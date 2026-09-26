@@ -97,13 +97,15 @@ _COMMAND_WHITELIST = frozenset({
 
 # 括号/分号密度阈值：{}()[];= 合计占非空白字符比超过 4% 判 code
 _CODE_DENSITY_THRESHOLD = 0.04
-_RE_DENSITY = re.compile(r"[{}()\[\];=]")
-_RE_NONWS = re.compile(r"\S")
 _RE_CJK = re.compile(r"[\u4e00-\u9fff]")
 
 # 含中文的句子走强特征正则的 CJK 占比上限：
 # "我们讨论了 import 这个词的含义" 这类正文含代码词的场景必须落回 text
 _CJK_RATIO_LIMIT = 0.5
+
+# 常见 ASCII 空白（str.count 逐字符统计用，避免 findall 建巨型列表）
+_ASCII_WS = " \t\n\r\x0b\x0c"
+_DENSITY_LITERALS = "{}()[];="
 
 
 def _is_link(content: str) -> bool:
@@ -164,18 +166,19 @@ def _is_code(content: str) -> bool:
     has_cjk = bool(_RE_CJK.search(content))
 
     if has_cjk:
-        cjk = len(_RE_CJK.findall(content))
-        non_ws = len(_RE_NONWS.findall(content))
+        # 计数用 str.count / sub 反推（C 速度，超长串不会建巨型列表）
+        cjk = len(content) - len(_RE_CJK.sub("", content))
+        non_ws = len(content) - sum(content.count(c) for c in _ASCII_WS)
         if non_ws and cjk / non_ws > _CJK_RATIO_LIMIT:
             return False
         return bool(_RE_CODE_FEATURES.search(content))
 
-    # 无 CJK：强特征 + 密度规则都启用（计数走正则 findall，C 速度）
+    # 无 CJK：强特征 + 密度规则都启用（计数走 str.count，C 速度）
     if _RE_CODE_FEATURES.search(content):
         return True
-    non_ws = len(_RE_NONWS.findall(content))
+    non_ws = len(content) - sum(content.count(c) for c in _ASCII_WS)
     if non_ws:
-        hits = len(_RE_DENSITY.findall(content))
+        hits = sum(content.count(c) for c in _DENSITY_LITERALS)
         if hits / non_ws > _CODE_DENSITY_THRESHOLD:
             return True
     return False

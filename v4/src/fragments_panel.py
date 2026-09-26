@@ -28,6 +28,10 @@ from PyQt6.QtCore import Qt, QSize, QTimer, QRect
 from PyQt6.QtGui import QColor, QFontMetrics, QBrush
 
 from src.fragment_manager import TYPE_LABELS, TYPE_ICONS
+from src.fragment_classifier import (
+    CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
+    CATEGORY_LABELS, CATEGORY_ORDER,
+)
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.merge_preview_dialog import MergePreviewDialog
@@ -52,6 +56,21 @@ SEARCH_DEBOUNCE_MS = 250
 # 避免列表被预览面板挤窄后省略号把时间一起吃掉
 TIME_ROLE = Qt.ItemDataRole.UserRole + 1
 
+# 条目内容语义类别（link/code/path/command/text）用独立 role 存储，
+# 绘制代理据此在条目左侧画类别色条
+CAT_ROLE = Qt.ItemDataRole.UserRole + 2
+
+# 类别 -> 主题色 token 映射（色条颜色唯一来源，token 定义见 theme.py）：
+#   链接=link(蓝) / 代码=primary(青) / 路径=warn(橙) / 命令=danger(红) /
+#   文本=text_secondary(灰，弱化"普通"存在感)
+_CATEGORY_TOKENS = {
+    CAT_LINK:    "link",
+    CAT_CODE:    "primary",
+    CAT_PATH:    "warn",
+    CAT_COMMAND: "danger",
+    CAT_TEXT:    "text_secondary",
+}
+
 
 # ====================================================================
 class _MatchHighlightDelegate(QStyledItemDelegate):
@@ -68,9 +87,14 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         self._time_color = QColor("#98A2AE")
         self._hl_bg = QColor(111, 255, 233, 80)
         self._hl_fg = QColor("#0B2B29")
+        self._cat_colors = {}          # category -> QColor 类别色条
 
     def set_theme(self, colors: dict):
-        """按主题刷新文字色 / 时间色 / 高亮底色（主色半透明 + 深色文字）"""
+        """按主题刷新文字色 / 时间色 / 高亮底色 / 类别色条
+
+        主色半透明 + 深色文字；类别色条从主题 token 取色
+        （映射见 _CATEGORY_TOKENS，缺 token 时回退次级灰）。
+        """
         self._base_color = QColor(colors.get("text", "#E4E8EE"))
         self._time_color = QColor(colors.get("text_placeholder", "#98A2AE"))
         bg = QColor(colors.get("primary", "#6FFFE9"))
@@ -78,6 +102,10 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
             bg = QColor("#6FFFE9")
         bg.setAlpha(85)
         self._hl_bg = bg
+        self._cat_colors = {}
+        for cat, token in _CATEGORY_TOKENS.items():
+            c = QColor(colors.get(token, ""))
+            self._cat_colors[cat] = c if c.isValid() else QColor("#98A2AE")
 
     def paint(self, painter, option, index):
         time_text = index.data(TIME_ROLE)
@@ -100,6 +128,17 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
             QStyle.SubElement.SE_ItemViewItemText, opt, widget)
         if text_rect.width() <= 2:
             return
+
+        # ---- 左侧类别色条：按内容语义类别着色（分组行无类别不画）----
+        cat = index.data(CAT_ROLE)
+        bar_color = self._cat_colors.get(cat) if cat else None
+        if bar_color is not None:
+            painter.save()
+            painter.fillRect(
+                QRect(text_rect.left(), text_rect.top() + 2,
+                      3, text_rect.height() - 4),
+                bar_color)
+            painter.restore()
 
         # 文字颜色：优先条目自带前景色（路径类的蓝色等）
         color = self._base_color
@@ -223,7 +262,8 @@ class _EmptyState(QWidget):
         else:
             self._icon.setText("🔍")
             self._title.setText("没有匹配的碎片")
-            self._desc.setText("换个关键词试试，或清空筛选条件查看全部碎片")
+            self._desc.setText("类型、内容、关键词三个筛选条件放宽一些，\n"
+                               "或清空筛选条件查看全部碎片")
             self._action.setVisible(True)
 
 
@@ -373,6 +413,21 @@ class FragmentsPanel(QWidget):
             lambda _i: self.refresh(preserve_view=False))
         toolbar.addWidget(self._frag_filter)
 
+        # ---- 第二筛选轴：内容语义类别（link/code/path/command/text）----
+        # 与 _frag_filter（来源渠道 type）互不替代，AND 组合筛选
+        self._frag_category = QComboBox()
+        self._frag_category.addItem("全部内容", "all")
+        labels = {CAT_LINK: "🔗 链接", CAT_CODE: "⌗ 代码", CAT_PATH: "📁 路径",
+                  CAT_COMMAND: "▶ 命令", CAT_TEXT: "📝 文本"}
+        for cat in CATEGORY_ORDER:
+            self._frag_category.addItem(labels.get(cat, cat), cat)
+        self._frag_category.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._frag_category.setMinimumContentsLength(4)
+        self._frag_category.currentIndexChanged.connect(
+            lambda _i: self.refresh(preserve_view=False))
+        toolbar.addWidget(self._frag_category)
+
         self._frag_search = QLineEdit()
         self._frag_search.setPlaceholderText("🔍 搜索碎片内容...")
         self._frag_search.setClearButtonEnabled(True)
@@ -490,13 +545,20 @@ class FragmentsPanel(QWidget):
 
     # ---- 空态 / 筛选 ----
     def _clear_filters(self):
-        """一键清空搜索词与类型筛选（空态里的按钮入口）"""
+        """一键清空搜索词与两个筛选下拉（空态里的按钮入口）
+
+        两个下拉都要 blockSignals 包住，避免 setCurrentIndex 触发
+        currentIndexChanged 造成多次重复 refresh。
+        """
         self._frag_search.blockSignals(True)
         self._frag_search.clear()
         self._frag_search.blockSignals(False)
         self._frag_filter.blockSignals(True)
         self._frag_filter.setCurrentIndex(0)
         self._frag_filter.blockSignals(False)
+        self._frag_category.blockSignals(True)
+        self._frag_category.setCurrentIndex(0)
+        self._frag_category.blockSignals(False)
         self.refresh(preserve_view=False)
 
     def _update_empty_state(self, shown_count: int, has_filter: bool):
@@ -518,21 +580,23 @@ class FragmentsPanel(QWidget):
         变化较大，回到顶部更符合预期。
         """
         ftype = self._frag_filter.currentData()
+        cat = self._frag_category.currentData()
         keyword = self._frag_search.text().strip()
         theme = self._host.current_theme
         colors = get_colors(theme)
 
+        # 筛选链：先按来源渠道 type、再按内容语义 category（AND 组合），
+        # 最后套搜索关键词（与旧单轴行为保持一致：无关键词时跳过搜索）
         if ftype == "all":
-            fragments = (self._fragment_manager.search_fragments(keyword)
-                         if keyword else self._fragment_manager.get_all_fragments())
+            fragments = self._fragment_manager.get_all_fragments()
         else:
-            all_of_type = self._fragment_manager.get_fragments_by_type(ftype)
-            if keyword:
-                kw = keyword.lower()
-                fragments = [f for f in all_of_type
-                             if kw in f.content.lower() or kw in f.source.lower()]
-            else:
-                fragments = all_of_type
+            fragments = self._fragment_manager.get_fragments_by_type(ftype)
+        if cat != "all":
+            fragments = [f for f in fragments if f.category == cat]
+        if keyword:
+            kw = keyword.lower()
+            fragments = [f for f in fragments
+                         if kw in f.content.lower() or kw in f.source.lower()]
 
         # 记录视图状态（滚动位置 + 选中项）
         scroll_value = self._frag_list.verticalScrollBar().value()
@@ -569,12 +633,14 @@ class FragmentsPanel(QWidget):
             item = QListWidgetItem(f"   {preview_text}")
             item.setData(Qt.ItemDataRole.UserRole, f.fragment_id)
             item.setData(TIME_ROLE, time_part)
+            item.setData(CAT_ROLE, f.category)
             if f.type in ("clipboard_path", "file_pickup"):
                 item.setForeground(QColor("#1976D2") if theme == "light"
                                    else QColor("#64B5F6"))
             icon = TYPE_ICONS.get(f.type, "📄")
             label = TYPE_LABELS.get(f.type, "未知")
-            tip_lines = [f"{icon} 类型: {label}"]
+            cat_label = CATEGORY_LABELS.get(f.category, f.category)
+            tip_lines = [f"{icon} 类型: {label}", f"🏷 内容: {cat_label}"]
             if f.source:
                 tip_lines.append(f"🔗 来源: {f.source}")
             tip_lines.append(f"🕐 时间: {created}")
@@ -605,7 +671,8 @@ class FragmentsPanel(QWidget):
         total = self._fragment_manager.count()
         self._frag_count_label.setText(f"显示 {len(fragments)} 条 / 共 {total} 条")
         self._update_empty_state(len(fragments),
-                                 bool(keyword) or ftype != "all")
+                                 bool(keyword) or ftype != "all"
+                                 or cat != "all")
         self._host.data_changed.emit("fragment")
 
     # ---- 预览同步 ----
@@ -638,6 +705,15 @@ class FragmentsPanel(QWidget):
         act_to_kb = menu.addAction("📚 加入知识库")
         act_to_nav = menu.addAction("🌐 添加至网址导航")
         menu.addSeparator()
+        # 手动归类子菜单（自动分类判错时的纠正入口）
+        cat_menu = menu.addMenu("🏷 归类为")
+        cat_actions = {}
+        for c in CATEGORY_ORDER:
+            act = cat_menu.addAction(CATEGORY_LABELS.get(c, c))
+            act.setCheckable(True)
+            act.setChecked(self._frag_current_category(fid) == c)
+            cat_actions[act] = c
+        menu.addSeparator()
         act_delete = menu.addAction("🗑 删除")
         action = menu.exec(self._frag_list.mapToGlobal(pos))
         if action == act_detail:
@@ -654,9 +730,17 @@ class FragmentsPanel(QWidget):
             self._to_knowledge(fid)
         elif action == act_to_nav:
             self._to_nav(fid)
+        elif action in cat_actions:
+            if self._fragment_manager.set_category(fid, cat_actions[action]):
+                self.refresh(preserve_view=True)
         elif action == act_delete:
             if self._fragment_manager.delete_fragment(fid):
                 self.refresh()
+
+    def _frag_current_category(self, fragment_id) -> str:
+        """取碎片当前内容语义类别（右键归类菜单勾选态用）"""
+        frag = self._fragment_manager.get_fragment(fragment_id)
+        return frag.category if frag is not None else ""
 
     # ---- 复制 / 编辑 ----
     def _copy_content(self, frag):

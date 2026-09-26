@@ -93,6 +93,7 @@ THEMES = {
         "warn_alpha":        "rgba(230, 126, 34, 0.12)",
         "warn_border":       "rgba(230, 126, 34, 0.30)",
         "success":           "#1F8A4C",
+        "link":              "#1976D2",   # 碎片内容类别色条（链接）
 
         # ---- 日程任务状态色（A2/A3，delegate 自绘取色，QSS 集中于此）----
         "task_overdue":      "#E74C3C",                    # 逾期（浅色）
@@ -166,6 +167,7 @@ THEMES = {
         "warn_alpha":        "rgba(224, 163, 75, 0.14)",
         "warn_border":       "rgba(224, 163, 75, 0.32)",
         "success":           "#2ECC71",
+        "link":              "#64B5F6",   # 碎片内容类别色条（链接）
 
         # ---- 日程任务状态色（A2/A3，delegate 自绘取色，QSS 集中于此）----
         "task_overdue":      "#FF6B5B",                    # 逾期（深色）
