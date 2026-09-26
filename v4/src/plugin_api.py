@@ -97,7 +97,7 @@ class PluginContext:
     # ---------------- 白名单能力 ----------------
     @property
     def logger(self):
-        """宿主日志器（插件日志走同一份 data/app.log）"""
+        """宿主日志器（插件日志走同一份 float_data/app.log）"""
         return self._logger
 
     @property
