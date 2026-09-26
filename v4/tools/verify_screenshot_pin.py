@@ -16,7 +16,7 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtCore import QEvent, QRect, QPoint, QPointF, Qt
 from PyQt6.QtGui import QColor, QPixmap, QMouseEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
@@ -222,6 +222,73 @@ if picked:
           f"{c_mid} -> {c2}")
 else:
     check("H0 前置裁剪失败", False)
+
+# ================= I. 钉图批注（画笔/箭头/马赛克/撤销） =================
+def annot_has_ink(pin):
+    """批注层是否存在非透明像素（稀疏采样，device px 坐标）"""
+    img = pin._annot
+    sx = max(1, img.width() // 80)
+    sy = max(1, img.height() // 80)
+    for y in range(0, img.height(), sy):
+        for x in range(0, img.width(), sx):
+            if img.pixelColor(x, y).alpha() > 0:
+                return True
+    return False
+
+
+pin_a = PinWindow(shot.copy(QRect(0, 0, round(200 * DPR), round(140 * DPR))),
+                  QPoint(30, 30), "dark")
+pin_a.show()
+check("I1 批注层尺寸/dpr", pin_a._annot.width() == round(200 * DPR)
+      and abs(pin_a._annot.devicePixelRatio() - DPR) < 1e-6,
+      f"{pin_a._annot.width()}x{pin_a._annot.height()} dpr={pin_a._annot.devicePixelRatio()}")
+check("I2 初始批注层透明", not annot_has_ink(pin_a))
+
+pin_a.set_tool("pen")
+check("I3 画笔模式+十字光标", pin_a._tool == "pen"
+      and pin_a.cursor().shape() == Qt.CursorShape.CrossCursor)
+QTest.mousePress(pin_a, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                 QPoint(10, 10))
+QTest.mouseMove(pin_a, QPoint(60, 10))
+QTest.mouseRelease(pin_a, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                   QPoint(60, 10))
+check("I4 画笔落墨", annot_has_ink(pin_a))
+check("I5 画笔颜色=默认红",
+      pin_a._annot.pixelColor(round(35 * DPR), round(10 * DPR)).alpha() > 0)
+check("I6 撤销栈入栈", len(pin_a._undo_stack) >= 1)
+
+pin_a.undo_annot()
+check("I7 撤销后批注层回透明", not annot_has_ink(pin_a))
+
+pin_a._paint_arrow(QPoint(20, 20), QPoint(80, 60))
+check("I8 箭头落墨", annot_has_ink(pin_a))
+tip_px = pin_a._annot.pixelColor(round(78 * DPR), round(59 * DPR))
+check("I9 箭头笔色", tip_px.alpha() > 0 and tip_px.red() > 150)  # 默认红 #FF5252
+
+pin_a._push_undo()
+pin_a._annot.fill(Qt.GlobalColor.transparent)
+pin_a._paint_mosaic_line(QPoint(30, 30), QPoint(70, 30))
+check("I10 马赛克落墨", annot_has_ink(pin_a))
+
+comp = pin_a._composited()
+check("I11 合成图含批注", comp.size() == pin_a._pix.size()
+      and abs(comp.devicePixelRatio() - DPR) < 1e-6)
+
+pin_a.clear_annot()
+check("I12 清除批注", not annot_has_ink(pin_a))
+pin_a.undo_annot()
+check("I13 清除可撤销（马赛克回显）", annot_has_ink(pin_a))
+
+# 缩放下的坐标映射：widget → base 除以 zoom
+pin_a.reset_zoom()
+pin_a._zoom = 2.0
+mapped = pin_a._to_base(QPoint(40, 20))
+check("I14 缩放坐标映射", mapped == QPoint(20, 10), f"got {mapped}")
+pin_a._zoom = 1.0
+
+pin_a.set_tool(None)
+check("I15 结束批注恢复箭头光标", pin_a._tool is None
+      and pin_a.cursor().shape() == Qt.CursorShape.ArrowCursor)
 
 # ================= 汇总 =================
 failed = [n for n, ok in _results if not ok]

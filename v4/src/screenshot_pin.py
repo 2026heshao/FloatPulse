@@ -430,7 +430,7 @@ class PinWindow(QWidget):
         )
         p = self._annot_painter()
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        p.drawPixmap(rect, chunky, QRectF(chunky.rect()))
+        p.drawPixmap(QRectF(rect), chunky, QRectF(chunky.rect()))
         p.end()
 
     def _paint_mosaic_line(self, a: QPoint, b: QPoint):
