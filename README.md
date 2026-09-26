@@ -6,12 +6,36 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](requirements.txt)
 [![Qt](https://img.shields.io/badge/UI-PyQt6%206.7%2B-41cd52)](requirements.txt)
 
-**一款 Windows 桌面常驻悬浮球工具：碎片收集 → 任务/笔记 → 知识复习 → 截图钉屏，一个球全搞定。**
+**一款 Windows 桌面常驻悬浮球工具：碎片收集 → 分类归档 → 转任务/笔记 → 截图钉屏，一个球全搞定。**
 原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核，打包后 71 MB，启动 1–2 秒。
 
 | 主窗口（深色） | 悬浮球 + 快捷卡片 |
 |---|---|
 | ![主窗口](docs/images/preview-main-dark.png) | ![卡片](docs/images/preview-card-dark.png) |
+
+---
+
+## 🔍 与同类工具的区别
+
+启动器负责找东西，截图工具负责看东西，FloatPulse 负责**随手记完之后的那一段**——记下来的碎片怎么归类、怎么变成任务或笔记、怎么导出进你已有的知识库。它不是要替代谁，而是补上这些工具都没做的那一环。
+
+| 能力 | FloatPulse | FocusCapture | Floatyball | Flow Launcher | Snipaste |
+|---|---|---|---|---|---|
+| 悬浮球常驻入口 | ✅ | ✅ | ✅ | ❌ | ❌ |
+| 随手记录碎片 | ✅ 快捕条 + 剪贴板 | ✅ 剪贴板 | ⚠️ 拖放 | ❌ | ❌ |
+| 碎片分类管理 | ✅ 来源 + 内容语义双轴 | ❌ 仅时间流 | ❌ | ❌ | ❌ |
+| 转成任务 / 笔记 | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 临时素材中转 | ✅ 去重 + 缩略图 + 过期清理 | ❌ | ❌ | ❌ | ❌ |
+| 截图钉屏 | ✅ 含批注与撤销 | ❌ | ❌ | ❌ | ✅ |
+| 软件 / 网址启动 | ✅ 拖 exe 即建 | ❌ | ✅ AHK 动作 | ✅ | ❌ |
+| 全局文件搜索 | ❌ | ❌ | ❌ | ✅ 含 Everything | ❌ |
+| 插件生态 | ⚠️ 外置插件，起步阶段 | ❌ | ✅ AHK | ✅ 200+ 社区插件 | ❌ |
+| 技术栈 | Python + PyQt6 | C# / WPF | AutoHotkey | C# / .NET | 闭源 |
+| GitHub Stars | 0 | 0 | 20 | 15,654 | 闭源 |
+
+**表里的 ❌ 不是缺陷，是取舍。** 全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义；插件生态刚起步，目前只有外置插件机制，社区插件的数量不跟任何人比，写 ⚠️ 就是 ⚠️。项目 Stars 是 0 也照实写 0：这是个还在自用打磨阶段的项目，没有外部用户验证，不装成「已被广泛使用」。
+
+*Stars 数据取自 GitHub API，2026-09-27 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单见 [docs/竞品分析-2026-09-27.md](docs/竞品分析-2026-09-27.md)。*
 
 ---
 
@@ -27,7 +51,7 @@
 ### 🃏 快捷卡片（三模式）
 | 模式 | 行为 |
 |------|------|
-| 📚 知识卡片 | 随机翻牌复习，悬停自动关闭 |
+| 📚 知识卡片 | 随机抽取知识库段落供速查，悬停自动关闭 |
 | 📋 日程任务 | 输入区 + 任务列表 + 截止日期分组（逾期/今天/本周/以后） |
 | 📝 随时笔记 | 单条便签，800ms 防抖自动保存 |
 
@@ -63,7 +87,8 @@
 |---|---|
 | `启动v4.bat` | 启动 v4（开发主线），带控制台实时日志 |
 | `启动v4.bat quiet` | 后台启动，无控制台窗口（日常使用） |
-| `启动v4.bat v3` / `v2` | 启动冻结基线，用于行为对照 |
+
+> v2 / v3 冻结基线已于 2026-09-27 清理移除，当前只保留 v4 主线；历史版本可从 GitHub 提交记录中查看。
 
 启动器会自动探测已安装 PyQt6 的 Python 并自检依赖。
 
@@ -98,7 +123,7 @@ python -m PyInstaller --noconfirm --clean --distpath dist2 --workpath build2 Flo
 ```
 
 产物 `dist2\FloatPulse\` 整个文件夹拷走即可运行，目标电脑无需 Python。
-注意：exe 需与 `知识库.docx` 同目录（知识卡片模式的数据源）。
+注意：打包运行时 exe 同级需有 `float_data/` 目录，知识卡片模式的数据源 `知识库.docx` 放在该目录内（源码运行时为项目根的 `float_data/`）。
 
 ---
 
@@ -106,16 +131,18 @@ python -m PyInstaller --noconfirm --clean --distpath dist2 --workpath build2 Flo
 
 ```
 FloatPulse/
-├── v4/                # 【开发主线】后续优化都在这里
-├── v2/ v3/            # 冻结基线（只读对照）
-├── shared/            # 图标 / 打包 spec / 工具脚本
-├── data/              # 运行数据（config / fragments / notes / ... 自动生成）
+├── v4/                # 【开发主线】源码、测试与离屏验证脚本
+├── plugins/           # 外置插件包（一包一目录，放进后重启生效）
+├── tools/             # 工程脚本（仓库自动巡检等）
+├── shared/            # 图标 / 打包 spec
+├── float_data/        # 运行数据（碎片 / 笔记 / 任务 / 知识库.docx，自动生成）
 ├── docs/              # 文档与图片
-├── 设计稿/             # UI 原型与验证截图
 └── 启动v4.bat          # 启动器
 ```
 
-各版本共用根目录的 `data/`、`temp_assets/`、`知识库.docx`，路径定位见 `src/app_paths.py`。
+未列出的 `dist2/`（打包产物）与 `宣传页/FloatPulse.zip`（分发包）都不进版本库——前者可随时重建，后者走 GitHub Release 附件。
+
+运行数据统一收纳在 `float_data/`（含 `temp_assets/` 与 `知识库.docx`），路径定位见 `v4/src/app_paths.py`；该目录已在 `.gitignore` 中，不会入库。
 
 ---
 
@@ -141,9 +168,8 @@ python test_init.py            # 启动冒烟
 ## 🗺 Roadmap
 
 - [x] v4：截图钉屏、开源运营包
-- [ ] 知识卡片间隔重复（Anki 式复习）
+- [x] Obsidian Markdown 导出（笔记 / 碎片 / 任务 → vault，只读、幂等）
 - [ ] `/` 命令面板（搜索即入口）
-- [ ] Obsidian Markdown 导出
 
 ---
 
