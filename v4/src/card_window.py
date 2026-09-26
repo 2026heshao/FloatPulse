@@ -1245,6 +1245,13 @@ class CardWindow(QWidget):
         return super().eventFilter(obj, event)
 
     # ---------------- 模式切换 ----------------
+    def switch_mode(self, mode: str):
+        """公开入口：切换卡片模式（fragment/task/note/nav/asset/app）
+
+        供宿主与插件上下文调用——外部不要直接调 _switch_mode（私有成员契约）。
+        """
+        self._switch_mode(mode)
+
     def _switch_mode(self, mode: str):
         """切换 Tab 模式（带水平滑入淡入淡出转场）"""
         if mode != "note":

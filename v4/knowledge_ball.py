@@ -552,14 +552,43 @@ class FloatingBall(QWidget):
         self._card_window.card_drag_finished.connect(self._on_card_drag_finished)
 
     def _init_context_menu(self):
-        """右键菜单：打开主窗口 / 退出程序"""
+        """右键菜单骨架：打开主窗口 | [插件动作] | 退出程序 [| 运行时追加项…]"""
         self._menu = QMenu(self)
         self._menu.setStyleSheet(get_menu_qss(self._theme))
+        # 动作注册表与插件上下文（由 main() 注入；未注入时菜单退化为内置两项）
+        self._action_registry = None
+        self._plugin_ctx = None
+        # 运行时追加项（add_context_action）：text / callback / separator_before / QAction
+        self._extra_context_actions = []
+        self._rebuild_context_menu()
+
+    def _rebuild_context_menu(self):
+        """按当前注册表重建右键菜单。
+
+        顺序：打开主窗口 → [插件动作] → 退出程序 → 运行时追加项。
+        追加项的相对位置与分隔线规则与重构前完全一致
+        （截图钉屏仍排在最后，虚拟菜单项个数不变）。
+        """
+        self._menu.clear()
 
         # 打开主窗口
         open_main_action = QAction("🖥  打开主窗口", self._menu)
         open_main_action.triggered.connect(self._open_main_window)
         self._menu.addAction(open_main_action)
+
+        # 插件动作（注册表数据驱动：menu=True 且启用中的动作）
+        plugin_actions = (self._action_registry.menu_actions()
+                          if self._action_registry is not None else [])
+        if plugin_actions:
+            self._menu.addSeparator()
+            for act in plugin_actions:
+                qa = QAction(act.title or act.id, self._menu)
+                icon_path = getattr(act, "icon_path", None)
+                if icon_path and os.path.isfile(icon_path):
+                    qa.setIcon(QIcon(icon_path))
+                qa.triggered.connect(
+                    lambda _checked=False, aid=act.id: self._trigger_action(aid))
+                self._menu.addAction(qa)
 
         self._menu.addSeparator()
 
@@ -567,6 +596,46 @@ class FloatingBall(QWidget):
         exit_action = QAction("退出程序", self._menu)
         exit_action.triggered.connect(self._request_quit)
         self._menu.addAction(exit_action)
+
+        # 运行时追加项（add_context_action）
+        for entry in self._extra_context_actions:
+            actions = self._menu.actions()
+            if entry["separator_before"] and actions and not actions[-1].isSeparator():
+                self._menu.addSeparator()
+            act = QAction(entry["text"], self._menu)
+            act.triggered.connect(entry["callback"])
+            self._menu.addAction(act)
+            entry["action"] = act
+
+    def _trigger_action(self, action_id):
+        """触发插件动作（插件的异常由注册表兜住，不会波及悬浮球）"""
+        if self._action_registry is not None:
+            self._action_registry.trigger(action_id, self._plugin_ctx)
+
+    # ---------------- 动作注册表（插件框架接线）----------------
+    def set_action_registry(self, registry, ctx=None):
+        """注入动作注册表与插件上下文，并重建右键菜单"""
+        self._action_registry = registry
+        self._plugin_ctx = ctx
+        self._rebuild_context_menu()
+
+    def refresh_plugin_menu(self):
+        """插件动作变化（启用/禁用/重载）后重建右键菜单的唯一刷新入口"""
+        self._rebuild_context_menu()
+
+    def open_main_window(self):
+        """公开入口：打开主窗口（供插件上下文等外部调用）"""
+        self._open_main_window()
+
+    def show_card_mode(self, mode: str) -> bool:
+        """公开入口：弹出小卡片并切到指定模式
+
+        mode：fragment / task / note / nav / asset / app
+        """
+        w = self._card_window
+        w.switch_mode(mode)
+        w.popup_near(self._ball_visual_rect())
+        return True
 
     def _open_main_window(self):
         """打开大窗口主UI（带毫秒级打点：定位真机"打开未响应数秒"阻塞段）"""
@@ -589,18 +658,17 @@ class FloatingBall(QWidget):
             QTimer.singleShot(300, _alive)
 
     def add_context_action(self, text, callback, separator_before=True):
-        """运行时向右键菜单追加动作（如：截图钉屏）。
+        """运行时向右键菜单追加动作（兼容入口，如：截图钉屏）。
 
         callback 无参调用；separator_before 决定是否在动作前加分隔线
         （若菜单末尾已是分隔线则不重复加）。
+        追加项排在菜单末尾（与历史行为一致），插件动作不受影响。
         """
-        actions = self._menu.actions()
-        if separator_before and actions and not actions[-1].isSeparator():
-            self._menu.addSeparator()
-        act = QAction(text, self._menu)
-        act.triggered.connect(callback)
-        self._menu.addAction(act)
-        return act
+        entry = {"text": text, "callback": callback,
+                 "separator_before": bool(separator_before), "action": None}
+        self._extra_context_actions.append(entry)
+        self._rebuild_context_menu()
+        return entry["action"]
 
     def _request_quit(self):
         """请求退出程序"""
@@ -2105,6 +2173,76 @@ def main():
     main_window.theme_changed.connect(screenshot_pin.apply_theme)
     # 悬浮球右键菜单入口
     ball.add_context_action("✂ 截图钉屏", screenshot_pin.start_capture)
+
+    # ---- 悬浮球插件系统（外置专精功能：<base_dir>/plugins/ 下的插件包）----
+    # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
+    #       只把「新增的专精单一功能」外置。详见 docs/插件开发说明.md
+    from src.plugin_api import ActionRegistry, PluginContext
+    from src.plugin_loader import PluginLoader
+
+    plugin_registry = ActionRegistry(
+        logger=get_logger(),
+        reserved_hotkeys=(
+            config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K"),
+            config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
+        ),
+    )
+    plugin_ctx = PluginContext(
+        logger=get_logger(),
+        config=config_manager.as_dict(),        # 只读快照，插件改不了宿主配置
+        show_toast=main_window.show_toast,
+        open_main_window=ball.open_main_window,
+        open_card_mode=ball.show_card_mode,
+    )
+    plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
+
+    # 独立 GlobalHotkeyManager：快捕条重注册会 unregister_all()，
+    # 共用实例会把插件热键一起踢掉
+    plugin_hotkey_mgr = GlobalHotkeyManager()
+    app.eventDispatcher().installNativeEventFilter(plugin_hotkey_mgr)
+    ball.set_action_registry(plugin_registry, plugin_ctx)
+
+    def _apply_plugin_hotkeys():
+        """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位"""
+        plugin_hotkey_mgr.unregister_all()
+        core_norm = {
+            str(config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K")).strip().lower().replace(" ", ""),
+            str(config_manager.get("screenshot_hotkey", "Ctrl+Alt+S")).strip().lower().replace(" ", ""),
+        }
+        for act in plugin_registry.all_actions():
+            hotkey = act.declared_hotkey()
+            if not hotkey or not act.enabled():
+                continue
+            if hotkey in core_norm:
+                get_logger().warning(
+                    f"[插件] 热键与核心功能冲突，插件让位：{act.hotkey}（{act.id}）")
+                continue
+            if not plugin_hotkey_mgr.register(
+                    act.hotkey, lambda aid=act.id: plugin_registry.trigger(aid, plugin_ctx)):
+                get_logger().warning(
+                    f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）")
+
+    def _apply_plugins(_enabled=None):
+        """插件总闸：开 → 加载/登记；关 → 摘掉动作（模块仍驻留，不真卸载）"""
+        if config_manager.get("plugins_enabled", True):
+            plugin_loader.load_all()
+        else:
+            plugin_loader.deactivate()
+        ball.refresh_plugin_menu()
+        _apply_plugin_hotkeys()
+
+    def _refresh_core_hotkey_reservation():
+        """核心热键变更 → 刷新保留集并重绑插件热键（插件始终让位）"""
+        plugin_registry.reserve_hotkeys((
+            config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K"),
+            config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
+        ))
+        _apply_plugin_hotkeys()
+
+    main_window.plugins_changed.connect(_apply_plugins)
+    main_window.quick_capture_changed.connect(_refresh_core_hotkey_reservation)
+    main_window.screenshot_changed.connect(_refresh_core_hotkey_reservation)
+    _apply_plugins()
 
     # 1. 小卡片退出请求 → 安全退出程序
     ball._card_window.request_quit.connect(_safe_quit)

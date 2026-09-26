@@ -173,6 +173,7 @@ class MainWindow(QWidget):
     hide_on_fullscreen_changed = pyqtSignal(bool)  # 全屏应用自动隐藏开关变更
     quick_capture_changed = pyqtSignal()         # 快速捕捉设置（开关/热键）变更
     screenshot_changed = pyqtSignal()            # 截图钉屏设置（开关/热键）变更
+    plugins_changed = pyqtSignal(bool)           # 悬浮球外置插件总闸变更
 
     def __init__(self, task_manager, note_manager, fragment_manager,
                  docx_manager, config_manager, clipboard_monitor,

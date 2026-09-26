@@ -29,6 +29,7 @@
   - quick_capture_pos:     快速捕捉输入条最后拖动位置 [x, y]（None=屏幕居中）
   - screenshot_enabled:   截图钉屏开关（Ctrl+Alt+S 框选 → 置顶参考浮窗）
   - screenshot_hotkey:     截图钉屏全局热键（如 "Ctrl+Alt+S"）
+  - plugins_enabled:      悬浮球外置插件总闸（启用 plugins/ 下的插件包）
   - ball_size:            悬浮球球体直径（像素，48-88，默认 64）
   - hide_on_fullscreen:   全屏应用（视频/游戏/演示）前台时自动隐藏悬浮球
   - asset_thumb_size:     临时素材缩略图宽度（像素，80-160，决定网格每行个数）
@@ -67,6 +68,7 @@ DEFAULT_CONFIG = {
     "quick_capture_pos":    None,         # 快速捕捉输入条拖动后位置 [x, y]
     "screenshot_enabled":   True,         # 截图钉屏开关（Ctrl+Alt+S）
     "screenshot_hotkey":    "Ctrl+Alt+S", # 截图钉屏全局热键
+    "plugins_enabled":      True,         # 悬浮球外置插件总闸（plugins/ 下的插件包）
     "ball_size":            64,           # 悬浮球球体直径（像素，48-88）
     "hide_on_fullscreen":   True,         # 全屏应用前台时自动隐藏悬浮球
     "fragment_preview_visible": True,     # 碎片工作台右侧预览面板是否显示
@@ -100,6 +102,7 @@ _CONFIG_TYPES = {
     "quick_capture_pos":    list,
     "screenshot_enabled":   bool,
     "screenshot_hotkey":    str,
+    "plugins_enabled":      bool,
     "ball_size":            int,
     "hide_on_fullscreen":   bool,
     "fragment_preview_visible": bool,
