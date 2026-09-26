@@ -1,5 +1,6 @@
 # FloatPulse · 生活悬浮球
 
+[![Tests](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml/badge.svg)](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue)](README.md)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](requirements.txt)
