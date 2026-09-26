@@ -448,6 +448,7 @@ class NotesPanel(QWidget):
         act_delete = menu.addAction("🗑 删除此笔记")
         menu.addSeparator()
         act_sticky = menu.addAction("📌 钉到桌面")
+        act_export = menu.addAction("📤 导出到 Obsidian")
         action = menu.exec(self._note_list.mapToGlobal(pos))
         if action == act_rename:
             self._rename_dialog(note_id)
@@ -488,6 +489,9 @@ class NotesPanel(QWidget):
                 self._host.data_changed.emit("note")
         elif action == act_sticky:
             self._pin_sticky(note_id)
+        elif action == act_export:
+            # 导出实现统一在宿主（三个面板共用，避免三份逻辑分叉）
+            self._host.export_to_obsidian()
 
     def _pin_sticky(self, note_id: int):
         """把当前笔记钉成桌面便签（管理器由宿主晚绑定注入；None 给轻提示）"""
