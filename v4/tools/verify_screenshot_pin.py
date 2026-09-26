@@ -177,15 +177,16 @@ except Exception as exc:
     print("G exception:", exc)
 check("G1 主题切换不抛异常", ok)
 
-# ================= H. 滚轮缩放 =================
+# ================= H. 滚轮缩放（内容缩放，窗框尺寸不动） =================
 from PyQt6.QtGui import QWheelEvent
 from src.screenshot_pin import PinWindow as _PW
 
 
-def wheel(pin, up):
+def wheel(pin, up, local=None):
     d = QPoint(0, 120) if up else QPoint(0, -120)
+    c = local if local is not None else QPointF(pin.width() / 2, pin.height() / 2)
     ev = QWheelEvent(
-        QPointF(pin.width() / 2, pin.height() / 2), QPointF(0, 0),
+        c, QPointF(0, 0),
         QPoint(0, 0), d, Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
     )
@@ -196,30 +197,46 @@ if picked:
     pix, gp = picked[0]
     pin3 = _PW(pix, QPoint(200, 200), "dark")
     base_w, base_h = pin3.width(), pin3.height()          # 201x141
-    c0 = pin3.geometry().center()
+    check("H1 滚轮不改窗框", True)                         # 占位对齐编号，见 H2
     wheel(pin3, True)
-    check("H1 放大 ×1.25", pin3.width() == round(base_w * 1.25)
-          and pin3.height() == round(base_h * 1.25),
-          f"{pin3.width()}x{pin3.height()}")
-    c1 = pin3.geometry().center()
-    check("H2 中心锚定", abs(c1.x() - c0.x()) <= 2 and abs(c1.y() - c0.y()) <= 2,
-          f"{c0} -> {c1}")
-    wheel(pin3, False)
-    check("H3 缩小回原尺寸", pin3.width() == base_w and pin3.height() == base_h)
+    check("H2 放大 ×1.25 且窗框不动", abs(pin3._zoom - 1.25) < 1e-6
+          and pin3.width() == base_w and pin3.height() == base_h,
+          f"zoom={pin3._zoom} size={pin3.width()}x{pin3.height()}")
+    # 光标锚定（中心）：光标下的 base 点缩放前后不变
+    c_center = QPointF(base_w / 2, base_h / 2)
+    b0 = pin3._to_base(QPoint(round(c_center.x()), round(c_center.y())))
+    wheel(pin3, True, c_center)
+    b1 = pin3._to_base(QPoint(round(c_center.x()), round(c_center.y())))
+    check("H3 光标锚定（中心）", b0 == b1, f"{b0} -> {b1}")
+    wheel(pin3, False)                                     # 1.5625 → 1.25
+    wheel(pin3, False)                                     # 1.25 → 1.0
+    check("H4 缩小回 1.0/pan≈0", abs(pin3._zoom - 1.0) < 1e-6
+          and abs(pin3._pan.x()) <= 1 and abs(pin3._pan.y()) <= 1,
+          f"zoom={pin3._zoom} pan={pin3._pan}")
+    # 非中心锚点：右下角放大，base 点保持
+    cx, cy = base_w - 10, base_h - 10
+    b_before = pin3._to_base(QPoint(cx, cy))
+    wheel(pin3, True, QPointF(cx, cy))
+    b_after = pin3._to_base(QPoint(cx, cy))
+    check("H5 光标锚定（角点）", b_before == b_after, f"{b_before} -> {b_after}")
     for _ in range(20):                                    # 连续缩小 → 触底
         wheel(pin3, False)
-    floor_w = max(_PW._MIN_DISP, round(base_w * _PW._ZOOM_MIN))
-    check("H4 缩小下限夹紧", pin3.width() == floor_w, f"w={pin3.width()} floor={floor_w}")
-    for _ in range(20):                                    # 连续放大 → 触顶
+    check("H6 缩放下限夹紧", abs(pin3._zoom - _PW._ZOOM_MIN) < 1e-6,
+          f"zoom={pin3._zoom}")
+    for _ in range(25):                                    # 连续放大 → 触顶
         wheel(pin3, True)
-    ceil_w = round(base_w * _PW._ZOOM_MAX)
-    check("H5 放大上限夹紧", pin3.width() == ceil_w, f"w={pin3.width()} ceil={ceil_w}")
-    c_mid = pin3.geometry().center()                       # reset 契约=相对重置前中心不动
+    check("H7 放大上限夹紧", abs(pin3._zoom - _PW._ZOOM_MAX) < 1e-6,
+          f"zoom={pin3._zoom}")
+    m = _PW._PAN_MARGIN                                    # 平移夹紧：至少 24px 交集
+    ok_pan = (pin3._pan.x() <= pin3.width() - m
+              and pin3._pan.x() >= m - pin3._base_w * pin3._zoom
+              and pin3._pan.y() <= pin3.height() - m
+              and pin3._pan.y() >= m - pin3._base_h * pin3._zoom)
+    check("H8 pan 夹紧在交集内", ok_pan, f"pan={pin3._pan}")
     pin3.reset_zoom()
-    c2 = pin3.geometry().center()
-    check("H6 重置回基准尺寸", pin3.width() == base_w and pin3.height() == base_h)
-    check("H7 重置中心不动", abs(c2.x() - c_mid.x()) <= 1 and abs(c2.y() - c_mid.y()) <= 1,
-          f"{c_mid} -> {c2}")
+    check("H9 重置：尺寸/zoom/pan 全复位", pin3.width() == base_w
+          and pin3.height() == base_h and abs(pin3._zoom - 1.0) < 1e-6
+          and pin3._pan == QPointF(0, 0))
 else:
     check("H0 前置裁剪失败", False)
 
@@ -279,16 +296,80 @@ check("I12 清除批注", not annot_has_ink(pin_a))
 pin_a.undo_annot()
 check("I13 清除可撤销（马赛克回显）", annot_has_ink(pin_a))
 
-# 缩放下的坐标映射：widget → base 除以 zoom
+# 缩放+平移下的坐标映射：(pt - pan) / zoom
 pin_a.reset_zoom()
 pin_a._zoom = 2.0
-mapped = pin_a._to_base(QPoint(40, 20))
-check("I14 缩放坐标映射", mapped == QPoint(20, 10), f"got {mapped}")
+pin_a._pan = QPointF(10.0, 5.0)
+mapped = pin_a._to_base(QPoint(50, 25))
+check("I14 缩放/平移坐标映射", mapped == QPoint(20, 10), f"got {mapped}")
 pin_a._zoom = 1.0
+pin_a._pan = QPointF(0.0, 0.0)
 
 pin_a.set_tool(None)
 check("I15 结束批注恢复箭头光标", pin_a._tool is None
       and pin_a.cursor().shape() == Qt.CursorShape.ArrowCursor)
+
+# ================= J. 右下角抓手：窗框等比例缩放，内容铺满 =================
+from PyQt6.QtGui import QMouseEvent
+
+pin_b = PinWindow(shot.copy(QRect(0, 0, round(200 * DPR), round(140 * DPR))),
+                  QPoint(50, 50), "dark")
+pin_b.show()
+w0, h0 = pin_b.width(), pin_b.height()                     # 200x140
+aspect = w0 / h0
+QTest.mousePress(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                 QPoint(w0 - 2, h0 - 2))
+check("J1 抓手按下进入缩放", pin_b._resizing and pin_b._resize_start is not None)
+
+g_target = pin_b.mapToGlobal(QPoint(w0 + 60, h0 + 40))
+ev_move = QMouseEvent(
+    QEvent.Type.MouseMove, QPointF(w0 + 60, h0 + 40), QPointF(g_target),
+    Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+    Qt.KeyboardModifier.NoModifier,
+)
+_app.sendEvent(pin_b, ev_move)
+# 按下点在抓手内 (198,138)：全局位移 = (62, 42)，横向占优
+dx_real, dy_real = 62, 42
+exp_w = round(w0 + max(dx_real, dy_real * aspect))          # 262
+exp_h = round(exp_w / aspect)
+check("J2 等比例缩放窗框", pin_b.width() == exp_w and pin_b.height() == exp_h,
+      f"{pin_b.width()}x{pin_b.height()} exp={exp_w}x{exp_h}")
+check("J3 内容铺满窗框", abs(pin_b._zoom - exp_w / w0) < 1e-6
+      and pin_b._pan == QPointF(0, 0)
+      and abs(pin_b._img_rect().right() - exp_w) < 1.5
+      and abs(pin_b._img_rect().bottom() - exp_h) < 1.5)
+
+QTest.mouseRelease(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                   QPoint(w0 + 60, h0 + 40))
+check("J4 释放退出缩放态", not pin_b._resizing and pin_b._resize_start is None)
+
+# 超限拖拽 → 上限夹紧（base 200 × 5.0 = 1000）
+QTest.mousePress(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                 QPoint(pin_b.width() - 2, pin_b.height() - 2))
+g_far = pin_b.mapToGlobal(QPoint(pin_b.width() + 5000, pin_b.height() + 5000))
+ev_far = QMouseEvent(
+    QEvent.Type.MouseMove, QPointF(pin_b.width() + 5000, pin_b.height() + 5000),
+    QPointF(g_far), Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+    Qt.KeyboardModifier.NoModifier,
+)
+_app.sendEvent(pin_b, ev_far)
+check("J5 窗框上限夹紧", pin_b.width() == round(200 * _PW._ZOOM_MAX),
+      f"w={pin_b.width()}")
+QTest.mouseRelease(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                   QPoint(pin_b.width(), pin_b.height()))
+
+pin_b.reset_zoom()
+check("J6 抓手缩放后可重置", pin_b.width() == w0 and pin_b.height() == h0
+      and abs(pin_b._zoom - 1.0) < 1e-6 and pin_b._pan == QPointF(0, 0))
+
+# 批注模式下抓手不响应（画笔优先）
+pin_b.set_tool("pen")
+QTest.mousePress(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                 QPoint(w0 - 2, h0 - 2))
+check("J7 批注模式抓手不抢事件", not pin_b._resizing and pin_b._drawing)
+QTest.mouseRelease(pin_b, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                   QPoint(w0 - 2, h0 - 2))
+pin_b.set_tool(None)
 
 # ================= 汇总 =================
 failed = [n for n, ok in _results if not ok]

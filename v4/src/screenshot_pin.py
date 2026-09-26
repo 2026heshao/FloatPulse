@@ -15,9 +15,11 @@
      覆盖层 / 钉图窗口必须拦截 QEvent.ShortcutOverride 并 accept，
      否则按 Esc 取消截图会误触发「退出整个程序」。
   3. 拖选小于 12×12 逻辑像素视为误触，直接取消不钉。
-  4. 钉图窗口 Tool 层级（不占任务栏）、WA_ShowWithoutActivating 不抢焦点，
-     拖动 / 滚轮缩放 / 批注（画笔/箭头/马赛克，Ctrl+Z 撤销）/
-     双击关闭 / 右键菜单（复制到剪贴板、保存 PNG、关闭，均含批注合成）。
+  4. 钉图窗口 Tool 层级（不占任务栏）、WA_ShowWithoutActivating 不抢焦点。
+     视口模型：滚轮=内容缩放（光标锚点，窗框不动）；
+     右下角抓手拖拽=窗框等比例缩放（内容铺满）；
+     批注（画笔/箭头/马赛克，Ctrl+Z 撤销）钉在 base 坐标不受视口影响；
+     左键拖动 / 双击关闭 / 右键菜单（复制/保存含批注合成）。
   5. 控制器负责去重（截图进行中忽略重复触发）与钉图生命周期管理。
 ====================================================================
 """
@@ -174,23 +176,31 @@ class SnipOverlay(QWidget):
 
 
 # ====================================================================
-# 钉图浮窗：置顶参考窗（拖动 / 滚轮缩放 / 批注 / 双击关闭 / 右键菜单）
+# 钉图浮窗：置顶参考窗（视口窗框 + 内容缩放 + 批注）
 # ====================================================================
 class PinWindow(QWidget):
-    """钉在屏幕上的截图浮窗。滚轮缩放 / 拖动 / 批注 / 双击关闭 / 右键菜单。
+    """钉在屏幕上的截图浮窗。两个独立维度：
 
-    批注：画笔 / 箭头 / 马赛克画刷，批注层与底图分离（base 逻辑坐标系），
-    缩放/拖动不影响批注锚点；复制/保存时合成批注。Ctrl+Z 撤销。
+    - 视口（窗框）：右下角抓手等比例拖动改变窗框大小，内容自动铺满
+    - 内容（图像）：滚轮缩放（0.15×–5×），窗框尺寸不动，以**鼠标位置为锚点**，
+      放大即"指哪看哪"（自带平移）；超出窗框部分裁剪
+    - 批注：画笔 / 箭头 / 马赛克画刷，批注层在 base 逻辑坐标系，
+      缩放/拖动/改窗框不影响批注锚点；复制/保存时合成批注。Ctrl+Z 撤销
+    - 左键拖动=移动窗口 / 双击关闭 / 右键菜单
     关闭时发出 closed(self)。
     """
 
     closed = pyqtSignal(object)
 
-    # 滚轮缩放参数（逻辑尺寸 = 基准尺寸 × _zoom）
+    # 内容缩放参数（相对 base 逻辑尺寸）
     _ZOOM_STEP = 1.25      # 每格滚轮缩放系数
     _ZOOM_MIN = 0.15
     _ZOOM_MAX = 5.0
-    _MIN_DISP = 24         # 最小显示边长（逻辑像素，防止缩到没影）
+    _PAN_MARGIN = 24       # 平移夹紧：窗框内至少保留 24px 图像交集
+
+    # 视口抓手（右下角等比例拖拽改窗框）
+    _GRIP = 18             # 抓手热区边长（逻辑 px）
+    _VIEW_MIN = 60         # 窗框最小边长
 
     # 批注参数（base 逻辑坐标系，与缩放无关）
     _PEN_WIDTH = 3
@@ -219,9 +229,12 @@ class PinWindow(QWidget):
         # QPixmap.size() 是设备像素，显示尺寸 = /dpr（逻辑坐标）
         disp_w = max(1, round(pixmap.width() / dpr))
         disp_h = max(1, round(pixmap.height() / dpr))
-        self._base_w = disp_w          # 缩放基准（zoom=1.0 的尺寸）
+        self._base_w = disp_w          # 图像基准逻辑尺寸（zoom=1.0）
         self._base_h = disp_h
         self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)  # 图像左上角在窗口内的位置（视口平移）
+        self._resizing = False         # 抓手拖拽改窗框进行中
+        self._resize_start = None      # (全局起点, start_w, start_h)
 
         # 批注层：与底图同尺寸的透明 QImage（device px + dpr），绘制用 base 逻辑坐标
         self._annot = QImage(pixmap.size(), QImage.Format.Format_ARGB32_Premultiplied)
@@ -272,6 +285,15 @@ class PinWindow(QWidget):
         super().keyPressEvent(e)
 
     def mousePressEvent(self, e):
+        # 右下角抓手：等比例拖拽改窗框（仅移动模式，批注工具激活时不响应）
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._tool is None
+                and self._grip_rect().contains(e.position().toPoint())):
+            self._resizing = True
+            self._resize_start = (
+                e.globalPosition().toPoint(), self.width(), self.height()
+            )
+            return
         if e.button() == Qt.MouseButton.LeftButton and self._tool is not None:
             pos = self._to_base(e.position().toPoint())
             self._push_undo()
@@ -293,6 +315,15 @@ class PinWindow(QWidget):
             )
 
     def mouseMoveEvent(self, e):
+        if self._resizing:
+            self._apply_resize(e.globalPosition().toPoint())
+            return
+        # 悬停抓手热区时切换光标（移动模式）
+        if (self._tool is None and self._drag_offset is None
+                and not (e.buttons() & Qt.MouseButton.LeftButton)):
+            on_grip = self._grip_rect().contains(e.position().toPoint())
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor if on_grip
+                           else Qt.CursorShape.ArrowCursor)
         if self._drawing:
             pos = self._to_base(e.position().toPoint())
             if self._tool == "pen":
@@ -316,6 +347,13 @@ class PinWindow(QWidget):
             self.move(e.globalPosition().toPoint() - self._drag_offset)
 
     def mouseReleaseEvent(self, e):
+        if self._resizing:
+            self._resizing = False
+            self._resize_start = None
+            get_logger().info(
+                f"[截图] 窗框调整为 {self.width()}x{self.height()}（zoom={self._zoom:.2f}）"
+            )
+            return
         if self._drawing:
             self._drawing = False
             self._stroke_last = None
@@ -331,12 +369,55 @@ class PinWindow(QWidget):
             return
         self._drag_offset = None
 
-    # ---------------- 批注 ----------------
-    def _to_base(self, widget_pt: QPoint) -> QPoint:
-        """窗口（widget）坐标 → base 逻辑坐标（缩放时除以 zoom）"""
-        z = self._zoom if self._zoom > 0 else 1.0
-        return QPoint(round(widget_pt.x() / z), round(widget_pt.y() / z))
+    # ---------------- 视口与坐标 ----------------
+    def _img_rect(self) -> QRectF:
+        """图像在窗口内的显示矩形（base 逻辑尺寸 × zoom + 平移）"""
+        return QRectF(self._pan.x(), self._pan.y(),
+                      self._base_w * self._zoom, self._base_h * self._zoom)
 
+    def _to_base(self, widget_pt: QPoint) -> QPoint:
+        """窗口（widget）坐标 → base 逻辑坐标：(pt - pan) / zoom"""
+        z = self._zoom if self._zoom > 0 else 1.0
+        return QPoint(
+            round((widget_pt.x() - self._pan.x()) / z),
+            round((widget_pt.y() - self._pan.y()) / z),
+        )
+
+    def _clamp_pan(self, pan: QPointF) -> QPointF:
+        """平移夹紧：图像与窗框至少保留 _PAN_MARGIN 交集，不至拖丢"""
+        img_w = self._base_w * self._zoom
+        img_h = self._base_h * self._zoom
+        m = self._PAN_MARGIN
+        x = min(max(pan.x(), m - img_w), self.width() - m)
+        y = min(max(pan.y(), m - img_h), self.height() - m)
+        return QPointF(x, y)
+
+    def _grip_rect(self) -> QRect:
+        """右下角抓手热区（仅移动模式可拖）"""
+        return QRect(self.width() - self._GRIP, self.height() - self._GRIP,
+                     self._GRIP, self._GRIP)
+
+    def _apply_resize(self, global_pos: QPoint):
+        """抓手拖拽：窗框等比例缩放，内容自动铺满（左上角固定不动）"""
+        if self._resize_start is None:
+            return
+        g0, w0, h0 = self._resize_start
+        dx = global_pos.x() - g0.x()
+        dy = global_pos.y() - g0.y()
+        aspect = w0 / max(1, h0)
+        # 取横向/纵向位移（纵向按宽高比折算）的较大者，保证斜拖手感自然
+        delta = max(dx, dy * aspect)
+        lo = max(self._VIEW_MIN, round(self._base_w * self._ZOOM_MIN))
+        hi = round(self._base_w * self._ZOOM_MAX)
+        new_w = min(max(round(w0 + delta), lo), hi)
+        new_h = max(1, round(new_w / aspect))
+        self.setFixedSize(new_w, new_h)
+        # 内容铺满窗框：zoom = 窗框宽 / 基准宽，平移归零
+        self._zoom = new_w / self._base_w
+        self._pan = QPointF(0.0, 0.0)
+        self.update()
+
+    # ---------------- 批注 ----------------
     def set_tool(self, tool):
         """切换批注工具：None=移动模式（恢复拖动），pen/arrow/mosaic"""
         if tool not in (None, "pen", "arrow", "mosaic"):
@@ -461,7 +542,7 @@ class PinWindow(QWidget):
         p.end()
         return out
 
-    # ---------------- 滚轮缩放 ----------------
+    # ---------------- 滚轮缩放（内容缩放，窗框不动） ----------------
     def wheelEvent(self, e):
         delta = e.angleDelta().y()
         if delta == 0:
@@ -470,23 +551,23 @@ class PinWindow(QWidget):
         new_zoom = max(self._ZOOM_MIN, min(self._ZOOM_MAX, self._zoom * factor))
         if abs(new_zoom - self._zoom) < 1e-6:
             return  # 已到边界，不抖动
-        new_w = max(self._MIN_DISP, round(self._base_w * new_zoom))
-        new_h = max(self._MIN_DISP, round(self._base_h * new_zoom))
-        # 以窗口中心为锚缩放（视觉中心不动）
-        # 注意：__init__ 用过 setFixedSize，min/max 已锁死，必须继续用
-        # setFixedSize 重设（resize 会被固定尺寸拒绝）
-        center = self.geometry().center()
+        # 以光标为锚：光标下的 base 点缩放前后保持在同一窗口位置（指哪放哪）
+        cursor = e.position()
+        z_old = self._zoom
+        base_x = (cursor.x() - self._pan.x()) / z_old
+        base_y = (cursor.y() - self._pan.y()) / z_old
         self._zoom = new_zoom
-        self.setFixedSize(new_w, new_h)
-        self.move(center.x() - new_w // 2, center.y() - new_h // 2)
+        self._pan = self._clamp_pan(QPointF(
+            cursor.x() - base_x * new_zoom,
+            cursor.y() - base_y * new_zoom,
+        ))
         self.update()
 
     def reset_zoom(self):
-        """恢复 1.0 缩放（基准尺寸），窗口中心保持不动"""
-        center = self.geometry().center()
+        """复位：窗框回基准尺寸、内容 1.0×、平移归零"""
         self._zoom = 1.0
+        self._pan = QPointF(0.0, 0.0)
         self.setFixedSize(self._base_w, self._base_h)
-        self.move(center.x() - self._base_w // 2, center.y() - self._base_h // 2)
         self.update()
 
     def mouseDoubleClickEvent(self, _e):
@@ -582,22 +663,15 @@ class PinWindow(QWidget):
     # ---------------- 绘制 ----------------
     def paintEvent(self, _event):
         p = QPainter(self)
-        # 缩放绘制：目标矩形=当前窗口（可能≠基准尺寸），平滑插值避免马赛克
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        p.drawPixmap(
-            QRectF(0, 0, self.width(), self.height()),
-            self._pix,
-            QRectF(self._pix.rect()),
-        )
-        # 批注层（同源同尺寸，随窗口同步缩放）
-        p.drawImage(
-            QRectF(0, 0, self.width(), self.height()),
-            self._annot,
-            QRectF(self._annot.rect()),
-        )
-        # 箭头拖动预览（base 坐标 → 窗口坐标乘 zoom）
+        target = self._img_rect()
+        p.drawPixmap(target, self._pix, QRectF(self._pix.rect()))
+        # 批注层（同源同尺寸，随内容一起缩放/平移）
+        p.drawImage(target, self._annot, QRectF(self._annot.rect()))
+        # 箭头拖动预览（base 坐标 → 窗口：translate(pan) + scale(zoom)）
         if self._pending is not None:
             p.save()
+            p.translate(self._pan)
             p.scale(self._zoom, self._zoom)
             pen = QPen(self._annot_color, self._PEN_WIDTH / max(1.0, self._zoom),
                        Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
@@ -621,6 +695,12 @@ class PinWindow(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawPolygon(tip, wing1, wing2)
             p.restore()
+        # 右下角抓手指示纹（移动模式 + 悬停时显示，三条斜线）
+        if self.underMouse() and self._tool is None:
+            p.setPen(QPen(self._accent, 2))
+            w, h = self.width(), self.height()
+            for i in (1, 2, 3):
+                p.drawLine(w - i * 5, h - 2, w - 2, h - i * 5)
         border_w = 2 if self.underMouse() else 1
         p.setPen(QPen(self._accent, border_w))
         p.setBrush(Qt.BrushStyle.NoBrush)
