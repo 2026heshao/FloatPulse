@@ -1,0 +1,29 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          pip install -r ../requirements.txt
+          pip install pytest
+
+      - name: 运行测试套件
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest tests -q
