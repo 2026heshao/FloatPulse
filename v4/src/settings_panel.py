@@ -281,6 +281,12 @@ class SettingsPanel(QWidget):
         add_row(bb_v, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
                 self._set_screenshot_hotkey)
 
+        # 悬浮球外置插件总闸：关掉后插件动作不挂菜单、不绑热键（模块仍驻留）
+        self._set_plugins = self._toggle("plugins_enabled", True)
+        self._set_plugins.toggled.connect(self._on_plugins_changed)
+        add_row(bb_v, "悬浮球插件", "启用 plugins/ 目录里的外置插件包；"
+                                    "新放入的插件包需重启程序", self._set_plugins)
+
         # 悬浮球大小（C1）：改球径时保持球心不动，投影留白自动适配
         self._set_ball_size = Stepper(48, 88, self._config.get("ball_size", 64),
                                       suffix="px", step=8)
@@ -387,6 +393,10 @@ class SettingsPanel(QWidget):
             self._set_screenshot.blockSignals(False)
         if hasattr(self, '_set_screenshot_hotkey'):
             self._set_screenshot_hotkey.setText(self._config.get("screenshot_hotkey", "Ctrl+Alt+S"))
+        if hasattr(self, '_set_plugins'):
+            self._set_plugins.blockSignals(True)
+            self._set_plugins.setChecked(self._config.get("plugins_enabled", True))
+            self._set_plugins.blockSignals(False)
         if hasattr(self, '_set_clipboard_filter'):
             apps = self._config.get("clipboard_filter_apps", []) or []
             self._set_clipboard_filter.setText(", ".join(str(a) for a in apps))
@@ -562,6 +572,14 @@ class SettingsPanel(QWidget):
             self._config.save()
             self._host.screenshot_changed.emit()
 
+    def _on_plugins_changed(self, checked: bool):
+        """悬浮球插件总闸：即时持久化并广播（主流程启用/禁用插件动作）"""
+        enabled = bool(checked)
+        if enabled != self._config.get("plugins_enabled", True):
+            self._config.set("plugins_enabled", enabled)
+            self._config.save()
+            self._host.plugins_changed.emit(enabled)
+
     def _on_screenshot_hotkey_changed(self):
         """截图热键编辑：校验格式与冲突后持久化并广播重注册"""
         text = self._set_screenshot_hotkey.text().strip()
@@ -632,6 +650,8 @@ class SettingsPanel(QWidget):
                 self._config.get("asset_thumb_size", 128))
         self._host.quick_capture_changed.emit()  # 热键/开关可能被重置，重注册
         self._host.screenshot_changed.emit()     # 截图热键/开关同理
+        self._host.plugins_changed.emit(
+            self._config.get("plugins_enabled", True))  # 插件总闸同理
 
         # 3. 刷新面板控件（含自启勾选框——注册表未被本次重置触及）
         self.refresh()
