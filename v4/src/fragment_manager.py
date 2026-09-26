@@ -11,7 +11,9 @@
   2. 兼容 PyInstaller 打包环境（路径由外部传入）
   3. 文件缺失自动初始化空列表；json 解析异常不崩溃
   4. 每条碎片拥有自增且不复用的唯一 fragment_id 主键
-  5. 碎片字段：fragment_id / type / content / source / created_at
+  5. 碎片字段：fragment_id / type / content / source / created_at / category
+     （category 为内容语义类别，由 fragment_classifier 自动判定，
+       详见 fragment_classifier.py 模块头说明）
   6. 所有增删改先操作内存列表，完毕统一调用 _save() 写盘
   7. 删除严格按 fragment_id 过滤
   8. 提供 trim_to_max() 在剪贴板历史超限时 FIFO 淘汰
@@ -30,6 +32,9 @@ import threading
 from datetime import datetime
 
 from src.json_store import load_records
+from src.fragment_classifier import (
+    classify, VALID_CATEGORIES,
+)
 
 
 # ====================================================================
@@ -130,14 +135,26 @@ TYPE_ICONS = {
 # 碎片数据类
 # ====================================================================
 class Fragment:
-    """单条碎片的数据载体"""
+    """单条碎片的数据载体
 
-    def __init__(self, fragment_id, ftype, content, source, created_at):
+    category：内容语义类别（link/code/path/command/text，见
+    fragment_classifier）。与 type（来源渠道）是两个独立维度：
+    type 说明"这条碎片怎么进来的"，category 说明"它是什么东西"。
+    旧数据无此字段时按内容自动重算（无缝迁移）。
+    """
+
+    def __init__(self, fragment_id, ftype, content, source, created_at,
+                 category=None):
         self.fragment_id = fragment_id          # 唯一主键，自增不复用
         self.type = ftype                       # 碎片类型（见 TYPE_*）
         self.content = content                   # 碎片内容
         self.source = source                     # 来源描述
         self.created_at = created_at             # 创建时间 "YYYY-MM-DD HH:MM"
+        # 内容语义类别：缺失或非法时按内容自动重算（旧数据迁移兜底）
+        if category in VALID_CATEGORIES:
+            self.category = category
+        else:
+            self.category = classify(content)
 
     def to_dict(self):
         """序列化为字典"""
@@ -147,17 +164,22 @@ class Fragment:
             "content": self.content,
             "source": self.source,
             "created_at": self.created_at,
+            "category": self.category,
         }
 
     @classmethod
     def from_dict(cls, d):
-        """从字典反序列化，带类型校验防止损坏数据崩溃"""
+        """从字典反序列化，带类型校验防止损坏数据崩溃
+
+        category：缺失或非法时由构造器按内容自动重算（旧数据迁移）
+        """
         return cls(
             fragment_id=int(d.get("fragment_id", 0) or 0),
             ftype=str(d.get("type", TYPE_CLIPBOARD_TEXT)),
             content=str(d.get("content", "")),
             source=str(d.get("source", "")),
             created_at=str(d.get("created_at", "")),
+            category=d.get("category"),
         )
 
     def preview(self, max_len: int = 50) -> str:
@@ -300,6 +322,8 @@ class FragmentManager:
                 return False
             if text != frag.content:
                 frag.content = text
+                # 内容变了，内容语义类别跟着重算（自动分类的约定）
+                frag.category = classify(text)
                 changed = True
         if source is not None and str(source) != frag.source:
             frag.source = str(source)
@@ -366,6 +390,40 @@ class FragmentManager:
     def get_fragments_by_type(self, ftype: str) -> list:
         """按类型筛选，按创建时间倒序"""
         return [f for f in self.get_all_fragments() if f.type == ftype]
+
+    # ---------------- 按内容语义类别（category）查 ----------------
+    def category_counts(self) -> dict:
+        """一次性遍历统计全部类别计数（避免 UI 侧多次 O(n) 遍历）
+
+        返回 dict 保证包含所有合法类别键（未出现的类别计 0）。
+        """
+        counts = {cat: 0 for cat in VALID_CATEGORIES}
+        for f in self._fragments:
+            if f.category in counts:
+                counts[f.category] += 1
+        return counts
+
+    def get_fragments_by_category(self, cat: str) -> list:
+        """按内容语义类别筛选，按创建时间倒序"""
+        return [f for f in self.get_all_fragments() if f.category == cat]
+
+    def count_by_category(self, cat: str) -> int:
+        """按内容语义类别计数"""
+        return sum(1 for f in self._fragments if f.category == cat)
+
+    def set_category(self, fragment_id: int, cat: str) -> bool:
+        """手动改碎片的内容语义类别（右键菜单入口），成功返回 True
+
+        cat 必须是合法类别常量；非法值拒绝（返回 False 不落盘）。
+        """
+        if cat not in VALID_CATEGORIES:
+            return False
+        frag = self.get_fragment(fragment_id)
+        if frag is None or frag.category == cat:
+            return False
+        frag.category = cat
+        self.mark_dirty()
+        return True
 
     def get_fragment(self, fragment_id: int):
         """按 fragment_id 获取单条碎片，不存在返回 None"""

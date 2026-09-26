@@ -38,6 +38,7 @@
 import sys
 import os
 import struct
+import time
 import traceback
 import json
 import logging
@@ -568,11 +569,24 @@ class FloatingBall(QWidget):
         self._menu.addAction(exit_action)
 
     def _open_main_window(self):
-        """打开大窗口主UI"""
+        """打开大窗口主UI（带毫秒级打点：定位真机"打开未响应数秒"阻塞段）"""
         if self._main_window is not None:
+            from src.logger import get_logger
+            t0 = time.perf_counter()
             self._main_window.show()
+            t1 = time.perf_counter()
             self._main_window.raise_()
             self._main_window.activateWindow()
+            t2 = time.perf_counter()
+            get_logger().info(
+                f"[主窗口] 打开: show={(t1 - t0) * 1000:.0f}ms "
+                f"raise+activate={(t2 - t1) * 1000:.0f}ms"
+            )
+            # 300ms 后确认事件循环存活（若期间被阻塞，看门狗会另行记录）
+            def _alive():
+                get_logger().info(
+                    f"[主窗口] 打开完成, visible={self._main_window.isVisible()}")
+            QTimer.singleShot(300, _alive)
 
     def add_context_action(self, text, callback, separator_before=True):
         """运行时向右键菜单追加动作（如：截图钉屏）。
@@ -2185,6 +2199,24 @@ def main():
     # 8.8 主窗口全屏让位开关变更 → 启停全屏检测
     main_window.hide_on_fullscreen_changed.connect(
         lambda _enabled: _apply_fullscreen_watch())
+
+    # ---- UI 心跳看门狗：事件循环阻塞 >800ms 时记录（诊断卡顿/未响应）----
+    # QTimer 在主线程事件循环里调度；循环被长任务阻塞时下一跳会迟到，
+    # 相邻两跳的间隔 = 实际阻塞时长。平时零输出，只在真卡顿时留痕。
+    _hb_state = {"last": time.monotonic()}
+
+    def _ui_heartbeat():
+        now = time.monotonic()
+        gap = (now - _hb_state["last"]) * 1000
+        _hb_state["last"] = now
+        if gap > 800:
+            get_logger().warning(
+                f"[UI心跳] 事件循环阻塞 {gap:.0f}ms（本条在阻塞结束后补记）")
+
+    _hb_timer = QTimer()
+    _hb_timer.setInterval(250)
+    _hb_timer.timeout.connect(_ui_heartbeat)
+    _hb_timer.start()
 
     # ---- 启动时直接显示主窗口 ----
     main_window.show()
