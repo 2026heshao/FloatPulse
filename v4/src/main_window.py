@@ -174,6 +174,8 @@ class MainWindow(QWidget):
     quick_capture_changed = pyqtSignal()         # 快速捕捉设置（开关/热键）变更
     screenshot_changed = pyqtSignal()            # 截图钉屏设置（开关/热键）变更
     plugins_changed = pyqtSignal(bool)           # 悬浮球外置插件总闸变更
+    pomodoro_changed = pyqtSignal()              # 番茄钟设置（开关/时长/自动休息）变更
+    task_focus_requested = pyqtSignal(int, str)  # 任务页请求对某任务开始专注（task_id, title）
 
     def __init__(self, task_manager, note_manager, fragment_manager,
                  docx_manager, config_manager, clipboard_monitor,
@@ -1711,13 +1713,13 @@ class MainWindow(QWidget):
         • <b>右键</b>：编辑标题… / 删除此笔记</p>
 
         <h3>📚 知识库</h3>
-        <p>• <b>数据来源</b>：程序目录下的「知识库.docx」，主窗口与卡片共用。文件名固定，须与主程序放同一文件夹：<b>源码运行放项目根</b>（与 data/ 同级），<b>打包后放 exe 同目录</b>；改名或移走会导致知识卡片无内容（程序仍可运行）<br>
+        <p>• <b>数据来源</b>：程序目录 <b>float_data/</b> 文件夹内的「知识库.docx」，主窗口与卡片共用。文件名固定，<b>源码运行放项目根的 float_data/ 内</b>，<b>打包后放 exe 同目录的 float_data/ 内</b>；改名或移走会导致知识卡片无内容（程序仍可运行）<br>
         • <b>外部编辑</b>：可直接用 Word/WPS 打开该 docx 修改并保存 → 面板提示「⚠️ 检测到外部修改」时点「🔄 重新加载」即生效，程序启动时也会自动检测。每个非空段落（去空格后 ≥ 4 字）就是一张知识卡片，过短段落自动忽略<br>
         • <b>重新加载</b>：「🔄 重新加载」重新读取 docx<br>
         • <b>新增内容</b>：「➕ 新增知识」追加到 docx 末尾；「📥 加入碎片池」把选中段落送进碎片工作台<br>
         • <b>右键段落</b>：编辑 / 删除 / 在此后新增 / 加入碎片池（删除与重新加载有玻璃风格确认框）<br>
         • <b>搜索</b>：输入去抖 250ms 实时过滤段落，无结果时显示占位提示；双击段落可直接编辑<br>
-        • <b>状态提示</b>：检测到 docx 被外部程序改动时提示「⚠️ 检测到外部修改，建议重新加载」。data/docx_meta.json 是程序自动维护的指纹缓存，请勿手工编辑</p>
+        • <b>状态提示</b>：检测到 docx 被外部程序改动时提示「⚠️ 检测到外部修改，建议重新加载」。float_data/docx_meta.json 是程序自动维护的指纹缓存，请勿手工编辑</p>
 
         <h3>📎 临时素材</h3>
         <p>• <b>收录方式</b>：拖图片 / 文件到悬浮球；复制图片到剪贴板（Excel、Word 一类图文混排仍按文本收集）<br>
@@ -1750,7 +1752,7 @@ class MainWindow(QWidget):
         • <b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</p>
 
         <h3>💡 数据与迁移</h3>
-        <p>• 全部数据都在本地：程序目录的 <b>data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置）与 <b>知识库.docx</b><br>
+        <p>• 全部数据都在本地：程序目录的 <b>float_data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）<br>
         • 换电脑时把整个程序文件夹拷走即可，数据跟着走<br>
         • 程序不联网、不登录、不上传任何内容，断网状态下所有功能照常可用</p>
         """

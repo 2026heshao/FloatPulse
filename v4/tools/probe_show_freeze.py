@@ -35,9 +35,9 @@ def mark(msg):
 
 def main():
     app = QApplication(sys.argv)
-    from src.app_paths import get_base_dir
+    from src.app_paths import get_base_dir, get_data_dir, get_docx_path
     base_dir = get_base_dir()
-    data_dir = os.path.join(base_dir, "data")
+    data_dir = get_data_dir(base_dir)
 
     real_cfg = os.path.join(data_dir, "config.json")
     tmp_dir = tempfile.mkdtemp(prefix="fp_probe_")
@@ -47,7 +47,7 @@ def main():
     config = ConfigManager(test_cfg)
 
     docx_mgr = DocxManager(
-        os.path.join(base_dir, "知识库.docx"),
+        get_docx_path(base_dir),
         os.path.join(data_dir, "docx_meta.json"),
     )
     docx_mgr.load()

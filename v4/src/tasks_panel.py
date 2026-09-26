@@ -202,14 +202,22 @@ class TasksPanel(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, t.task_id)
                 item.setData(KIND_ROLE, KIND_ROW)
                 item.setData(ROLE_TITLE, t.title)
-                item.setData(ROLE_REL,
-                              format_relative_deadline(t.deadline, today))
+                item.setData(ROLE_REL, self._rel_text(t, today))
                 item.setData(ROLE_STATE, state)
                 item.setData(ROLE_DONE, bool(t.done))
                 self._task_list.addItem(item)
 
         total = len(self._task_manager.get_all_tasks())
         self._task_count_label.setText(f"共 {total} 条")
+
+    def _rel_text(self, t, today: str) -> str:
+        """行尾右侧文案：相对截止时间 + 番茄累计（🍅×N，0 次不显示）。"""
+        rel = format_relative_deadline(t.deadline, today)
+        n = getattr(t, "focus_sessions", 0) or 0
+        if n > 0:
+            tomato = f"🍅×{n}"
+            rel = f"{rel} · {tomato}" if rel else tomato
+        return rel
 
     def apply_theme(self):
         """主题切换时更新行配色（由 MainWindow 调用）。"""
@@ -318,6 +326,8 @@ class TasksPanel(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
         act_toggle = menu.addAction("取消完成" if task.done else "标记完成")
+        # 番茄钟绑定：右键直接对该任务开始一次专注（悬浮球进度环可见）
+        act_focus = menu.addAction("🎯 专注此任务")
         act_edit = menu.addAction("✏️ 编辑...")
         menu.addSeparator()
         act_delete = menu.addAction("🗑 删除")
@@ -328,6 +338,8 @@ class TasksPanel(QWidget):
             self._task_manager.set_done(task_id, not task.done)
             self.refresh()
             self._host.data_changed.emit("task")
+        elif action == act_focus:
+            self._host.task_focus_requested.emit(task_id, task.title)
         elif action == act_edit:
             self._edit_dialog(task)
         elif action == act_delete:
