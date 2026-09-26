@@ -704,6 +704,7 @@ class FragmentsPanel(QWidget):
         act_to_note = menu.addAction("💾 存为笔记")
         act_to_kb = menu.addAction("📚 加入知识库")
         act_to_nav = menu.addAction("🌐 添加至网址导航")
+        act_to_sticky = menu.addAction("📌 钉为便签")
         menu.addSeparator()
         # 手动归类子菜单（自动分类判错时的纠正入口）
         cat_menu = menu.addMenu("🏷 归类为")
@@ -726,6 +727,8 @@ class FragmentsPanel(QWidget):
                 self._copy_content(frag)
         elif action == act_to_note:
             self._to_note(fid)
+        elif action == act_to_sticky:
+            self._to_sticky(fid)
         elif action == act_to_kb:
             self._to_knowledge(fid)
         elif action == act_to_nav:
@@ -761,17 +764,43 @@ class FragmentsPanel(QWidget):
         dlg.exec()
         self.refresh()
 
-    def _to_note(self, fragment_id: int):
-        """将碎片转存为一条新笔记"""
+    def _to_note_id(self, fragment_id: int):
+        """碎片转存为新笔记的公共路径（存为笔记 / 钉为便签共用），返回 note_id"""
         frag = self._fragment_manager.get_fragment(fragment_id)
         if not frag:
-            return
+            return None
         title_text = frag.content.replace("\n", " ").strip()[:20]
         title = f"💾 {title_text}{'...' if len(frag.content) > 20 else ''}"
-        self._note_manager.add_note(frag.content, title=title)
+        note_id = self._note_manager.add_note(frag.content, title=title)
         self._host.refresh_page("notes")
         self._host.data_changed.emit("note")
-        QMessageBox.information(self, "已转存", f"碎片已存为新笔记：\n{title}")
+        return note_id
+
+    def _to_note(self, fragment_id: int):
+        """将碎片转存为一条新笔记"""
+        title = self._to_note_id(fragment_id)
+        if title is None:
+            return
+        note = self._note_manager.get_note(title)
+        QMessageBox.information(
+            self, "已转存",
+            f"碎片已存为新笔记：\n{note.title if note else ''}")
+
+    def _to_sticky(self, fragment_id: int):
+        """碎片 → 新笔记 → 直接钉成桌面便签（复用 _to_note_id，不另写转换）"""
+        note_id = self._to_note_id(fragment_id)
+        if note_id is None:
+            return
+        manager = self._host.sticky_manager
+        if manager is None:
+            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            return
+        ok, reason = manager.open(note_id)
+        if ok:
+            self._host.show_toast("📌 已钉为桌面便签")
+        elif reason == "limit":
+            self._host.show_toast(
+                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
 
     def _to_knowledge(self, fragment_id: int):
         """将碎片内容追加到知识库 docx 末尾"""
