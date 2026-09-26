@@ -1,0 +1,34 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# ---- 打包产物（PyInstaller，75MB，禁止入库）----
+dist2/
+build2/
+dist/
+build/
+*.manifest
+
+# ---- 宣传页内的打包分发副本（31.5MB 构建产物，改走 GitHub Release 附件）----
+宣传页/*.zip
+
+# ---- 运行数据（个人碎片/笔记/任务/日志，隐私）----
+data/
+temp_assets/
+*.log
+
+# ---- 个人知识库数据源 ----
+知识库.docx
+知识库.docx.bak
+
+# ---- 本地会话与编辑器 ----
+.workbuddy/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

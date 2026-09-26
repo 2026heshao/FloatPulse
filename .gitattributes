@@ -1,0 +1,14 @@
+# 中文 GBK 批处理必须保持 CRLF，否则双击时中文乱码 / goto 跳转异常
+*.bat text eol=crlf
+
+# 二进制，禁止换行转换与文本 diff
+*.docx binary
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+
+# 统一 LF 的文本类型
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf

@@ -1,0 +1,232 @@
+# -*- coding: utf-8 -*-
+"""截图钉屏：拖选裁剪 / ESC 拦截 / 钉图尺寸与生命周期 验证。
+
+A 覆盖层构造：全屏几何 + 十字光标
+B ESC 拦截：ShortcutOverride 事件被 accept 并吃掉（不落到全局退出快捷键）
+C 拖选裁剪：伪造鼠标事件走真实 mouse 事件链 → 逻辑坐标选区 × dpr 裁剪
+D 选区过小：误触取消，不发出 region_selected
+E 钉图：显示尺寸 = pixmap/dpr（逻辑坐标）、closed 信号 → 控制器计数回落
+F 控制器 close_all：钉图与覆盖层全关
+G 主题切换：边框色字典取值不抛异常
+
+跑法：python tools/run_gui_check.py tools/verify_screenshot_pin.py
+"""
+import os
+import sys
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QColor, QPixmap, QMouseEvent
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE)
+
+from src.screenshot_pin import (
+    SnipOverlay, PinWindow, ScreenshotPinController, _MIN_SELECTION,
+)
+
+_app = QApplication.instance() or QApplication(sys.argv)
+
+_results = []
+
+
+def check(name, cond, detail=""):
+    _results.append((name, bool(cond)))
+    tag = "[OK]  " if cond else "[FAIL]"
+    suffix = f"  -> {detail}" if (detail and not cond) else ""
+    print(f"{tag} {name}{suffix}", flush=True)
+
+
+DPR = 2.0  # 用放大的 dpr 验证逻辑/设备坐标换算
+SCREEN_W, SCREEN_H = 800, 600
+
+shot = QPixmap(round(SCREEN_W * DPR), round(SCREEN_H * DPR))
+shot.setDevicePixelRatio(DPR)
+shot.fill(QColor("#223344"))
+geo_out = []
+
+# ================= A. 覆盖层构造 =================
+overlay = SnipOverlay(shot, _app.primaryScreen().geometry(), "dark")
+check("A1 覆盖层无边框置顶", overlay.windowFlags() & Qt.WindowType.FramelessWindowHint
+      and overlay.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+overlay.show()
+check("A2 显示成功", overlay.isVisible())
+geo_out = overlay.geometry()
+exp_geo = _app.primaryScreen().geometry()
+check("A3 几何=屏幕", geo_out == exp_geo, f"geo={geo_out} exp={exp_geo}")
+
+# ================= B. ESC 拦截（全局退出快捷键冲突防护） =================
+ev = QEvent(QEvent.Type.ShortcutOverride)
+# QTest.keyEvent 无法直接构造 ShortcutOverride，手动造 QKeyEvent
+from PyQt6.QtGui import QKeyEvent
+ev = QKeyEvent(QEvent.Type.ShortcutOverride, Qt.Key.Key_Escape,
+               Qt.KeyboardModifier.NoModifier)
+accepted = ev.isAccepted()
+handled = overlay.event(ev)
+check("B1 ShortcutOverride 被处理", handled is True)
+check("B2 事件已 accept", ev.isAccepted() and not accepted)
+overlay._origin = None
+QTest.keyClick(overlay, Qt.Key.Key_Escape)
+check("B3 Esc 关闭覆盖层", not overlay.isVisible())
+overlay2 = SnipOverlay(shot, _app.primaryScreen().geometry(), "dark")
+overlay2.show()
+
+# ================= C. 拖选裁剪（逻辑坐标 × dpr） =================
+picked = []
+
+
+def mouse_ev(ev_type, local, gp, button, buttons):
+    return QMouseEvent(ev_type, QPointF(local), QPointF(gp),
+                       button, buttons, Qt.KeyboardModifier.NoModifier)
+
+
+overlay2.region_selected.connect(lambda pix, gp: picked.append((pix, gp)))
+
+# 选区 (100,80)-(300,220) 逻辑坐标 → 期望裁剪 200x140 逻辑尺寸
+lp1 = QPointF(100, 80)
+lp2 = QPointF(300, 220)
+gp1 = overlay2.mapToGlobal(lp1.toPoint())
+gp2 = overlay2.mapToGlobal(lp2.toPoint())
+overlay2.mousePressEvent(mouse_ev(QEvent.Type.MouseButtonPress, lp1, gp1,
+                                  Qt.MouseButton.LeftButton,
+                                  Qt.MouseButton.LeftButton))
+overlay2.mouseMoveEvent(mouse_ev(QEvent.Type.MouseMove, lp2, gp2,
+                                 Qt.MouseButton.NoButton,
+                                 Qt.MouseButton.LeftButton))
+overlay2.mouseReleaseEvent(mouse_ev(QEvent.Type.MouseButtonRelease, lp2, gp2,
+                                    Qt.MouseButton.LeftButton,
+                                    Qt.MouseButton.LeftButton))
+check("C1 region_selected 已发射", len(picked) == 1)
+if picked:
+    pix, gp = picked[0]
+    # QRect(p1,p2) 宽高含端点：300-100+1=201
+    exp_w, exp_h = 201, 141
+    check("C2 裁剪尺寸=逻辑选区x2(dpr)", pix.width() == exp_w * 2 and pix.height() == exp_h * 2,
+          f"{pix.width()}x{pix.height()}")
+    check("C2b 逻辑尺寸=选区", round(pix.width() / DPR) == exp_w and round(pix.height() / DPR) == exp_h,
+          f"logical={pix.width() / DPR}x{pix.height() / DPR}")
+    check("C3 裁剪图保留 dpr", abs(pix.devicePixelRatio() - DPR) < 1e-6,
+          f"dpr={pix.devicePixelRatio()}")
+    check("C4 全局坐标正确", gp == gp1, f"gp={gp} expect={gp1}")
+check("C5 释放后覆盖层关闭", not overlay2.isVisible())
+
+# ================= D. 选区过小取消 =================
+picked2 = []
+overlay3 = SnipOverlay(shot, _app.primaryScreen().geometry(), "dark")
+overlay3.region_selected.connect(lambda pix, gp: picked2.append((pix, gp)))
+overlay3.show()
+tiny = QPointF(10, 10)
+tiny2 = QPointF(10 + _MIN_SELECTION - 1, 10)
+overlay3.mousePressEvent(mouse_ev(QEvent.Type.MouseButtonPress, tiny,
+                                  overlay3.mapToGlobal(tiny.toPoint()),
+                                  Qt.MouseButton.LeftButton,
+                                  Qt.MouseButton.LeftButton))
+overlay3.mouseReleaseEvent(mouse_ev(QEvent.Type.MouseButtonRelease, tiny2,
+                                    overlay3.mapToGlobal(tiny2.toPoint()),
+                                    Qt.MouseButton.LeftButton,
+                                    Qt.MouseButton.LeftButton))
+check("D1 过小选区不发射信号", len(picked2) == 0)
+check("D2 过小选区直接取消", not overlay3.isVisible())
+
+# ================= E. 钉图尺寸 / 生命周期 =================
+ctrl = ScreenshotPinController(theme="dark")
+if picked:
+    pix, gp = picked[0]
+    closed_log = []
+    pin = PinWindow(pix, gp, "dark")
+    pin.closed.connect(lambda p: closed_log.append(p))
+    ctrl._pins.append(pin)
+    check("E1 钉图显示尺寸=逻辑坐标", pin.width() == 201 and pin.height() == 141,
+          f"{pin.width()}x{pin.height()}")
+    check("E2 Tool 层级不占任务栏", bool(pin.windowFlags() & Qt.WindowType.Tool))
+    check("E3 不抢焦点", bool(pin.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)))
+    # 拖动
+    p0 = pin.pos()
+    pin._drag_offset = QPoint(5, 5)
+    pin.mouseMoveEvent(mouse_ev(QEvent.Type.MouseMove, QPointF(10, 10),
+                                gp + QPoint(60, 40), Qt.MouseButton.NoButton,
+                                Qt.MouseButton.LeftButton))
+    check("E4 拖动移动窗口", pin.pos() == p0 + QPoint(55, 35),
+          f"pos={pin.pos()}")
+    pin.close()
+    check("E5 closed 信号发射", len(closed_log) == 1)
+else:
+    check("E0 前置裁剪失败", False)
+
+# ================= F. 控制器 close_all =================
+overlay4 = SnipOverlay(shot, _app.primaryScreen().geometry(), "dark")
+overlay4.show()
+ctrl._overlay = overlay4
+pin2 = PinWindow(shot, QPoint(0, 0), "dark")
+ctrl._pins.append(pin2)
+ctrl.close_all()
+check("F1 close_all 清空钉图", len(ctrl._pins) == 0)
+check("F2 close_all 关闭覆盖层", ctrl._overlay is None and not overlay4.isVisible())
+
+# ================= G. 主题切换 =================
+try:
+    ctrl.apply_theme("light")
+    ctrl.apply_theme("dark")
+    ctrl.apply_theme("bogus")   # 非法名应被忽略不崩
+    ok = True
+except Exception as exc:
+    ok = False
+    print("G exception:", exc)
+check("G1 主题切换不抛异常", ok)
+
+# ================= H. 滚轮缩放 =================
+from PyQt6.QtGui import QWheelEvent
+from src.screenshot_pin import PinWindow as _PW
+
+
+def wheel(pin, up):
+    d = QPoint(0, 120) if up else QPoint(0, -120)
+    ev = QWheelEvent(
+        QPointF(pin.width() / 2, pin.height() / 2), QPointF(0, 0),
+        QPoint(0, 0), d, Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+    )
+    pin.wheelEvent(ev)
+
+
+if picked:
+    pix, gp = picked[0]
+    pin3 = _PW(pix, QPoint(200, 200), "dark")
+    base_w, base_h = pin3.width(), pin3.height()          # 201x141
+    c0 = pin3.geometry().center()
+    wheel(pin3, True)
+    check("H1 放大 ×1.25", pin3.width() == round(base_w * 1.25)
+          and pin3.height() == round(base_h * 1.25),
+          f"{pin3.width()}x{pin3.height()}")
+    c1 = pin3.geometry().center()
+    check("H2 中心锚定", abs(c1.x() - c0.x()) <= 2 and abs(c1.y() - c0.y()) <= 2,
+          f"{c0} -> {c1}")
+    wheel(pin3, False)
+    check("H3 缩小回原尺寸", pin3.width() == base_w and pin3.height() == base_h)
+    for _ in range(20):                                    # 连续缩小 → 触底
+        wheel(pin3, False)
+    floor_w = max(_PW._MIN_DISP, round(base_w * _PW._ZOOM_MIN))
+    check("H4 缩小下限夹紧", pin3.width() == floor_w, f"w={pin3.width()} floor={floor_w}")
+    for _ in range(20):                                    # 连续放大 → 触顶
+        wheel(pin3, True)
+    ceil_w = round(base_w * _PW._ZOOM_MAX)
+    check("H5 放大上限夹紧", pin3.width() == ceil_w, f"w={pin3.width()} ceil={ceil_w}")
+    c_mid = pin3.geometry().center()                       # reset 契约=相对重置前中心不动
+    pin3.reset_zoom()
+    c2 = pin3.geometry().center()
+    check("H6 重置回基准尺寸", pin3.width() == base_w and pin3.height() == base_h)
+    check("H7 重置中心不动", abs(c2.x() - c_mid.x()) <= 1 and abs(c2.y() - c_mid.y()) <= 1,
+          f"{c_mid} -> {c2}")
+else:
+    check("H0 前置裁剪失败", False)
+
+# ================= 汇总 =================
+failed = [n for n, ok in _results if not ok]
+print("=" * 40)
+print(f"共 {len(_results)} 项，失败 {len(failed)} 项")
+if failed:
+    print("失败项：", failed)
+sys.exit(1 if failed else 0)

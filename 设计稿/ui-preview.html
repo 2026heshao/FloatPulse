@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FloatPulse v2 · UI 高仿真</title>
+<style>
+:root{
+  --primary:#5BC0BE; --primary-lite:#6FFFE9; --primary-deep:#3D9E9C;
+  --primary-a08:rgba(91,192,190,.08); --primary-a12:rgba(91,192,190,.12);
+  --primary-a18:rgba(91,192,190,.18); --primary-a30:rgba(91,192,190,.30);
+  --text:#2C3E50; --text-2:#8B96A3; --text-3:#AAB4BF;
+  --glass-fill:rgba(255,255,255,.58);
+  --glass-edge:rgba(255,255,255,.88);
+  --glass-edge-b:rgba(16,32,48,.08);
+  --panel-fill:rgba(255,255,255,.46);
+  --panel-edge:rgba(255,255,255,.75);
+  --hair:rgba(16,32,48,.07);
+  --shadow:0 1px 1px rgba(16,32,48,.04),0 8px 20px rgba(16,32,48,.10),0 24px 56px rgba(16,32,48,.14);
+  --radius-win:14px; --radius-card:22px;
+  --ease:cubic-bezier(.22,.61,.36,1);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+}
+html[data-theme="dark"]{
+  --primary:#6FFFE9; --primary-lite:#8BFFF0; --primary-deep:#4AA8A6;
+  --primary-a08:rgba(111,255,233,.08); --primary-a12:rgba(111,255,233,.12);
+  --primary-a18:rgba(111,255,233,.18); --primary-a30:rgba(111,255,233,.30);
+  --text:#E4E8EE; --text-2:#98A2AE; --text-3:#7A8592;
+  --glass-fill:rgba(20,22,32,.62);
+  --glass-edge:rgba(255,255,255,.14);
+  --glass-edge-b:rgba(0,0,0,.45);
+  --panel-fill:rgba(255,255,255,.055);
+  --panel-edge:rgba(255,255,255,.12);
+  --hair:rgba(255,255,255,.09);
+  --shadow:0 1px 1px rgba(0,0,0,.30),0 10px 24px rgba(0,0,0,.40),0 28px 60px rgba(0,0,0,.46);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  font-family:"Microsoft YaHei","Segoe UI",system-ui,-apple-system,sans-serif;
+  color:var(--text);
+  background:#DCE3EA;
+  min-height:100vh;padding:28px 24px 60px;
+  transition:background .4s var(--ease),color .3s var(--ease);
+}
+html[data-theme="dark"] body{background:#0B0D14}
+
+.page-head{max-width:940px;margin:0 auto 22px;display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}
+.page-head h1{font-size:17px;font-weight:600;letter-spacing:.2px}
+.page-head p{font-size:12.5px;color:var(--text-2);margin-top:6px;line-height:1.7}
+.page-head .spacer{flex:1}
+.hint-chip{
+  font-size:12px;padding:7px 12px;border-radius:9px;
+  background:var(--glass-fill);border:1px solid var(--glass-edge);
+  color:var(--text-2);backdrop-filter:blur(14px) saturate(1.5);
+}
+.tgl{
+  cursor:pointer;font-size:12.5px;padding:8px 14px;border-radius:10px;border:1px solid var(--primary-a30);
+  background:var(--primary-a12);color:var(--primary);font-weight:600;
+  transition:transform .16s var(--ease),background .2s var(--ease),box-shadow .2s var(--ease);
+}
+.tgl:hover{background:var(--primary-a18);box-shadow:0 4px 14px var(--primary-a30)}
+.tgl:active{transform:translateY(1px) scale(.99)}
+
+/* ---------- 模拟桌面 ---------- */
+.desk{
+  position:relative;max-width:940px;margin:0 auto;border-radius:20px;overflow:hidden;
+  padding:34px 10px 40px;display:flex;flex-direction:column;align-items:center;gap:34px;
+  background:
+    radial-gradient(520px 360px at 10% 6%, #4FC3C0 0%, rgba(79,195,192,0) 58%),
+    radial-gradient(480px 400px at 90% 16%, #7E8FE0 0%, rgba(126,143,224,0) 58%),
+    radial-gradient(560px 440px at 60% 98%, #EFB183 0%, rgba(239,177,131,0) 60%),
+    linear-gradient(150deg,#E9EFF4 0%,#DCE5EC 55%,#D0DBE4 100%);
+  transition:background .5s var(--ease);
+}
+html[data-theme="dark"] .desk{
+  background:
+    radial-gradient(560px 380px at 12% 8%, #12403E 0%, rgba(18,64,62,0) 62%),
+    radial-gradient(520px 420px at 88% 18%, #232A52 0%, rgba(35,42,82,0) 60%),
+    radial-gradient(600px 460px at 62% 96%, #4A2E22 0%, rgba(74,46,34,0) 62%),
+    linear-gradient(150deg,#11141F 0%,#0D1018 60%,#0A0C12 100%);
+}
+.desk::after{
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;
+  background-image:radial-gradient(rgba(255,255,255,.55) .5px, transparent .5px);
+  background-size:3px 3px;mix-blend-mode:overlay;
+}
+.desk-label{
+  position:absolute;top:12px;left:16px;font-size:11.5px;letter-spacing:.4px;
+  color:rgba(44,62,80,.5);z-index:3;
+}
+html[data-theme="dark"] .desk-label{color:rgba(228,232,238,.42)}
+
+/* ---------- 玻璃基础 ---------- */
+.glass{
+  position:relative;background:var(--glass-fill);
+  border:1px solid var(--glass-edge);
+  box-shadow:var(--shadow), inset 0 1px 0 rgba(255,255,255,.55), inset 0 0 0 .5px var(--glass-edge-b);
+  backdrop-filter:blur(26px) saturate(1.7);
+  -webkit-backdrop-filter:blur(26px) saturate(1.7);
+  overflow:hidden;
+}
+.glass::before{
+  content:"";position:absolute;left:0;right:0;top:0;height:32%;pointer-events:none;
+  background:linear-gradient(to bottom, rgba(255,255,255,.42), rgba(255,255,255,0));
+}
+html[data-theme="dark"] .glass::before{
+  background:linear-gradient(to bottom, rgba(255,255,255,.10), rgba(255,255,255,0));
+}
+
+/* ==================== 主窗口 ==================== */
+.app-window{width:920px;height:620px;border-radius:var(--radius-win);z-index:2;flex:none;
+  animation:winIn .42s var(--ease-out) both}
+@keyframes winIn{from{opacity:0;transform:translateY(10px) scale(.985)}to{opacity:1;transform:none}}
+.win-titlebar{
+  height:48px;display:flex;align-items:center;gap:9px;padding:0 12px 0 18px;
+  border-bottom:1px solid var(--hair);position:relative;z-index:2;
+}
+.win-logo{
+  width:22px;height:22px;border-radius:7px;
+  background:linear-gradient(140deg,var(--primary-lite),var(--primary) 58%,var(--primary-deep));
+  box-shadow:0 2px 8px var(--primary-a30),inset 0 1px 0 rgba(255,255,255,.6);
+  display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;font-weight:700;
+}
+.win-name{font-size:14px;font-weight:600;letter-spacing:.3px}
+.win-sub{font-size:11px;color:var(--text-3);margin-left:2px}
+.win-titlebar .spacer{flex:1}
+.wbtn{
+  width:34px;height:34px;border-radius:10px;border:1px solid transparent;background:transparent;
+  color:var(--text-2);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:background .16s var(--ease),color .16s var(--ease),transform .14s var(--ease),border-color .16s var(--ease);
+}
+.wbtn:hover{background:var(--primary-a12);color:var(--primary);border-color:var(--primary-a30)}
+.wbtn:active{transform:translateY(1px) scale(.95)}
+.wbtn.danger:hover{background:rgba(214,72,58,.14);color:#D6483A;border-color:rgba(214,72,58,.32)}
+
+.win-body{display:flex;height:calc(100% - 48px);position:relative;z-index:2}
+.sidebar{
+  width:168px;padding:16px 12px 12px;border-right:1px solid var(--hair);
+  display:flex;flex-direction:column;position:relative;
+}
+.side-title{
+  font-size:11px;letter-spacing:1.4px;color:var(--text-3);font-weight:600;
+  padding:0 12px 10px;
+}
+.nav-indicator{
+  position:absolute;left:0;width:3px;height:22px;border-radius:0 3px 3px 0;
+  background:var(--primary);top:0;
+  transition:transform .34s var(--ease-out),background .3s var(--ease);
+  box-shadow:0 0 10px var(--primary-a30);
+}
+.nav-item{
+  height:40px;border-radius:10px;display:flex;align-items:center;gap:10px;padding:0 12px;
+  font-size:13px;color:var(--text-2);cursor:pointer;white-space:nowrap;
+  transition:background .18s var(--ease),color .18s var(--ease),transform .18s var(--ease);
+}
+.nav-item .ico{font-size:14px;width:16px;text-align:center;filter:saturate(.85)}
+.nav-item:hover{background:var(--primary-a08);color:var(--text);transform:translateX(2px)}
+.nav-item.active{
+  background:var(--primary-a18);color:var(--primary);font-weight:600;
+  box-shadow:inset 0 0 0 1px var(--primary-a30);
+}
+.sidebar .spacer{flex:1}
+.side-foot{font-size:11px;color:var(--text-3);text-align:center;padding-top:8px}
+
+.content{flex:1;padding:20px 22px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.page-head-row{display:flex;align-items:center;gap:12px}
+.page-title{font-size:17px;font-weight:600;letter-spacing:.2px}
+.count-chip{
+  font-size:11.5px;color:var(--primary);background:var(--primary-a12);
+  border:1px solid var(--primary-a30);border-radius:7px;padding:3px 9px;font-weight:600;
+}
+.page-head-row .spacer{flex:1}
+.toolbar{display:flex;gap:8px;align-items:center}
+.search{
+  height:34px;width:230px;border-radius:9px;padding:0 12px 0 30px;font-size:12.5px;
+  background:var(--panel-fill);border:1px solid var(--panel-edge);color:var(--text);outline:none;
+  transition:border-color .18s var(--ease),box-shadow .18s var(--ease);
+}
+.search:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-a12)}
+.search-wrap{position:relative;display:flex;align-items:center}
+.search-wrap .mag{position:absolute;left:11px;font-size:11px;color:var(--text-3);pointer-events:none}
+.btn{
+  height:34px;padding:0 15px;border-radius:9px;font-size:12.5px;cursor:pointer;border:1px solid transparent;
+  transition:background .16s var(--ease),color .16s var(--ease),transform .14s var(--ease),box-shadow .2s var(--ease);
+}
+.btn.primary{
+  background:linear-gradient(140deg,var(--primary-lite),var(--primary) 60%,var(--primary-deep));
+  color:#fff;font-weight:600;box-shadow:0 4px 14px var(--primary-a30),inset 0 1px 0 rgba(255,255,255,.4);
+}
+.btn.primary:hover{filter:brightness(1.06);box-shadow:0 7px 20px var(--primary-a30)}
+.btn.primary:active{transform:translateY(1px) scale(.99);box-shadow:0 2px 8px var(--primary-a30)}
+.btn.ghost{background:var(--primary-a12);color:var(--primary);border-color:var(--primary-a30)}
+.btn.ghost:hover{background:var(--primary-a18)}
+.btn.ghost:active{transform:translateY(1px) scale(.99)}
+
+.panel{
+  border-radius:12px;background:var(--panel-fill);border:1px solid var(--panel-edge);
+  padding:8px;flex:1;overflow:hidden;position:relative;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.4);
+}
+.list{display:flex;flex-direction:column;gap:2px;height:100%;overflow-y:auto;padding-right:2px}
+.list::-webkit-scrollbar{width:8px}
+.list::-webkit-scrollbar-thumb{background:transparent;border-radius:4px;transition:background .2s}
+.list:hover::-webkit-scrollbar-thumb{background:var(--primary-a30)}
+.row{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:9px;font-size:12.5px;
+  color:var(--text);cursor:default;
+  transition:background .18s var(--ease),transform .18s var(--ease),box-shadow .2s var(--ease);
+}
+.row:hover{background:var(--primary-a08);transform:translateX(1px)}
+.row .tag{
+  font-size:10.5px;padding:2px 7px;border-radius:6px;background:var(--primary-a12);
+  color:var(--primary);border:1px solid var(--primary-a30);flex:none;
+}
+.row .tag.warn{background:rgba(230,126,34,.12);color:#C97A1E;border-color:rgba(230,126,34,.3)}
+.row .tag.ok{background:rgba(39,174,96,.12);color:#1F8A4C;border-color:rgba(39,174,96,.3)}
+.row .txt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-2)}
+.row .time{font-size:11px;color:var(--text-3);flex:none}
+.row .acts{display:flex;gap:6px;opacity:0;transform:translateX(4px);transition:opacity .2s var(--ease),transform .2s var(--ease)}
+.row:hover .acts{opacity:1;transform:none}
+.mini{
+  height:24px;padding:0 10px;border-radius:7px;font-size:11.5px;cursor:pointer;
+  border:1px solid var(--primary-a30);background:var(--primary-a12);color:var(--primary);
+  transition:background .16s var(--ease),transform .14s var(--ease);
+}
+.mini:hover{background:var(--primary-a18)}
+.mini:active{transform:translateY(1px)}
+.mini.del{border-color:rgba(214,72,58,.28);background:rgba(214,72,58,.10);color:#D6483A}
+.mini.del:hover{background:rgba(214,72,58,.18)}
+.empty-hint{font-size:11.5px;color:var(--text-3);text-align:center;padding:6px}
+
+/* ==================== 悬浮球 + 卡片 ==================== */
+.ball-stage{
+  width:920px;height:400px;border-radius:18px;position:relative;
+  display:flex;align-items:center;justify-content:flex-end;padding:0 26px;gap:18px;
+}
+.ball-card-zone{position:relative;display:flex;align-items:center;gap:14px}
+
+.small-card{
+  width:440px;height:340px;border-radius:var(--radius-card);display:flex;overflow:hidden;
+  opacity:0;transform:translateX(16px) scale(.97);pointer-events:none;
+  transition:opacity .2s var(--ease),transform .22s var(--ease-out);
+  z-index:4;
+}
+.small-card.show{opacity:1;transform:none;pointer-events:auto}
+.sc-side{
+  width:48px;flex:none;display:flex;flex-direction:column;align-items:center;gap:4px;
+  padding:12px 0;border-right:1px solid var(--primary-a30);position:relative;
+}
+.sc-ind{
+  position:absolute;left:0;width:3px;height:24px;border-radius:0 2px 2px 0;background:var(--primary);
+  top:12px;transition:transform .34s var(--ease-out);box-shadow:0 0 10px var(--primary-a30);
+}
+.sc-tab{
+  width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  font-size:17px;color:var(--text-2);cursor:pointer;flex:none;
+  transition:background .18s var(--ease),color .18s var(--ease),transform .18s var(--ease);
+}
+.sc-tab:hover{background:var(--primary-a12);color:var(--primary);transform:scale(1.06)}
+.sc-tab.active{background:var(--primary-a18);color:var(--primary);box-shadow:inset 0 0 0 1px var(--primary-a30)}
+.sc-body{flex:1;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.sc-title{font-size:13.5px;font-weight:600;color:var(--primary);display:flex;align-items:center;gap:6px}
+.sc-title .spacer{flex:1}
+.sc-close{
+  width:22px;height:22px;border-radius:11px;border:1px solid rgba(214,72,58,.3);
+  background:rgba(214,72,58,.10);color:#D6483A;font-size:12px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .16s var(--ease),transform .16s var(--ease),color .16s var(--ease);
+}
+.sc-close:hover{background:#D6483A;color:#fff}
+.sc-hair{height:1px;background:var(--hair);margin:2px 0}
+.sc-row{
+  display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px;color:var(--text-2);
+  transition:background .16s var(--ease);
+}
+.sc-row:hover{background:var(--primary-a08)}
+.sc-row .txt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sc-row .acts{display:flex;gap:6px;opacity:.5;transition:opacity .18s var(--ease)}
+.sc-row:hover .acts{opacity:1}
+.sc-foot{font-size:11px;color:var(--text-3);text-align:center;margin-top:auto}
+.sc-pages{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;padding-right:2px}
+.sc-pages::-webkit-scrollbar{width:8px}
+.sc-pages::-webkit-scrollbar-thumb{background:transparent;border-radius:4px}
+.sc-pages:hover::-webkit-scrollbar-thumb{background:var(--primary-a30)}
+.sc-pages.enter{animation:pageIn .24s var(--ease-out) both}
+@keyframes pageIn{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
+.kc-text{font-size:13.5px;line-height:1.85;color:var(--text);padding:6px 8px 10px}
+.kc-btn{align-self:flex-end;margin-top:auto}
+.tk-input{display:flex;gap:6px;margin-bottom:6px}
+.tk-input input{flex:1;height:32px;border-radius:9px;padding:0 10px;font-size:12.5px;
+  background:var(--panel-fill);border:1px solid var(--panel-edge);color:var(--text);outline:none;
+  transition:border-color .18s var(--ease),box-shadow .18s var(--ease)}
+.tk-input input:focus{border-color:var(--primary);box-shadow:0 0 0 3px var(--primary-a12)}
+.tk-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:8px;font-size:12.5px;
+  color:var(--text);transition:background .16s var(--ease)}
+.tk-row:hover{background:var(--primary-a08)}
+.tk-dot{width:15px;height:15px;border-radius:5px;border:1px solid var(--primary-a30);flex:none;
+  display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;transition:background .18s var(--ease)}
+.tk-dot.on{background:var(--primary);border-color:var(--primary)}
+.tk-row.done .tk-t{color:var(--text-3);text-decoration:line-through}
+.tk-t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk-due{font-size:11px;flex:none;color:var(--text-3)}
+.tk-due.over{color:#D6483A}
+.tk-due.today{color:#C97A1E}
+.ph{font-size:12px;color:var(--text-3);text-align:center;padding:30px 0}
+
+.ball-wrap{position:relative;width:96px;height:96px;flex:none;display:flex;align-items:center;justify-content:center}
+.ball-halo{
+  position:absolute;inset:0;border-radius:50%;background:radial-gradient(circle,var(--primary-a30) 0%,rgba(91,192,190,0) 68%);
+  opacity:0;transform:scale(.7);transition:opacity .3s var(--ease),transform .34s var(--ease-out);
+}
+.ball-wrap:hover .ball-halo{opacity:1;transform:scale(1)}
+.ball{
+  width:64px;height:64px;border-radius:50%;cursor:pointer;position:relative;
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255,255,255,.9) 0%, rgba(255,255,255,0) 42%),
+    linear-gradient(148deg,var(--primary-lite) 0%,var(--primary) 52%,var(--primary-deep) 100%);
+  box-shadow:
+    0 6px 16px rgba(16,32,48,.20),
+    0 14px 34px var(--primary-a30),
+    inset 0 -6px 14px rgba(0,0,0,.12),
+    inset 0 0 0 1px rgba(255,255,255,.35);
+  transition:transform .22s var(--ease-out),box-shadow .26s var(--ease),filter .22s var(--ease);
+  display:flex;align-items:center;justify-content:center;
+}
+.ball::after{
+  content:"";position:absolute;left:14%;top:10%;width:40%;height:24%;border-radius:50%;
+  background:linear-gradient(to bottom,rgba(255,255,255,.85),rgba(255,255,255,0));
+  filter:blur(1px);pointer-events:none;
+}
+.ball:hover{transform:scale(1.055);filter:brightness(1.05);
+  box-shadow:0 8px 20px rgba(16,32,48,.22),0 20px 46px var(--primary-a30),inset 0 -6px 14px rgba(0,0,0,.12),inset 0 0 0 1px rgba(255,255,255,.42)}
+.ball:active{transform:scale(.96)}
+.ball .core{font-size:20px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.18));z-index:2}
+.ball-blood{position:absolute;bottom:-16px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--text-3);white-space:nowrap}
+.drag-hint{
+  position:absolute;left:26px;bottom:22px;font-size:11.5px;color:var(--text-3);
+}
+
+.notes{max-width:940px;margin:36px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.note{
+  padding:14px 16px;border-radius:12px;background:var(--glass-fill);border:1px solid var(--glass-edge);
+  backdrop-filter:blur(14px) saturate(1.4);
+}
+.note h3{font-size:12.5px;font-weight:600;color:var(--primary);margin-bottom:7px}
+.note p{font-size:12px;line-height:1.75;color:var(--text-2)}
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <div>
+    <h1>FloatPulse v2 · UI 高仿真（可交互）</h1>
+    <p>这是效果预览，不是真实程序。可直接操作：点左侧导航、点悬浮球弹出卡片、点卡片图标栏切换页、拖动列表滚动、右上角切主题。</p>
+  </div>
+  <div class="spacer"></div>
+  <div class="hint-chip">玻璃质感 = 6 层叠加 · 淡入 180ms</div>
+  <button class="tgl" id="themeBtn">切换深色</button>
+</div>
+
+<div class="desk">
+  <div class="desk-label">模拟桌面背景（真实程序里透出的是你的壁纸/窗口）</div>
+
+  <!-- ================= 主窗口 ================= -->
+  <div class="app-window glass">
+    <div class="win-titlebar">
+      <div class="win-logo">F</div>
+      <div class="win-name">生活悬浮球</div>
+      <div class="win-sub">v2.0</div>
+      <div class="spacer"></div>
+      <button class="wbtn" id="winTheme" title="切换主题">🌙</button>
+      <button class="wbtn" title="最小化">—</button>
+      <button class="wbtn" title="最大化">⛶</button>
+      <button class="wbtn danger" title="关闭">×</button>
+    </div>
+    <div class="win-body">
+      <div class="sidebar">
+        <div class="side-title">WORKBENCH</div>
+        <div class="nav-indicator" id="navInd"></div>
+        <div class="nav-item active" data-page="0"><span class="ico">🧩</span>碎片工作台</div>
+        <div class="nav-item" data-page="1"><span class="ico">📋</span>日程任务</div>
+        <div class="nav-item" data-page="2"><span class="ico">📝</span>笔记管理</div>
+        <div class="nav-item" data-page="3"><span class="ico">📚</span>知识库</div>
+        <div class="nav-item" data-page="4"><span class="ico">📎</span>临时素材</div>
+        <div class="nav-item" data-page="5"><span class="ico">🚀</span>软件导航</div>
+        <div class="spacer"></div>
+        <div class="nav-item" data-page="6"><span class="ico">🌐</span>网址导航</div>
+        <div class="nav-item" data-page="7"><span class="ico">⚙️</span>设置</div>
+        <div class="side-foot">v2.0 · PyQt6</div>
+      </div>
+
+      <div class="content">
+        <div class="page-head-row">
+          <div class="page-title" id="pageTitle">🧩 碎片工作台</div>
+          <div class="count-chip" id="pageCount">共 128 条</div>
+          <div class="spacer"></div>
+          <div class="toolbar">
+            <div class="search-wrap"><span class="mag">🔍</span><input class="search" placeholder="搜索碎片内容..."></div>
+            <button class="btn ghost">筛选</button>
+            <button class="btn primary">合并选中</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="list" id="mainList">
+            <div class="row"><span class="tag">文本</span><span class="txt">PyQt6 无边框窗口 + WA_TranslucentBackground 的圆角实现方式</span><span class="time">09:12</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">路径</span><span class="txt">D:\Obsidian\知识库\my_kb\CodeDrill-工程经验沉淀.md</span><span class="time">09:08</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">知识</span><span class="txt">玻璃拟态的三层结构：外壳半透明填充 + 顶部高光带 + 内嵌面板</span><span class="time">08:57</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">文本</span><span class="txt">QGraphicsDropShadowEffect 在半透明窗口上会触发离屏渲染，拖拽时卡顿</span><span class="time">08:41</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">素材</span><span class="txt">temp_assets\设计参考_dock风格.png</span><span class="time">昨天</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">知识</span><span class="txt">惯性滚动（QScroller）能让长列表获得手机/网页级的手感</span><span class="time">昨天</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">文本</span><span class="txt">导航改为点击切换，hover 只做指示条滑动 + 高亮，避免误触连跳</span><span class="time">昨天</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+            <div class="row"><span class="tag">路径</span><span class="txt">D:\桌面\AI Port\FloatPulse\src\theme.py</span><span class="time">9-20</span>
+              <span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>
+          </div>
+        </div>
+        <div class="empty-hint">双击查看完整内容 · 右键复制/删除/存为笔记</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 悬浮球 + 卡片 ================= -->
+  <div class="ball-stage">
+    <div class="drag-hint">点一下球 → 卡片弹入；点卡片左侧图标切换页；再点球收起</div>
+    <div class="ball-card-zone">
+      <div class="small-card glass" id="smallCard">
+        <div class="sc-side">
+          <div class="sc-ind" id="scInd"></div>
+          <div class="sc-tab active" data-tab="0">🧩</div>
+          <div class="sc-tab" data-tab="1">💡</div>
+          <div class="sc-tab" data-tab="2">📋</div>
+          <div class="sc-tab" data-tab="3">📝</div>
+          <div class="sc-tab" data-tab="4">🌐</div>
+          <div class="sc-tab" data-tab="5">📎</div>
+          <div class="sc-tab" data-tab="6">🚀</div>
+        </div>
+        <div class="sc-body">
+          <div class="sc-title"><span id="scTitle">🧩 碎片</span><span class="spacer"></span><button class="sc-close">×</button></div>
+          <div class="sc-hair"></div>
+          <div class="sc-pages" id="scPages"></div>
+          <div class="sc-foot">右键卡片：退出程序</div>
+        </div>
+      </div>
+
+      <div class="ball-wrap">
+        <div class="ball-halo"></div>
+        <div class="ball" id="ball"><span class="core">💠</span></div>
+        <div class="ball-blood">拖拽 / 吸边</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="note">
+    <h3>这一版改了什么</h3>
+    <p>导航与卡片 Tab 都改成点击切换，hover 只做高亮 + 指示条滑动；卡片弹出改为 180ms 淡入位移；玻璃从"实色白板"变成真正的 6 层叠加。</p>
+  </div>
+  <div class="note">
+    <h3>为什么看起来更"贵"</h3>
+    <p>顶部高光带 + 1px 上亮下暗描边 + 内嵌面板 + 3% 噪点，这四样是玻璃质感的核心。加上 hover 时按钮从 0 淡入、行悬停抬升 1px。</p>
+  </div>
+  <div class="note">
+    <h3>接下来落到 PyQt6</h3>
+    <p>同样的层用 QPainter 画（window 壳）+ QSS（内嵌面板），动画用 QVariantAnimation 统一 180ms CubicOut；长列表接 QScroller 做惯性滚动。</p>
+  </div>
+</div>
+
+<script>
+const root = document.documentElement;
+const themeBtn = document.getElementById('themeBtn');
+const winTheme = document.getElementById('winTheme');
+function setTheme(t){
+  root.setAttribute('data-theme', t);
+  themeBtn.textContent = t === 'dark' ? '切换浅色' : '切换深色';
+  winTheme.textContent = t === 'dark' ? '☀️' : '🌙';
+}
+themeBtn.onclick = () => setTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+winTheme.onclick = () => setTheme(root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+
+const navItems = [...document.querySelectorAll('.nav-item')];
+const navInd = document.getElementById('navInd');
+const pageTitle = document.getElementById('pageTitle');
+const pageCount = document.getElementById('pageCount');
+const meta = [
+  ['🧩 碎片工作台','共 128 条'],['📋 日程任务','待办 6 项'],['📝 笔记管理','共 34 条'],
+  ['📚 知识库','共 512 段'],['📎 临时素材','共 12 个'],['🚀 软件导航','共 9 个'],
+  ['🌐 网址导航','共 18 个'],['⚙️ 设置','']
+];
+function moveNavInd(el){
+  const side = el.parentElement.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  navInd.style.transform = `translateY(${r.top - side.top + (r.height-22)/2}px)`;
+}
+function fadeIn(el){
+  el.style.animation = 'none'; void el.offsetWidth;
+  el.style.animation = 'winIn .26s var(--ease-out) both';
+}
+navItems.forEach((el)=>{
+  el.addEventListener('click', ()=>{
+    navItems.forEach(n=>n.classList.remove('active'));
+    el.classList.add('active');
+    moveNavInd(el);
+    const i = +el.dataset.page;
+    pageTitle.textContent = meta[i][0];
+    pageCount.textContent = meta[i][1];
+    pageCount.style.display = meta[i][1] ? '' : 'none';
+    fadeIn(document.querySelector('.content .panel'));
+  });
+});
+moveNavInd(document.querySelector('.nav-item.active'));
+
+const card = document.getElementById('smallCard');
+const ball = document.getElementById('ball');
+ball.addEventListener('click', ()=> card.classList.toggle('show'));
+document.querySelector('.sc-close').onclick = (e)=>{ e.stopPropagation(); card.classList.remove('show'); };
+
+if (location.hash.indexOf('dark') >= 0) setTheme('dark');
+setTimeout(()=> card.classList.add('show'), 260);
+
+const tabs = [...document.querySelectorAll('.sc-tab')];
+const scInd = document.getElementById('scInd');
+const scTitle = document.getElementById('scTitle');
+const scPages = document.getElementById('scPages');
+const tabNames = ['🧩 碎片','💡 知识卡片','📋 日程任务','📝 临时笔记','🌐 网址导航','📎 临时素材','🚀 软件导航'];
+
+const frag = (t) => '<div class="sc-row"><span class="txt">'+t+'</span><span class="acts"><button class="mini">复制</button><button class="mini del">删除</button></span></div>';
+const task = (t,due,cls,done) => '<div class="tk-row'+(done?' done':'')+'"><span class="tk-dot'+(done?' on':'')+'">'+(done?'✓':'')+'</span><span class="tk-t">'+t+'</span><span class="tk-due '+(cls||'')+'">'+due+'</span></div>';
+const pages = [
+  frag('PyQt6 圆角窗口的三种实现方式对比')
+  + frag('D:\\Obsidian\\知识库\\my_kb\\ui-ux-pro-max')
+  + frag('导航点击切换 + hover 指示条滑动')
+  + frag('惯性滚动让长列表有手机级手感')
+  + frag('玻璃 = 半透明填充 + 顶部高光 + 内嵌面板'),
+  '<div class="kc-text">玻璃拟态的关键不是"更透明"，而是<b>边缘的亮线与内阴影</b>——它们让平面看起来有厚度。三层结构：外壳半透明填充、顶部高光带、内嵌面板。</div><button class="btn primary kc-btn">下一张 ➜</button>',
+  '<div class="tk-input"><input placeholder="输入任务标题，回车添加..."><button class="btn primary">添加</button></div>'
+  + task('整理 v1 基线并冻结','已完成',null,true)
+  + task('拆分 v2 与共用模块','今天','today',false)
+  + task('玻璃壳层重写','逾期 2 天','over',false)
+  + task('长列表接入惯性滚动','9-30',null,false),
+  '<div class="sc-row"><span class="txt">随手记：卡片弹出要 180ms 淡入位移</span></div>'
+  + '<div class="sc-row"><span class="txt">hover 只做视觉反馈，点击才切页</span></div>'
+  + '<div class="ph">自动保存已开启 · 800ms 防抖</div>',
+  '<div class="ph">网址导航（与主窗口共用同一份数据）</div>',
+  '<div class="ph">临时素材 · 拖拽到任意位置取出</div>',
+  '<div class="ph">软件导航 · 点击卡片启动</div>'
+];
+function renderPage(i){
+  scPages.innerHTML = pages[i];
+  scPages.classList.remove('enter'); void scPages.offsetWidth;
+  scPages.classList.add('enter'); scPages.scrollTop = 0;
+}
+function moveScInd(el){
+  const side = el.parentElement.getBoundingClientRect();
+  const r = el.getBoundingClientRect();
+  scInd.style.transform = `translateY(${r.top - side.top + (r.height-24)/2}px)`;
+}
+tabs.forEach((el)=>{
+  el.addEventListener('click', ()=>{
+    tabs.forEach(t=>t.classList.remove('active'));
+    el.classList.add('active');
+    moveScInd(el);
+    scTitle.textContent = tabNames[+el.dataset.tab];
+    renderPage(+el.dataset.tab);
+  });
+});
+moveScInd(document.querySelector('.sc-tab.active'));
+renderPage(0);
+</script>
+</body>
+</html>

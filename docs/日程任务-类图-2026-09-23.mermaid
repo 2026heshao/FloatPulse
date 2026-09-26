@@ -1,0 +1,43 @@
+classDiagram
+    class Task {
+        +int task_id
+        +str title
+        +str note
+        +str deadline
+        +bool done
+        +str created_at
+        +str completed_at
+        +to_dict() dict
+        +from_dict(d)$ Task
+    }
+    class TaskManager {
+        +add_task(title, note, deadline) int
+        +update_task(id, title, note, deadline) bool
+        +toggle_task(id) bool
+        +set_done(id, done) bool
+        +delete_task(id) bool
+        +get_all_tasks() list~Task~
+        +get_tasks_grouped(today) list
+        +get_task(id) Task
+    }
+    class StateFns {
+        <<module functions>>
+        +task_state(deadline, today) tuple
+        +format_relative_deadline(deadline, today) str
+    }
+    class TaskItemDelegate {
+        +toggle_requested(int) signal
+        +paint(painter, option, index)
+        +sizeHint(option, index) QSize
+        +editorEvent(evt, model, option, index) bool
+        +set_check_progress(task_id, p)
+    }
+    class UndoBar {
+        +undo_clicked(int) signal
+        +show_for(task_id, title)
+        +TIMEOUT_MS = 5000
+    }
+    TaskManager "1" o-- "*" Task
+    TaskManager ..> StateFns
+    TaskItemDelegate ..> TaskManager
+    UndoBar ..> TaskManager
