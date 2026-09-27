@@ -13,6 +13,9 @@
     页面销毁退订本地服务 listener、配置落盘 data_dir
   E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
     show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
+  F 页面注销 / 重建链路：unregister_plugin_page（按钮摘除 / 占位补槽 /
+    自动切回首页 / 可重入）、重新启用走全新注册分支、
+    rebuild_plugin_page（启用分支真实路径）、未知插件拒绝
   D light / dark 双主题真截图（页面嵌进真实 MainWindow）→ build/shots/
 
 跑法：python tools/run_gui_check.py tools/verify_ai_assistant.py
@@ -430,6 +433,47 @@ check("E6 未知 key / 固定页 key 被拒绝",
       and win.show_plugin_page("plugin:main") is False)
 page3.deleteLater()
 page4.deleteLater()
+
+# ====================================================================
+# F. 页面注销 / 重建链路（停用插件 → 页面与导航键同步消失；重新启用 → 回归）
+# ====================================================================
+# E4 已把页面切到前台：注销时必须自动切回首页
+ok = win.unregister_plugin_page(PAGE_KEY)
+check("F1 注销成功 + 模块级注册表清除",
+      ok is True
+      and PAGE_KEY not in _mw.NAV_PAGE_INDEX
+      and PAGE_KEY not in _mw.NAV_PAGE_TITLES)
+check("F2 侧栏按钮已摘除", win._nav_btns.get(PAGE_KEY) is None)
+check("F3 正显示该页时注销 → 自动切回首页",
+      win._stack.currentIndex() == 0, str(win._stack.currentIndex()))
+check("F4 占位补槽：stack 总页数不变 + 已注销 key 被拒绝",
+      win._stack.count() == idx1 + 1
+      and win.show_plugin_page(PAGE_KEY) is False,
+      f"count={win._stack.count()}")
+check("F5 重复注销返回 False（可安全重入）",
+      win.unregister_plugin_page(PAGE_KEY) is False)
+
+# 重新启用：register 走全新注册分支（新索引、新按钮）
+page5 = plug.AiChatPage(page_ctx)
+idx3 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page5)
+check("F6 重新注册：全新分支新索引 + 按钮回归",
+      idx3 == idx1 + 1 and win._nav_btns.get(PAGE_KEY) is not None,
+      f"{idx1} -> {idx3}")
+
+# rebuild_plugin_page（插件中心「启用」分支的真实调用路径）
+win.set_plugin_loader(loader)      # 产品里由 knowledge_ball 启动时注入
+saved_widget = win._stack.widget(idx3)
+check("F7 rebuild 重建页面：索引稳定 + stack 换新 widget",
+      win.rebuild_plugin_page(PLUGIN_ID) is True
+      and win._stack.widget(idx3) is not None
+      and win._stack.widget(idx3) is not saved_widget)
+check("F8 rebuild 未知插件返回 False",
+      win.rebuild_plugin_page("no-such-plugin") is False)
+
+# 收尾：模拟「再次停用」，把全局注册痕迹清干净（D 段多实例不受串台影响）
+check("F9 收尾注销成功（全局 dict 已清）",
+      win.unregister_plugin_page(PAGE_KEY) is True
+      and PAGE_KEY not in _mw.NAV_PAGE_INDEX)
 
 # ====================================================================
 # D. light / dark 双主题真截图（页面嵌进真实 MainWindow 作 host）

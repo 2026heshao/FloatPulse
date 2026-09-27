@@ -1703,6 +1703,72 @@ class MainWindow(QWidget):
         self._switch_page(idx)
         return True
 
+    def unregister_plugin_page(self, key: str) -> bool:
+        """注销插件提供的导航页面（停用 / 卸载页面插件时由宿主调用）。
+
+        与 register_plugin_page 成对。三处停用路径——插件中心启停开关、
+        启动回放 ``plugins_disabled``、总闸关闭——页面此前都无人摘除，
+        导致「停用了导航键和页面还挂在主窗口」；本方法补齐注销环节。
+
+        索引策略：**空占位补槽**而非直接 removeWidget——QStackedWidget
+        移除中间页会把后续索引整体前移，连坐其他插件页的
+        ``NAV_PAGE_INDEX`` 与 ``_nav_group`` 按钮 id 映射；占位页无按钮
+        不可达，成本可忽略。注销后同步清除两个模块级 dict 项，重新启用
+        时 register_plugin_page 走全新注册分支（新索引、新按钮）。
+        正在显示该页时先切回首页。key 未注册返回 False（可安全重入）。
+        """
+        idx = NAV_PAGE_INDEX.pop(key, None)
+        if idx is None or idx < 10:      # 未知 key；固定页段防御性回滚
+            if idx is not None:
+                NAV_PAGE_INDEX[key] = idx
+            return False
+        NAV_PAGE_TITLES.pop(key, None)
+        if self._stack.currentIndex() == idx:
+            self._switch_page(0)
+        old = self._stack.widget(idx)
+        if old is not None:
+            self._stack.removeWidget(old)
+            self._stack.insertWidget(idx, QWidget())   # 占位：索引全稳定
+            old.deleteLater()
+        btn = self._nav_btns.pop(key, None)
+        if btn is not None:
+            self._nav_group.removeButton(btn)
+            self._nav_btns_layout.removeWidget(btn)
+            btn.deleteLater()
+        return True
+
+    def rebuild_plugin_page(self, plugin_id: str) -> bool:
+        """重新注册指定插件的页面（插件中心重新启用某插件时调用）。
+
+        页面实例由插件自己的 create_page 产生（与 knowledge_ball 启动装配
+        同一契约），这里只负责「要页面 → 塞回主窗口」。插件未加载、未声明
+        page 或 create_page 失败一律返回 False，绝不把插件问题抛进 UI 操作。
+        register_plugin_page 幂等，重复重建只换 widget 不换索引。
+        """
+        loader = self.plugin_loader
+        if loader is None:
+            return False
+        for lp in loader.loaded_plugins():
+            if lp.plugin_id != plugin_id:
+                continue
+            spec = getattr(lp, "manifest", {}).get("page")
+            if not spec:
+                return False
+            try:
+                widget = lp.plugin.create_page(lp.ctx)
+            except Exception:              # noqa: BLE001 - 页面失败不拖垮 UI
+                return False
+            if widget is None:
+                return False
+            key = f"plugin:{plugin_id}"
+            self.register_plugin_page(key, spec["title"], widget)
+            try:
+                lp.page_key = key          # 热键动作经 parent_window 切页用
+            except Exception:              # noqa: BLE001 - 辅助标记，失败无害
+                pass
+            return True
+        return False
+
     # ---- 设置业务方法 ----
     # ==================================================================
     # 页面切换
