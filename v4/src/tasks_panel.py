@@ -329,6 +329,7 @@ class TasksPanel(QWidget):
         # 番茄钟绑定：右键直接对该任务开始一次专注（悬浮球进度环可见）
         act_focus = menu.addAction("🎯 专注此任务")
         act_edit = menu.addAction("✏️ 编辑...")
+        act_export = menu.addAction("📤 导出到 Obsidian")
         menu.addSeparator()
         act_delete = menu.addAction("🗑 删除")
         action = menu.exec(self._task_list.mapToGlobal(pos))
@@ -342,6 +343,9 @@ class TasksPanel(QWidget):
             self._host.task_focus_requested.emit(task_id, task.title)
         elif action == act_edit:
             self._edit_dialog(task)
+        elif action == act_export:
+            # 导出实现统一在宿主（三个面板共用，避免三份逻辑分叉）
+            self._host.export_to_obsidian()
         elif action == act_delete:
             self._stop_animations()
             self._task_manager.delete_task(task_id)
