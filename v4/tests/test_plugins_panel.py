@@ -135,6 +135,21 @@ def _make_loaded_plugin(tmp_path, description="", doc=None,
         actions_raw=[action])
 
 
+def _plugin_cards(panel):
+    """_cards_layout 里的「已装插件卡片」列表。
+
+    布局结构为 [store_box, 已装卡片..., stretch]（store_box 是插件商店
+    区块，插件数为 0 时只是隐藏、始终占位），因此不能再用固定下标取卡片，
+    必须按 objectName == "pluginCard" 过滤。
+    """
+    cards = []
+    for i in range(panel._cards_layout.count()):
+        w = panel._cards_layout.itemAt(i).widget()
+        if w is not None and w.objectName() == "pluginCard":
+            cards.append(w)
+    return cards
+
+
 class _FakeLoader:
     def __init__(self, plugins):
         self._plugins = plugins
@@ -142,8 +157,16 @@ class _FakeLoader:
     def loaded_plugins(self):
         return list(self._plugins)
 
+    # 生产侧 PluginLoader.plugins_dir / store_dir 均为 @property（见
+    # plugin_loader.py:419/427），替身必须同契约，否则面板按属性取到
+    # bound method，setToolTip() 抛 TypeError。
+    @property
     def plugins_dir(self):
         return os.path.join(os.path.sep, "nonexistent_plugins_dir")
+
+    @property
+    def store_dir(self):
+        return os.path.join(os.path.sep, "nonexistent_store_dir")
 
 
 class _FakeHost:
@@ -164,8 +187,8 @@ class TestPluginsPanel:
         panel = PluginsPanel(_FakeHost(loader=None))
         assert panel._empty_label.isVisibleTo(panel)
         assert "共 0 个插件" in panel._count_label.text()
-        # 卡片区除 stretch 外无卡片
-        assert panel._cards_layout.count() == 1
+        # 卡片区除 store_box（无商店包时隐藏）与 stretch 外无卡片
+        assert _plugin_cards(panel) == []
 
     def test_card_rendered_with_actions(self, qapp, tmp_path):
         from PyQt6.QtWidgets import QLabel
@@ -174,8 +197,9 @@ class TestPluginsPanel:
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
         assert not panel._empty_label.isVisibleTo(panel)
         assert "共 1 个插件" in panel._count_label.text()
-        assert panel._cards_layout.count() == 2   # 1 卡片 + stretch
-        card = panel._cards_layout.itemAt(0).widget()
+        cards = _plugin_cards(panel)
+        assert len(cards) == 1
+        card = cards[0]
         assert card is not None
         joined = " ".join(l.text() for l in card.findChildren(QLabel))
         assert "演示插件" in joined and "v1.2.3" in joined
@@ -189,7 +213,7 @@ class TestPluginsPanel:
         lp = _make_loaded_plugin(
             tmp_path, description="", doc="周报草稿生成器。")
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
-        card = panel._cards_layout.itemAt(0).widget()
+        card = _plugin_cards(panel)[0]
         texts = " ".join(l.text() for l in card.findChildren(QLabel))
         assert "周报草稿生成器" in texts
 
@@ -200,16 +224,16 @@ class TestPluginsPanel:
             _FakeHost(loader=_FakeLoader([lp]), plugins_enabled=False))
         assert panel._gate_label.isVisibleTo(panel)
         # 总闸关闭 → 即使 loader 有插件也不渲染卡片
-        assert panel._cards_layout.count() == 1
+        assert _plugin_cards(panel) == []
 
     def test_refresh_rebuilds(self, qapp, tmp_path):
         from src.plugins_panel import PluginsPanel
         host = _FakeHost(loader=None)
         panel = PluginsPanel(host)
-        assert panel._cards_layout.count() == 1
+        assert _plugin_cards(panel) == []
         host._loader = _FakeLoader([_make_loaded_plugin(tmp_path)])
         panel.refresh()
-        assert panel._cards_layout.count() == 2
+        assert len(_plugin_cards(panel)) == 1
 
 
 # ====================================================================
@@ -385,7 +409,7 @@ class TestUsageDoc:
         lp = _make_loaded_plugin(tmp_path)
         lp.path = str(d)
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
-        card = panel._cards_layout.itemAt(0).widget()
+        card = _plugin_cards(panel)[0]
         texts = " ".join(l.text() for l in card.findChildren(QLabel))
         assert "选定范围后一键汇总" in texts
         # 按钮文案更新为「查看使用说明」
@@ -398,7 +422,7 @@ class TestUsageDoc:
         from src.plugins_panel import PluginsPanel
         lp = _make_loaded_plugin(tmp_path)              # 无任何 md
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
-        card = panel._cards_layout.itemAt(0).widget()
+        card = _plugin_cards(panel)[0]
         texts = " ".join(l.text() for l in card.findChildren(QLabel))
         assert "📖" not in texts
 

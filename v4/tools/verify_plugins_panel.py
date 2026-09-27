@@ -55,10 +55,12 @@ check("A. 面板文案不再出现错误的安装路径 float_data/plugins",
       "float_data/plugins" not in blob,
       "仍出现" if "float_data/plugins" in blob else "已清干净")
 
-# ---------- B. 文案正确指向 plugins/ ----------
-check("B. 文案指向正确的插件安装目录 plugins/",
-      "plugins/" in blob and "与程序同级" in blob,
-      f"命中={[l for l in labels if 'plugins/' in l][:1]}")
+# ---------- B. 文案正确指向插件安装目录 plugins/ ----------
+# 2026-09-27 晚改：文案改为「商店安装」引导（双目录模型），
+# 不再用「与程序同级」这类相对说法——两个目录都直接写绝对路径。
+check("B. 文案指向插件安装目录 plugins/，且引导走商店安装",
+      "插件安装目录" in blob and ".fpplug" in blob and "安装" in blob,
+      f"命中={[l for l in labels if '插件安装目录' in l][:1]}")
 
 # ---------- C. 压缩包后缀是 .fpplug（与加载器一致） ----------
 check("C. 压缩包后缀写作 .fpplug（与加载器实际支持一致）",
