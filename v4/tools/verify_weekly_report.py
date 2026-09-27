@@ -178,6 +178,15 @@ frag_mgr.flush()
 note_mgr.add_note("本周会议要点正文", title="周会记录")
 temp_note = note_mgr.get_temp_note()          # 临时笔记必须被报告跳过
 
+# 兼容垫片：并行会话正在新增「插件中心」页（config.NAV_PAGE_KEYS 已含
+# "plugins"，但 main_window.NAV_PAGE_TITLES / NAV_PAGE_INDEX 尚未同步），
+# 会让侧边栏构建 KeyError。本脚本只验证周报窗口，不关心导航，
+# 因此把 TITLES/INDEX 补齐到与 NAV_PAGE_KEYS 对齐即可（不改动源码）。
+_mw = sys.modules["src.main_window"]
+if "plugins" not in _mw.NAV_PAGE_TITLES:
+    _mw.NAV_PAGE_TITLES["plugins"] = "🔌  插件中心"
+    _mw.NAV_PAGE_INDEX.setdefault("plugins", 9)
+
 win = MainWindow(task_mgr, note_mgr, frag_mgr, docx_mgr, config, clip, temp_mgr)
 win.resize(1000, 760)
 win.show()
@@ -427,6 +436,60 @@ check("F6 三个输出按钮文案正确",
 check("F7 vault 未配置 → 写入按钮置灰且给出原因",
       not dlg._vault_btn.isEnabled() and "设置" in dlg._vault_btn.toolTip(),
       dlg._vault_btn.toolTip())
+
+# ====================================================================
+# F8-F13. UI 与主窗口一致性（本次改动的核心护栏）
+#   对话框继承 PluginDialog（→ GlassDialog），复用主窗口 QSS 与玻璃壳，
+#   因此「玻璃壳存在 / 无边框 / 圆角阴影 / 自绘标题栏 / 主题跟随」
+#   这些视觉约定都必须成立，否则会退回系统原生外观。
+# ====================================================================
+from src.glass_dialog import GlassDialog            # noqa: E402
+from src.plugin_ui import PluginDialog              # noqa: E402
+from src.theme import DEFAULT_THEME, get_colors     # noqa: E402
+from PyQt6.QtCore import Qt as _Qt                  # noqa: E402
+
+check("F8 对话框继承官方玻璃基类（PluginDialog → GlassDialog）",
+      isinstance(dlg, PluginDialog) and isinstance(dlg, GlassDialog),
+      f"mro={[c.__name__ for c in type(dlg).__mro__[:4]]}")
+
+check("F9 无边框 + 半透明背景（圆角才真正生效）",
+      bool(dlg.windowFlags() & _Qt.WindowType.FramelessWindowHint)
+      and dlg.testAttribute(_Qt.WidgetAttribute.WA_TranslucentBackground))
+
+# 玻璃壳：与主窗口同样的 objectName + GlassPanel 类型
+from src.glass import GlassPanel                    # noqa: E402
+check("F10 挂载玻璃壳（GlassPanel + objectName=mainWindow，与主窗口一致）",
+      isinstance(dlg._container, GlassPanel)
+      and dlg._container.objectName() == "mainWindow",
+      f"type={type(dlg._container).__name__} name={dlg._container.objectName()!r}")
+
+# QSS 必须真的下发到容器上（复用主窗口 QSS → 按钮/输入框样式才生效）
+_qss = dlg._container.styleSheet()
+check("F11 容器已套用主窗口 QSS（非空且含主色按钮规则）",
+      bool(_qss) and "primaryBtn" in _qss and "secondaryBtn" in _qss,
+      f"qss_len={len(_qss)}")
+
+# 自绘标题栏（标题文案 + 右上角关闭按钮）
+from PyQt6.QtWidgets import QLabel as _QLabel, QWidget as _QWidget   # noqa: E402
+_tb = dlg._container.findChild(_QWidget, "titleBar")
+_tb_labels = [c.text() for c in _tb.findChildren(_QLabel)] if _tb else []
+check("F12 自绘标题栏存在且含标题文案",
+      _tb is not None and "日报 / 周报草稿" in _tb_labels,
+      f"labels={_tb_labels}")
+
+# 主题跟随：切到 dark 后颜色表必须变化（证明 apply_theme 真的读到了主题）
+_light = get_colors("light")
+_dark = get_colors("dark")
+check("F13 light/dark 配色表不同（主题跟随有可观测差异）",
+      _light["text"] != _dark["text"] and _light["panel_fill"] != _dark["panel_fill"],
+      f"light.text={_light['text']} dark.text={_dark['text']}")
+
+# 内容区关键控件都在 body 里（不是直接挂在对话框上）——
+# 这是 GlassDialog 的布局约定，挂错会导致内容压在标题栏下面
+_children = set(dlg.body.findChildren(object))
+check("F14 预览/状态/按钮均位于 body 内容区（布局约定）",
+      dlg._text in _children and dlg._status in _children
+      and dlg._copy_btn in _children)
 
 # ====================================================================
 # G/H/I. 三个输出动作

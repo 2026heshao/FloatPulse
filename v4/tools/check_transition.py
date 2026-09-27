@@ -31,7 +31,7 @@ from src.fragment_manager import FragmentManager
 from src.task_manager import TaskManager
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_DIR = os.path.join(PROJECT, "设计稿")
+OUT_DIR = os.path.join(PROJECT, "docs", "images")
 TARGET_TAB = 2          # 切到「日程任务」页
 
 
@@ -84,6 +84,7 @@ def region_diff(a: QPixmap, b: QPixmap, region: QRect, tol: int = 8):
 
 
 def main():
+    os.makedirs(OUT_DIR, exist_ok=True)   # 输出目录自建兜底
     app = QApplication(sys.argv)
     from src.app_paths import get_data_dir
     data = get_data_dir(get_base_dir())

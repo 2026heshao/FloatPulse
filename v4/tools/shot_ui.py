@@ -27,7 +27,7 @@ from src.task_manager import TaskManager
 from src.temp_asset_manager import TempAssetManager
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_DIR = os.path.join(PROJECT, "设计稿")
+OUT_DIR = os.path.join(PROJECT, "docs", "images")
 THEME = sys.argv[1] if len(sys.argv) > 1 else "light"
 
 
@@ -58,6 +58,7 @@ def _compose(pixmap):
 
 
 def main():
+    os.makedirs(OUT_DIR, exist_ok=True)   # 输出目录自建兜底
     app = QApplication(sys.argv)
     from src.app_paths import get_data_dir, get_docx_path
     base = get_base_dir()

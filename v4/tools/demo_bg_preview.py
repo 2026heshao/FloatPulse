@@ -21,7 +21,7 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_DIR = os.path.join(PROJECT, "设计稿")
+OUT_DIR = os.path.join(PROJECT, "docs", "images")
 
 CANVAS_W, CANVAS_H = 1000, 380
 CARD_W, CARD_H = 226, 160
@@ -93,6 +93,7 @@ def draw_card(painter: QPainter, rect: QRect, alpha: int, patch: QPixmap,
 
 
 def main():
+    os.makedirs(OUT_DIR, exist_ok=True)   # 输出目录自建兜底
     app = QApplication(sys.argv)
     screen = app.primaryScreen()
     geo = screen.availableGeometry()
