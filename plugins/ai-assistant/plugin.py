@@ -516,11 +516,21 @@ class AiChatPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
-        # ---- 后端设置卡（默认收起）----
+        # ---- 后端设置卡（默认收起；内容超高时卡内纵向滚动，不挤爆页面）----
+        # 内容体放在 QScrollArea 里：本卡两个区块共 9 行输入 + 2 行按钮，
+        # 自然高度 ~530px，主窗口偏矮时（最小 920×620）布局会把卡片压瘪、
+        # 把消息流挤没，底部按钮被裁掉（2026-09-27 用户反馈）。
+        # 卡片最高 430px，超出部分卡内滚动；QSS 已有 QScrollArea 视口
+        # 透明规则，玻璃卡底色不受影响。
         self._settings_card = QFrame(self)
         self._settings_card.setObjectName("glassCard")
-        form = QVBoxLayout(self._settings_card)
-        form.setContentsMargins(16, 14, 16, 14)
+        card_lay = QVBoxLayout(self._settings_card)
+        card_lay.setContentsMargins(16, 14, 16, 14)
+        card_lay.setSpacing(0)
+
+        _settings_body = QWidget()          # 卡内滚动内容体
+        form = QVBoxLayout(_settings_body)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
 
         # 区块 A：在线 / 常驻后端
@@ -598,6 +608,16 @@ class AiChatPage(QWidget):
         save_row.addWidget(self._save_btn)
         save_row.addStretch()
         form.addLayout(save_row)
+
+        # 滚动包装：内容体 → 卡片（纵向滚动兜底）
+        _settings_scroll = QScrollArea(self._settings_card)
+        _settings_scroll.setWidgetResizable(True)
+        _settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _settings_scroll.setWidget(_settings_body)
+        card_lay.addWidget(_settings_scroll)
+        self._settings_card.setMaximumHeight(430)
 
         root.addWidget(self._settings_card)
         self._settings_card.setVisible(False)

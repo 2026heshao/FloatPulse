@@ -35,7 +35,7 @@ ROOT = os.path.dirname(BASE)
 sys.path.insert(0, BASE)
 
 from PyQt6.QtCore import Qt, QEvent               # noqa: E402
-from PyQt6.QtWidgets import QApplication          # noqa: E402
+from PyQt6.QtWidgets import QApplication, QScrollArea  # noqa: E402
 from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
 from src.config import ConfigManager              # noqa: E402
@@ -295,6 +295,20 @@ page._toggle_settings()
 pump()
 check("C4 设置卡可展开（动态显隐给了 parent，不崩）",
       page._settings_card.isVisible())
+# ---- 后端设置卡纵向滚动兜底（2026-09-27 用户反馈：窗口矮时被挤瘪）----
+card_scroll = page._settings_card.findChild(QScrollArea)
+check("C4b 设置卡内容套 QScrollArea 且 widgetResizable",
+      card_scroll is not None and card_scroll.widgetResizable())
+check("C4c 设置卡高度上限 430（超出卡内滚动，不挤消息流）",
+      page._settings_card.maximumHeight() == 430)
+# 模拟矮窗口：页面压到 360 高 → 卡片被布局压缩，纵向滚动条必须可用
+page.resize(480, 360)
+pump(50)
+sb_max = card_scroll.verticalScrollBar().maximum()
+check("C4d 矮窗口下设置卡内容可纵向滚动",
+      sb_max > 0,
+      f"sb_max={sb_max} card_h={page._settings_card.height()}")
+page.resize(1000, 700)
 page._toggle_settings()
 
 # ---- 快捷指令 ----
