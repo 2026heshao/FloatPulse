@@ -249,6 +249,21 @@ class TestConfigManager:
         assert cm.set("clipboard_capture_images", False) is True
         assert cm.get("clipboard_capture_images") is False
 
+    def test_auto_hide_enabled_contract(self):
+        """自动隐藏总开关（2026-09-27 新增）：默认开启、类型 bool、非法值被拒。
+
+        关闭语义 = 贴边后永不半隐藏，必须与 auto_hide_seconds 分开表达：
+        秒数范围是 1-60，用「0 = 不隐藏」会被范围校验直接拒掉。
+        """
+        cm = ConfigManager(":memory:")
+        assert DEFAULT_CONFIG.get("auto_hide_enabled") is True
+        assert _CONFIG_TYPES.get("auto_hide_enabled") is bool
+        assert cm.get("auto_hide_enabled") is True
+        assert cm.set("auto_hide_enabled", "no") is False
+        assert cm.set("auto_hide_enabled", 1) is False   # int 1 不是 bool
+        assert cm.set("auto_hide_enabled", False) is True
+        assert cm.get("auto_hide_enabled") is False
+
     def test_every_default_key_has_type_entry(self):
         """配置项三件套一致性：DEFAULT_CONFIG 里每个键都必须登记类型。
 

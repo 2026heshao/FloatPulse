@@ -48,6 +48,25 @@ class SettingsPanel(QWidget):
         box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         return box
 
+    def _group_card(self, parent_v, title: str):
+        """创建设置分组卡片（标题 + 行容器），返回其内部竖直布局。
+
+        分组只负责视觉边界与标题，行内容仍由 ``_add_row`` 追加，
+        所有分组的行样式因此完全一致；调用方拿到返回的 vbox 直接加行即可。
+        """
+        box = self._group_box()
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(14, 10, 14, 12)
+        bv.setSpacing(0)
+        label = QLabel(title)
+        label.setObjectName("sectionLabel")
+        bv.addWidget(label)
+        gap = QWidget()
+        gap.setFixedHeight(6)
+        bv.addWidget(gap)
+        parent_v.addWidget(box)
+        return bv
+
     def _toggle(self, key: str, default: bool) -> ToggleSwitch:
         """创建跟随主题的开关并登记（主题切换时统一 set_theme）"""
         sw = ToggleSwitch(self._config.get(key, default),
@@ -55,11 +74,15 @@ class SettingsPanel(QWidget):
         self._toggles.append(sw)
         return sw
 
-    def _add_row(self, vbox, title: str, desc: str, widget, tip: str = ""):
+    def _add_row(self, vbox, title: str, desc: str, widget, tip: str = "",
+                 last: bool = False):
         """行式设置项：左侧「标题 + 描述」，右侧控件（垂直居中），行间细分隔线。
 
         形式对齐参考设计稿（2026-09-24）：勾选类用开关、数字类用步进器，
         全部右对齐；说明文字从 tooltip 提升为可见的描述行。
+
+        ``last=True`` 表示这是所在分组的最后一行——不再追加分隔线，
+        否则分组底部会多出一条悬空横线（卡片边框本身已提供视觉收束）。
         """
         row = QWidget()
         h = QHBoxLayout(row)
@@ -80,7 +103,8 @@ class SettingsPanel(QWidget):
         h.addWidget(widget, 0, Qt.AlignmentFlag.AlignRight
                     | Qt.AlignmentFlag.AlignVCenter)
         vbox.addWidget(row)
-        vbox.addWidget(make_separator())
+        if not last:
+            vbox.addWidget(make_separator())
 
     def _build_ui(self):
         page = self
@@ -100,21 +124,22 @@ class SettingsPanel(QWidget):
         v.setContentsMargins(0, 0, 8, 0)
         v.setSpacing(8)
 
-        title = QLabel("⚙️ 设置")
-        title.setObjectName("pageTitle")
-        v.addWidget(title)
+        page_title = QLabel("⚙️ 设置")
+        page_title.setObjectName("pageTitle")
+        v.addWidget(page_title)
 
-        # ---- 主题设置 ----
-        theme_box = self._group_box()
-        tb_v = QVBoxLayout(theme_box)
-        tb_v.setContentsMargins(14, 10, 14, 12)
-        tb_v.setSpacing(8)
+        # 分组顺序：外观 → 悬浮球 → 剪贴板 → 素材 → 全局工具 → 启动系统
+        # 组内行顺序 = 功能亲密度（同组相邻项最常被一起调整）
+        self._toggles = []
+        add_row = self._add_row
+        group = self._group_card
 
-        theme_title = QLabel("🎨 主题外观")
-        theme_title.setObjectName("sectionLabel")
-        tb_v.addWidget(theme_title)
+        # ================= 1. 外观与主题 =================
+        gv = group(v, "🎨 外观与主题")
 
-        theme_row = QHBoxLayout()
+        theme_ctl = QWidget()
+        theme_row = QHBoxLayout(theme_ctl)
+        theme_row.setContentsMargins(0, 0, 0, 0)
         theme_row.setSpacing(8)
         self._set_theme_light = QPushButton("☀️ 浅色主题")
         self._set_theme_light.setObjectName("secondaryBtn")
@@ -123,7 +148,6 @@ class SettingsPanel(QWidget):
         self._set_theme_light.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_theme_light.clicked.connect(lambda: self._on_set_theme("light"))
         theme_row.addWidget(self._set_theme_light)
-
         self._set_theme_dark = QPushButton("🌙 深色主题")
         self._set_theme_dark.setObjectName("secondaryBtn")
         self._set_theme_dark.setCheckable(True)
@@ -131,81 +155,7 @@ class SettingsPanel(QWidget):
         self._set_theme_dark.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_theme_dark.clicked.connect(lambda: self._on_set_theme("dark"))
         theme_row.addWidget(self._set_theme_dark)
-        theme_row.addStretch()
-        tb_v.addLayout(theme_row)
-
-        v.addWidget(theme_box)
-
-        # ---- 行为设置（行式布局：标题+描述居左，控件居右，行间分隔线）----
-        behavior_box = self._group_box()
-        bb_v = QVBoxLayout(behavior_box)
-        bb_v.setContentsMargins(14, 10, 14, 12)
-        bb_v.setSpacing(0)
-
-        behavior_title = QLabel("⚙️ 行为配置")
-        behavior_title.setObjectName("sectionLabel")
-        bb_v.addWidget(behavior_title)
-        head_gap = QWidget()
-        head_gap.setFixedHeight(6)
-        bb_v.addWidget(head_gap)
-
-        self._toggles = []
-        add_row = self._add_row
-
-        self._set_clipboard_max = Stepper(10, 10000,
-                                          self._config.get("clipboard_max_items", 200),
-                                          suffix="条", step=10)
-        add_row(bb_v, "剪贴板历史上限", "达到上限后自动清理最早的碎片",
-                self._set_clipboard_max)
-
-        self._set_auto_hide = Stepper(1, 60,
-                                      self._config.get("auto_hide_seconds", 3),
-                                      suffix="秒")
-        add_row(bb_v, "悬浮球自动隐藏", "贴边静止一段时间后半隐藏，鼠标靠近即恢复",
-                self._set_auto_hide)
-
-        self._set_ball_visible = self._toggle("ball_visible", True)
-        self._set_ball_visible.toggled.connect(self._on_ball_visibility_changed)
-        add_row(bb_v, "显示悬浮球", "桌面上的球体入口，隐藏后可从系统托盘唤回",
-                self._set_ball_visible)
-
-        self._set_card_always_show = self._toggle("card_always_show", False)
-        self._set_card_always_show.toggled.connect(self._on_card_always_show_preview)
-        add_row(bb_v, "小卡片保持显示", "卡片不自动关闭，常驻在悬浮球旁",
-                self._set_card_always_show)
-
-        self._set_temp_asset_max_count = Stepper(
-            5, 500, self._config.get("temp_asset_max_count", 50),
-            suffix="个", step=5)
-        add_row(bb_v, "临时素材上限", "超出上限后自动清理最早的素材",
-                self._set_temp_asset_max_count)
-
-        self._set_temp_asset_max_days = Stepper(
-            0, 365, self._config.get("temp_asset_max_days", 30), suffix="天")
-        add_row(bb_v, "素材保留天数", "0 表示不按天数自动清理",
-                self._set_temp_asset_max_days)
-
-        # 素材缩略图大小：决定临时素材网格每行个数（默认 128px → 一行 4 个）
-        self._set_asset_thumb = Stepper(
-            80, 160, self._config.get("asset_thumb_size", 128),
-            suffix="px", step=8)
-        self._set_asset_thumb.valueChanged.connect(self._on_asset_thumb_changed)
-        add_row(bb_v, "素材缩略图大小", "临时素材网格单元尺寸，每档 8px，调小可一行显示更多",
-                self._set_asset_thumb)
-
-        # 数字类设置改动即持久化：写盘并广播，无需任何保存动作
-        self._set_clipboard_max.valueChanged.connect(self._on_spin_changed)
-        self._set_auto_hide.valueChanged.connect(self._on_spin_changed)
-        self._set_temp_asset_max_count.valueChanged.connect(self._on_spin_changed)
-        self._set_temp_asset_max_days.valueChanged.connect(self._on_spin_changed)
-
-        # 卡片尺寸 / 动画速度：用增减按钮（Stepper）而非滑条 ——
-        # 滑条会在鼠标滚设置页时被滚轮静默改值，步进器只在数值框聚焦时才吃滚轮。
-        self._set_card_size = Stepper(60, 140, self._config.get("app_card_size", 96),
-                                      suffix="px", step=4)
-        self._set_card_size.valueChanged.connect(self._on_card_size_changed)
-        add_row(bb_v, "软件卡片尺寸", "导航页卡片大小，每档 4px，可长按 ± 连续调整",
-                self._set_card_size)
+        add_row(gv, "主题外观", "浅色 / 深色两套配色，切换即时生效", theme_ctl)
 
         # anim_speed 存浮点（0.5~2.0），Stepper 内部用整数 50~200，
         # divisor=100 / decimals=1 → 显示「1.3」，对外仍发内部整数。
@@ -215,19 +165,73 @@ class SettingsPanel(QWidget):
                                        suffix="x", step=10,
                                        divisor=100, decimals=1)
         self._set_anim_speed.valueChanged.connect(self._on_anim_speed_changed)
-        add_row(bb_v, "动画速度", "悬浮球与勾选动画的统一倍速，每档 0.1x",
+        add_row(gv, "动画速度", "悬浮球与勾选动画的统一倍速，每档 0.1x",
                 self._set_anim_speed)
 
-        self._set_autostart = self._toggle("autostart", False)
-        self._set_autostart.setChecked(autostart.is_autostart_enabled())
-        self._set_autostart.toggled.connect(self._on_autostart_changed)
-        add_row(bb_v, "开机自启", "随 Windows 登录启动（写注册表 Run 项，无需管理员权限）",
-                self._set_autostart)
+        # 数值类用增减按钮（Stepper）而非滑条 ——
+        # 滑条会在鼠标滚设置页时被滚轮静默改值，步进器只在数值框聚焦时才吃滚轮。
+        self._set_card_size = Stepper(60, 140, self._config.get("app_card_size", 96),
+                                      suffix="px", step=4)
+        self._set_card_size.valueChanged.connect(self._on_card_size_changed)
+        add_row(gv, "软件卡片尺寸", "导航页卡片大小，每档 4px，可长按 ± 连续调整",
+                self._set_card_size, last=True)
 
-        self._set_restore_last_page = self._toggle("restore_last_page", False)
-        self._set_restore_last_page.toggled.connect(self._on_restore_last_page_changed)
-        add_row(bb_v, "启动时恢复上次页面", "下次打开回到关闭前停留的页面",
-                self._set_restore_last_page)
+        # ================= 2. 悬浮球 =================
+        gv = group(v, "🔵 悬浮球")
+
+        self._set_ball_visible = self._toggle("ball_visible", True)
+        self._set_ball_visible.toggled.connect(self._on_ball_visibility_changed)
+        add_row(gv, "显示悬浮球", "桌面上的球体入口，隐藏后可从系统托盘唤回",
+                self._set_ball_visible)
+
+        # 悬浮球大小（C1）：改球径时保持球心不动，投影留白自动适配
+        self._set_ball_size = Stepper(48, 88, self._config.get("ball_size", 64),
+                                      suffix="px", step=8)
+        self._set_ball_size.valueChanged.connect(self._on_ball_size_changed)
+        add_row(gv, "悬浮球大小", "球体直径，每档 8px，调整时保持球心不动",
+                self._set_ball_size)
+
+        # 自动隐藏总开关（本项为秒数的上位开关，关闭时秒数行灰化）
+        self._set_auto_hide_enabled = self._toggle("auto_hide_enabled", True)
+        self._set_auto_hide_enabled.toggled.connect(self._on_auto_hide_enabled_changed)
+        add_row(gv, "自动隐藏", "贴边静止一段时间后半隐藏；关闭后球始终完整显示",
+                self._set_auto_hide_enabled)
+
+        self._set_auto_hide = Stepper(1, 60,
+                                      self._config.get("auto_hide_seconds", 3),
+                                      suffix="秒")
+        self._set_auto_hide.valueChanged.connect(self._on_spin_changed)
+        add_row(gv, "自动隐藏延迟", "贴边静止多少秒后开始半隐藏，鼠标靠近即恢复",
+                self._set_auto_hide)
+        self._sync_auto_hide_rows()   # 按开关初值决定秒数行是否可编辑
+
+        # 全屏应用让位（B8）：全屏视频/游戏/演示时不与画面争抢注意力
+        self._set_hide_fullscreen = self._toggle("hide_on_fullscreen", True)
+        self._set_hide_fullscreen.toggled.connect(self._on_hide_fullscreen_changed)
+        add_row(gv, "全屏应用让位", "检测到全屏应用时自动隐藏悬浮球，退出后恢复",
+                self._set_hide_fullscreen)
+
+        self._set_card_always_show = self._toggle("card_always_show", False)
+        self._set_card_always_show.toggled.connect(self._on_card_always_show_preview)
+        add_row(gv, "小卡片保持显示", "卡片不自动关闭，常驻在悬浮球旁",
+                self._set_card_always_show)
+
+        # 悬浮球外置插件总闸：关掉后插件动作不挂菜单、不绑热键（模块仍驻留）
+        self._set_plugins = self._toggle("plugins_enabled", True)
+        self._set_plugins.toggled.connect(self._on_plugins_changed)
+        add_row(gv, "悬浮球插件", "启用 plugins/ 目录里的外置插件包；"
+                                  "新放入的插件包需重启程序",
+                self._set_plugins, last=True)
+
+        # ================= 3. 剪贴板与碎片 =================
+        gv = group(v, "📋 剪贴板与碎片")
+
+        self._set_clipboard_max = Stepper(10, 10000,
+                                          self._config.get("clipboard_max_items", 200),
+                                          suffix="条", step=10)
+        self._set_clipboard_max.valueChanged.connect(self._on_spin_changed)
+        add_row(gv, "剪贴板历史上限", "达到上限后自动清理最早的碎片",
+                self._set_clipboard_max)
 
         self._set_clipboard_filter = QLineEdit()
         apps = self._config.get("clipboard_filter_apps", []) or []
@@ -235,28 +239,45 @@ class SettingsPanel(QWidget):
         self._set_clipboard_filter.setPlaceholderText("如：WeChat, Weixin, chrome")
         self._set_clipboard_filter.setMinimumWidth(190)
         self._set_clipboard_filter.editingFinished.connect(self._on_clipboard_filter_changed)
-        add_row(bb_v, "剪贴板过滤", "这些进程里的复制不会进碎片池（逗号分隔，即时生效）",
+        add_row(gv, "剪贴板过滤", "这些进程里的复制不会进碎片池（逗号分隔，即时生效）",
                 self._set_clipboard_filter)
-
-        self._set_close_to_tray = self._toggle("close_to_tray", True)
-        self._set_close_to_tray.toggled.connect(self._on_close_to_tray_changed)
-        add_row(bb_v, "关闭即收进托盘", "点 ✕ 不退出、常驻后台，从托盘图标唤回",
-                self._set_close_to_tray)
 
         # 剪贴板图片自动入素材池（Y2）：纯图片复制（截图/复制图片）时生效
         self._set_clipboard_images = self._toggle("clipboard_capture_images", True)
         self._set_clipboard_images.toggled.connect(self._on_clipboard_images_changed)
-        add_row(bb_v, "剪贴板自动捕获图片", "无文本时图片自动进素材池；图文混排仍按文本收集",
-                self._set_clipboard_images)
+        add_row(gv, "剪贴板自动捕获图片", "无文本时图片自动进素材池；图文混排仍按文本收集",
+                self._set_clipboard_images, last=True)
 
-        self._set_task_reminder = self._toggle("task_reminder_enabled", True)
-        self._set_task_reminder.toggled.connect(self._on_task_reminder_changed)
-        add_row(bb_v, "任务到期提醒", "启动时及每日 9:00 托盘气泡，点击直达任务页",
-                self._set_task_reminder)
+        # ================= 4. 临时素材 =================
+        gv = group(v, "🖼 临时素材")
+
+        self._set_temp_asset_max_count = Stepper(
+            5, 500, self._config.get("temp_asset_max_count", 50),
+            suffix="个", step=5)
+        self._set_temp_asset_max_count.valueChanged.connect(self._on_spin_changed)
+        add_row(gv, "临时素材上限", "超出上限后自动清理最早的素材",
+                self._set_temp_asset_max_count)
+
+        self._set_temp_asset_max_days = Stepper(
+            0, 365, self._config.get("temp_asset_max_days", 30), suffix="天")
+        self._set_temp_asset_max_days.valueChanged.connect(self._on_spin_changed)
+        add_row(gv, "素材保留天数", "0 表示不按天数自动清理",
+                self._set_temp_asset_max_days)
+
+        # 素材缩略图大小：决定临时素材网格每行个数（默认 128px → 一行 4 个）
+        self._set_asset_thumb = Stepper(
+            80, 160, self._config.get("asset_thumb_size", 128),
+            suffix="px", step=8)
+        self._set_asset_thumb.valueChanged.connect(self._on_asset_thumb_changed)
+        add_row(gv, "素材缩略图大小", "临时素材网格单元尺寸，每档 8px，调小可一行显示更多",
+                self._set_asset_thumb, last=True)
+
+        # ================= 5. 全局工具 =================
+        gv = group(v, "⚡ 全局工具")
 
         self._set_quick_capture = self._toggle("quick_capture_enabled", True)
         self._set_quick_capture.toggled.connect(self._on_quick_capture_changed)
-        add_row(bb_v, "全局快速捕捉", "任意界面按热键呼出迷你输入条，回车即存入碎片池",
+        add_row(gv, "全局快速捕捉", "任意界面按热键呼出迷你输入条，回车即存入碎片池",
                 self._set_quick_capture)
 
         self._set_capture_hotkey = QLineEdit()
@@ -264,13 +285,13 @@ class SettingsPanel(QWidget):
         self._set_capture_hotkey.setPlaceholderText("如：Ctrl+Alt+K")
         self._set_capture_hotkey.setMinimumWidth(190)
         self._set_capture_hotkey.editingFinished.connect(self._on_capture_hotkey_changed)
-        add_row(bb_v, "快速捕捉热键", "格式 Ctrl+Alt+K，需含修饰键；被占用时会提示",
+        add_row(gv, "快速捕捉热键", "格式 Ctrl+Alt+K，需含修饰键；被占用时会提示",
                 self._set_capture_hotkey)
 
         # 截图钉屏（V4）：开关 + 热键
         self._set_screenshot = self._toggle("screenshot_enabled", True)
         self._set_screenshot.toggled.connect(self._on_screenshot_changed)
-        add_row(bb_v, "截图钉屏", "按热键框选屏幕区域，钉成置顶参考浮窗",
+        add_row(gv, "截图钉屏", "按热键框选屏幕区域，钉成置顶参考浮窗",
                 self._set_screenshot)
 
         self._set_screenshot_hotkey = QLineEdit()
@@ -278,53 +299,59 @@ class SettingsPanel(QWidget):
         self._set_screenshot_hotkey.setPlaceholderText("如：Ctrl+Alt+S")
         self._set_screenshot_hotkey.setMinimumWidth(190)
         self._set_screenshot_hotkey.editingFinished.connect(self._on_screenshot_hotkey_changed)
-        add_row(bb_v, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
+        add_row(gv, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
                 self._set_screenshot_hotkey)
 
         # 番茄钟（V4）：总开关 + 时长两档 + 自动休息
         self._set_pomodoro = self._toggle("pomodoro_enabled", True)
         self._set_pomodoro.toggled.connect(self._on_pomodoro_changed)
-        add_row(bb_v, "番茄钟", "悬浮球外圈进度环计时，右键球体开始/暂停/结束",
+        add_row(gv, "番茄钟", "悬浮球外圈进度环计时，右键球体开始/暂停/结束",
                 self._set_pomodoro)
 
         self._set_pomodoro_focus = Stepper(
             1, 120, self._config.get("pomodoro_focus_minutes", 25),
             suffix="分钟")
         self._set_pomodoro_focus.valueChanged.connect(self._on_pomodoro_time_changed)
-        add_row(bb_v, "专注时长", "每个番茄的专注分钟数（1-120）",
+        add_row(gv, "专注时长", "每个番茄的专注分钟数（1-120）",
                 self._set_pomodoro_focus)
 
         self._set_pomodoro_break = Stepper(
             1, 60, self._config.get("pomodoro_break_minutes", 5),
             suffix="分钟")
         self._set_pomodoro_break.valueChanged.connect(self._on_pomodoro_time_changed)
-        add_row(bb_v, "休息时长", "专注结束后的休息分钟数（1-60）",
+        add_row(gv, "休息时长", "专注结束后的休息分钟数（1-60）",
                 self._set_pomodoro_break)
 
         self._set_pomodoro_auto = self._toggle("pomodoro_auto_break", False)
         self._set_pomodoro_auto.toggled.connect(self._on_pomodoro_changed)
-        add_row(bb_v, "自动进入休息", "专注计满后不回 idle，直接开始休息相位",
-                self._set_pomodoro_auto)
+        add_row(gv, "自动进入休息", "专注计满后不回 idle，直接开始休息相位",
+                self._set_pomodoro_auto, last=True)
 
-        # 悬浮球外置插件总闸：关掉后插件动作不挂菜单、不绑热键（模块仍驻留）
-        self._set_plugins = self._toggle("plugins_enabled", True)
-        self._set_plugins.toggled.connect(self._on_plugins_changed)
-        add_row(bb_v, "悬浮球插件", "启用 plugins/ 目录里的外置插件包；"
-                                    "新放入的插件包需重启程序", self._set_plugins)
+        # ================= 6. 启动与系统 =================
+        gv = group(v, "🚀 启动与系统")
 
-        # 悬浮球大小（C1）：改球径时保持球心不动，投影留白自动适配
-        self._set_ball_size = Stepper(48, 88, self._config.get("ball_size", 64),
-                                      suffix="px", step=8)
-        self._set_ball_size.valueChanged.connect(self._on_ball_size_changed)
-        add_row(bb_v, "悬浮球大小", "球体直径，每档 8px，调整时保持球心不动",
-                self._set_ball_size)
+        self._set_autostart = self._toggle("autostart", False)
+        self._set_autostart.setChecked(autostart.is_autostart_enabled())
+        self._set_autostart.toggled.connect(self._on_autostart_changed)
+        add_row(gv, "开机自启", "随 Windows 登录启动（写注册表 Run 项，无需管理员权限）",
+                self._set_autostart)
 
-        # 全屏应用让位（B8）：全屏视频/游戏/演示时不与画面争抢注意力
-        self._set_hide_fullscreen = self._toggle("hide_on_fullscreen", True)
-        self._set_hide_fullscreen.toggled.connect(self._on_hide_fullscreen_changed)
-        add_row(bb_v, "全屏应用让位", "检测到全屏应用时自动隐藏悬浮球，退出后恢复",
-                self._set_hide_fullscreen)
+        self._set_restore_last_page = self._toggle("restore_last_page", False)
+        self._set_restore_last_page.toggled.connect(self._on_restore_last_page_changed)
+        add_row(gv, "启动时恢复上次页面", "下次打开回到关闭前停留的页面",
+                self._set_restore_last_page)
 
+        self._set_close_to_tray = self._toggle("close_to_tray", True)
+        self._set_close_to_tray.toggled.connect(self._on_close_to_tray_changed)
+        add_row(gv, "关闭即收进托盘", "点 ✕ 不退出、常驻后台，从托盘图标唤回",
+                self._set_close_to_tray)
+
+        self._set_task_reminder = self._toggle("task_reminder_enabled", True)
+        self._set_task_reminder.toggled.connect(self._on_task_reminder_changed)
+        add_row(gv, "任务到期提醒", "启动时及每日 9:00 托盘气泡，点击直达任务页",
+                self._set_task_reminder, last=True)
+
+        # ---- 恢复默认：全局操作，不属于任何分组 ----
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         # 所有设置项均已实时持久化（改动即写盘并联动），无"保存"按钮
@@ -336,10 +363,9 @@ class SettingsPanel(QWidget):
         reset_btn.clicked.connect(self._on_reset_settings)
         btn_row.addWidget(reset_btn)
         btn_row.addStretch()
-        bb_v.addLayout(btn_row)
+        v.addLayout(btn_row)
 
-        v.addWidget(behavior_box)
-
+        # ================= 关于 =================
         about_box = self._group_box()
         ab_v = QVBoxLayout(about_box)
         ab_v.setContentsMargins(14, 10, 14, 12)
@@ -376,6 +402,18 @@ class SettingsPanel(QWidget):
             self._set_theme_light.setChecked(theme == "light")
             self._set_theme_dark.setChecked(theme == "dark")
 
+    def _sync_auto_hide_rows(self):
+        """同步「自动隐藏」相关行的可用性：总开关关闭时秒数步进器灰化。
+
+        用灰化而非隐藏——布局位置稳定，用户看得出「这里有设置、只是当前不生效」，
+        重新打开开关时也不用手忙脚乱找位置。
+        """
+        if not hasattr(self, '_set_auto_hide_enabled'):
+            return
+        enabled = bool(self._set_auto_hide_enabled.isChecked())
+        if hasattr(self, '_set_auto_hide'):
+            self._set_auto_hide.setEnabled(enabled)
+
     # ---- 刷新入口 ----
     def refresh(self):
         """刷新设置面板当前值
@@ -395,6 +433,13 @@ class SettingsPanel(QWidget):
             stepper.blockSignals(True)
             stepper.setValue(self._config.get(key, default))
             stepper.blockSignals(False)
+        # 自动隐藏总开关：先同步开关值，再据此重算秒数行的可用性
+        if hasattr(self, '_set_auto_hide_enabled'):
+            self._set_auto_hide_enabled.blockSignals(True)
+            self._set_auto_hide_enabled.setChecked(
+                bool(self._config.get("auto_hide_enabled", True)))
+            self._set_auto_hide_enabled.blockSignals(False)
+            self._sync_auto_hide_rows()
         if hasattr(self, '_set_card_always_show'):
             self._set_card_always_show.setChecked(self._config.get("card_always_show", False))
         if hasattr(self, '_set_ball_visible'):
@@ -501,6 +546,15 @@ class SettingsPanel(QWidget):
             if max_count != old_count or max_days != old_days:
                 self._host.asset_limits_changed.emit(max_count, max_days)
             self._host.auto_hide_seconds_changed.emit(hide)
+
+    def _on_auto_hide_enabled_changed(self, checked: bool):
+        """自动隐藏总开关：即时持久化、联动秒数行灰化并广播（悬浮球停表/恢复显示）"""
+        enabled = bool(checked)
+        if enabled != self._config.get("auto_hide_enabled", True):
+            self._config.set("auto_hide_enabled", enabled)
+            self._config.save()
+        self._sync_auto_hide_rows()
+        self._host.auto_hide_enabled_changed.emit(enabled)
 
     def _on_ball_visibility_changed(self, checked: bool):
         """悬浮球显示/隐藏切换（立即生效并持久化）"""
@@ -698,6 +752,8 @@ class SettingsPanel(QWidget):
             self._config.get("temp_asset_max_days", 30),
         )
         self._host.auto_hide_seconds_changed.emit(self._config.get("auto_hide_seconds", 3))
+        self._host.auto_hide_enabled_changed.emit(
+            self._config.get("auto_hide_enabled", True))
         self._host.anim_speed_changed.emit(self._config.get("anim_speed", 1.0))
         self._host.ball_size_changed.emit(self._config.get("ball_size", 64))
         self._host.hide_on_fullscreen_changed.emit(
