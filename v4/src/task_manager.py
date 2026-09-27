@@ -173,7 +173,7 @@ class Task:
     """单条任务的数据载体"""
 
     def __init__(self, task_id, title, note, deadline, done, created_at,
-                 completed_at=""):
+                 completed_at="", focus_sessions=0):
         self.task_id = task_id            # 唯一主键，自增不复用
         self.title = title                # 任务标题
         self.note = note                  # 备注
@@ -184,6 +184,8 @@ class Task:
         self.created_at = created_at      # 创建时间 "YYYY-MM-DD HH:MM"
         # 完成时间 "YYYY-MM-DD HH:MM"；未完成为空串（存量 JSON 无该键 → 空串）
         self.completed_at = completed_at
+        # 累计完成番茄数（番茄钟专注相位计满 +1；存量 JSON 无该键 → 0）
+        self.focus_sessions = max(0, int(focus_sessions or 0))
 
     def to_dict(self):
         """序列化为字典（用于写 json）"""
@@ -195,6 +197,7 @@ class Task:
             "done": self.done,
             "created_at": self.created_at,
             "completed_at": self.completed_at,
+            "focus_sessions": self.focus_sessions,
         }
 
     @classmethod
@@ -209,6 +212,8 @@ class Task:
             created_at=str(d.get("created_at", "")),
             # 存量 JSON 无该键 → 自动补空串，无需迁移脚本
             completed_at=str(d.get("completed_at", "")),
+            # 存量 JSON 无该键 → 0（旧数据自动迁移）
+            focus_sessions=int(d.get("focus_sessions", 0) or 0),
         )
 
 
@@ -326,6 +331,21 @@ class TaskManager:
         if t is None:
             return False
         return self.set_done(task_id, not t.done)
+
+    def add_focus_session(self, task_id: int, n: int = 1):
+        """累计番茄钟专注次数（严格按 task_id 查找）。
+
+        - 成功 → 返回累加后的 focus_sessions（≥1）
+        - 任务不存在 / n 非正 → 返回 None（调用方据此跳过提示）
+        """
+        if n <= 0:
+            return None
+        for t in self._tasks:
+            if t.task_id == task_id:
+                t.focus_sessions += int(n)
+                self._save()
+                return t.focus_sessions
+        return None
 
     def delete_task(self, task_id: int) -> bool:
         """

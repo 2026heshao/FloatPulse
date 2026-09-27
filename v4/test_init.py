@@ -20,11 +20,10 @@ from knowledge_ball import FloatingBall
 
 def main():
     app = QApplication(sys.argv)
-    # 与主程序保持一致：数据与知识库统一用项目根目录（v1 / v2 共用同一份）
-    from src.app_paths import get_base_dir
+    # 与主程序保持一致：数据与知识库统一用项目根的 float_data/
+    from src.app_paths import get_base_dir, get_data_dir, get_docx_path
     base_dir = get_base_dir()
-    data_dir = os.path.join(base_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
+    data_dir = get_data_dir(base_dir)
 
     # ★ 测试用「真实配置的副本」，绝不读写用户的 config.json ——
     #   apply_external_theme / 窗口几何保存等路径都会 set + save 落盘，
@@ -39,7 +38,7 @@ def main():
     config = ConfigManager(test_cfg)
 
     docx_mgr = DocxManager(
-        os.path.join(base_dir, "知识库.docx"),
+        get_docx_path(base_dir),
         os.path.join(data_dir, "docx_meta.json"),
     )
     paragraphs, err = docx_mgr.load()

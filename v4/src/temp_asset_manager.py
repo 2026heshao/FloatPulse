@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 
 from src.constants import sanitize_filename
 from src.json_store import load_records
+from src.app_paths import DATA_DIR_NAME, TEMP_ASSETS_DIRNAME
 
 
 def _file_sha256(path: str) -> str:
@@ -129,20 +130,20 @@ class TempAssetManager:
     def __init__(self, base_dir: str, max_assets: int = DEFAULT_MAX_ASSETS,
                  max_days: int = 0):
         """
-        base_dir  : 程序主目录（temp_assets/ 和 data/temp_assets.json 都建在这里）
+        base_dir  : 程序主目录（float_data/temp_assets/ 和 float_data/temp_assets.json 都建在这里）
         max_assets: 总上限（图片+文件合计）
         max_days  : 自动清理天数（0 表示不按天数清理）
         """
         self._base_dir = base_dir
-        self._assets_dir = os.path.join(base_dir, "temp_assets")
-        self._json_path = os.path.join(base_dir, "data", "temp_assets.json")
+        self._assets_dir = os.path.join(base_dir, DATA_DIR_NAME, TEMP_ASSETS_DIRNAME)
+        self._json_path = os.path.join(base_dir, DATA_DIR_NAME, "temp_assets.json")
         self._max_assets = max(1, max_assets)
         self._max_days = max(0, max_days)
         self._assets = []                # 内存素材列表
         self._next_id = 1                # 下一个自增 asset_id（不复用）
         self._hash_index = {}            # content_hash -> asset_id 索引（拖拽去重）
 
-        # 确保 temp_assets/ 和 data/ 目录存在
+        # 确保 float_data/temp_assets/ 与 float_data/ 目录存在
         try:
             os.makedirs(self._assets_dir, exist_ok=True)
             os.makedirs(os.path.dirname(self._json_path), exist_ok=True)

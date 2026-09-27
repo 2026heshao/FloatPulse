@@ -85,7 +85,8 @@ def region_diff(a: QPixmap, b: QPixmap, region: QRect, tol: int = 8):
 
 def main():
     app = QApplication(sys.argv)
-    data = os.path.join(get_base_dir(), "data")
+    from src.app_paths import get_data_dir
+    data = get_data_dir(get_base_dir())
     config = ConfigManager(os.path.join(data, "config.json"))
     config.set("theme", "light")
     frags = FragmentManager(os.path.join(data, "fragments.json"))

@@ -71,9 +71,13 @@ from src.docx_manager import DocxManager
 from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
-from src.theme import get_menu_qss
+from src.theme import get_menu_qss, get_colors
 from src.controls import ScreenToast
 from src.constants import sanitize_filename, DEFAULT_THEME
+from src.pomodoro import (
+    PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
+    STATE_IDLE, STATE_RUNNING, STATE_PAUSED,
+)
 
 
 # ====================================================================
@@ -81,7 +85,7 @@ from src.constants import sanitize_filename, DEFAULT_THEME
 # ====================================================================
 def _check_data_integrity(data_dir: str, logger):
     """
-    启动时扫描 data/ 目录下所有 JSON 文件，检测损坏。
+    启动时扫描 float_data/ 目录下所有 JSON 文件，检测损坏。
     损坏文件记录到日志，不弹窗（各管理器会自动初始化空数据）。
     """
     json_files = [
@@ -115,7 +119,7 @@ def _check_data_integrity(data_dir: str, logger):
                 None, "数据完整性检查",
                 f"检测到 {len(corrupted)} 个数据文件损坏，已自动重置为空数据：\n\n"
                 f"{details}\n\n"
-                f"详情请查看日志：data/app.log"
+                f"详情请查看日志：float_data/app.log"
             )
         logger.warning(f"启动检查完成：{len(corrupted)} 个文件损坏已重置")
     else:
@@ -175,6 +179,11 @@ class _BallSurface(QWidget):
         self._pixmap = None    # 缓存图标，None 未加载 / False 不存在
         self._badge_text = ""  # 右下角徽标文字（空串不绘制）
         self._pulse_seq = None  # 脉冲动画引用（防 GC）
+        # 番茄钟进度环（绘制层只收 number 和 color，不做业务逻辑）
+        self._ring_progress = 0.0   # 0.0~1.0
+        self._ring_active = False   # False → 整层不画（idle 球上无痕迹）
+        self._ring_track = None     # QColor 或 None
+        self._ring_fill = None      # QColor 或 None
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # 鼠标全部透传给宿主处理（本控件只绘制，不做交互）
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -216,6 +225,27 @@ class _BallSurface(QWidget):
         text = "" if count <= 0 else ("99+" if count > 99 else str(count))
         if text != self._badge_text:
             self._badge_text = text
+            self.update()
+
+    # ---------------- 番茄钟进度环 ----------------
+    def set_ring_colors(self, track: QColor, fill: QColor):
+        """设置环的轨道/进度配色（由宿主从主题字典取色后传入）"""
+        self._ring_track = QColor(track)
+        self._ring_fill = QColor(fill)
+        if self._ring_active:
+            self.update()
+
+    def set_ring_progress(self, value: float, active: bool):
+        """更新进度环（每秒一次即可，不要更高频重绘）。
+
+        - active=False → 整层不画（idle 状态球上不得有任何痕迹）
+        - value 夹取 0.0~1.0
+        """
+        value = max(0.0, min(1.0, float(value)))
+        changed = (value != self._ring_progress) or (active != self._ring_active)
+        self._ring_progress = value
+        self._ring_active = bool(active)
+        if changed:
             self.update()
 
     def pulse(self):
@@ -315,9 +345,32 @@ class _BallSurface(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         self._paint_shadow(painter, cx, cy, vis_r, self._glow)
+        self._paint_ring(painter, cx, cy, vis_r)
         self._paint_ball(painter, cx, cy, vis_r)
         self._paint_badge(painter, cx, cy, vis_r)
         painter.end()
+
+    def _paint_ring(self, painter, cx, cy, vis_r):
+        """番茄钟进度环：球体外圈 vis_r+4 处，12 点方向起顺时针。
+
+        - active=False 整层不画；进度 0 也不画（避免只剩一个点）
+        - drawArc 角度单位 1/16 度；负跨角 = 顺时针
+        """
+        if not self._ring_active or self._ring_fill is None:
+            return
+        if self._ring_progress <= 0.0:
+            return
+        r = vis_r + 4.0
+        rect = QRectF(cx - r, cy - r, r * 2.0, r * 2.0)
+        pen = QPen(self._ring_fill)
+        pen.setWidthF(max(2.5, vis_r * 0.12))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.save()
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # 12 点方向（90°）起，顺时针扫 progress × 360°
+        painter.drawArc(rect, 90 * 16, -int(self._ring_progress * 360 * 16))
+        painter.restore()
 
     # ---------------- 阴影：径向渐变（替代多层同心椭圆）----------------
     # 浅色桌面：靠较深的投影体现"接地"；深色桌面：投影压淡（黑底上黑影子显脏），
@@ -451,6 +504,8 @@ class FloatingBall(QWidget):
 
     # 信号
     request_quit = pyqtSignal()   # 请求退出程序
+    # 番茄钟相位计满（phase=focus/break, bound_title=绑定任务标题）
+    pomodoro_phase_finished = pyqtSignal(str, str)
 
     def __init__(self, cards, task_manager=None, note_manager=None,
                  fragment_manager=None, docx_manager=None,
@@ -488,6 +543,9 @@ class FloatingBall(QWidget):
         self._edge_side = None
         self._anim = None                # 宿主位移动画（吸边/滑出）
         self._out_count = 0
+        # 空闲吸边自动隐藏总开关（设置页可关）：关闭后球始终完整显示，
+        # 贴边不再半隐藏。启动时由 _apply_auto_hide_config() 从配置读取覆盖。
+        self._auto_hide_enabled = True
         # 全屏应用让位（B8）：全屏时自动隐藏、退出全屏恢复，不改变用户的手动隐藏意愿
         self._fs_hidden = False
         # 未吸边隐藏时的"正常位置"（C4）：落盘用它，避免存下半个在屏外的坐标
@@ -500,6 +558,7 @@ class FloatingBall(QWidget):
         self._init_card_window()
         self._init_context_menu()
         self._init_hover_timer()
+        self._init_pomodoro()
 
         # 接受文件拖拽
         self.setAcceptDrops(True)
@@ -575,6 +634,15 @@ class FloatingBall(QWidget):
         open_main_action = QAction("🖥  打开主窗口", self._menu)
         open_main_action.triggered.connect(self._open_main_window)
         self._menu.addAction(open_main_action)
+
+        # 番茄钟菜单项（按状态显隐；功能关闭时整组不出现）
+        pom_entries = self._pomodoro_menu_entries()
+        if pom_entries:
+            self._menu.addSeparator()
+            for text, callback in pom_entries:
+                act = QAction(text, self._menu)
+                act.triggered.connect(callback)
+                self._menu.addAction(act)
 
         # 插件动作（注册表数据驱动：menu=True 且启用中的动作）
         plugin_actions = (self._action_registry.menu_actions()
@@ -670,6 +738,164 @@ class FloatingBall(QWidget):
         self._rebuild_context_menu()
         return entry["action"]
 
+    # ---------------- 番茄钟（进度环 + 菜单 + 任务绑定）----------------
+    def _init_pomodoro(self):
+        """创建番茄钟计时器并接线（配置读取/信号连接/环配色）。"""
+        self._pomodoro_enabled = True
+        self._pomodoro = PomodoroTimer(self)
+        self._pomodoro.ticked.connect(self._on_pomodoro_ticked)
+        self._pomodoro.phase_changed.connect(self._on_pomodoro_phase_changed)
+        self._pomodoro.state_changed.connect(self._on_pomodoro_state_changed)
+        self._pomodoro.finished.connect(self._on_pomodoro_finished)
+        self._apply_ring_colors()
+        self.apply_pomodoro_config()
+
+    def _apply_ring_colors(self):
+        """按当前主题取环配色：专注=主色深档，休息=成功绿。"""
+        colors = get_colors(self._theme)
+        track = QColor(str(colors.get("text", "#2C3E50")))
+        track.setAlpha(60)
+        focus_fill = QColor(str(colors.get("primary_deep", "#3D9E9C")))
+        break_fill = QColor(str(colors.get("success", "#1F8A4C")))
+        self._surface.set_ring_colors(track, focus_fill)
+        # 相位切换时换填充色（休息相位用 break_fill）
+        if self._pomodoro.phase == PHASE_BREAK:
+            self._surface.set_ring_colors(track, break_fill)
+        self._ring_break_fill = break_fill
+        self._ring_track = track
+
+    def apply_pomodoro_config(self):
+        """设置页/恢复默认后重读配置：时长、总开关、菜单与环全量同步。
+
+        关闭总开关时：停止计时、清环清 tooltip、菜单项移除。
+        """
+        cfg = self._config
+        self._pomodoro_enabled = bool(cfg.get("pomodoro_enabled", True)) if cfg else True
+        focus_min = int(cfg.get("pomodoro_focus_minutes", 25)) if cfg else 25
+        break_min = int(cfg.get("pomodoro_break_minutes", 5)) if cfg else 5
+        auto_break = bool(cfg.get("pomodoro_auto_break", False)) if cfg else False
+        self._pomodoro.configure(focus_minutes=focus_min,
+                                 break_minutes=break_min,
+                                 auto_break=auto_break)
+        if not self._pomodoro_enabled and self._pomodoro.state != STATE_IDLE:
+            self._pomodoro.stop()
+        self._update_pomodoro_visuals()
+        self._rebuild_context_menu()
+
+    def start_focus(self, bound_task_id=None, title=""):
+        """开始一次专注（公开入口：球菜单 / 任务页右键「专注此任务」）。
+
+        - 功能关闭 → 轻提示后忽略
+        - running 中 → 拒绝叠加（不打破当前计时）
+        - paused / idle → 从满时长起跑
+        """
+        if not self._pomodoro_enabled:
+            self._show_toast("番茄钟已在设置中关闭")
+            return
+        if self._pomodoro.state == STATE_RUNNING:
+            self._show_toast("已有进行中的计时，请先结束再开始")
+            return
+        self._pomodoro.bound_task_id = bound_task_id
+        self._pomodoro.bound_title = str(title or "")
+        self._pomodoro.start(PHASE_FOCUS)
+
+    def _pomodoro_toggle(self):
+        """菜单「开始/暂停/继续」三态入口。"""
+        if self._pomodoro.state == STATE_IDLE:
+            self.start_focus()
+        else:
+            self._pomodoro.toggle()
+
+    def _pomodoro_stop(self):
+        """菜单「结束计时」：回到 idle（不计数）。"""
+        self._pomodoro.stop()
+        self._pomodoro.bound_task_id = None
+        self._pomodoro.bound_title = ""
+
+    def _pomodoro_menu_entries(self):
+        """按当前状态产出右键菜单项 [(text, callback), ...]；关闭时返回空。"""
+        if not getattr(self, "_pomodoro_enabled", False):
+            return []
+        timer = self._pomodoro
+        state = timer.state
+        is_break = timer.phase == PHASE_BREAK
+        if state == STATE_IDLE:
+            return [("🍅 开始专注", self.start_focus)]
+        if state == STATE_RUNNING:
+            return [
+                ("⏸ 暂停休息" if is_break else "⏸ 暂停专注", self._pomodoro_toggle),
+                ("⏹ 结束计时", self._pomodoro_stop),
+            ]
+        # paused
+        return [
+            ("▶ 继续休息" if is_break else "▶ 继续专注", self._pomodoro_toggle),
+            ("⏹ 结束计时", self._pomodoro_stop),
+        ]
+
+    def _format_mmss(self, seconds: int) -> str:
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def _pomodoro_tooltip_text(self):
+        timer = self._pomodoro
+        state = timer.state
+        if state == STATE_IDLE or not self._pomodoro_enabled:
+            return ""
+        remaining = self._format_mmss(timer.remaining_seconds())
+        if state == STATE_PAUSED:
+            return f"⏸ 已暂停 · 剩余 {remaining}"
+        if timer.phase == PHASE_BREAK:
+            return f"☕ 休息中 · 剩余 {remaining}"
+        return f"🍅 专注中 · 剩余 {remaining}"
+
+    def _update_pomodoro_visuals(self):
+        """环 + tooltip 一次性同步（ticked/状态/相位变化共用）。"""
+        timer = self._pomodoro
+        active = (self._pomodoro_enabled
+                  and timer.state in (STATE_RUNNING, STATE_PAUSED))
+        self._surface.set_ring_progress(timer.progress(), active)
+        self.setToolTip(self._pomodoro_tooltip_text())
+
+    def _on_pomodoro_ticked(self, _remaining: int):
+        self._update_pomodoro_visuals()
+
+    def _on_pomodoro_phase_changed(self, phase: str):
+        # 相位切换 → 换环色（休息绿）并同步 tooltip
+        colors = getattr(self, "_ring_track", None)
+        if colors is not None:
+            fill = (self._ring_break_fill if phase == PHASE_BREAK
+                    else QColor(str(get_colors(self._theme).get(
+                        "primary_deep", "#3D9E9C"))))
+            self._surface.set_ring_colors(colors, fill)
+        self._update_pomodoro_visuals()
+
+    def _on_pomodoro_state_changed(self, _state: str):
+        # 状态变化 → 菜单项组随显隐重建（菜单通常处于关闭态，开销可忽略）
+        self._update_pomodoro_visuals()
+        self._rebuild_context_menu()
+
+    def _on_pomodoro_finished(self, phase: str):
+        """相位计满：脉冲反馈 + 轻提示 + 任务番茄计数 + 托盘气泡（经信号）。"""
+        self.pulse()
+        if phase == PHASE_FOCUS:
+            title = self._pomodoro.bound_title
+            tid = self._pomodoro.bound_task_id
+            counted = None
+            if tid is not None and self._task_manager is not None:
+                counted = self._task_manager.add_focus_session(tid)
+            if counted:
+                self._show_toast(f"🍅 专注完成「{title}」（累计 {counted} 个番茄）")
+            else:
+                self._show_toast("🍅 专注完成，休息一下！")
+            # 绑定只服务一次专注，完成后清掉
+            self._pomodoro.bound_task_id = None
+            self._pomodoro.bound_title = ""
+            self.pomodoro_phase_finished.emit(PHASE_FOCUS, title)
+        else:
+            self._show_toast("☕ 休息结束，开始新的专注吧")
+            self.pomodoro_phase_finished.emit(PHASE_BREAK, "")
+        # auto_break 时 start(BREAK) 已把状态推回 running；
+        # 否则 _tick 已落回 idle。菜单/环/tooltip 在 state_changed 里同步。
+
     def _request_quit(self):
         """请求退出程序"""
         self.request_quit.emit()
@@ -683,6 +909,9 @@ class FloatingBall(QWidget):
         # 球体渐变配色（浅色/深色主色不同）
         if self._surface is not None:
             self._surface.set_theme(theme_name)
+        # 番茄钟进度环配色随主题（环在球外圈，颜色取自主题字典）
+        if getattr(self, "_pomodoro", None) is not None:
+            self._apply_ring_colors()
         # 右键菜单 QSS
         self._menu.setStyleSheet(get_menu_qss(theme_name))
         # 小卡片主题
@@ -709,12 +938,9 @@ class FloatingBall(QWidget):
         """获取临时素材目录（与 TempAssetManager 使用同一根目录，两版共用）"""
         if self._temp_asset_manager is not None:
             return self._temp_asset_manager.get_assets_dir()
-        # 回退：统一走项目根（打包运行时为 exe 目录）
-        from src.app_paths import get_base_dir
-        base = get_base_dir()
-        tmp_dir = os.path.join(base, "temp_assets")
-        os.makedirs(tmp_dir, exist_ok=True)
-        return tmp_dir
+        # 回退：统一走 float_data/temp_assets（打包运行时为 exe 目录下）
+        from src.app_paths import get_temp_assets_dir
+        return get_temp_assets_dir()
 
     def dragEnterEvent(self, event):
         """
@@ -1615,8 +1841,8 @@ class FloatingBall(QWidget):
 
         self._idle_hide_timer = QTimer(self)
         self._idle_hide_timer.setSingleShot(True)
-        # 自动隐藏秒数从配置读取
-        self._apply_auto_hide_seconds()
+        # 自动隐藏秒数与总开关从配置读取
+        self._apply_auto_hide_config()
         self._idle_hide_timer.timeout.connect(self._on_idle_hide_timeout)
 
         # 位置落盘防抖（C4）：拖动结束后延迟写入，拖动过程中不写盘
@@ -1625,10 +1851,18 @@ class FloatingBall(QWidget):
         self._pos_save_timer.setInterval(self.POS_SAVE_DELAY)
         self._pos_save_timer.timeout.connect(self._save_position)
 
-    def _apply_auto_hide_seconds(self):
-        """从配置读取空闲吸边隐藏秒数应用到定时器（启动时调用）"""
-        seconds = (self._config.get("auto_hide_seconds", 3)
-                   if self._config else 3)
+    def _apply_auto_hide_config(self):
+        """从配置读取空闲吸边自动隐藏的秒数与总开关（启动时调用）。
+
+        开关关闭时只停表、不改位置——启动瞬间球尚未吸边，
+        不存在"卡在半隐藏态"的情况（运行中切换走 set_auto_hide_enabled）。
+        """
+        if self._config:
+            seconds = self._config.get("auto_hide_seconds", 3)
+            enabled = bool(self._config.get("auto_hide_enabled", True))
+        else:
+            seconds, enabled = 3, True
+        self._auto_hide_enabled = enabled
         if hasattr(self, '_idle_hide_timer') and self._idle_hide_timer is not None:
             self._idle_hide_timer.setInterval(int(seconds) * 1000)
 
@@ -1638,6 +1872,24 @@ class FloatingBall(QWidget):
             self._idle_hide_timer.setInterval(max(1, int(seconds)) * 1000)
             if self._idle_hide_timer.isActive():
                 self._idle_hide_timer.start()  # 重启以应用新计时
+
+    def set_auto_hide_enabled(self, enabled: bool):
+        """外部（设置页）实时开关空闲吸边自动隐藏。
+
+        关闭时：立即停表；若球此刻正停在半隐藏状态，滑回屏内恢复完整显示——
+        否则球会永久卡在半个屏外，只有鼠标移近才滑出，与"关闭自动隐藏"的语义相反。
+        打开时：若球正贴边则立即重新开始计时，无需等下一次交互。
+        """
+        enabled = bool(enabled)
+        self._auto_hide_enabled = enabled
+        timer = getattr(self, '_idle_hide_timer', None)
+        if timer is None:
+            return
+        timer.stop()
+        if enabled:
+            self._start_idle_hide_timer()       # 贴边时重新开始计时
+        elif self._hidden_to_edge:
+            self._slide_out_from_edge()         # 解除半隐藏，恢复完整显示
 
     def _is_near_edge(self):
         if self._hidden_to_edge:
@@ -1655,6 +1907,11 @@ class FloatingBall(QWidget):
         return d <= self.EDGE_THRESHOLD
 
     def _start_idle_hide_timer(self):
+        # 总开关关闭时永不启动：所有触发点（悬停离开、拖拽结束、吸边完成）
+        # 统一走这里，一处判定即可全链路生效
+        if not self._auto_hide_enabled:
+            self._idle_hide_timer.stop()
+            return
         if self._is_near_edge():
             self._idle_hide_timer.start()
         else:
@@ -1822,7 +2079,7 @@ def _get_base_dir() -> str:
     统一委托 src.app_paths.get_base_dir()：
       - 打包运行 → exe 所在目录
       - 源码运行 → 项目根目录（v1_baseline / v2 / shared 的公共父目录），
-        使 v1 与 v2 共用同一份 data/、知识库.docx、temp_assets/
+        使多版本共用同一份 float_data/（内含知识库.docx、temp_assets/）
     """
     from src.app_paths import get_base_dir
     return get_base_dir()
@@ -1871,18 +2128,18 @@ def main():
     # 首个实例：创建命名事件，用于接收后续实例的唤醒信号
     singleton.create_event()
 
-    # ---- 定位数据文件 ----
+    # ---- 定位数据文件（统一收纳进 float_data/，路径函数见 src/app_paths.py）----
+    from src.app_paths import get_data_dir, get_docx_path
     base_dir = _get_base_dir()
-    data_dir = os.path.join(base_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
-    docx_path = os.path.join(base_dir, "知识库.docx")
+    data_dir = get_data_dir(base_dir)
+    docx_path = get_docx_path(base_dir)
     schedule_path = os.path.join(data_dir, "schedule.json")
     notes_path = os.path.join(data_dir, "notes.json")
     fragments_path = os.path.join(data_dir, "fragments.json")
     docx_meta_path = os.path.join(data_dir, "docx_meta.json")
     config_path = os.path.join(data_dir, "config.json")
 
-    # ---- 初始化日志系统（自动创建 data/app.log）----
+    # ---- 初始化日志系统（自动创建 float_data/app.log）----
     from src.logger import init_logger, install_excepthook, get_logger
     logger = init_logger(base_dir, level=logging.INFO)
     install_excepthook()  # 替换全局异常钩子为带日志记录的版本
@@ -2174,6 +2431,22 @@ def main():
     # 悬浮球右键菜单入口
     ball.add_context_action("✂ 截图钉屏", screenshot_pin.start_capture)
 
+    # ---- 番茄钟（球体进度环 + 右键菜单 + 任务绑定，V4）----
+    def _on_pomodoro_phase_finished(phase, title):
+        """相位计满 → 托盘气泡（非模态）+ 主窗口任务页刷新（番茄计数变了）"""
+        if phase == PHASE_FOCUS:
+            body = f"专注完成「{title}」，休息一下！" if title else "专注完成，休息一下！"
+            _tray_icon.showMessage(
+                "🍅 番茄钟", body,
+                QSystemTrayIcon.MessageIcon.Information, 6000)
+            main_window.refresh_tasks()
+        get_logger().info(f"[番茄钟] 相位完成: phase={phase}, task={title or '自由专注'}")
+
+    ball.pomodoro_phase_finished.connect(_on_pomodoro_phase_finished)
+    main_window.pomodoro_changed.connect(ball.apply_pomodoro_config)
+    # 任务页右键「专注此任务」→ 球体开始绑定式专注
+    main_window.task_focus_requested.connect(ball.start_focus)
+
     # ---- 悬浮球插件系统（外置专精功能：<base_dir>/plugins/ 下的插件包）----
     # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
     #       只把「新增的专精单一功能」外置。详见 docs/插件开发说明.md
@@ -2330,6 +2603,9 @@ def main():
 
     # 8.6 主窗口空闲吸边隐藏秒数变更 → 实时应用到悬浮球
     main_window.auto_hide_seconds_changed.connect(ball.set_auto_hide_seconds)
+
+    # 8.6b 主窗口自动隐藏总开关变更 → 实时应用到悬浮球（关闭时停表并把半隐藏的球滑回屏内）
+    main_window.auto_hide_enabled_changed.connect(ball.set_auto_hide_enabled)
 
     # 8.7 主窗口悬浮球大小变更 → 实时应用到悬浮球（保持球心不动，位置即落盘）
     main_window.ball_size_changed.connect(ball.apply_ball_size)

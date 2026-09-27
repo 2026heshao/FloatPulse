@@ -17,6 +17,7 @@
   - theme:                主题名 ("light" | "dark")，默认值见 constants.DEFAULT_THEME
   - clipboard_max_items:  剪贴板历史条数上限
   - auto_hide_seconds:    悬浮球空闲吸边隐藏秒数
+  - auto_hide_enabled:    悬浮球空闲吸边自动隐藏总开关（关闭后球始终完整显示）
   - clipboard_filter_apps: 剪贴板过滤应用列表（不捕获这些进程的复制）
   - clipboard_capture_images: 剪贴板中的图片是否自动存入临时素材池
   - main_window_geometry: 大窗口几何（用于记住上次位置大小）
@@ -29,6 +30,10 @@
   - quick_capture_pos:     快速捕捉输入条最后拖动位置 [x, y]（None=屏幕居中）
   - screenshot_enabled:   截图钉屏开关（Ctrl+Alt+S 框选 → 置顶参考浮窗）
   - screenshot_hotkey:     截图钉屏全局热键（如 "Ctrl+Alt+S"）
+  - pomodoro_enabled:      番茄钟总开关（球体进度环 + 右键菜单控制）
+  - pomodoro_focus_minutes: 专注相位时长（分钟，1-120，默认 25）
+  - pomodoro_break_minutes: 休息相位时长（分钟，1-60，默认 5）
+  - pomodoro_auto_break:   专注结束后自动进入休息
   - plugins_enabled:      悬浮球外置插件总闸（启用 plugins/ 下的插件包）
   - ball_size:            悬浮球球体直径（像素，48-88，默认 64）
   - hide_on_fullscreen:   全屏应用（视频/游戏/演示）前台时自动隐藏悬浮球
@@ -47,6 +52,7 @@ DEFAULT_CONFIG = {
     "theme":                DEFAULT_THEME,
     "clipboard_max_items":  200,
     "auto_hide_seconds":    3,
+    "auto_hide_enabled":    True,         # 悬浮球空闲吸边自动隐藏总开关
     "clipboard_filter_apps": [],
     "main_window_geometry": "",
     "card_always_show":     False,
@@ -68,6 +74,10 @@ DEFAULT_CONFIG = {
     "quick_capture_pos":    None,         # 快速捕捉输入条拖动后位置 [x, y]
     "screenshot_enabled":   True,         # 截图钉屏开关（Ctrl+Alt+S）
     "screenshot_hotkey":    "Ctrl+Alt+S", # 截图钉屏全局热键
+    "pomodoro_enabled":     True,         # 番茄钟总开关（球体进度环 + 右键菜单）
+    "pomodoro_focus_minutes": 25,         # 专注相位时长（分钟，1-120）
+    "pomodoro_break_minutes": 5,          # 休息相位时长（分钟，1-60）
+    "pomodoro_auto_break":  False,        # 专注结束后是否自动进入休息
     "plugins_enabled":      True,         # 悬浮球外置插件总闸（plugins/ 下的插件包）
     "ball_size":            64,           # 悬浮球球体直径（像素，48-88）
     "hide_on_fullscreen":   True,         # 全屏应用前台时自动隐藏悬浮球
@@ -81,6 +91,7 @@ _CONFIG_TYPES = {
     "theme":                str,
     "clipboard_max_items":  int,
     "auto_hide_seconds":    int,
+    "auto_hide_enabled":    bool,
     "clipboard_filter_apps": list,
     "main_window_geometry": str,
     "card_always_show":     bool,
@@ -102,6 +113,10 @@ _CONFIG_TYPES = {
     "quick_capture_pos":    list,
     "screenshot_enabled":   bool,
     "screenshot_hotkey":    str,
+    "pomodoro_enabled":     bool,
+    "pomodoro_focus_minutes": int,
+    "pomodoro_break_minutes": int,
+    "pomodoro_auto_break":  bool,
     "plugins_enabled":      bool,
     "ball_size":            int,
     "hide_on_fullscreen":   bool,
@@ -125,6 +140,9 @@ _CONFIG_RANGES = {
     "last_page_index":      (0, 7),
     # 悬浮球球体直径：与设置页 Stepper 范围 48-88 保持一致
     "ball_size":            (48, 88),
+    # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
+    "pomodoro_focus_minutes": (1, 120),
+    "pomodoro_break_minutes": (1, 60),
 }
 
 
