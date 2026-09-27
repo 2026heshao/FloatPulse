@@ -509,15 +509,16 @@ class AiChatPage(QWidget):
         self._busy = False
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
+        self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
         # ---- 后端设置卡（默认收起）----
         self._settings_card = QFrame(self)
         self._settings_card.setObjectName("glassCard")
         form = QVBoxLayout(self._settings_card)
-        form.setContentsMargins(14, 12, 14, 12)
-        form.setSpacing(6)
+        form.setContentsMargins(16, 14, 16, 14)
+        form.setSpacing(8)
 
         # 区块 A：在线 / 常驻后端
         cap_a = QLabel("后端服务")
