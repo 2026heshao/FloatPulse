@@ -117,10 +117,16 @@ def make_async_poster(logger=None):
       - 在后台线程发请求，``on_done(result)`` 保证在 UI 线程回调；
       - 返回 False = 没能发起（回调 ok=False 的结果）。
     宿主在**主线程**调用一次 make_async_poster，把返回值塞进
-    PluginContext(http_post_async=...)。闭包持有 Relay，宿主持有闭包，
+    PluginContext(http_post_async=...)。闭包持有日志器，
     生命周期即应用生命周期，无需手动清理。
+
+    线程模型（2026-09-27 修）：relay **每请求独立**——worker 在后台
+    线程 emit ``done``，本请求自己的 relay（主线程创建的 QObject）把
+    信号排队回 UI 线程。此前 relay 是整个桥共享的单例且
+    ``relay.got.connect(_finish)`` 从不移除，第 N 个响应会把**全部**
+    历史请求的回调广播一遍（实测：多点几次「保存并测试」后，对话
+    回调收到探活的响应，气泡重复出现；日志同一秒爆出 N 条完成行）。
     """
-    relay = _Relay()
 
     def post(url, headers=None, body=None, timeout=30.0, on_done=None):
         result = {"ok": False, "status": 0, "body": "",
@@ -130,6 +136,7 @@ def make_async_poster(logger=None):
                 logger.warning("[插件网络] POST 被拒：on_done 不是可调用对象")
             return False
 
+        relay = _Relay()      # 每请求一个：响应只送达自己的回调（见 docstring）
         worker = _HttpPostWorker(url, dict(headers or {}), body, timeout)
         started = time.monotonic()
 

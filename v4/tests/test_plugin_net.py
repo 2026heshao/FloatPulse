@@ -145,6 +145,45 @@ def test_async_poster_rejects_non_callable(server, qapp):
     assert poster(server + "/echo", body={}, on_done=None) is False
 
 
+def test_async_poster_no_cross_delivery(server, qapp):
+    """连发 3 个请求（不同请求体）：每个 on_done **恰好**收到自己的响应。
+
+    回归钉子：此前 relay 是整个桥共享的单例且 ``relay.got.connect``
+    从不移除 → 第 N 个响应会把全部历史请求的回调广播一遍。实测表现 =
+    多点几次「保存并测试连接」后，对话回调收到探活的响应，同一回复
+    的气泡重复出现多条。
+    """
+    from PyQt6.QtCore import QCoreApplication, QThread
+
+    poster = make_async_poster()
+    received = []                      # (tag, 回显的请求体原文)
+
+    def make_cb(tag):
+        def cb(res):
+            body = ""
+            if res.get("ok"):
+                body = json.loads(res["body"])["echo"]
+            received.append((tag, body))
+        return cb
+
+    for i in range(3):
+        assert poster(server + "/echo", body={"tag": str(i)},
+                      timeout=5.0, on_done=make_cb(str(i))) is True
+
+    deadline = 5000        # ms
+    while len(received) < 3 and deadline > 0:
+        QCoreApplication.processEvents()
+        QThread.msleep(20)
+        deadline -= 20
+
+    # 若广播 bug 回归：received 长度会 > 3（每响应触发 3 个回调）
+    assert sorted(received) == [
+        ("0", '{"tag": "0"}'),
+        ("1", '{"tag": "1"}'),
+        ("2", '{"tag": "2"}'),
+    ], f"回调次数或内容错乱：{received}"
+
+
 @pytest.fixture(scope="module")
 def qapp():
     from PyQt6.QtWidgets import QApplication
