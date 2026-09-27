@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
-"""AI 助手插件离屏端到端验证：真实加载器（含 capabilities）→ 真实对话框。
+"""AI 助手插件离屏端到端验证（页面插件版）：
+真实加载器（含 capabilities + page）→ 真实主窗口页面注入 → 真实页面。
 
 覆盖（每一步都走真实代码路径）：
-  A 真实 plugins/ 目录扫到 ai-assistant：动作进注册表、热键合法、
-    派生 ctx 带 network 能力、宿主桥已注入
-  B 纯函数层：format_tasks / format_fragments / format_notes /
-    build_request（含校验）/ parse_reply（401/404/坏 JSON/正常）
-  C 真实对话框：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥发出
-    （假桥捕获：URL / headers / body / system 提示词全对）、回复气泡、
-    历史落位、清空对话、配置落盘 data_dir
-  D light / dark 双主题真截图（真实 MainWindow 作 host）→ build/shots/
+  A 真实 plugins/ 目录扫到 ai-assistant：动作进注册表、热键生效且
+    **不进悬浮球菜单**（menu=false）、manifest page 字段解析、
+    create_page 返回真实页面、派生 ctx 带 network 能力
+  B 纯函数层：format_* / build_request（含校验）/ parse_reply
+  C 真实 AiChatPage：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥
+    发出（假桥捕获）、Enter 发送 / Shift+Enter 换行、保存并测试连接
+    反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 自动接后端）、
+    页面销毁退订本地服务 listener、配置落盘 data_dir
+  E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
+    show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
+  D light / dark 双主题真截图（页面嵌进真实 MainWindow）→ build/shots/
 
 跑法：python tools/run_gui_check.py tools/verify_ai_assistant.py
 """
@@ -27,8 +31,9 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(BASE)
 sys.path.insert(0, BASE)
 
+from PyQt6.QtCore import Qt, QEvent               # noqa: E402
 from PyQt6.QtWidgets import QApplication          # noqa: E402
-from PyQt6.QtGui import QFontDatabase             # noqa: E402
+from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
 from src.config import ConfigManager              # noqa: E402
 from src.docx_manager import DocxManager          # noqa: E402
@@ -51,6 +56,7 @@ QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\msyh.ttc")
 _results = []
 PLUGIN_ID = "ai-assistant"
 ACTION_ID = f"{PLUGIN_ID}.chat"
+PAGE_KEY = f"plugin:{PLUGIN_ID}"
 
 
 def check(name, cond, detail=""):
@@ -68,6 +74,12 @@ def pump(ms=0):
     while time.time() < end:
         _app.processEvents()
         time.sleep(0.01)
+
+
+def send_key(widget, key, mods=Qt.KeyboardModifier.NoModifier, text=""):
+    """构造真实 QKeyEvent 走 sendEvent 分发（offscreen 下 QTest.keyClick 会崩）"""
+    QApplication.sendEvent(widget, QKeyEvent(QEvent.Type.KeyPress, key,
+                                             mods, text))
 
 
 # ---------------- 日志 ----------------
@@ -127,7 +139,7 @@ win.show()
 pump(200)
 
 # ====================================================================
-# A. 真实加载链路（capabilities 生效）
+# A. 真实加载链路（capabilities + page 生效）
 # ====================================================================
 plugins_dir = os.path.join(ROOT, "plugins")
 registry = ActionRegistry(
@@ -157,21 +169,37 @@ ids = [p.plugin_id for p in loaded]
 check("A1 真实 plugins/ 目录扫到 ai-assistant", PLUGIN_ID in ids, f"{ids}")
 
 act = registry.get(ACTION_ID)
-check("A2 动作已进注册表且挂菜单", act is not None and act.menu is True)
-check("A3 热键 Ctrl+Alt+I 合法且生效",
+check("A2 动作已注册且**不进悬浮球菜单**（menu=false）",
+      act is not None and act.menu is False,
+      f"menu={getattr(act, 'menu', 'N/A')}")
+check("A3 热键 Ctrl+Alt+I 合法且生效（menu=false 不影响热键）",
       act is not None and act.hotkey == "Ctrl+Alt+I"
       and ACTION_ID in [a.id for a in registry.hotkey_actions()])
 
+lp_ai = next((p for p in loaded if p.plugin_id == PLUGIN_ID), None)
+check("A4 manifest page 字段解析通过（title 保留）",
+      lp_ai is not None and lp_ai.manifest.get("page")
+      == {"title": "🤖 AI 助手"},
+      str(lp_ai.manifest.get("page") if lp_ai else None))
+
 sub_ctx = registry.context_of(ACTION_ID)
-check("A4 派生 ctx 带 network 能力",
+check("A5 派生 ctx 带 network 能力",
       sub_ctx is not None and sub_ctx.has_capability("network"))
-check("A5 宿主桥已注入派生 ctx",
+check("A6 宿主桥已注入派生 ctx",
       sub_ctx is not None and sub_ctx._http_post_async is not None)
-check("A6 未声明的插件没有能力（weekly-report）",
+check("A7 未声明的插件没有能力（weekly-report）",
       all(not registry.context_of(f"{pid}.{suffix}").has_capability("network")
           for pid in ("weekly-report",)
           for suffix in ("draft",)
           if registry.context_of(f"{pid}.{suffix}") is not None))
+
+# create_page 入口（knowledge_ball._register_plugin_pages 的调用方式）
+page_from_plugin = lp_ai.plugin.create_page(lp_ai.ctx)
+check("A8 create_page 返回 AiChatPage 实例",
+      type(page_from_plugin).__name__ == "AiChatPage",
+      type(page_from_plugin).__name__)
+page_from_plugin.destroyed.emit()   # 模拟销毁路径（测试完即弃）
+page_from_plugin.deleteLater()
 
 # ====================================================================
 # B. 纯函数层
@@ -221,7 +249,7 @@ rep, err = plug.parse_reply({"ok": True, "status": 200,
 check("B8 parse_reply 提取 content", rep == "答复" and err is None)
 _, err401 = plug.parse_reply({"ok": False, "status": 401, "body": "",
                               "error": "HTTP 401"})
-check("B9 parse_reply 401 提示 key", err401 and "key" in err401)
+check("B9 parse_reply 401 提示本地推理", err401 and "本地推理" in err401)
 _, err404 = plug.parse_reply({"ok": False, "status": 404, "body": "",
                               "error": "HTTP 404"})
 check("B10 parse_reply 404 提示地址", err404 and "base_url" in err404)
@@ -229,7 +257,7 @@ _, errbad = plug.parse_reply({"ok": True, "status": 200, "body": "not-json"})
 check("B11 parse_reply 坏 JSON 归一错误", errbad and "协议" in errbad)
 
 # ====================================================================
-# C. 真实对话框（假桥捕获请求；对话框代码路径全真）
+# C. 真实页面（假桥捕获请求；页面代码路径全真）
 # ====================================================================
 captured = []
 
@@ -244,7 +272,7 @@ def fake_bridge(url, headers, body, timeout, on_done):
     return True
 
 
-dlg_ctx = PluginContext(
+page_ctx = PluginContext(
     logger=_logger, config=config.as_dict(),
     show_toast=lambda *a, **k: None,
     data=plugin_data,
@@ -253,68 +281,174 @@ dlg_ctx = PluginContext(
     http_post_async=fake_bridge,
 ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), ["network"])
 
-dlg = plug.ChatDialog(dlg_ctx)
-check("C1 对话框构造不崩（真实 MainWindow host）", dlg is not None)
-dlg.show()
+page = plug.AiChatPage(page_ctx)
+check("C1 页面构造不崩（真实 MainWindow host）", page is not None)
+page.show()
 pump()
-check("C2 欢迎气泡已在流里", dlg._stream.count() == 2)   # stretch + 1 卡
+check("C2 欢迎气泡已在流里", page._stream.count() == 2)   # stretch + 1 卡
 
-check("C3 设置卡默认收起", not dlg._settings_card.isVisible())
-dlg._toggle_settings()
+check("C3 设置卡默认收起", not page._settings_card.isVisible())
+page._toggle_settings()
 pump()
 check("C4 设置卡可展开（动态显隐给了 parent，不崩）",
-      dlg._settings_card.isVisible())
-dlg._toggle_settings()
+      page._settings_card.isVisible())
+page._toggle_settings()
 
-dlg.send_quick("tasks", "请总结我的任务")
+# ---- 快捷指令 ----
+page.send_quick("tasks", "请总结我的任务")
 pump(50)
 check("C5 快捷指令经桥发出：URL 正确",
       captured and captured[0]["url"].endswith("/chat/completions"),
       captured[0]["url"] if captured else "无请求")
 b = captured[0]["body"]
-check("C6 请求体含 system 提示词 + 用户消息 + 数据",
+check("C6 请求体含 system 提示词 + 用户消息 + 真实宿主数据",
       b["messages"][0]["role"] == "system"
       and "截止周五的交付" in b["messages"][-1]["content"]
       and "AI 助手" in b["messages"][0]["content"])
 check("C7 本地 key 空时不带 Authorization",
       "Authorization" not in captured[0]["headers"])
 check("C8 busy 态已恢复 + AI 气泡出现",
-      not dlg._busy and dlg._stream.count() == 4)
+      not page._busy and page._stream.count() == 4)
 check("C9 成功轮次落进历史（user+assistant 成对）",
-      len(dlg._history) == 2
-      and dlg._history[0]["role"] == "user"
-      and dlg._history[1]["content"] == "测试回复 ok")
+      len(page._history) == 2
+      and page._history[0]["role"] == "user"
+      and page._history[1]["content"] == "测试回复 ok")
 
-dlg._clear_chat()
+# ---- Enter 发送 / Shift+Enter 换行 ----
+n_before = len(captured)
+page._input.setPlainText("你好")
+send_key(page._input, Qt.Key.Key_Return)          # 无 Shift → 发送
+pump(50)
+check("C10 Enter 直发（不经按钮）",
+      len(captured) == n_before + 1 and page._input.toPlainText() == "")
+send_key(page._input, Qt.Key.Key_Return,
+         Qt.KeyboardModifier.ShiftModifier)       # Shift → 换行
+pump(50)
+check("C11 Shift+Enter 只换行不发送",
+      len(captured) == n_before + 1
+      and "\n" in page._input.toPlainText())
+page._input.clear()
+
+# ---- 保存并测试连接（用户要求：确定按钮 + 反馈）----
+page._status.clear()
+page._save_and_test()
+pump(50)
+check("C12 保存并测试：探活请求 max_tokens=1",
+      captured and captured[-1]["body"].get("max_tokens") == 1)
+check("C13 保存并测试：成功反馈 ✓ + 按钮复位可点",
+      "✓" in page._status.text()
+      and page._save_btn.isEnabled()
+      and page._save_btn.text() == "保存并测试连接",
+      page._status.text())
+
+# ---- 失败反馈（桥返回失败 → ✗ + 错误提示）----
+captured_fail = []
+
+
+def failing_bridge(url, headers, body, timeout, on_done):
+    on_done({"ok": False, "status": 401, "body": "",
+             "error": "HTTP 401", "url": url})
+    return True
+
+
+page._ctx._http_post_async = failing_bridge     # 临时换假桥
+page._save_and_test()
+pump(50)
+check("C14 保存并测试：失败反馈 ✗ + 提示 + 按钮复位",
+      "✗" in page._status.text() and page._save_btn.isEnabled())
+page._ctx._http_post_async = fake_bridge        # 换回来
+
+# ---- 本地服务状态机（不真启动：假路径 → error）----
+plug.LOCAL_SERVER.start(page_ctx, "no-such.exe", "no-such.gguf", 8093)
+check("C15 本地服务启动校验：假 exe 路径 → error 状态",
+      plug.LOCAL_SERVER.status == "error"
+      and "程序不存在" in plug.LOCAL_SERVER.detail,
+      f"{plug.LOCAL_SERVER.status}/{plug.LOCAL_SERVER.detail}")
+listeners_n0 = len(plug.LOCAL_SERVER._listeners)
+page.destroyed.emit()          # 触发退订（真实销毁路径的等价操作）
+listeners_n1 = len(plug.LOCAL_SERVER._listeners)
+check("C16 页面销毁退订本地服务 listener（防死引用累积）",
+      listeners_n1 == listeners_n0 - 1,
+      f"{listeners_n0} -> {listeners_n1}")
+
+# 就绪状态自动接后端（新页面重新挂 listener 验证页面响应）
+page2 = plug.AiChatPage(page_ctx)
+page2.show()
+plug.LOCAL_SERVER.port = 8093     # 模拟 start 成功后的状态（假路径未走到赋值）
+plug.LOCAL_SERVER._emit("ready", "本地服务就绪（127.0.0.1:8093）")
 pump()
-check("C10 清空对话：历史与气泡都清（欢迎语重新出现）",
-      dlg._history == [] and dlg._stream.count() == 2)
+check("C17 ready → 按钮变「停止」+ URL 自动切本地 8093",
+      page2._local_btn.text() == "停止本地服务"
+      and page2._url_edit.text() == "http://127.0.0.1:8093/v1",
+      f"{page2._local_btn.text()}/{page2._url_edit.text()}")
+plug.LOCAL_SERVER._emit("stopped", "")   # 复位，别污染后面
 
-dlg._url_edit.setText("http://127.0.0.1:8080/v1")
-dlg._key_edit.setText("sk-test")
-dlg._model_edit.setText("qwen3-4b")
-dlg._collect_settings()
-cfg_path = os.path.join(dlg_ctx.data_dir, "config.json")
+# ---- 清空 + 配置落盘 ----
+page2._clear_chat()
+pump()
+check("C18 清空对话：历史与气泡都清（欢迎语重新出现）",
+      page2._history == [] and page2._stream.count() == 2)
+
+page2._url_edit.setText("http://127.0.0.1:8080/v1")
+page2._key_edit.setText("sk-test")
+page2._model_edit.setText("qwen3-4b")
+page2._collect_settings()
+cfg_path = os.path.join(page_ctx.data_dir, "config.json")
 stored = json.load(open(cfg_path, encoding="utf-8"))
-check("C11 配置落盘 data_dir/config.json",
+check("C19 配置落盘 data_dir/config.json",
       stored["base_url"] == "http://127.0.0.1:8080/v1"
       and stored["api_key"] == "sk-test", str(stored))
-dlg.close()
+page2.deleteLater()
+page.deleteLater()
 
 # ====================================================================
-# D. light / dark 双主题真截图（各自真实 MainWindow 作 host）
+# E. 页面注入链路（register_plugin_page / show_plugin_page / last_page）
+# ====================================================================
+page3 = plug.AiChatPage(page_ctx)
+idx1 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page3)
+check("E1 插件页注入：物理索引 ≥ 10（固定页 0-9 之外）", idx1 >= 10, str(idx1))
+check("E2 侧栏出现该页面按钮（插在设置按钮之前）",
+      win._nav_btns.get(PAGE_KEY) is not None)
+
+# 幂等：重复注册（rescan 重建路径）= 新 widget 换旧 widget，索引不变
+page4 = plug.AiChatPage(page_ctx)
+idx2 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page4)
+check("E3 幂等注册：同 key 索引不变 + stack 里是新页面",
+      idx2 == idx1 and win._stack.widget(idx1) is page4,
+      f"{idx1} -> {idx2}")
+
+ok = win.show_plugin_page(PAGE_KEY)
+pump(50)
+check("E4 show_plugin_page 切页成功且 currentIndex 正确",
+      ok and win._stack.currentIndex() == idx1,
+      f"ok={ok} cur={win._stack.currentIndex()}")
+check("E5 插件页不写入 last_page_index（config 上限 9）",
+      config.get("last_page_index", 0) != idx1,
+      str(config.get("last_page_index", 0)))
+check("E6 未知 key / 固定页 key 被拒绝",
+      win.show_plugin_page("plugin:no-such") is False
+      and win.show_plugin_page("plugin:main") is False)
+page3.deleteLater()
+page4.deleteLater()
+
+# ====================================================================
+# D. light / dark 双主题真截图（页面嵌进真实 MainWindow 作 host）
 # ====================================================================
 shots = os.path.join(ROOT, "build", "shots")
 os.makedirs(shots, exist_ok=True)
 saved = []
 for theme in ("light", "dark"):
     config.set("theme", theme)
+    # NAV_PAGE_INDEX/NAV_PAGE_TITLES 是模块级单例：前面的窗口实例已注册过
+    # 插件页，多实例下会串台（新窗口走幂等分支却把按钮插进旧窗口侧栏）。
+    # 产品单实例运行无此问题；离屏多实例测试需先清掉全局注册痕迹。
+    _mw.NAV_PAGE_INDEX.pop(PAGE_KEY, None)
+    _mw.NAV_PAGE_TITLES.pop(PAGE_KEY, None)
     win_t = MainWindow(task_mgr, note_mgr, frag_mgr, docx_mgr, config,
                        clip, temp_mgr)
     win_t.resize(1000, 760)
     win_t.show()
     pump(300)
-    # 关键：host 必须是**这个**主题的主窗口（ctx.parent_window 决定取主题）
     ctx_t = PluginContext(
         logger=_logger, config=config.as_dict(),
         show_toast=lambda *a, **k: None,
@@ -323,16 +457,22 @@ for theme in ("light", "dark"):
         parent_window=lambda w=win_t: w,
         http_post_async=fake_bridge,
     ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), ["network"])
-    dlg_t = plug.ChatDialog(ctx_t)
-    dlg_t.show()
+    page_t = plug.AiChatPage(ctx_t)
+    # 真实时序：先注入主窗口（reparent 到 QSS 作用域内）再显示页面；
+    # 反过来先 show 会让页面先成为无 QSS 祖先的顶层窗口，离屏下样式残留
+    page_t._toggle_settings()          # 展开设置卡：截图信息量更足
+    win_t.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page_t)
+    win_t.show_plugin_page(PAGE_KEY)
     pump(300)
     check(f"D-{theme} host 主题=当前主题",
-          getattr(dlg_t._host, "current_theme", "") == theme,
-          getattr(dlg_t._host, "current_theme", None))
+          getattr(win_t, "current_theme", "") == theme,
+          getattr(win_t, "current_theme", None))
     path = os.path.join(shots, f"ai_assistant_{theme}.png")
-    if dlg_t.grab().save(path):
+    # 全窗 grab：对刚 reparent 的子件单独 grab，离屏下 QSS 合成不完整
+    # （实测 dark 下字色残留 light 态），真实显示无此问题
+    if win_t.grab().save(path):
         saved.append(theme)
-    dlg_t.close()
+    page_t.deleteLater()
     win_t.close()
     pump(100)
 check("D1 light/dark 双主题截图落盘 build/shots/", saved == ["light", "dark"],

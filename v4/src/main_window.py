@@ -1653,6 +1653,56 @@ class MainWindow(QWidget):
         """插件加载器（未注入时为 None；面板按 None 渲染空态）"""
         return getattr(self, "_plugin_loader", None)
 
+    # ---- 插件页面注入（2026-09-27：manifest.page → 主窗口导航页） ----
+    def register_plugin_page(self, key: str, title: str, widget) -> int:
+        """注册插件提供的导航页面（knowledge_ball 对页面插件调用）。
+
+        - 物理索引 = QStackedWidget 追加到末尾（0-9 为固定页，插件页 10+）
+        - 侧栏按钮插在「设置」之前；插件页**不参与**拖动换位、不写入
+          ``last_page_index``（config 范围上限 9，越界写入会被静默丢弃）
+        - **幂等**：同一 key 重复注册（插件中心「重新扫描」会重跑装配）
+          只替换页面内容，索引与按钮保持稳定，旧页面被安全销毁
+        返回物理索引。
+        """
+        old_index = NAV_PAGE_INDEX.get(key)
+        if old_index is not None:
+            old = self._stack.widget(old_index)
+            if old is not None:
+                self._stack.removeWidget(old)
+                old.deleteLater()
+            self._stack.insertWidget(old_index, widget)
+            # 侧栏按钮已存在：只更新文案
+            NAV_PAGE_TITLES[key] = title
+            for b, k in self._nav_btns.items():
+                if k == key:
+                    b.setText(title)
+            return old_index
+
+        index = self._stack.count()
+        NAV_PAGE_TITLES[key] = title
+        NAV_PAGE_INDEX[key] = index
+        self._stack.addWidget(widget)
+        btn = self._make_nav_button(title, index)   # 无 nav_key → 不参与换位
+        self._nav_btns[key] = btn
+        lay = self._nav_btns_layout
+        lay.insertWidget(lay.indexOf(self._settings_btn), btn)
+        return index
+
+    def show_plugin_page(self, key: str) -> bool:
+        """打开主窗口并切到插件页面（插件热键动作经 ctx.parent_window()
+        调用的**约定公开入口**，与 show_xxx_page 系列同款行为）。
+
+        key = 注册时的 ``plugin:<插件id>``；未知 key 返回 False。
+        """
+        idx = NAV_PAGE_INDEX.get(key)
+        if idx is None or idx < 10:      # 只允许切到插件页段
+            return False
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._switch_page(idx)
+        return True
+
     # ---- 设置业务方法 ----
     # ==================================================================
     # 页面切换
@@ -1674,9 +1724,12 @@ class MainWindow(QWidget):
         """记录当前页面索引到配置（D3：记住上次页面功能）。
 
         - 说明页（索引 HELP_PAGE_INDEX=8）不记录，避免下次启动直接落在说明页
+        - 插件页（物理索引 > LAST_PAGE_INDEX_MAX）不记录：config 的
+          ``_CONFIG_RANGES`` 对 last_page_index 有上限校验，越界值会被
+          静默丢弃——显式跳过，避免每次切页都做一次注定失败的写盘
         - 值未变化时不写盘，避免频繁 I/O
         """
-        if index == HELP_PAGE_INDEX:
+        if index == HELP_PAGE_INDEX or index > LAST_PAGE_INDEX_MAX:
             return
         try:
             if self._config.get("last_page_index", 0) != index:
