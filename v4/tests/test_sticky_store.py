@@ -155,3 +155,94 @@ def test_missing_file_starts_empty(tmp_path, note_ids):
     store = StickyStore(str(tmp_path / "none.json"), note_ids=lambda: note_ids["ids"])
     assert store.count() == 0
     assert store.get_all() == []
+
+
+# ---------------- 任务锚点（kind="task"）----------------
+@pytest.fixture()
+def task_ids():
+    """模拟 TaskManager：可增删的 task_id 集合"""
+    return {"ids": {10, 20}}
+
+
+@pytest.fixture()
+def dual_store(tmp_path, note_ids, task_ids):
+    s = StickyStore(str(tmp_path / "stickies.json"),
+                    note_ids=lambda: note_ids["ids"],
+                    task_ids=lambda: task_ids["ids"])
+    yield s
+
+
+def test_default_kind_is_note(dual_store):
+    """不传 kind → 兼容为笔记便签（旧调用路径零改动）"""
+    rec = dual_store.upsert(1, 0, 0, 280, 200)
+    assert rec.kind == "note"
+    assert dual_store.get_by_anchor("note", 1) is rec
+    assert dual_store.get_by_anchor("task", 1) is None
+
+
+def test_task_kind_roundtrip(tmp_path, note_ids, task_ids):
+    """task 便签：独立 id 空间，重启后 kind 与几何一致"""
+    p = str(tmp_path / "s.json")
+    s1 = StickyStore(p, note_ids=lambda: note_ids["ids"],
+                     task_ids=lambda: task_ids["ids"])
+    rec = s1.upsert(10, 11, 22, 280, 200, kind="task")
+    assert rec.kind == "task"
+    s2 = StickyStore(p, note_ids=lambda: note_ids["ids"],
+                     task_ids=lambda: task_ids["ids"])
+    got = s2.get_by_anchor("task", 10)
+    assert got is not None and got.kind == "task"
+    assert (got.x, got.y) == (11, 22)
+    # 同一数字 id 在两种 kind 下互不串扰
+    assert s2.get_by_anchor("note", 10) is None
+
+
+def test_same_id_two_kinds_coexist(dual_store):
+    """note_id=1 与 task_id=1 可同时各钉一条（kind 隔离 id 空间）"""
+    n = dual_store.upsert(1, 0, 0, 280, 200)
+    t = dual_store.upsert(1, 30, 30, 280, 200, kind="task")
+    assert n.sticky_id != t.sticky_id
+    assert dual_store.count() == 2
+    assert dual_store.get_by_anchor("task", 1) is t
+
+
+def test_task_orphan_purged(dual_store, task_ids):
+    """任务被删后其便签记录按 kind 精确清理，笔记记录不受影响"""
+    dual_store.upsert(1, 0, 0, 280, 200)                      # note
+    dual_store.upsert(10, 0, 0, 280, 200, kind="task")        # task
+    task_ids["ids"].discard(10)
+    assert dual_store.purge_orphans() == 1
+    assert dual_store.count() == 1
+    assert dual_store.get_by_anchor("note", 1) is not None
+    assert dual_store.get_by_anchor("task", 10) is None
+
+
+def test_task_orphan_purged_without_task_ids(tmp_path, note_ids):
+    """store 不支持任务（task_ids=None）→ 存量 task 记录加载即清"""
+    p = str(tmp_path / "s.json")
+    data = {"stickies": [{
+        "sticky_id": 1, "note_id": 10, "x": 0, "y": 0,
+        "w": 280, "h": 200, "kind": "task",
+    }], "next_id": 2}
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    s = StickyStore(p, note_ids=lambda: note_ids["ids"])   # 无 task_ids
+    assert s.count() == 0
+
+
+def test_kind_invalid_falls_back_to_note():
+    rec = Sticky.from_dict({"sticky_id": 1, "note_id": 5,
+                            "kind": "bogus"})
+    assert rec.kind == "note"
+
+
+def test_legacy_record_without_kind_is_note(tmp_path, note_ids):
+    """旧版 stickies.json（无 kind 键）加载后语义不变"""
+    p = str(tmp_path / "s.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump({"stickies": [{
+            "sticky_id": 1, "note_id": 2, "x": 5, "y": 6,
+            "w": 280, "h": 200,
+        }], "next_id": 2}, f)
+    s = StickyStore(p, note_ids=lambda: note_ids["ids"])
+    rec = s.get_by_note_id(2)
+    assert rec is not None and rec.kind == "note"
