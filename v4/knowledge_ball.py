@@ -611,7 +611,7 @@ class FloatingBall(QWidget):
         self._card_window.card_drag_finished.connect(self._on_card_drag_finished)
 
     def _init_context_menu(self):
-        """右键菜单骨架：打开主窗口 | [插件动作] | 退出程序 [| 运行时追加项…]"""
+        """右键菜单骨架：打开主窗口 | [番茄钟项] | [插件动作] | 追加项 | 退出程序"""
         self._menu = QMenu(self)
         self._menu.setStyleSheet(get_menu_qss(self._theme))
         # 动作注册表与插件上下文（由 main() 注入；未注入时菜单退化为内置两项）
@@ -624,9 +624,9 @@ class FloatingBall(QWidget):
     def _rebuild_context_menu(self):
         """按当前注册表重建右键菜单。
 
-        顺序：打开主窗口 → [插件动作] → 退出程序 → 运行时追加项。
-        追加项的相对位置与分隔线规则与重构前完全一致
-        （截图钉屏仍排在最后，虚拟菜单项个数不变）。
+        顺序：打开主窗口 → [番茄钟项] → [插件动作] → 运行时追加项 → 退出程序。
+        「退出程序」固定垫底（2026-09-27 用户要求）；
+        截图钉屏等追加项保持插在退出程序之前。
         """
         self._menu.clear()
 
@@ -658,14 +658,7 @@ class FloatingBall(QWidget):
                     lambda _checked=False, aid=act.id: self._trigger_action(aid))
                 self._menu.addAction(qa)
 
-        self._menu.addSeparator()
-
-        # 退出程序
-        exit_action = QAction("退出程序", self._menu)
-        exit_action.triggered.connect(self._request_quit)
-        self._menu.addAction(exit_action)
-
-        # 运行时追加项（add_context_action）
+        # 运行时追加项（add_context_action，如截图钉屏）
         for entry in self._extra_context_actions:
             actions = self._menu.actions()
             if entry["separator_before"] and actions and not actions[-1].isSeparator():
@@ -674,6 +667,14 @@ class FloatingBall(QWidget):
             act.triggered.connect(entry["callback"])
             self._menu.addAction(act)
             entry["action"] = act
+
+        # 退出程序（固定在最底部）
+        actions = self._menu.actions()
+        if actions and not actions[-1].isSeparator():
+            self._menu.addSeparator()
+        exit_action = QAction("退出程序", self._menu)
+        exit_action.triggered.connect(self._request_quit)
+        self._menu.addAction(exit_action)
 
     def _trigger_action(self, action_id):
         """触发插件动作（插件的异常由注册表兜住，不会波及悬浮球）"""
@@ -798,6 +799,17 @@ class FloatingBall(QWidget):
         self._pomodoro.bound_task_id = bound_task_id
         self._pomodoro.bound_title = str(title or "")
         self._pomodoro.start(PHASE_FOCUS)
+
+    def pomodoro_busy(self) -> bool:
+        """是否有番茄钟计时会话在身（running/paused 均算）。
+
+        期间悬浮球不参与全屏自动让位（用户约定 2026-09-27：
+        计时时环在显示倒计时进度，藏起来就看不到了）。
+        """
+        t = getattr(self, "_pomodoro", None)
+        return (bool(getattr(self, "_pomodoro_enabled", False))
+                and t is not None
+                and t.state in (STATE_RUNNING, STATE_PAUSED))
 
     def _pomodoro_toggle(self):
         """菜单「开始/暂停/继续」三态入口。"""
@@ -2242,12 +2254,33 @@ def main():
             ball.set_fullscreen_hidden(False)
 
     def _on_fullscreen_changed(is_fs: bool):
-        """前台全屏应用出现/退出 → 悬浮球自动让位/恢复"""
+        """前台全屏应用出现/退出 → 悬浮球自动让位/恢复
+
+        例外：番茄钟计时中（含暂停）不让位——球上进度环在显示
+        倒计时，藏起来就看不到剩余时间了（用户约定 2026-09-27）。
+        """
+        if is_fs and ball.pomodoro_busy():
+            get_logger().info("全屏检测：番茄钟计时中，悬浮球保持可见不让位")
+            return
         ball.set_fullscreen_hidden(is_fs)
         get_logger().info(f"全屏检测：{'进入全屏，悬浮球让位' if is_fs else '退出全屏，悬浮球恢复'}")
 
     fs_watcher.fullscreen_changed.connect(_on_fullscreen_changed)
     _apply_fullscreen_watch()
+
+    def _sync_fullscreen_for_pomodoro(_state: str):
+        """番茄钟开始/结束 → 与全屏让位状态对齐。
+
+        计时开始时若正处于全屏，取消让位把球亮出来；
+        计时结束/停止时若仍处于全屏，补做让位。
+        """
+        if not fs_watcher.is_running() or not fs_watcher.is_fullscreen():
+            return
+        ball.set_fullscreen_hidden(not ball.pomodoro_busy())
+
+    _pom_timer = getattr(ball, "_pomodoro", None)
+    if _pom_timer is not None:
+        _pom_timer.state_changed.connect(_sync_fullscreen_for_pomodoro)
 
     # ---- 托盘图标点击 → 切换主窗口显示/隐藏（不退出程序）----
     def _on_tray_activated(reason):

@@ -1,16 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
 ====================================================================
-FloatPulse v3 打包配置（onedir + 轻量过滤）
+FloatPulse v4 打包配置（onedir + 轻量过滤，2026-09-27 自 v3 切换）
 ====================================================================
 使用方式（在项目根目录执行）：
 
-    python -m PyInstaller --noconfirm --clean FloatPulse.spec
+    python -m PyInstaller --noconfirm --clean --distpath dist2 --workpath build2 FloatPulse.spec
 
 产物：
-    dist/FloatPulse/FloatPulse.exe   主程序（含图标）
-    dist/FloatPulse/_internal/       PyQt6 等依赖（已剔无用大件）
-    打包后需手动补「知识库.docx」到 exe 同级（用户数据，外部可改）
+    dist2/FloatPulse/FloatPulse.exe   主程序（含图标）
+    dist2/FloatPulse/_internal/       PyQt6 等依赖（已剔无用大件）
+    打包后需手动补「知识库.docx」到 exe 同级的 float_data/ 文件夹内
+    （用户数据，外部可改；float_data/ 其余内容运行时自动生成）
 
 轻量过滤说明（纯 Widgets 应用，全部冒烟兜底）：
     - opengl32sw.dll   19.7MB 软件 OpenGL 渲染器，仅 QML/3D 需要
@@ -30,12 +31,12 @@ except NameError:
     _SPEC_DIR = os.getcwd()
 
 _ROOT = _SPEC_DIR
-_V3 = os.path.join(_ROOT, "v3")
+_SRC = os.path.join(_ROOT, "v4")
 _ICON = os.path.join(_ROOT, "FloatPulse.ico")
 
 a = Analysis(
-    [os.path.join(_V3, "knowledge_ball.py")],
-    pathex=[_V3],
+    [os.path.join(_SRC, "knowledge_ball.py")],
+    pathex=[_SRC],
     binaries=[],
     datas=[(_ICON, ".")],
     hiddenimports=[],

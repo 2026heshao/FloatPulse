@@ -483,6 +483,13 @@ QLineEdit#stepValue:focus {
     border: none;
     border-bottom: 1px solid $primary;
 }
+/* 步进器灰化态（自动隐藏总开关关闭时其秒数步进器整体 setEnabled(False)）：
+   stepValue 有专属 objectName，特化规则会盖掉通用的 QLineEdit:disabled，
+   必须单独声明，否则数字/单位仍是正常色，看不出已被禁用 */
+QLineEdit#stepValue:disabled,
+QLabel#fieldLabel:disabled {
+    color: $text_disabled;
+}
 
 /* ---- 滑杆：细槽 + 圆形手柄 ---- */
 QSlider {

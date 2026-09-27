@@ -169,6 +169,7 @@ class MainWindow(QWidget):
     asset_limits_changed = pyqtSignal(int, int)  # 临时素材上限变更（max_count, max_days）
     anim_speed_changed = pyqtSignal(float)       # 悬浮球动画速度变更
     auto_hide_seconds_changed = pyqtSignal(int)  # 悬浮球空闲吸边隐藏秒数变更
+    auto_hide_enabled_changed = pyqtSignal(bool)  # 悬浮球空闲吸边自动隐藏总开关变更
     ball_size_changed = pyqtSignal(int)          # 悬浮球球体直径变更
     hide_on_fullscreen_changed = pyqtSignal(bool)  # 全屏应用自动隐藏开关变更
     quick_capture_changed = pyqtSignal()         # 快速捕捉设置（开关/热键）变更

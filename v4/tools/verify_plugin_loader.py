@@ -6,7 +6,7 @@
   B 合法插件 → 动作进注册表、菜单出现、QAction.trigger() 真能驱动插件 run()
   C 坏插件（requires=requests / 抢核心热键 / 抢已占热键）→ 全部跳过 + 日志有记录
   D .fpplug（zip）→ 自动解压后加载，原文件保留
-  E 右键菜单顺序：打开主窗口 | [插件动作] | 退出程序 | 运行时追加项（截图钉屏仍在最后）
+  E 右键菜单顺序：打开主窗口 | [番茄钟项] | [插件动作] | 运行时追加项 | 退出程序（固定垫底）
   F deactivate → 菜单回到无插件基线；activate → 恢复且模块未重导入
   G 插件 run() 抛异常 → 球不崩（注册表兜住），菜单/其他插件不受影响
 
@@ -197,15 +197,16 @@ ball.set_action_registry(registry, ctx)
 texts = [a.text() for a in ball._menu.actions()]
 print(f"    菜单项：{texts}", flush=True)
 
-expected = ["🖥  打开主窗口", "", "屏幕取色", "压缩包动作", "", "退出程序",
-            "", "✂ 截图钉屏"]
+expected = ["🖥  打开主窗口", "", "🍅 开始专注", "", "屏幕取色", "压缩包动作",
+            "", "✂ 截图钉屏", "", "退出程序"]
 check("E1 插件动作插在「打开主窗口」与「退出程序」之间", texts == expected,
       f"{texts}")
-check("E2 运行时追加项（截图钉屏）仍在最后，位置未变",
-      texts[-1] == "✂ 截图钉屏" and texts[-2] == "")
+check("E2 退出程序固定垫底，截图钉屏插在它之前",
+      texts[-1] == "退出程序" and texts[-3] == "✂ 截图钉屏",
+      f"{texts[-4:]}")
 
-# 基线（无插件）与历史行为一致
-baseline = ["🖥  打开主窗口", "", "退出程序", "", "✂ 截图钉屏"]
+# 基线（无插件）与设计一致：打开主窗口 | 🍅 开始专注 | 截图钉屏 | 退出程序
+baseline = ["🖥  打开主窗口", "", "🍅 开始专注", "", "✂ 截图钉屏", "", "退出程序"]
 
 # 通过菜单 QAction 真触发插件 run()
 action_item = [a for a in ball._menu.actions() if a.text() == "屏幕取色"]
