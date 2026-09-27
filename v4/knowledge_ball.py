@@ -1677,6 +1677,10 @@ class FloatingBall(QWidget):
                 self._hover_check_timer.stop()
         elif not self._card_window.is_locked():
             if self._card_window.isVisible():
+                # 卡片已弹出但停在别的模式（任务/碎片页）时先切回卡片模式，
+                # 否则 next_card() 只改了内容，界面停在原页 → 点击看似无反馈（B9）
+                if self._card_window._last_mode != "card":
+                    self._card_window._switch_mode("card")
                 self._card_window.next_card()
             else:
                 self._card_window.show_next_random()
