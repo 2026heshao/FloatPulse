@@ -30,12 +30,14 @@
 ====================================================================
 """
 
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
     QStackedWidget, QButtonGroup,
     QListWidget, QListWidgetItem, QComboBox, QLineEdit, QTextEdit,
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
-    QFrame, QMessageBox, QMenu, QSplitter, QApplication,
+    QFrame, QMessageBox, QMenu, QSplitter, QApplication, QFileDialog,
     QScrollArea, QTableWidget, QTableWidgetItem,
     QAbstractItemView, QHeaderView, QInputDialog, QSlider,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
@@ -282,6 +284,59 @@ class MainWindow(QWidget):
     @sticky_manager.setter
     def sticky_manager(self, manager):
         self._sticky_manager = manager
+
+    # ==================================================================
+    # 导出到 Obsidian（唯一实现；设置页按钮与三个面板右键菜单共用）
+    # ==================================================================
+    def export_to_obsidian(self, interactive: bool = True):
+        """把笔记 / 碎片 / 任务**单向**导出为 Markdown 到 Obsidian vault。
+
+        - vault 路径取 ``config.obsidian_vault_path``；为空且 ``interactive``
+          → 弹目录选择框，选完记住；**取消则直接返回（不导出、不报错）**
+        - 导出范围取 ``config.export_notes / export_fragments / export_tasks``
+        - ``interactive`` 时用 show_toast 给轻提示（含文件数与失败条数）
+        - 导出是**只读操作**：不删改任何 json 数据；同名 md 按语义覆盖
+
+        :return: ``md_export.ExportResult``；用户取消选择目录时返回 ``None``
+        """
+        from src import md_export
+
+        vault = str(self._config.get("obsidian_vault_path", "") or "")
+        if not vault:
+            if not interactive:
+                return None
+            start_dir = os.path.expanduser("~")
+            vault = QFileDialog.getExistingDirectory(
+                self, "选择 Obsidian vault 目录", start_dir)
+            if not vault:
+                return None                  # 用户取消：不导出、不报错
+            self._config.set("obsidian_vault_path", vault)
+            self._config.save()
+
+        opts = {
+            "export_notes": bool(self._config.get("export_notes", True)),
+            "export_fragments": bool(self._config.get("export_fragments", True)),
+            "export_tasks": bool(self._config.get("export_tasks", True)),
+        }
+        result = md_export.export_all(
+            vault,
+            self._note_manager.get_all_notes(),
+            self._fragment_manager.get_all_fragments(),
+            self._task_manager.get_all_tasks(),
+            opts,
+        )
+
+        if interactive:
+            if result.errors:
+                _ident, reason = result.errors[0]
+                self.show_toast(
+                    f"导出完成：共 {len(result.files_written)} 个文件，"
+                    f"失败 {len(result.errors)} 条（{reason}）", 4200)
+            else:
+                self.show_toast(
+                    f"已导出到 Obsidian：共 {len(result.files_written)} 个文件",
+                    3200)
+        return result
 
     def _on_fragments_trimmed(self, count: int):
         """碎片池超限自动淘汰时通报用户（此前是静默删除，用户不知道数据少了）"""

@@ -9,11 +9,13 @@
 软件导航页面实例。
 """
 
+import os
+
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame,
     QLineEdit,
-    QMessageBox,
+    QMessageBox, QFileDialog,
 )
 from PyQt6.QtCore import Qt
 
@@ -351,6 +353,41 @@ class SettingsPanel(QWidget):
         add_row(gv, "任务到期提醒", "启动时及每日 9:00 托盘气泡，点击直达任务页",
                 self._set_task_reminder, last=True)
 
+        # ================= 7. 导出 =================
+        # 单列一组而非并入现有组：现有六组各管一类"行为配置"，
+        # 导出是「数据出口」而非行为开关，且需要承载路径 + 操作两个控件，
+        # 并入任一组都会破坏该组"同类项相邻"的语义。
+        gv = group(v, "📤 导出")
+
+        vault_ctl = QWidget()
+        vault_row = QHBoxLayout(vault_ctl)
+        vault_row.setContentsMargins(0, 0, 0, 0)
+        vault_row.setSpacing(8)
+        self._set_vault_path = QLabel(self._vault_path_text())
+        self._set_vault_path.setObjectName("hintLabel")
+        self._set_vault_path.setMinimumWidth(170)
+        self._set_vault_path.setToolTip(
+            "导出目录；导出结果写入其下的 FloatPulse 文件夹（笔记 / 碎片 / 任务）")
+        vault_row.addWidget(self._set_vault_path)
+        self._set_vault_choose = QPushButton("更改目录")
+        self._set_vault_choose.setObjectName("secondaryBtn")
+        self._set_vault_choose.setFixedHeight(30)
+        self._set_vault_choose.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._set_vault_choose.clicked.connect(self._on_choose_vault_dir)
+        vault_row.addWidget(self._set_vault_choose)
+        add_row(gv, "导出位置", "Obsidian vault 根目录；内容写入其下的 FloatPulse 文件夹",
+                vault_ctl)
+
+        self._set_export_btn = QPushButton("导出到 Obsidian")
+        self._set_export_btn.setObjectName("secondaryBtn")
+        self._set_export_btn.setFixedHeight(30)
+        self._set_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._set_export_btn.setToolTip(
+            "把笔记 / 碎片 / 任务导出为 Markdown；重复导出覆盖同名文件")
+        self._set_export_btn.clicked.connect(self._on_export_clicked)
+        add_row(gv, "一键导出", "笔记 / 碎片 / 任务导出为 Markdown，重复导出覆盖同名文件",
+                self._set_export_btn, last=True)
+
         # ---- 恢复默认：全局操作，不属于任何分组 ----
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -505,6 +542,9 @@ class SettingsPanel(QWidget):
             self._set_asset_thumb.blockSignals(False)
         if hasattr(self, '_set_hide_fullscreen'):
             self._set_hide_fullscreen.setChecked(self._config.get("hide_on_fullscreen", True))
+        if hasattr(self, '_set_vault_path'):
+            # 导出目录可能被「恢复默认」清空或被别的入口改写，刷新时同步展示
+            self._set_vault_path.setText(self._vault_path_text())
 
     def _on_set_theme(self, theme_name: str):
         """设置面板切换主题"""
@@ -714,6 +754,36 @@ class SettingsPanel(QWidget):
                          int(self._set_pomodoro_break.value()))
         self._config.save()
         self._host.pomodoro_changed.emit()
+
+    # ---- 导出到 Obsidian ----
+    def _vault_path_text(self) -> str:
+        """导出目录的展示文案：为空显示「未选择」，过长省略中段。"""
+        vault = str(self._config.get("obsidian_vault_path", "") or "")
+        if not vault:
+            return "未选择"
+        if len(vault) <= 30:
+            return vault
+        return vault[:14] + "..." + vault[-13:]
+
+    def _on_choose_vault_dir(self):
+        """选择 Obsidian vault 目录；用户取消则不改动任何状态。
+
+        仅记住路径，不触发导出——导出由「导出到 Obsidian」按钮或各面板
+        右键菜单发起（避免选完目录就意外开始写盘）。
+        """
+        cur = str(self._config.get("obsidian_vault_path", "") or "")
+        start = cur if cur and os.path.isdir(cur) else os.path.expanduser("~")
+        path = QFileDialog.getExistingDirectory(self, "选择 Obsidian vault 目录", start)
+        if not path:
+            return                          # 取消：不导出、不报错
+        self._config.set("obsidian_vault_path", path)
+        self._config.save()
+        self.refresh()
+
+    def _on_export_clicked(self):
+        """一键导出：转交宿主公开方法（提示与容错都在那里，避免逻辑分叉）"""
+        self._host.export_to_obsidian()
+        self.refresh()
 
     # 恢复默认设置时保留的键：属于用户数据/环境状态，不属于"设置"
     _RESET_PRESERVE_KEYS = (
