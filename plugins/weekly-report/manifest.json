@@ -1,0 +1,15 @@
+{
+  "id": "weekly-report",
+  "name": "日报 / 周报草稿",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "requires": ["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
+  "actions": [
+    {
+      "id": "weekly-report.draft",
+      "title": "📝 生成日报 / 周报草稿",
+      "hotkey": "Ctrl+Alt+W",
+      "menu": true
+    }
+  ]
+}

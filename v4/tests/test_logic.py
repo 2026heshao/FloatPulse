@@ -423,6 +423,68 @@ class TestTempAssetDedup:
 
 
 # ====================================================================
+# TempAssetManager：单文件体积上限闸门（优化调研清单 6.3）
+# ====================================================================
+class TestTempAssetSizeGate:
+    """超限文件必须在「算哈希 / 复制」之前被拒，不留副本、不占用 asset_id"""
+
+    @staticmethod
+    def _make_source(d, name, size_bytes):
+        p = os.path.join(d, name)
+        with open(p, "wb") as f:
+            f.write(b"x" * size_bytes)
+        return p
+
+    def test_oversize_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            am = tam.TempAssetManager(d, max_file_mb=1)
+            src = self._make_source(d, "big.bin", 2 * 1024 * 1024)
+            assert am.add_asset(src) == tam.REJECT_TOO_LARGE
+            assert am.count() == 0
+            # 素材目录里不得留下任何副本
+            assert os.listdir(am.get_assets_dir()) == []
+
+    def test_exact_limit_allowed(self):
+        """恰好等于上限不算超限（判据是 > 而非 >=）"""
+        with tempfile.TemporaryDirectory() as d:
+            am = tam.TempAssetManager(d, max_file_mb=1)
+            src = self._make_source(d, "exact.bin", 1024 * 1024)
+            assert am.add_asset(src) > 0
+
+    def test_zero_means_unlimited(self):
+        with tempfile.TemporaryDirectory() as d:
+            am = tam.TempAssetManager(d, max_file_mb=0)
+            src = self._make_source(d, "huge.bin", 3 * 1024 * 1024)
+            assert am.add_asset(src) > 0
+
+    def test_update_limits_applies_gate(self):
+        """设置页改上限后即时生效（无需重启）"""
+        with tempfile.TemporaryDirectory() as d:
+            am = tam.TempAssetManager(d, max_file_mb=5)
+            src = self._make_source(d, "mid.bin", 2 * 1024 * 1024)
+            assert am.add_asset(src) > 0
+            am.update_limits(max_file_mb=1)
+            assert am.get_max_file_mb() == 1
+            src2 = self._make_source(d, "mid2.bin", 2 * 1024 * 1024)
+            assert am.add_asset(src2) == tam.REJECT_TOO_LARGE
+            assert am.count() == 1
+
+    def test_reject_does_not_consume_id(self):
+        """被拒的文件不吃掉自增 id"""
+        with tempfile.TemporaryDirectory() as d:
+            am = tam.TempAssetManager(d, max_file_mb=1)
+            big = self._make_source(d, "b.bin", 2 * 1024 * 1024)
+            small = self._make_source(d, "s.txt", 10)
+            assert am.add_asset(big) == tam.REJECT_TOO_LARGE
+            assert am.add_asset(small) == 1
+
+    def test_config_default_matches_manager_default(self):
+        """config 默认值与管理器常量必须一致（防 2.4 类「两处默认值不同步」）"""
+        from src.config import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["temp_asset_max_file_mb"] == tam.DEFAULT_MAX_FILE_MB
+
+
+# ====================================================================
 # task_manager：task_state 状态判定（C3 口径统一）
 # ====================================================================
 class TestTaskState:
