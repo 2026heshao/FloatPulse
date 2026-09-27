@@ -22,7 +22,7 @@
   - clipboard_capture_images: 剪贴板中的图片是否自动存入临时素材池
   - main_window_geometry: 大窗口几何 "x,y,w,h"（空串 = 无记忆，启动用默认尺寸居中）
   - restore_last_page:    启动时是否恢复上次浏览的页面
-  - last_page_index:      最后浏览的页面索引（0-7，说明页 8 不记录）
+  - last_page_index:      最后浏览的页面索引（0..LAST_PAGE_INDEX_MAX，说明页 8 不记录）
   - close_to_tray:        关闭主窗口时最小化到托盘（不退出程序）
   - task_reminder_enabled: 任务到期提醒开关（启动时 + 每日 9:00 托盘气泡）
   - quick_capture_enabled: 全局快速捕捉条开关
@@ -74,7 +74,7 @@ DEFAULT_CONFIG = {
     "anim_speed":           1.0,          # 悬浮球动画速度档位（0.5-2.0，统一缩放动画时长）
     "ball_position":        None,         # 悬浮球最后保存位置 [x, y]
     "restore_last_page":    False,        # 启动时是否恢复上次浏览的页面
-    "last_page_index":      0,            # 最后浏览的页面索引（0-7）
+    "last_page_index":      0,            # 最后浏览的页面索引（0..LAST_PAGE_INDEX_MAX）
     "close_to_tray":        True,         # 关闭主窗口 → 最小化到托盘（False 沿用旧规则）
     "task_reminder_enabled": True,        # 任务到期提醒（托盘气泡）
     "quick_capture_enabled": True,        # 全局快速捕捉条
@@ -142,6 +142,11 @@ _CONFIG_TYPES = {
     "nav_order":            list,
 }
 
+# 主窗口「最后浏览页面」允许的最大物理索引。
+# 页面组成：0-6 面板 / 7 软件导航 / 8 说明页（不记录）/ 9 插件中心。
+# 新增页面时**必须同步抬高此值**，否则该页存不进配置（读取时越界丢弃）。
+LAST_PAGE_INDEX_MAX = 9
+
 # 配置项取值范围（数值类）
 _CONFIG_RANGES = {
     "clipboard_max_items":  (10, 10000),
@@ -155,8 +160,10 @@ _CONFIG_RANGES = {
     # 软件卡片尺寸：与主窗口设置页步进器范围 60-140（每档 4px）保持一致
     "app_card_size":        (60, 140),
     "anim_speed":           (0.5, 2.0),
-    # 主窗口页面索引：0-6 面板 + 7 软件导航（说明页 8 不记录）
-    "last_page_index":      (0, 7),
+    # 主窗口页面索引上限 = 最大物理索引（0-6 面板 + 7 软件导航 + 9 插件中心；
+    # 说明页 8 不记录）。页面增删时**必须同步这里**，否则新页存不进配置：
+    # 读取时 lo<=val<=hi 不满足会静默丢弃，表现为「启动时恢复不到该页」。
+    "last_page_index":      (0, LAST_PAGE_INDEX_MAX),
     # 悬浮球球体直径：与设置页 Stepper 范围 48-88 保持一致
     "ball_size":            (48, 88),
     # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
@@ -179,11 +186,15 @@ NAV_PAGE_KEYS = frozenset({
     "assets",      # 临时素材
     "apps",        # 软件导航
     "nav",         # 网址导航
+    "plugins",     # 插件中心（2026-09-27 新增，物理索引 9）
 })
 
 # 默认显示顺序（与未自定义时的历史左栏顺序一致）
 DEFAULT_NAV_ORDER = ["fragments", "tasks", "notes", "knowledge",
-                     "assets", "apps", "nav"]
+                     "assets", "apps", "nav", "plugins"]
+
+# 2026-09-27 之前的 7 键旧版顺序集（用于旧配置无损升级）
+_LEGACY_NAV_KEYS = NAV_PAGE_KEYS - {"plugins"}
 
 
 def sanitize_nav_order(raw, valid_keys=NAV_PAGE_KEYS):
@@ -192,8 +203,15 @@ def sanitize_nav_order(raw, valid_keys=NAV_PAGE_KEYS):
     - ``raw`` 非 list / 长度不符 / 含非法 key / 缺 key / 重复 → 返回 None
       （调用方回退默认顺序，不崩溃）
     - 合法 → 返回 list 副本
+    - **旧版兼容**：7 键旧排列（缺 plugins）→ 保留用户自定义顺序，
+      把 "plugins" 追加到末尾返回，不丢弃用户的排序偏好
     """
     if not isinstance(raw, list) or len(raw) != len(valid_keys):
+        # 旧版 7 键排列 → 追加 plugins 后放行
+        if (isinstance(raw, list) and len(raw) == len(_LEGACY_NAV_KEYS)
+                and all(isinstance(k, str) for k in raw)
+                and set(raw) == _LEGACY_NAV_KEYS):
+            return list(raw) + ["plugins"]
         return None
     if not all(isinstance(k, str) for k in raw):
         return None

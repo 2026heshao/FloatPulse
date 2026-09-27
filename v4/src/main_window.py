@@ -51,7 +51,9 @@ from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QPixmap, QShortcut, QK
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
-from src.config import sanitize_nav_order, DEFAULT_NAV_ORDER
+from src.config import (
+    sanitize_nav_order, DEFAULT_NAV_ORDER, LAST_PAGE_INDEX_MAX,
+)
 from src.glass import GlassPanel, NavIndicator
 from src.controls import ScreenToast
 from src.app_paths import find_icon_file, get_screen_geometry
@@ -79,7 +81,10 @@ NAV_PAGE_INDEX = {
     "assets": 4,       # 临时素材
     "nav": 5,          # 网址导航
     "apps": 7,         # 软件导航
+    "plugins": 9,      # 插件中心（2026-09-27 新增）
 }
+# 使用说明页的物理索引（QStackedWidget 第 9 个，F1 切换；不参与「记住上次页面」）
+HELP_PAGE_INDEX = 8
 # 各功能页按钮文案（key 固定，文案可随 UI 调整）
 NAV_PAGE_TITLES = {
     "fragments": "🧩  碎片工作台",
@@ -89,6 +94,7 @@ NAV_PAGE_TITLES = {
     "assets": "📎  临时素材",
     "apps": "🚀  软件导航",
     "nav": "🌐  网址导航",
+    "plugins": "🔌  插件中心",
 }
 # 拖拽换位：位移超过该值（像素）才进入拖拽，否则视为普通点击切页
 NAV_DRAG_THRESHOLD = 8
@@ -385,9 +391,9 @@ class MainWindow(QWidget):
         search_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         search_shortcut.activated.connect(self._open_global_search)
 
-        # Ctrl+1~7: 切到左栏显示顺序第 N 个功能页（快捷键跟随位置：
+        # Ctrl+1~8: 切到左栏显示顺序第 N 个功能页（快捷键跟随位置：
         # 拖动换位后 Ctrl+N 指向新排到第 N 位的那个功能页）
-        for i in range(7):
+        for i in range(8):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{i+1}"), self)
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.activated.connect(lambda n=i: self._switch_to_nav_slot(n))
@@ -985,9 +991,9 @@ class MainWindow(QWidget):
         group_top.setObjectName("sideBarTitle")
         v.addWidget(group_top)
 
-        # 按显示顺序创建 7 个功能页按钮（拖动换位只改这里的顺序，
+        # 按显示顺序创建 8 个功能页按钮（拖动换位只改这里的顺序，
         # 每个按钮绑定的物理索引不变）。布局槽位约定：group_top 占 0、
-        # 功能页占 1..7，设置/说明/版本号固定在功能页之后。
+        # 功能页占 1..8，设置/说明/版本号固定在功能页之后。
         self._nav_btns_layout = v
         self._nav_area = side
         self._nav_btns = {}
@@ -1048,7 +1054,7 @@ class MainWindow(QWidget):
 
     # ---------------- nav_order 读取与校验 ----------------
     def _load_nav_order(self) -> list:
-        """读取左栏显示顺序：非法（非 list/长度≠7/非 key 排列）→ 回退默认。"""
+        """读取左栏显示顺序：非法（非 list/长度≠8/非 key 排列）→ 回退默认。"""
         order = sanitize_nav_order(self._config.get("nav_order", []))
         if order is None:
             return list(DEFAULT_NAV_ORDER)
@@ -1067,7 +1073,7 @@ class MainWindow(QWidget):
         self._abort_nav_settle_animations()
         # 记录重排前各按钮位置（父级坐标）
         old_pos = {key: btn.pos() for key, btn in self._nav_btns.items()}
-        # 先把 7 个功能页按钮全部移出布局，再按新顺序插回槽位 1..7
+        # 先把 8 个功能页按钮全部移出布局，再按新顺序插回槽位 1..8
         for btn in self._nav_btns.values():
             v.removeWidget(btn)
         for i, key in enumerate(order):
@@ -1215,7 +1221,7 @@ class MainWindow(QWidget):
 
     # ---------------- 实时让位：拖拽期间按钮脱离布局自由定位 ----------------
     def _freeze_nav_buttons(self) -> bool:
-        """把 7 个功能页按钮从布局中摘出、按当前几何自由定位。
+        """把 8 个功能页按钮从布局中摘出、按当前几何自由定位。
 
         原位插一个等高 spacer 顶住垂直空间，设置/说明/版本号不会被顶上移；
         按钮几何保持不变，随后由拖拽逻辑直接改 y 实现"空档跟着鼠标走"。
@@ -1527,15 +1533,28 @@ class MainWindow(QWidget):
         self._stack = QStackedWidget()
 
         # 七个面板：碎片 / 任务 / 笔记 / 知识库 / 临时素材 / 网址导航 / 设置
+        # （逐页构建后各泵一次事件循环：主窗口构建是启动最重的同步段
+        #   （实测 2s+），泵帧让启动闪屏动画在这段里也持续旋转，见 src/splash.py）
         self._page_fragments = self._build_fragments_page()
+        self._pump_boot()
         self._page_tasks = self._build_tasks_page()
+        self._pump_boot()
         self._page_notes = self._build_notes_page()
+        self._pump_boot()
         self._page_knowledge = self._build_knowledge_page()
+        self._pump_boot()
         self._page_assets = self._build_assets_page()
+        self._pump_boot()
         self._page_nav = self._build_nav_page()
+        self._pump_boot()
         self._page_settings = self._build_settings_page()
+        self._pump_boot()
         self._page_app_launcher = self._build_app_launcher_page()
+        self._pump_boot()
         self._page_help = self._build_help_page()
+        self._pump_boot()
+        self._page_plugins = self._build_plugins_page()
+        self._pump_boot()
 
         self._stack.addWidget(self._page_fragments)   # 0
         self._stack.addWidget(self._page_tasks)        # 1
@@ -1546,6 +1565,7 @@ class MainWindow(QWidget):
         self._stack.addWidget(self._page_settings)     # 6
         self._stack.addWidget(self._page_app_launcher) # 7
         self._stack.addWidget(self._page_help)         # 8
+        self._stack.addWidget(self._page_plugins)      # 9
 
         # 软件导航页面信号：启动软件后请求回到首页
         self._page_app_launcher.request_switch_to_home.connect(
@@ -1561,6 +1581,16 @@ class MainWindow(QWidget):
 
         v.addWidget(self._stack)
         return content
+
+    @staticmethod
+    def _pump_boot():
+        """主窗口构建期间泵一次事件循环。
+
+        仅在 __init__ 构建页面的同步流程中调用：此时窗口未 show、
+        无定时器、无信号连接，队列里只有绘制事件——泵帧没有重入
+        风险，却能让启动闪屏（src/splash.py）的旋转动画不冻结。
+        """
+        QApplication.processEvents()
 
     # ==================================================================
     # 五个面板（占位实现，P1-8 任务填充完整功能）
@@ -1605,6 +1635,24 @@ class MainWindow(QWidget):
             self._config, parent=self, theme=self._theme
         )
 
+    # ---- 插件中心页面 ----
+    def _build_plugins_page(self):
+        """插件中心面板：展示已安装插件与使用说明（9 号页，只读展示）"""
+        from src.plugins_panel import PluginsPanel
+        return PluginsPanel(self)
+
+    def set_plugin_loader(self, loader):
+        """注入悬浮球插件加载器（knowledge_ball 启动时调用一次）。
+
+        PluginsPanel 经由 plugin_loader 属性只读访问，不持强引用之外的操作。
+        """
+        self._plugin_loader = loader
+
+    @property
+    def plugin_loader(self):
+        """插件加载器（未注入时为 None；面板按 None 渲染空态）"""
+        return getattr(self, "_plugin_loader", None)
+
     # ---- 设置业务方法 ----
     # ==================================================================
     # 页面切换
@@ -1625,10 +1673,10 @@ class MainWindow(QWidget):
     def _remember_last_page(self, index: int):
         """记录当前页面索引到配置（D3：记住上次页面功能）。
 
-        - 说明页（索引 8）不记录，避免下次启动直接落在说明页
+        - 说明页（索引 HELP_PAGE_INDEX=8）不记录，避免下次启动直接落在说明页
         - 值未变化时不写盘，避免频繁 I/O
         """
-        if index == 8:
+        if index == HELP_PAGE_INDEX:
             return
         try:
             if self._config.get("last_page_index", 0) != index:
@@ -1640,12 +1688,18 @@ class MainWindow(QWidget):
     def _initial_page_index(self) -> int:
         """计算启动时应打开的页面索引。
 
-        - 开启「启动时恢复上次页面」→ 返回上次浏览的页面（0-7，越界回退首页）
+        - 开启「启动时恢复上次页面」→ 返回上次浏览的页面
+          （0..LAST_PAGE_INDEX_MAX，越界/说明页回退首页）
         - 未开启（默认）→ 返回首页（碎片工作台）
+
+        范围上限取自 config.LAST_PAGE_INDEX_MAX，与写入侧的
+        ``_CONFIG_RANGES`` 同源——此前两处各自写死 7，页面增加到 9 后
+        插件中心既存不下也恢复不了。
         """
         if self._config.get("restore_last_page", False):
             idx = self._config.get("last_page_index", 0)
-            if isinstance(idx, int) and 0 <= idx <= 7:
+            if (isinstance(idx, int) and 0 <= idx <= LAST_PAGE_INDEX_MAX
+                    and idx != HELP_PAGE_INDEX):
                 return idx
         return 0
 
@@ -1659,6 +1713,9 @@ class MainWindow(QWidget):
             if self._page_app_launcher:
                 self._page_app_launcher.load_apps_from_config()
                 self._page_app_launcher.reload_settings()
+        elif index == 9:
+            # 插件中心：注入 loader 后首次切到此页时重建插件卡片
+            self.refresh_page("plugins")
 
     # ==================================================================
     # 公开接口：供外部调用刷新指定面板
@@ -1666,11 +1723,12 @@ class MainWindow(QWidget):
     def refresh_page(self, name: str):
         """按面板名刷新对应面板（仅当该面板当前可见时刷新）。
 
-        面板名：fragments / tasks / notes / knowledge / assets / nav / settings
+        面板名：fragments / tasks / notes / knowledge / assets / nav /
+        settings / plugins
         """
         index = {
             "fragments": 0, "tasks": 1, "notes": 2, "knowledge": 3,
-            "assets": 4, "nav": 5, "settings": 6,
+            "assets": 4, "nav": 5, "settings": 6, "plugins": 9,
         }.get(name)
         if index is None or self._stack.currentIndex() != index:
             return
@@ -1683,6 +1741,7 @@ class MainWindow(QWidget):
             "assets": self._page_assets,
             "nav": self._page_nav,
             "settings": self._page_settings,
+            "plugins": self._page_plugins,
         }.get(name)
         if panel is not None and hasattr(panel, "refresh"):
             panel.refresh()
@@ -1755,6 +1814,17 @@ class MainWindow(QWidget):
         self.raise_()
         self.activateWindow()
         self._switch_page(6)
+
+    def show_plugins_page(self):
+        """打开并跳转到插件中心（补齐其余面板都有的 show_xxx_page 入口）。
+
+        用 NAV_PAGE_INDEX 查表而非写死索引——插件页物理索引 9 与「设置页 6」
+        不连续，写死数字最容易在页面增删时埋雷。
+        """
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._switch_page(NAV_PAGE_INDEX["plugins"])
 
     # ==================================================================
     # 主题系统
@@ -1862,7 +1932,7 @@ class MainWindow(QWidget):
         • <b>Ctrl+T</b>：切换浅色 / 深色主题<br>
         • <b>Ctrl+K</b>：全库统一搜索（碎片 / 任务 / 笔记 / 素材，双击结果跳转到对应面板）<br>
         • <b>F1</b>：进入使用说明页；再按一次返回进入前的页面<br>
-        • <b>Ctrl+1 ~ Ctrl+7</b>：依次切换到 碎片 / 任务 / 笔记 / 知识库 / 素材 / 网址导航 / 设置<br>
+        • <b>Ctrl+1 ~ Ctrl+8</b>：依次切换到左栏第 1~8 个功能页（含插件中心）<br>
         • <b>Ctrl+Alt+K</b>：呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭；热键与开关可在设置中修改）</p>
 
         <h3>💠 悬浮球</h3>
