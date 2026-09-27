@@ -12,6 +12,10 @@
   H .fpplug（zip）→ 自动解压到 plugins/<id>/ 后加载，原文件保留
   I deactivate/activate → 摘掉/恢复动作，且**不重新导入模块**
   J 全程不 import knowledge_ball（插件层与宿主解耦的硬约束）
+  K 只读数据门面：provider 缺失/抛错只降级不崩；返回深拷贝，插件改不到宿主数据
+  L 插件身份与私有目录：for_plugin 派生、data_dir 自动创建、非法 id 拒绝
+  M 热键格式校验：格式非法 → 丢掉热键但保留动作（与被占用时整动作让位不同）
+  N 注册表按动作记住插件自己的 ctx，trigger 优先用它
 """
 
 import json
@@ -28,8 +32,9 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
 from src.plugin_api import (          # noqa: E402
-    ActionRegistry, BallAction, BallPlugin, PluginContext,
-    is_allowed_requirement, normalize_hotkey,
+    ActionRegistry, BallAction, BallPlugin, PluginContext, PluginData,
+    is_allowed_requirement, is_safe_plugin_id, is_valid_hotkey,
+    normalize_hotkey,
 )
 from src.plugin_loader import PluginLoader, validate_manifest  # noqa: E402
 
@@ -650,3 +655,270 @@ def test_ballaction_enabled_toggle():
     act.set_enabled(True)
     assert act.enabled() is True
     assert isinstance(A(), BallPlugin) is False        # 类型层次正确
+
+
+# ====================================================================
+# K. 只读数据门面 PluginData
+# ====================================================================
+def _mk_logger(sink):
+    logger = logging.getLogger(f"fp_plug_t_{uuid.uuid4().hex}")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.handlers.clear()
+    logger.addHandler(_Capture(sink))
+    return logger
+
+
+def test_plugin_data_named_accessors_and_sources():
+    data = PluginData(providers={
+        "tasks": lambda: [{"task_id": 1}],
+        "fragments": lambda: [{"fragment_id": 1}],
+        "notes": lambda: [{"note_id": 1}],
+        "pomodoro": lambda: {"state": "idle"},
+    })
+    assert data.sources() == ("fragments", "notes", "pomodoro", "tasks")
+    assert data.has("tasks") is True and data.has("users") is False
+    assert data.tasks() == [{"task_id": 1}]
+    assert data.fragments() == [{"fragment_id": 1}]
+    assert data.notes() == [{"note_id": 1}]
+    assert data.pomodoro() == {"state": "idle"}
+    # 数据源存在但返回 None → 仍然安全降级为空容器
+    assert PluginData(providers={"tasks": lambda: None}).tasks() == []
+
+
+def test_plugin_data_empty_is_safe():
+    data = PluginData(logger=None)
+    assert data.sources() == ()
+    assert data.fetch("tasks") is None
+    assert data.tasks() == [] and data.fragments() == []
+    assert data.notes() == [] and data.pomodoro() == {}
+
+
+def test_plugin_data_missing_source_warns():
+    sink = []
+    data = PluginData(logger=_mk_logger(sink), providers={"tasks": lambda: []})
+    assert data.fragments() == []
+    assert any("数据源不可用" in r.getMessage() for r in sink)
+
+
+def test_plugin_data_provider_exception_isolated():
+    sink = []
+
+    def boom():
+        raise RuntimeError("provider 炸了")
+
+    data = PluginData(logger=_mk_logger(sink), providers={"tasks": boom})
+    assert data.tasks() == []                       # 不把异常抛给插件
+    assert any("数据源读取失败" in r.getMessage() for r in sink)
+
+
+def test_plugin_data_returns_deep_copy():
+    """插件拿到的是副本：改它碰不到宿主数据（只读语义是真的，不是口号）"""
+    source = {"tasks": [{"task_id": 1, "title": "原值", "tags": ["a"]}]}
+    data = PluginData(providers={"tasks": lambda: source["tasks"]})
+    got = data.tasks()
+    got[0]["title"] = "被插件改了"
+    got[0]["tags"].append("b")
+    assert source["tasks"][0]["title"] == "原值"
+    assert source["tasks"][0]["tags"] == ["a"]
+
+
+def test_plugin_data_ignores_non_callable_provider():
+    data = PluginData(providers={"tasks": [1, 2], "ok": lambda: 1})
+    assert data.sources() == ("ok",)
+
+
+# ====================================================================
+# L. 插件身份与私有目录
+# ====================================================================
+def test_for_plugin_shares_capabilities_binds_identity(tmp_path):
+    data = PluginData(providers={"tasks": lambda: []})
+    base = PluginContext(logger=None, config={"theme": "light"}, data=data,
+                         data_dir_base=str(tmp_path / "plugdata"))
+    assert base.plugin_id == "" and base.data_dir == ""   # 共享上下文无身份
+
+    child = base.for_plugin("demo", "/somewhere/demo")
+    assert child.plugin_id == "demo"
+    assert child.plugin_dir == "/somewhere/demo"
+    assert dict(child.config)["theme"] == "light"         # 能力共享
+    assert child.data is base.data                        # 同一份数据门面
+    created = child.data_dir
+    assert created and os.path.isdir(created)
+    assert os.path.basename(created) == "demo"
+
+
+def test_data_dir_rejects_unsafe_or_unconfigured(tmp_path):
+    base = PluginContext(logger=None, data_dir_base=str(tmp_path))
+    assert base.for_plugin("../evil").data_dir == ""
+    assert base.for_plugin("").data_dir == ""
+    assert PluginContext(logger=None).for_plugin("demo").data_dir == ""
+
+
+def test_parent_window_safe_degradation():
+    assert PluginContext(logger=None).parent_window() is None
+    marker = object()
+    ctx = PluginContext(logger=None, parent_window=lambda: marker)
+    assert ctx.parent_window() is marker
+    assert ctx.for_plugin("d").parent_window() is marker   # 派生后仍共享
+
+    def boom():
+        raise RuntimeError("x")
+
+    assert PluginContext(logger=None, parent_window=boom).parent_window() is None
+
+
+def test_is_safe_plugin_id_unit():
+    for ok in ("a", "A1", "abc-1.2_x", "x" * 64):
+        assert is_safe_plugin_id(ok) is True, ok
+    for bad in ("", None, 1, ".", "..", "a..b", ".x", "-x", "a/b", "a\\b",
+                "x" * 65):
+        assert is_safe_plugin_id(bad) is False, bad
+
+
+# ====================================================================
+# M. 热键格式校验
+# ====================================================================
+@pytest.mark.parametrize("text", [
+    "Ctrl+Alt+W", "ctrl+w", "Alt+Shift+F5", "Win+Ctrl+Q",
+    "Control+1", "Ctrl+Alt+F24", "shift+alt+Z",
+])
+def test_is_valid_hotkey_accepts(text):
+    assert is_valid_hotkey(text) is True, text
+
+
+@pytest.mark.parametrize("text", [
+    None, 1, "", "K", "Ctrl", "Ctrl+Alt", "Ctrl+K+Alt", "Ctrl+Alt+",
+    "Ctrl+F99", "Ctrl+F0", "Ctrl+Alt+KK",
+])
+def test_is_valid_hotkey_rejects(text):
+    assert is_valid_hotkey(text) is False, text
+
+
+def test_loader_invalid_hotkey_drops_hotkey_keeps_action(env):
+    """格式非法 → 只丢热键，动作仍在菜单（与被占用时整动作让位是两种处置）"""
+    write_plugin(env.plugins_dir, "badkey",
+                 manifest_of("badkey", [action_spec("badkey.go", hotkey="K")]),
+                 make_code("badkey", ["badkey.go"]))
+    env.loader.load_all()
+    act = env.registry.get("badkey.go")
+    assert act is not None
+    assert act.hotkey is None
+    assert [a.id for a in env.registry.menu_actions()] == ["badkey.go"]
+    assert not env.registry.hotkey_actions()
+    assert any("热键格式非法" in m for m in env.warnings())
+
+
+def test_loader_valid_hotkey_kept(env):
+    write_plugin(env.plugins_dir, "goodkey",
+                 manifest_of("goodkey", [action_spec("goodkey.go",
+                                                     hotkey="Ctrl+Alt+W")]),
+                 make_code("goodkey", ["goodkey.go"]))
+    env.loader.load_all()
+    act = env.registry.get("goodkey.go")
+    assert act.hotkey == "Ctrl+Alt+W"
+    assert [a.id for a in env.registry.hotkey_actions()] == ["goodkey.go"]
+
+
+# ====================================================================
+# N. 注册表记住每个动作所属插件的上下文
+# ====================================================================
+def test_registry_remembers_per_action_ctx():
+    seen = []
+    reg = ActionRegistry(logger=None)
+    own_ctx = PluginContext(logger=None, plugin_id="plug-a")
+
+    class A(BallAction):
+        id = "plug-a.go"
+        title = "go"
+
+        def run(self, ctx):
+            seen.append(getattr(ctx, "plugin_id", None))
+
+    assert reg.register(A(), "plug-a", own_ctx) is True
+    other = PluginContext(logger=None, plugin_id="plug-b")
+    assert reg.trigger("plug-a.go", other) is True
+    assert seen == ["plug-a"]            # 用插件自己的 ctx，不用调用方传的
+    assert reg.context_of("plug-a.go") is own_ctx
+    assert reg.unregister("plug-a") == 1
+    assert reg.context_of("plug-a.go") is None
+
+
+def test_trigger_falls_back_to_passed_ctx():
+    """注册时没给 ctx（兼容旧调用）→ 仍用调用方传入的共享上下文"""
+    seen = []
+    reg = ActionRegistry(logger=None)
+
+    class A(BallAction):
+        id = "a"
+        title = "a"
+
+        def run(self, ctx):
+            seen.append(ctx)
+
+    reg.register(A(), "")
+    shared = PluginContext(logger=None)
+    assert reg.trigger("a", shared) is True
+    assert seen == [shared]
+    assert reg.clear() == 1
+    assert reg.trigger("a", shared) is False
+
+
+def test_loader_passes_derived_ctx_to_plugin(env):
+    """create_actions 与 run 拿到的是同一个「绑定了插件身份」的上下文"""
+    code = (
+        "# -*- coding: utf-8 -*-\n"
+        "from src.plugin_api import BallAction, BallPlugin\n"
+        "\n"
+        "SEEN = []\n"
+        "\n"
+        "class Act(BallAction):\n"
+        '    id = "derived.go"\n'
+        '    title = "go"\n'
+        "    def run(self, ctx):\n"
+        "        SEEN.append(('run', ctx.plugin_id, ctx.plugin_dir))\n"
+        "\n"
+        "class TestPlugin(BallPlugin):\n"
+        '    id = "derived"\n'
+        "    def create_actions(self, ctx):\n"
+        "        SEEN.append(('create', ctx.plugin_id, ctx.plugin_dir))\n"
+        "        return [Act()]\n"
+    )
+    write_plugin(env.plugins_dir, "derived",
+                 manifest_of("derived", [action_spec("derived.go")]), code)
+    env.loader.load_all()
+    mod = module_of("derived")
+    assert mod.SEEN == [("create", "derived", str(env.plugins_dir / "derived"))]
+    env.registry.trigger("derived.go")
+    assert mod.SEEN[-1] == ("run", "derived", str(env.plugins_dir / "derived"))
+
+
+def test_context_logger_never_none():
+    """宿主没给日志器时也退化为 NullHandler：插件可以无条件调 ctx.logger.*"""
+    ctx = PluginContext(logger=None)
+    assert ctx.logger is not None
+    ctx.logger.info("不能炸")                     # 关键：非 None 才敢直接调
+    ctx.logger.warning("也不能炸")
+    assert ctx.for_plugin("d").logger is not None
+
+
+def test_plugin_using_ctx_logger_survives_null_logger():
+    """曾把进程干崩的真实场景：logger=None + 插件 run() 里第一行就写日志。
+
+    AttributeError 发生在 Qt 槽里会被解释器升级成 qFatal（0xC0000409），
+    所以这里必须断言 trigger 返回 True，而不是「没抛异常」。
+    """
+    reg = ActionRegistry(logger=None)
+    ctx = PluginContext(logger=None)
+    seen = []
+
+    class A(BallAction):
+        id = "a"
+        title = "a"
+
+        def run(self, ctx):
+            ctx.logger.info("插件日志")
+            seen.append(True)
+
+    assert reg.register(A(), "") is True
+    assert reg.trigger("a", ctx) is True
+    assert seen == [True]
