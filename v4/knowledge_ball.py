@@ -2204,10 +2204,34 @@ def main():
     config_manager = ConfigManager(config_path)
     logger.info("配置管理器初始化完成")
 
+    # ---- 启动闪屏 + 分阶段打点 ----
+    # 启动序列是同步的，功能/插件增多后可达数秒：闪屏让等待可见，
+    # [启动] 打点让「慢在哪」可直接从 app.log 定位（2026-09-27）。
+    # _mark 在每个阶段开始时调用：结算上一段耗时 → 更新闪屏文案 →
+    # 泵一次事件循环（动画在同步段之间才有机会转起来）。
+    from src.splash import LaunchSplash
+    splash = LaunchSplash(theme=config_manager.get("theme", "light"))
+    splash.start()
+    _boot = {"t0": time.monotonic(), "last": time.monotonic(),
+             "stage": "初始准备"}
+
+    def _mark(stage: str):
+        now = time.monotonic()
+        logger.info(
+            f"[启动] {_boot['stage']} 耗时 {(now - _boot['last']) * 1000:.0f}ms"
+            f"（累计 {(now - _boot['t0']) * 1000:.0f}ms）")
+        _boot["last"] = now
+        _boot["stage"] = stage
+        splash.set_stage(f"{stage}…")
+        app.processEvents()
+
+    _mark("检查数据完整性")
+
     # ---- 启动时数据完整性检查 ----
     _check_data_integrity(data_dir, logger)
 
     # ---- docx 管理器 ----
+    _mark("加载知识库")
     docx_manager = DocxManager(docx_path, docx_meta_path)
     paragraphs, err = docx_manager.load()
     if err:
@@ -2240,6 +2264,7 @@ def main():
             cards = docx_manager.get_cards()
 
     # ---- 业务管理器（与悬浮球、大窗口共享同一实例）----
+    _mark("读取数据文件")
     task_manager = TaskManager(schedule_path)
     note_manager = NoteManager(notes_path)
     fragment_manager = FragmentManager(fragments_path)
@@ -2257,6 +2282,7 @@ def main():
         task_manager=task_manager)
 
     # ---- 临时素材管理器（拖图片/文件到悬浮球时复制保存）----
+    _mark("初始化素材与导航")
     temp_asset_manager = TempAssetManager(
         base_dir,
         max_assets=config_manager.get("temp_asset_max_count", 50),
@@ -2274,6 +2300,7 @@ def main():
     clipboard_monitor.start()
 
     # ---- 大窗口主UI ----
+    _mark("构建主窗口界面")
     main_window = MainWindow(
         task_manager, note_manager, fragment_manager,
         docx_manager, config_manager, clipboard_monitor,
@@ -2283,6 +2310,7 @@ def main():
     main_window.sticky_manager = sticky_manager
 
     # ---- 悬浮球 ----
+    _mark("初始化悬浮球")
     ball = FloatingBall(
         cards, task_manager, note_manager,
         fragment_manager, docx_manager, config_manager,
@@ -2293,6 +2321,7 @@ def main():
         ball.show()
 
     # ---- 全屏应用检测（B8）：全屏时自动让位，退出全屏恢复 ----
+    _mark("接线与托盘")
     from src.fullscreen_watcher import FullscreenWatcher
     fs_watcher = FullscreenWatcher(
         exclude_hwnds=lambda: (int(ball.winId()), int(main_window.winId())))
@@ -2498,6 +2527,7 @@ def main():
     QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)  # 之后每天 9:00
 
     # ---- 全局快速捕捉条（热键呼出 → 一句话进碎片池）----
+    _mark("注册热键")
     from src.global_hotkey import GlobalHotkeyManager
     from src.quick_capture import QuickCaptureWindow
 
@@ -2567,6 +2597,7 @@ def main():
     # ---- 悬浮球插件系统（外置专精功能：<base_dir>/plugins/ 下的插件包）----
     # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
     #       只把「新增的专精单一功能」外置。详见 docs/插件开发说明.md
+    _mark("加载插件")
     from src.plugin_api import ActionRegistry, PluginContext, PluginData
     from src.plugin_loader import PluginLoader
 
@@ -2610,6 +2641,8 @@ def main():
     plugin_hotkey_mgr = GlobalHotkeyManager()
     app.eventDispatcher().installNativeEventFilter(plugin_hotkey_mgr)
     ball.set_action_registry(plugin_registry, plugin_ctx)
+    # 插件中心页面数据通道：主窗口经只读属性访问 loaded_plugins()
+    main_window.set_plugin_loader(plugin_loader)
 
     def _apply_plugin_hotkeys():
         """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位"""
@@ -2764,6 +2797,7 @@ def main():
         lambda _enabled: _apply_fullscreen_watch())
 
     # ---- UI 心跳看门狗：事件循环阻塞 >800ms 时记录（诊断卡顿/未响应）----
+    _mark("最后准备")
     # QTimer 在主线程事件循环里调度；循环被长任务阻塞时下一跳会迟到，
     # 相邻两跳的间隔 = 实际阻塞时长。平时零输出，只在真卡顿时留痕。
     _hb_state = {"last": time.monotonic()}
@@ -2783,7 +2817,12 @@ def main():
 
     # ---- 启动时直接显示主窗口 ----
     main_window.show()
+    _mark("显示主窗口")
     get_logger().info("主窗口已显示，进入事件循环")
+    # 启动收尾：结算最后一段 → 总耗时日志 → 闪屏淡出
+    now = time.monotonic()
+    logger.info(f"[启动] 全部完成 总计 {now - _boot['t0']:.2f}s")
+    splash.finish()
 
     # ---- 唤醒信号：第二个实例启动时通过命名事件唤醒本实例 ----
     # 使用后台线程阻塞等待命名事件（事件驱动），替代 300ms 持续轮询，
