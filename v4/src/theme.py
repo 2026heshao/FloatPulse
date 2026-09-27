@@ -76,6 +76,12 @@ THEMES = {
         # 浅色主色 #5BC0BE 明度偏高：白字对比度仅 2.16:1，必须用深墨（6.76:1）
         "on_primary":        "#1B2B33",
         "on_disabled":       "#6B747E",
+        # ---- 次按钮（secondaryBtn）文字色 ----
+        # 次按钮 = 淡青底($primary_a12) + 青色文字。直接用 $primary 作文字色时，
+        # 浅色主题下对比度仅 2.16:1（远低于 WCAG AA 4.5:1），全项目所有次按钮
+        # 看起来都像禁用态。这里单独给一个加深的同色系文字色：白底上 5.18:1。
+        # （深色主题不必加深，$primary 在深底上是 14.7:1）
+        "secondary_text":    "#27787A",
 
         # ---- 文字 ----
         "text":              "#2C3E50",
@@ -152,6 +158,10 @@ THEMES = {
         # 深色主色 #6FFFE9 极浅：白字对比度仅 1.22:1（几乎不可读），必须用深墨（11.9:1）
         "on_primary":        "#1B2B33",
         "on_disabled":       "rgba(255, 255, 255, 180)",
+        # ---- 次按钮（secondaryBtn）文字色 ----
+        # 深色主题下 $primary(#6FFFE9) 在深底上已达 14.7:1，直接用主色即可，
+        # 这里只为与 light 主题保持同一 token 名（QSS 模板共用一份）。
+        "secondary_text":    "#6FFFE9",
 
         "text":              "#E4E8EE",
         "text_secondary":    "#98A2AE",
@@ -351,7 +361,7 @@ QPushButton#primaryBtn:pressed {
 
 QPushButton#secondaryBtn {
     background-color: $primary_a12;
-    color: $primary;
+    color: $secondary_text;
     border: 1px solid $primary_a30;
     border-radius: 9px;
 }
@@ -361,7 +371,7 @@ QPushButton#secondaryBtn:hover {
 QPushButton#secondaryBtn:checked {
     background-color: $primary_a18;
     border: 1px solid $primary;
-    color: $primary;
+    color: $secondary_text;
     font-weight: 600;
 }
 QPushButton#secondaryBtn:pressed {
@@ -422,6 +432,113 @@ QWidget#settingsGroup {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
     border-radius: 12px;
+}
+
+/* ---- 插件中心 ---- */
+QFrame#pluginCard {
+    background-color: $panel_fill;
+    border: 1px solid $panel_edge;
+    border-radius: 12px;
+}
+QLabel#pluginCardTitle {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#pluginCardId {
+    color: $text_secondary;
+    font-size: 12px;
+}
+QLabel#pluginCardDesc {
+    color: $text_secondary;
+    font-size: 12px;
+}
+QLabel#pluginCardUsage {
+    color: $text_secondary;
+    font-size: 12px;
+    font-style: italic;
+}
+QTextBrowser#usageViewer {
+    background-color: transparent;
+    color: $text;
+    border: 1px solid $panel_edge;
+    border-radius: 8px;
+    padding: 8px;
+    font-size: 13px;
+}
+QLabel#pluginActionTitle {
+    color: $text;
+    font-size: 12px;
+}
+QLabel#pluginActionTag {
+    color: $text_secondary;
+    font-size: 11px;
+}
+QLabel#pluginGateHint {
+    color: $danger;
+    background-color: $danger_alpha;
+    border: 1px solid $danger_border;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+}
+QLabel#pluginEmptyHint {
+    color: $text_secondary;
+    font-size: 13px;
+}
+
+/* ---- 插件中心：加载失败卡片 ---- */
+QFrame#pluginErrorCard {
+    background-color: $danger_alpha;
+    border: 1px solid $danger_border;
+    border-radius: 12px;
+}
+QLabel#pluginErrorTitle {
+    color: $danger;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#pluginErrorReason {
+    color: $text;
+    font-size: 12px;
+}
+QLabel#pluginErrorHint {
+    color: $text_secondary;
+    font-size: 12px;
+}
+/* ---- 插件中心：状态标签（已启用 / 已停用 / 部分生效）---- */
+QLabel#pluginStatusOn {
+    color: $success;
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid $success;
+    border-radius: 6px;
+}
+QLabel#pluginStatusOff {
+    color: $text_secondary;
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid $panel_edge;
+    border-radius: 6px;
+}
+QLabel#pluginStatusWarn {
+    color: $danger;
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid $danger_border;
+    border-radius: 6px;
+}
+/* ---- 插件中心：失败区小标题 ---- */
+QLabel#pluginSectionLabel {
+    color: $text_secondary;
+    font-size: 12px;
+    font-weight: 600;
+}
+/* ---- 插件中心：插件安装目录（等宽，便于核对路径）---- */
+QLabel#pluginDirLabel {
+    color: $text_secondary;
+    font-family: 'Consolas', 'Cascadia Mono', monospace;
+    font-size: 12px;
 }
 QLabel#fieldLabel {
     color: $text_secondary;
