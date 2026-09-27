@@ -1,5 +1,0 @@
-{
-  "extraPaths": ["."],
-  "reportMissingModuleSource": false,
-  "reportIncompatibleMethodOverride": "none"
-}
