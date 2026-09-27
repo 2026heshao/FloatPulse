@@ -96,9 +96,9 @@ def _text_colors(body: str) -> list:
 # ====================================================================
 # 1. 主题词完整性
 # ====================================================================
-@pytest.mark.parametrize("token", ["on_primary", "on_disabled"])
+@pytest.mark.parametrize("token", ["on_primary", "on_disabled", "secondary_text"])
 def test_on_primary_tokens_exist_in_both_themes(token):
-    """两份配色字典都要有 on_primary / on_disabled（substitute 严格模式）"""
+    """两份配色字典都要有 on_primary / on_disabled / secondary_text（substitute 严格模式）"""
     for theme in ("light", "dark"):
         assert token in THEMES[theme], (
             "%s 主题缺少主题词 %r —— QSS 用 Template.substitute，缺键会直接 KeyError"
@@ -176,3 +176,51 @@ def test_danger_and_disabled_states_still_use_their_own_colors():
         assert THEMES[theme]["on_disabled"].lower() in disabled_body.lower(), (
             "disabled 态应使用 on_disabled 主题词"
         )
+
+
+# ====================================================================
+# 4. 次按钮（secondaryBtn）文字对比度
+# ====================================================================
+# 次按钮底色是半透明 $primary_a12，静态拿不到合成后的实色。
+# 这里按"叠加在卡片实底上"的合成色做估计（留了余量，宁可判严）。
+# light: #FFFFFF + rgba(91,192,190,0.12)  ->  #E7F4F4
+# dark : #232536 + rgba(111,255,233,0.12) ->  #31374A
+_SECONDARY_BG = {
+    "light": "#E7F4F4",
+    "dark":  "#31374A",
+}
+
+
+def test_secondary_button_text_contrast_meets_wcag():
+    """次按钮（淡青底 + 青字）文字对比度必须达标。
+
+    2026-09-27：浅色主题原用 ``color: $primary``(#5BC0BE) 压在淡青底上，
+    对比度仅 ~1.8:1，全项目所有次按钮看起来都像禁用态。改用 ``$secondary_text``
+    （light 加深为 #27787A）后应显著拉开。
+    """
+    for theme in ("light", "dark"):
+        c = THEMES[theme]
+        fg = c["secondary_text"]
+        bg = _SECONDARY_BG[theme]
+        ratio = _contrast(fg, bg)
+        assert ratio >= 4.0, (
+            "%s 主题：次按钮文字 secondary_text(%s) 在淡青底(%s)上对比度仅 %.2f:1，"
+            "低于 4.0 —— 次按钮会看起来像禁用态" % (theme, fg, bg, ratio)
+        )
+
+
+def test_secondary_button_qss_uses_secondary_text_token():
+    """钉死 QSS 用的是 $secondary_text 而不是 $primary（防回退）"""
+    for theme in ("light", "dark"):
+        qss = get_main_window_qss(theme)
+        rules = dict(_rules(qss))
+        for sel in ("QPushButton#secondaryBtn", "QPushButton#secondaryBtn:checked"):
+            body = rules.get(sel, "")
+            assert body, "%s 主题缺少规则 %s" % (theme, sel)
+            assert THEMES[theme]["secondary_text"].lower() in body.lower(), (
+                "%s 主题 %s 的文字色应为 secondary_text(%s)，实际：%s"
+                % (theme, sel, THEMES[theme]["secondary_text"], body.strip())
+            )
+            assert THEMES[theme]["primary"].lower() not in _text_colors(body), (
+                "%s 主题 %s 不应再用 primary 作文字色" % (theme, sel)
+            )

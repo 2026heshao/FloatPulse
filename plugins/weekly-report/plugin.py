@@ -29,12 +29,14 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import QDate, Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QDateEdit, QDialog, QFileDialog, QHBoxLayout,
-    QLabel, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton,
-    QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QDateEdit, QFileDialog, QHBoxLayout,
+    QLabel, QMessageBox, QPlainTextEdit, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from src.plugin_api import BallAction, BallPlugin
+from src.plugin_ui import (
+    PluginDialog, flash_button, make_hint_label, make_section_label,
+)
 
 # ====================================================================
 # 常量
@@ -381,36 +383,46 @@ def default_file_stem(start, end) -> str:
 # ====================================================================
 # 预览对话框
 # ====================================================================
-class ReportDialog(QDialog):
-    """范围选择 + 草稿预览 + 三个输出动作（复制 / 另存为 / 写入 vault）"""
+class ReportDialog(PluginDialog):
+    """范围选择 + 草稿预览 + 三个输出动作（复制 / 另存为 / 写入 vault）
+
+    外观继承宿主的 ``PluginDialog``（玻璃壳 + 圆角 + 自绘标题栏 + 柔和阴影），
+    与主窗口共用同一份 QSS，因此跟随 light/dark 主题自动换肤。
+    """
 
     def __init__(self, ctx, parent=None):
-        super().__init__(parent)
+        super().__init__(ctx, title="日报 / 周报草稿",
+                         subtitle="由当前数据生成，可编辑后导出",
+                         parent=parent, size=(860, 620))
+        # 基类已把 ctx 存进 self._plugin_ctx；这里沿用本插件惯用的 _ctx 名字
         self._ctx = ctx
         self._today = date.today()
-        self.setWindowTitle("📝 日报 / 周报草稿")
-        self.setMinimumSize(760, 560)
         self._build_ui()
         self._regenerate()
 
     # ---------------- 界面 ----------------
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        body = self.body_layout
+        body.setContentsMargins(20, 14, 20, 16)
+        body.setSpacing(10)
 
-        # 范围行 —— 先把控件全部建好并设初值，**最后再接信号**：
+        # ---- 第一行：时间范围（整行一个玻璃卡片，与设置页分组观感一致）----
+        range_card = QWidget()
+        range_card.setObjectName("glassCard")
+        rc = QHBoxLayout(range_card)
+        rc.setContentsMargins(14, 10, 14, 10)
+        rc.setSpacing(10)
+
+        # 标题 + 单选：先把控件全部建好并设初值，**最后再接信号**，
         # 否则 setChecked 会立刻触发 toggled → 处理器去访问尚未创建的日期控件
-        range_row = QHBoxLayout()
-        range_row.setSpacing(10)
-        range_row.addWidget(QLabel("时间范围"))
+        rc.addWidget(make_section_label("时间范围"))
         self._group = QButtonGroup(self)
         self._radios = {}
         for key, text in RANGE_OPTIONS:
             rb = QRadioButton(text)
             self._group.addButton(rb)
             self._radios[key] = rb
-            range_row.addWidget(rb)
+            rc.addWidget(rb)
         self._radios[RANGE_WEEK].setChecked(True)
 
         week_start = self._today - timedelta(days=6)
@@ -425,50 +437,63 @@ class ReportDialog(QDialog):
         for w in (self._from, self._to):
             w.setEnabled(False)                 # 仅「自定义区间」可用
             w.setFixedWidth(120)
-        range_row.addWidget(QLabel("起"))
-        range_row.addWidget(self._from)
-        range_row.addWidget(QLabel("止"))
-        range_row.addWidget(self._to)
-        range_row.addStretch(1)
-        root.addLayout(range_row)
+        rc.addWidget(QLabel("起"))
+        rc.addWidget(self._from)
+        rc.addWidget(QLabel("止"))
+        rc.addWidget(self._to)
+        rc.addStretch(1)
+        body.addWidget(range_card)
 
-        # 预览区（可编辑：改完的文本才是复制/落盘的内容）
+        # ---- 预览区：套一层卡片，与范围行同一视觉语言 ----
+        preview_card = QWidget()
+        preview_card.setObjectName("glassCard")
+        pc = QVBoxLayout(preview_card)
+        pc.setContentsMargins(14, 12, 14, 12)
+        pc.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(make_section_label("草稿预览"))
+        head.addWidget(make_hint_label("可直接编辑，导出的是当前内容"))
+        head.addStretch(1)
+        pc.addLayout(head)
+
         self._text = QPlainTextEdit()
+        # QPlainTextEdit 在主题 QSS 里已有通用规则（边框/圆角/焦点态），
+        # 不另设 objectName，以免样式落空
         self._text.setFont(QFont("Microsoft YaHei UI", 10))
         self._text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
-        root.addWidget(self._text, 1)
+        pc.addWidget(self._text, 1)
+        body.addWidget(preview_card, 1)
 
-        # 输出按钮行
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        self._copy_btn = QPushButton("📋 复制到剪贴板")
-        self._save_btn = QPushButton("💾 另存为 .md…")
-        self._vault_btn = QPushButton("🗂 写入 Obsidian vault")
-        close_btn = QPushButton("关闭")
-        for b in (self._copy_btn, self._save_btn, self._vault_btn, close_btn):
-            btn_row.addWidget(b)
-        btn_row.addStretch(1)
+        # ---- 状态行：固定高度占位，避免文字出现/消失导致按钮行跳动 ----
+        self._status = QLabel("")
+        self._status.setObjectName("hintLabel")
+        self._status.setMinimumHeight(20)
+        body.addWidget(self._status)
 
+        # ---- 底部按钮行（右对齐，与其他对话框一致）----
         # vault 未配置 → 置灰并说明原因（不弹窗、不阻断其它按钮）
-        if not self._vault_path():
+        vault_ready = bool(self._vault_path())
+        created = self.add_footer([
+            ("关闭", "secondaryBtn", self.accept),
+            ("📋 复制到剪贴板", "secondaryBtn", self._do_copy),
+            ("💾 另存为 .md…", "secondaryBtn", self._do_save_as),
+            ("🗂 写入 Obsidian vault", "primaryBtn", self._do_vault),
+        ])
+        self._close_btn, self._copy_btn, self._save_btn, self._vault_btn = created
+        if not vault_ready:
             self._vault_btn.setEnabled(False)
             self._vault_btn.setToolTip(
                 "未配置 Obsidian vault 路径：请到 设置 → 📤 导出 → 更改目录")
 
-        self._status = QLabel("")
-        self._status.setMinimumHeight(20)
-        root.addWidget(self._status)
-        root.addLayout(btn_row)
-
-        # 信号接线统一放到控件就绪之后
+        # 信号接线统一放到控件就绪之后。
+        # 注意：按钮的 clicked 已在 add_footer 内部接好，这里**不要再接一次**
+        # （重复接线会让每次点击触发两次，落盘/弹窗都会翻倍）。
         for rb in self._radios.values():
             rb.toggled.connect(self._on_range_changed)
         self._from.dateChanged.connect(self._regenerate)
         self._to.dateChanged.connect(self._regenerate)
-        self._copy_btn.clicked.connect(self._do_copy)
-        self._save_btn.clicked.connect(self._do_save_as)
-        self._vault_btn.clicked.connect(self._do_vault)
-        close_btn.clicked.connect(self.accept)
 
     # ---------------- 范围与生成 ----------------
     def _current_key(self) -> str:
@@ -520,8 +545,10 @@ class ReportDialog(QDialog):
         if clipboard is None:                      # 离屏/无剪贴板环境兜底
             self._status.setText("⚠ 当前环境没有剪贴板，复制失败")
             return
-        clipboard.setText(self._text.toPlainText())
-        self._status.setText(f"✅ 已复制 {len(self._text.toPlainText())} 字到剪贴板")
+        text = self._text.toPlainText()
+        clipboard.setText(text)
+        self._status.setText(f"✅ 已复制 {len(text)} 字到剪贴板")
+        flash_button(self._copy_btn, "✅ 已复制")
 
     def _default_dir(self) -> str:
         vault = self._vault_path()
