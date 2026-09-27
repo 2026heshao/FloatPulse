@@ -35,6 +35,10 @@
   - pomodoro_break_minutes: 休息相位时长（分钟，1-60，默认 5）
   - pomodoro_auto_break:   专注结束后自动进入休息
   - plugins_enabled:      悬浮球外置插件总闸（启用 plugins/ 下的插件包）
+  - obsidian_vault_path:  Obsidian vault 根目录（空串=未选择，导出时弹框让用户选）
+  - export_notes:         导出笔记到 Obsidian（默认开）
+  - export_fragments:     导出碎片到 Obsidian（默认开）
+  - export_tasks:         导出任务到 Obsidian（默认开）
   - ball_size:            悬浮球球体直径（像素，48-88，默认 64）
   - hide_on_fullscreen:   全屏应用（视频/游戏/演示）前台时自动隐藏悬浮球
   - asset_thumb_size:     临时素材缩略图宽度（像素，80-160，决定网格每行个数）
@@ -79,6 +83,10 @@ DEFAULT_CONFIG = {
     "pomodoro_break_minutes": 5,          # 休息相位时长（分钟，1-60）
     "pomodoro_auto_break":  False,        # 专注结束后是否自动进入休息
     "plugins_enabled":      True,         # 悬浮球外置插件总闸（plugins/ 下的插件包）
+    "obsidian_vault_path":  "",           # Obsidian vault 根目录（空=未选择）
+    "export_notes":         True,         # 导出笔记到 Obsidian
+    "export_fragments":     True,         # 导出碎片到 Obsidian
+    "export_tasks":         True,         # 导出任务到 Obsidian
     "ball_size":            64,           # 悬浮球球体直径（像素，48-88）
     "hide_on_fullscreen":   True,         # 全屏应用前台时自动隐藏悬浮球
     "fragment_preview_visible": True,     # 碎片工作台右侧预览面板是否显示
@@ -118,6 +126,10 @@ _CONFIG_TYPES = {
     "pomodoro_break_minutes": int,
     "pomodoro_auto_break":  bool,
     "plugins_enabled":      bool,
+    "obsidian_vault_path":  str,
+    "export_notes":         bool,
+    "export_fragments":     bool,
+    "export_tasks":         bool,
     "ball_size":            int,
     "hide_on_fullscreen":   bool,
     "fragment_preview_visible": bool,
