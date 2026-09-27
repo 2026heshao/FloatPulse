@@ -20,7 +20,7 @@
   - auto_hide_enabled:    悬浮球空闲吸边自动隐藏总开关（关闭后球始终完整显示）
   - clipboard_filter_apps: 剪贴板过滤应用列表（不捕获这些进程的复制）
   - clipboard_capture_images: 剪贴板中的图片是否自动存入临时素材池
-  - main_window_geometry: 大窗口几何（用于记住上次位置大小）
+  - main_window_geometry: 大窗口几何 "x,y,w,h"（空串 = 无记忆，启动用默认尺寸居中）
   - restore_last_page:    启动时是否恢复上次浏览的页面
   - last_page_index:      最后浏览的页面索引（0-7，说明页 8 不记录）
   - close_to_tray:        关闭主窗口时最小化到托盘（不退出程序）
@@ -41,6 +41,9 @@
   - export_tasks:         导出任务到 Obsidian（默认开）
   - ball_size:            悬浮球球体直径（像素，48-88，默认 64）
   - hide_on_fullscreen:   全屏应用（视频/游戏/演示）前台时自动隐藏悬浮球
+  - temp_asset_max_count: 临时素材数量上限（超出按添加时间淘汰最旧的）
+  - temp_asset_max_days:  临时素材自动清理天数（0 = 不按天数清理）
+  - temp_asset_max_file_mb: 单个临时素材体积上限（MB，0 = 不限制）
   - asset_thumb_size:     临时素材缩略图宽度（像素，80-160，决定网格每行个数）
 ====================================================================
 """
@@ -62,6 +65,7 @@ DEFAULT_CONFIG = {
     "card_always_show":     False,
     "temp_asset_max_count": 50,           # 临时素材数量上限
     "temp_asset_max_days":  30,           # 临时素材自动清理天数（0 表示不按天数清理）
+    "temp_asset_max_file_mb": 50,         # 单个素材体积上限（MB，0 表示不限制）
     "asset_thumb_size":     128,          # 素材缩略图宽度（像素，80-160，决定每行个数）
     "ball_visible":         True,         # 悬浮球是否显示
     "apps":                 [],           # 软件导航条目列表
@@ -105,6 +109,7 @@ _CONFIG_TYPES = {
     "card_always_show":     bool,
     "temp_asset_max_count": int,
     "temp_asset_max_days":  int,
+    "temp_asset_max_file_mb": int,
     "asset_thumb_size":     int,
     "ball_visible":         bool,
     "apps":                 list,
@@ -143,6 +148,8 @@ _CONFIG_RANGES = {
     "auto_hide_seconds":    (1, 60),
     "temp_asset_max_count": (5, 500),
     "temp_asset_max_days":  (0, 365),
+    # 单文件体积上限：与设置页步进器范围 0-2048（每档 10MB）保持一致；0 = 不限制
+    "temp_asset_max_file_mb": (0, 2048),
     # 素材缩略图宽度：与设置页步进器范围 80-160（每档 8px）保持一致
     "asset_thumb_size":     (80, 160),
     # 软件卡片尺寸：与主窗口设置页步进器范围 60-140（每档 4px）保持一致

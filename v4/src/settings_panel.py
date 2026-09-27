@@ -260,6 +260,14 @@ class SettingsPanel(QWidget):
         add_row(gv, "临时素材上限", "超出上限后自动清理最早的素材",
                 self._set_temp_asset_max_count)
 
+        # 单文件体积上限：防止误拖大文件（视频/镜像）时同步复制占满磁盘
+        self._set_temp_asset_max_file = Stepper(
+            0, 2048, self._config.get("temp_asset_max_file_mb", 50),
+            suffix="MB", step=10)
+        self._set_temp_asset_max_file.valueChanged.connect(self._on_spin_changed)
+        add_row(gv, "单个素材体积上限", "超过该大小的文件不会复制进素材池；0 表示不限制",
+                self._set_temp_asset_max_file)
+
         self._set_temp_asset_max_days = Stepper(
             0, 365, self._config.get("temp_asset_max_days", 30), suffix="天")
         self._set_temp_asset_max_days.valueChanged.connect(self._on_spin_changed)
@@ -465,6 +473,7 @@ class SettingsPanel(QWidget):
             (self._set_clipboard_max, "clipboard_max_items", 200),
             (self._set_auto_hide, "auto_hide_seconds", 3),
             (self._set_temp_asset_max_count, "temp_asset_max_count", 50),
+            (self._set_temp_asset_max_file, "temp_asset_max_file_mb", 50),
             (self._set_temp_asset_max_days, "temp_asset_max_days", 30),
         ):
             stepper.blockSignals(True)
@@ -571,20 +580,24 @@ class SettingsPanel(QWidget):
 
         max_count = int(self._set_temp_asset_max_count.value())
         max_days = int(self._set_temp_asset_max_days.value())
+        max_file_mb = int(self._set_temp_asset_max_file.value())
         old_count = self._config.get("temp_asset_max_count", 50)
         old_days = self._config.get("temp_asset_max_days", 30)
-        if max_count != old_count or max_days != old_days:
+        old_file_mb = self._config.get("temp_asset_max_file_mb", 50)
+        limits_changed = (max_count != old_count or max_days != old_days
+                          or max_file_mb != old_file_mb)
+        if limits_changed:
             self._config.set("temp_asset_max_count", max_count)
             self._config.set("temp_asset_max_days", max_days)
+            self._config.set("temp_asset_max_file_mb", max_file_mb)
             changed = True
 
         if changed:
             self._config.save()
             # 广播联动
-            if hide != self._config.get("auto_hide_seconds", 3):
-                pass  # 已在上面 set 完成
-            if max_count != old_count or max_days != old_days:
-                self._host.asset_limits_changed.emit(max_count, max_days)
+            if limits_changed:
+                self._host.asset_limits_changed.emit(
+                    max_count, max_days, max_file_mb)
             self._host.auto_hide_seconds_changed.emit(hide)
 
     def _on_auto_hide_enabled_changed(self, checked: bool):
@@ -820,6 +833,7 @@ class SettingsPanel(QWidget):
         self._host.asset_limits_changed.emit(
             self._config.get("temp_asset_max_count", 50),
             self._config.get("temp_asset_max_days", 30),
+            self._config.get("temp_asset_max_file_mb", 50),
         )
         self._host.auto_hide_seconds_changed.emit(self._config.get("auto_hide_seconds", 3))
         self._host.auto_hide_enabled_changed.emit(

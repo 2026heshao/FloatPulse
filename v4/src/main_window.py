@@ -153,22 +153,29 @@ class MainWindow(QWidget):
     """生活悬浮球大窗口主UI"""
 
     # ---- 窗口尺寸常量 ----
-    DEFAULT_WIDTH = 920
-    DEFAULT_HEIGHT = 620
-    # 当前默认尺寸即最小尺寸：窗口可放大自适应，不可小于默认尺寸
-    MIN_WIDTH = DEFAULT_WIDTH
-    MIN_HEIGHT = DEFAULT_HEIGHT
+    # 默认尺寸（2026-09-27 由 920×620 调大）：功能持续增加后，旧尺寸下
+    # 碎片列表一屏仅 9 行、长文本普遍截断，且右侧预览区偏窄
+    DEFAULT_WIDTH = 1280
+    DEFAULT_HEIGHT = 740
+    # 最小尺寸 = 调大前的默认尺寸（布局已验证过的安全下限）。
+    # 默认值与最小值**解耦**：默认变大后用户仍可手动缩小，不被硬下限卡住
+    MIN_WIDTH = 920
+    MIN_HEIGHT = 620
     SIDE_BAR_WIDTH = 168
     TITLE_BAR_HEIGHT = 48
     SHADOW_MARGIN = 18           # 阴影留白边距
     WINDOW_RADIUS = 14           # 窗口圆角（与设计稿一致）
+    # 默认尺寸按屏幕可用工作区钳制时预留的四周留白（小屏兜底，防开出屏幕外）
+    SCREEN_SAFE_MARGIN = 40
+    # 窗口几何落盘防抖间隔（毫秒）：连续拖动/缩放期间只写一次盘
+    GEOMETRY_SAVE_DELAY = 600
 
     # ---- 信号 ----
     theme_changed = pyqtSignal(str)   # 主题切换时发射，参数为 "light"/"dark"
     data_changed = pyqtSignal(str)    # 数据变更时发射，参数为数据类型标识
     ball_visibility_changed = pyqtSignal(bool)  # 悬浮球显示/隐藏切换
     card_always_show_changed = pyqtSignal(bool)  # 小卡片保持显示模式切换
-    asset_limits_changed = pyqtSignal(int, int)  # 临时素材上限变更（max_count, max_days）
+    asset_limits_changed = pyqtSignal(int, int, int)  # 临时素材上限变更（max_count, max_days, max_file_mb）
     anim_speed_changed = pyqtSignal(float)       # 悬浮球动画速度变更
     auto_hide_seconds_changed = pyqtSignal(int)  # 悬浮球空闲吸边隐藏秒数变更
     auto_hide_enabled_changed = pyqtSignal(bool)  # 悬浮球空闲吸边自动隐藏总开关变更
@@ -208,6 +215,9 @@ class MainWindow(QWidget):
 
         # 最大化前的正常窗口几何（还原时精确恢复，不强制回默认尺寸）
         self._normal_geometry = None
+        # 窗口几何落盘：防抖定时器（懒创建）+ 初始化/恢复期间抑制保存标志
+        self._geom_save_timer = None
+        self._restoring_geometry = False
 
         # 左栏拖拽换位状态：
         # - 光标采用「配对防护」：``_nav_drag_cursor_active`` 为 True 才允许
@@ -462,12 +472,19 @@ class MainWindow(QWidget):
             | Qt.WindowType.Window
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+        w, h = self._compute_default_size()
+        self.resize(w, h)
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
         # 开启鼠标跟踪：悬停时实时检测边缘并切换缩放指针
         self.setMouseTracking(True)
-        # 初始位置：屏幕中央偏左，确保完全在可视区内
-        self._ensure_on_screen(init=True)
+        # 初始位置：优先恢复上次几何；无有效记忆时居中到屏幕
+        # _restoring_geometry 用于抑制构造期 resize/move 事件触发落盘
+        self._restoring_geometry = True
+        try:
+            if not self._restore_saved_geometry():
+                self._ensure_on_screen(init=True)
+        finally:
+            self._restoring_geometry = False
         # 修复：无边框窗口默认缺少 WS_MINIMIZEBOX/WS_MAXIMIZEBOX 样式，
         # 导致点击任务栏按钮只能激活/还原、无法最小化/最大化隐藏
         try:
@@ -521,6 +538,111 @@ class MainWindow(QWidget):
         except Exception:
             # 任何异常都不应阻塞窗口显示
             pass
+
+    # ==================================================================
+    # 窗口几何：默认尺寸钳制 / 上次几何恢复 / 防抖落盘
+    # ==================================================================
+    def _compute_default_size(self) -> tuple:
+        """默认尺寸：放得下就用理想值，放不下才按工作区收缩。
+
+        - 屏幕 ≥ 默认尺寸 → 直接用 DEFAULT_WIDTH/HEIGHT（不缩水，保证选定值生效）
+        - 屏幕偏小 → 收缩到「工作区 - 两倍安全留白」，但不低于 MIN_WIDTH/HEIGHT
+          （宁可略超屏也不让布局被压坏）
+        """
+        w, h = self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT
+        try:
+            scr = get_screen_geometry()
+            if scr.width() > 0 and scr.height() > 0:
+                if w > scr.width():
+                    w = max(self.MIN_WIDTH,
+                            scr.width() - self.SCREEN_SAFE_MARGIN * 2)
+                if h > scr.height():
+                    h = max(self.MIN_HEIGHT,
+                            scr.height() - self.SCREEN_SAFE_MARGIN * 2)
+        except Exception:
+            pass
+        return w, h
+
+    def _parse_saved_geometry(self):
+        """解析配置里的几何字符串 "x,y,w,h"。
+
+        非法 / 缺失 / 尺寸小于最小尺寸 → 返回 None（回退默认尺寸更安全）
+        """
+        raw = self._config.get("main_window_geometry", "")
+        if not raw or not isinstance(raw, str):
+            return None
+        parts = raw.split(",")
+        if len(parts) != 4:
+            return None
+        try:
+            x, y, w, h = (int(float(p)) for p in parts)
+        except (TypeError, ValueError):
+            return None
+        if w < self.MIN_WIDTH or h < self.MIN_HEIGHT:
+            return None
+        return QRect(x, y, w, h)
+
+    def _restore_saved_geometry(self) -> bool:
+        """恢复上次窗口几何；无有效记忆 / 屏幕异常时返回 False（调用方回退居中）。
+
+        恢复值一律做钳制：分辨率变小、外接屏拔掉、记忆值过大时,
+        都不能把窗口放到屏幕外或撑得比工作区还大。
+        """
+        geom = self._parse_saved_geometry()
+        if geom is None:
+            return False
+        try:
+            scr = get_screen_geometry()
+        except Exception:
+            return False
+        if scr.width() <= 0 or scr.height() <= 0:
+            return False
+        w = max(self.MIN_WIDTH, min(geom.width(), scr.width()))
+        h = max(self.MIN_HEIGHT, min(geom.height(), scr.height()))
+        x = max(scr.left(), min(geom.x(), scr.right() - w))
+        y = max(scr.top(), min(geom.y(), scr.bottom() - h))
+        self.setGeometry(x, y, w, h)
+        return True
+
+    def _schedule_save_geometry(self):
+        """窗口尺寸/位置变化后防抖落盘（连续拖动/缩放只写一次）"""
+        if self._restoring_geometry:
+            return
+        if self._geom_save_timer is None:
+            self._geom_save_timer = QTimer(self)
+            self._geom_save_timer.setSingleShot(True)
+            self._geom_save_timer.setInterval(self.GEOMETRY_SAVE_DELAY)
+            self._geom_save_timer.timeout.connect(self._save_geometry)
+        self._geom_save_timer.start()
+
+    def _save_geometry(self, force: bool = False):
+        """把当前窗口几何写入配置。
+
+        - 不可见时不写（``force=True`` 供退出兜底时跳过该判定）
+        - 最大化 / 最小化时不写（避免把最大化尺寸记成正常尺寸）
+        - 尺寸异常（小于最小尺寸）时不写
+        - 与已存值相同则不写盘（省 I/O）
+        """
+        if self._geom_save_timer is not None:
+            self._geom_save_timer.stop()
+        if self._restoring_geometry:
+            return
+        if not force and not self.isVisible():
+            return
+        if self.isMaximized() or self.isMinimized():
+            return
+        g = self.geometry()
+        if g.width() < self.MIN_WIDTH or g.height() < self.MIN_HEIGHT:
+            return
+        value = f"{g.x()},{g.y()},{g.width()},{g.height()}"
+        if value == self._config.get("main_window_geometry", ""):
+            return
+        self._config.set("main_window_geometry", value)
+        self._config.save()
+
+    def save_geometry_now(self):
+        """立即落盘窗口几何（程序退出前由主程序兜底调用，防抖窗口内也不丢）"""
+        self._save_geometry(force=True)
 
     def showEvent(self, event):
         """窗口显示前确保位置在屏幕内；首次显示播放入场动画"""
@@ -602,7 +724,7 @@ class MainWindow(QWidget):
             y = max(screen.top(), min(geom.y(), screen.bottom() - geom.height()))
             self.setGeometry(x, y, geom.width(), geom.height())
         else:
-            self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
+            self.resize(*self._compute_default_size())
             self._center_on_screen()
 
     def _center_on_screen(self):
@@ -621,7 +743,7 @@ class MainWindow(QWidget):
             return
         if self.isMaximized():
             self._max_btn.setText("❐")
-            self._max_btn.setToolTip("还原默认尺寸")
+            self._max_btn.setToolTip("还原窗口")
         else:
             self._max_btn.setText("⛶")
             self._max_btn.setToolTip("最大化窗口")
@@ -687,6 +809,13 @@ class MainWindow(QWidget):
         # 左栏拖拽期间窗口尺寸变化 → 槽位冻结值失效，直接回滚退出拖拽
         if self._nav_free_spacer is not None:
             self._force_end_nav_drag()
+        # 尺寸变化 → 防抖落盘（最大化/最小化由 _save_geometry 自行跳过）
+        self._schedule_save_geometry()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        # 位置变化（用户拖动标题栏）→ 防抖落盘
+        self._schedule_save_geometry()
 
     def closeEvent(self, event):
         """关闭窗口的智能处理：
@@ -696,6 +825,8 @@ class MainWindow(QWidget):
             悬浮球可见 → 只隐藏主窗口（保持后台运行）
             悬浮球不可见 → 退出程序（避免无窗口的僵尸进程）
         """
+        # 关闭/隐藏/退出前立即落盘，兜住防抖窗口内尚未写入的尺寸位置
+        self._save_geometry()
         if self._allow_close:
             event.accept()
             return
