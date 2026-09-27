@@ -1,17 +1,20 @@
 {
   "id": "ai-assistant",
   "name": "AI 助手",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "plugin.py",
   "requires": ["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
   "capabilities": ["network"],
+  "page": {
+    "title": "🤖 AI 助手"
+  },
   "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答",
   "actions": [
     {
       "id": "ai-assistant.chat",
       "title": "🤖 AI 助手",
       "hotkey": "Ctrl+Alt+I",
-      "menu": true
+      "menu": false
     }
   ]
 }
