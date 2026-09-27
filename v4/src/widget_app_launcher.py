@@ -3,24 +3,27 @@
 ====================================================================
 软件导航组件  -  AppLauncherPage / AppEditDialog / AppManageDialog
 ====================================================================
-软件导航页面：嵌入主窗口 QStackedWidget 的只读浏览页面组件。
+软件导航页面：嵌入主窗口 QStackedWidget 的浏览页面组件。
 
 职责划分：
-  · AppLauncherPage —— 只读浏览页面，仅展示卡片 + 启动软件
+  · AppLauncherPage —— 浏览页面：卡片左键启动；卡片/空白区右键菜单
   · AppManageDialog  —— 管理对话框（新增/编辑/删除），由主窗口设置页调用
-  · AppEditDialog    —— 新增/编辑软件条目的模态弹窗，仅供 AppManageDialog 调用
+  · AppEditDialog    —— 新增/编辑软件条目的模态弹窗，管理对话框与
+                        导航页右键菜单共用
 
 本文件包含：
-  · AppCardWidget       —— 单张软件卡片（图标 + 名称）
-  · AppLauncherPage     —— 嵌入主窗口的导航浏览页面（只读，无增删改）
+  · AppCardWidget       —— 单张软件卡片（图标 + 名称 + 右键菜单）
+  · AppLauncherPage     —— 嵌入主窗口的导航浏览页面
   · AppManageDialog     —— 软件列表管理对话框（新增/编辑/删除）
   · AppEditDialog       —— 新增/编辑软件条目的模态弹窗
   · extract_exe_icon / load_icon_pixmap / draw_placeholder_icon
                         图标工具函数
 
 设计要点：
-  1. AppLauncherPage 继承 QWidget，浏览页面内卡片只读（无右键菜单）；
-     页面顶部提供【管理软件列表】按钮唤起 AppManageDialog 完成增删改
+  1. AppLauncherPage 继承 QWidget，卡片左键启动软件；
+     卡片右键弹专属菜单（启动/编辑/定位/复制路径/移除），
+     页面空白处右键弹新增/管理菜单——事件均就地消费，
+     不再冒泡到主窗口的全局右键兜底菜单
   2. 卡片尺寸步进器位于主窗口全局设置页，通过 apply_card_size() 实时刷新本页
   3. AppManageDialog 继承 QDialog，管理结束发射 apps_changed 刷新导航页
   4. 软件列表数据存放在宿主已有 config.json 的根节点 "apps" 数组中，
@@ -52,6 +55,8 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QFrame,
     QGraphicsOpacityEffect,
+    QMenu,
+    QApplication,
 )
 from PyQt6.QtCore import Qt, QSize, QFileInfo, pyqtSignal
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPixmapCache
@@ -379,16 +384,22 @@ def _launch_elevated(exe_path: str, launch_args: str, name: str, parent=None) ->
 
 class AppCardWidget(QFrame):
     """
-    单张软件卡片：图标 + 软件名称。
+    单张软件卡片：图标 + 软件名称 + 右键菜单。
 
     - 左键点击发射 clicked 信号（携带卡片索引）
+    - 右键弹卡片专属菜单，选择后发射 actionRequested(index, action)，
+      由 AppLauncherPage 统一分发业务；事件就地消费，
+      不冒泡到主窗口的全局右键兜底菜单
     - 路径失效（exe 文件不存在）时整张卡片置灰
     - hover 背景高亮（通过 QSS #appCard:hover 实现）
-    - 无右键菜单（卡片本身不绑定任何管理操作）
     """
 
     # 左键点击信号：参数为卡片在 app_list 中的索引
     clicked = pyqtSignal(int)
+
+    # 右键菜单动作信号：(卡片索引, 动作 id)
+    # 动作 id: launch / edit / locate / copypath / remove
+    actionRequested = pyqtSignal(int, str)
 
     # 卡片名称区域高度（像素）
     _NAME_AREA_H = 28
@@ -457,6 +468,27 @@ class AppCardWidget(QFrame):
             self.clicked.emit(self._index)
         super().mousePressEvent(event)
 
+    def contextMenuEvent(self, event):
+        """右键菜单：启动/编辑/定位/复制路径/移除。
+
+        菜单选择后经 actionRequested 信号交由 AppLauncherPage 分发；
+        exec 结束后 accept，阻止事件继续冒泡到主窗口兜底菜单。
+        """
+        menu = QMenu(self)
+        menu.addAction("🚀 启动", lambda: self.actionRequested.emit(
+            self._index, "launch"))
+        menu.addAction("✏️ 编辑…", lambda: self.actionRequested.emit(
+            self._index, "edit"))
+        menu.addAction("📁 打开所在位置", lambda: self.actionRequested.emit(
+            self._index, "locate"))
+        menu.addAction("📋 复制路径", lambda: self.actionRequested.emit(
+            self._index, "copypath"))
+        menu.addSeparator()
+        menu.addAction("🗑️ 移除", lambda: self.actionRequested.emit(
+            self._index, "remove"))
+        menu.exec(event.globalPos())
+        event.accept()
+
 
 # ====================================================================
 # 主页面（只读浏览，嵌入 QStackedWidget）
@@ -470,7 +502,8 @@ class AppLauncherPage(QWidget):
       （管理按钮唤起 AppManageDialog 完成新增/编辑/删除，保存后立即刷新本页卡片）
     - 设置栏：自动回到主页复选框（卡片尺寸调节已迁移至主窗口设置页）
     - 滚动区域：卡片网格，列数随页面宽度自适应
-    - 卡片唯一交互：左键点击启动软件（无右键菜单）
+    - 卡片交互：左键启动；右键弹专属菜单（启动/编辑/定位/复制路径/移除）
+    - 页面空白处右键：新增软件 / 管理软件列表
     - 启动成功后若开启了"自动回到主页面"，发射 request_switch_to_home 信号
 
     对外接口：
@@ -573,8 +606,6 @@ class AppLauncherPage(QWidget):
         self._scroll.setWidget(self._grid_container)
         root.addWidget(self._scroll, 1)
 
-        # 注意：网格容器和卡片均不绑定右键菜单（只读页面）
-
     def _apply_style(self):
         """应用主题 QSS + 卡片/页面专用样式。"""
         qss = get_main_window_qss(self._theme)
@@ -657,9 +688,7 @@ class AppLauncherPage(QWidget):
         self._back_home_cb.setChecked(self._auto_back_home)
         self._back_home_cb.blockSignals(False)
 
-        self._current_cols = self._calc_columns()
-        self._render_cards()
-        self._update_count()
+        self._refresh_cards()
 
     # ================================ 卡片渲染 ================================
     def _calc_columns(self) -> int:
@@ -674,7 +703,7 @@ class AppLauncherPage(QWidget):
 
     def _render_cards(self):
         """
-        清空网格并重新渲染全部卡片（不绑定右键菜单）。
+        清空网格并重新渲染全部卡片（左键启动 + 右键菜单）。
 
         排列规则：从左上角开始，按行从左到右、放满一行换下一行，
         末行不满时右侧留空（左对齐，不做居中补位）。
@@ -686,7 +715,7 @@ class AppLauncherPage(QWidget):
         for i, app in enumerate(self.app_list):
             card = AppCardWidget(app, i, self._card_size, self)
             card.clicked.connect(self._on_card_clicked)
-            # 卡片不绑定右键菜单（只读页面）
+            card.actionRequested.connect(self._on_card_action)
             self._grid_layout.addWidget(card, i // cols, i % cols)
 
     @staticmethod
@@ -754,27 +783,115 @@ class AppLauncherPage(QWidget):
     def _on_apps_changed(self):
         """软件列表被管理对话框修改后：重载数据并刷新卡片网格。"""
         self.load_apps_from_config()
-        self._current_cols = self._calc_columns()
-        self._render_cards()
-        self._update_count()
+        self._refresh_cards()
+
+    # ================================ 右键菜单（页面空白区） ================================
+    def contextMenuEvent(self, event):
+        """页面空白处右键：新增软件 / 管理软件列表。
+
+        就地消费事件，不再冒泡到主窗口的全局右键兜底菜单
+        （此前空白处右键会弹出「显示/隐藏悬浮球」，与本页无关）。
+        """
+        menu = QMenu(self)
+        menu.addAction("➕ 新增软件", self._on_add_quick)
+        menu.addAction("📋 管理软件列表", self._on_manage_apps)
+        menu.exec(event.globalPos())
+        event.accept()
 
     # ================================ 卡片点击启动 ================================
     def _on_card_clicked(self, index: int):
+        """左键点击卡片：异步启动外部 exe 程序。"""
+        if index < 0 or index >= len(self.app_list):
+            return
+        self._launch_index(index)
+
+    def _launch_index(self, index: int):
         """
-        左键点击卡片：异步启动外部 exe 程序。
+        启动指定条目（左键与右键菜单「启动」共用）。
 
         - 具体启动逻辑（校验/Popen/740 提权处理）在模块级公共函数
           launch_app 中实现，与悬浮球小卡片的软件页共用同一套逻辑
         - 启动成功后若开启了 _auto_back_home，发射 request_switch_to_home 信号
         """
-        if index < 0 or index >= len(self.app_list):
-            return
-        app = self.app_list[index]
-
-        if launch_app(app, parent=self):
-            # 启动成功 → 根据开关决定是否请求切换到主页面
+        if launch_app(self.app_list[index], parent=self):
             if self._auto_back_home:
                 self.request_switch_to_home.emit()
+
+    # ================================ 卡片右键动作分发 ================================
+    def _on_card_action(self, index: int, action: str):
+        """卡片右键菜单动作统一入口（action id 见 AppCardWidget.actionRequested）。"""
+        if index < 0 or index >= len(self.app_list):
+            return
+        if action == "launch":
+            self._launch_index(index)
+        elif action == "edit":
+            self._edit_app(index)
+        elif action == "locate":
+            self._locate_app(self.app_list[index])
+        elif action == "copypath":
+            self._copy_app_path(self.app_list[index])
+        elif action == "remove":
+            self._remove_app(index)
+
+    def _edit_app(self, index: int):
+        """编辑单个条目：复用 AppEditDialog，确认后写回 config 并刷新。"""
+        dlg = AppEditDialog(self.app_list[index], parent=self,
+                            theme=self._theme)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_app:
+            self.app_list[index] = dlg.result_app
+            self.save_apps_to_config()
+            self._refresh_cards()
+
+    def _locate_app(self, app: dict):
+        """在资源管理器中定位软件文件（exe 或 lnk 本身，并选中）。"""
+        path = (app.get("exe_path") or "").strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(
+                self, "无法定位",
+                f"「{app.get('name', '')}」的文件不存在：\n{path or '（空路径）'}\n\n"
+                "文件可能已被移动或删除，请编辑该条目修正路径。")
+            return
+        try:
+            # explorer /select,"path"：打开所在文件夹并选中该文件
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        except OSError as e:
+            QMessageBox.warning(self, "无法定位",
+                                f"打开资源管理器失败：\n{e}")
+
+    def _copy_app_path(self, app: dict):
+        """复制可执行文件路径到剪贴板（无声操作，不弹提示）。"""
+        path = (app.get("exe_path") or "").strip()
+        if path:
+            QApplication.clipboard().setText(path)
+
+    def _remove_app(self, index: int):
+        """移除条目（二次确认；只从列表删除，不动电脑上的软件本体）。"""
+        name = self.app_list[index].get("name", "")
+        reply = QMessageBox.question(
+            self, "确认移除",
+            f"确定要从软件导航移除「{name}」吗？\n\n"
+            "仅从列表中删除，不会卸载或删除电脑上的软件本体。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            del self.app_list[index]
+            self.save_apps_to_config()
+            self._refresh_cards()
+
+    def _on_add_quick(self):
+        """右键菜单直接新增一条软件（无需经过管理对话框）。"""
+        dlg = AppEditDialog(None, parent=self, theme=self._theme)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_app:
+            self.app_list.append(dlg.result_app)
+            self.save_apps_to_config()
+            self._refresh_cards()
+
+    def _refresh_cards(self):
+        """重算列数并重建卡片网格 + 更新计数（数据变更后统一出口）。"""
+        self._current_cols = self._calc_columns()
+        self._render_cards()
+        self._update_count()
 
 
 # ====================================================================
@@ -959,6 +1076,9 @@ class AppManageDialog(QDialog):
 class AppEditDialog(QDialog):
     """
     新增 / 编辑软件条目弹窗（模态）。
+
+    调用方：AppManageDialog（管理对话框）与 AppLauncherPage
+    （导航页右键菜单「编辑…」/「➕ 新增软件」）。
 
     控件：
       - 软件名称输入框

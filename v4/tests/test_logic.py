@@ -696,11 +696,12 @@ class TestNavOrderSanitize:
         out = sanitize_nav_order(DEFAULT_NAV_ORDER)
         assert out == DEFAULT_NAV_ORDER
         assert out is not DEFAULT_NAV_ORDER   # 返回副本
-        assert len(NAV_PAGE_KEYS) == 7
+        assert len(NAV_PAGE_KEYS) == 8        # 2026-09-27 起含 plugins
         assert set(DEFAULT_NAV_ORDER) == set(NAV_PAGE_KEYS)
 
     def test_valid_permutation(self):
-        raw = ["nav", "apps", "assets", "knowledge", "notes", "tasks", "fragments"]
+        raw = ["nav", "apps", "assets", "knowledge",
+               "notes", "tasks", "fragments", "plugins"]
         assert sanitize_nav_order(raw) == raw
 
     def test_empty_means_never_customized(self):
