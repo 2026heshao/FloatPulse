@@ -884,6 +884,16 @@ class FloatingBall(QWidget):
         # 状态变化 → 菜单项组随显隐重建（菜单通常处于关闭态，开销可忽略）
         self._update_pomodoro_visuals()
         self._rebuild_context_menu()
+        # 番茄钟计时期间暂停闲置自动隐藏；结束/停止后恢复原节律。
+        # 若开始计时那一刻球正半隐藏在屏幕边缘，滑回屏内把环亮出来
+        if self.pomodoro_busy():
+            t = getattr(self, "_idle_hide_timer", None)
+            if t is not None:
+                t.stop()
+            if getattr(self, "_hidden_to_edge", False):
+                self._slide_out_from_edge()
+        else:
+            self._start_idle_hide_timer()
 
     def _on_pomodoro_finished(self, phase: str):
         """相位计满：脉冲反馈 + 轻提示 + 任务番茄计数 + 托盘气泡（经信号）。"""
@@ -1924,6 +1934,11 @@ class FloatingBall(QWidget):
         if not self._auto_hide_enabled:
             self._idle_hide_timer.stop()
             return
+        # 番茄钟计时中（含暂停）不自动隐藏：环在显示倒计时进度
+        # （用户约定 2026-09-27：开启番茄钟时关闭悬浮球自动隐藏）
+        if self.pomodoro_busy():
+            self._idle_hide_timer.stop()
+            return
         if self._is_near_edge():
             self._idle_hide_timer.start()
         else:
@@ -2204,6 +2219,16 @@ def main():
     note_manager = NoteManager(notes_path)
     fragment_manager = FragmentManager(fragments_path)
 
+    # ---- 桌面便签（几何存独立 stickies.json，与 notes.json 生命周期解耦）----
+    from src.sticky_notes import StickyStore, StickyNoteManager
+    sticky_store = StickyStore(
+        os.path.join(data_dir, "stickies.json"),
+        note_ids=lambda: {n.note_id for n in note_manager.get_all_notes()},
+    )
+    sticky_manager = StickyNoteManager(
+        note_manager, sticky_store,
+        theme=config_manager.get("theme", DEFAULT_THEME))
+
     # ---- 临时素材管理器（拖图片/文件到悬浮球时复制保存）----
     from src.temp_asset_manager import TempAssetManager
     temp_asset_manager = TempAssetManager(
@@ -2227,6 +2252,8 @@ def main():
         docx_manager, config_manager, clipboard_monitor,
         temp_asset_manager, nav_manager
     )
+    # 桌面便签管理器注入宿主（面板经 @property sticky_manager 晚绑定读取）
+    main_window.sticky_manager = sticky_manager
 
     # ---- 悬浮球 ----
     ball = FloatingBall(
@@ -2313,6 +2340,12 @@ def main():
             screenshot_pin.close_all()
         except Exception:
             pass
+        # 桌面便签：几何立即落盘后收掉全部窗口（笔记数据保留）
+        try:
+            sticky_manager.save_now()
+            sticky_manager.close_all()
+        except Exception:
+            pass
         # 重置卡片窗口状态为默认首页
         ball._card_window._last_mode = "fragment"
         ball._card_window._switch_mode("fragment")
@@ -2342,6 +2375,29 @@ def main():
     _tray_menu = QMenu()
     _act_main = _tray_menu.addAction("显示 / 隐藏主窗口")
     _act_ball = _tray_menu.addAction("显示 / 隐藏悬浮球")
+
+    # ---- 📌 便签子菜单：列出已钉便签 + 全部置前 / 全部关闭 ----
+    _tray_sticky_menu = QMenu("📌 便签", _tray_menu)
+
+    def _rebuild_sticky_menu():
+        _tray_sticky_menu.clear()
+        entries = sticky_manager.get_all()
+        if not entries:
+            empty = _tray_sticky_menu.addAction("（暂无便签）")
+            empty.setEnabled(False)
+        else:
+            for sid, title, _nid in entries:
+                act = _tray_sticky_menu.addAction(f"📄 {title[:24]}")
+                act.triggered.connect(
+                    lambda _checked=False, s=sid: sticky_manager.raise_sticky(s))
+            _tray_sticky_menu.addSeparator()
+            front = _tray_sticky_menu.addAction("⬆ 全部置前")
+            front.triggered.connect(sticky_manager.bring_all_to_front)
+        close_all = _tray_sticky_menu.addAction("✕ 全部关闭")
+        close_all.triggered.connect(sticky_manager.close_all)
+
+    _tray_sticky_menu.aboutToShow.connect(_rebuild_sticky_menu)
+    _tray_menu.addMenu(_tray_sticky_menu)
     _tray_menu.addSeparator()
     _act_quit = _tray_menu.addAction("退出程序")
     _act_main.triggered.connect(_toggle_main_window)
@@ -2572,6 +2628,8 @@ def main():
 
     # 3. 大窗口主题切换 → 悬浮球 + 小卡片应用主题
     main_window.theme_changed.connect(ball.apply_theme)
+    # 3b. 主题切换 → 桌面便签全部换肤
+    main_window.theme_changed.connect(sticky_manager.apply_theme)
 
     # 4. 剪贴板新增碎片 → 大窗口刷新碎片页面（若可见）+ 球体脉冲反馈
     def _on_fragment_added(_content=None):
@@ -2607,6 +2665,9 @@ def main():
         elif kind == "fragment" and ball._card_window.isVisible():
             # 碎片变更后刷新小卡片碎片页
             ball._card_window._refresh_fragment_page()
+        elif kind == "note":
+            # 笔记被删除后，对应桌面便签自动关闭（孤儿窗口不留）
+            sticky_manager.validate_open_windows()
     main_window.data_changed.connect(_on_main_data_changed)
 
     # 6. 主窗口悬浮球开关 → 显示/隐藏悬浮球
