@@ -6,7 +6,7 @@ title FloatPulse 启动器
 
 echo ============================================================
 echo   FloatPulse 启动器
-echo   v4 = 开发主线（默认）      v2 / v3 = 冻结基线（对照用）
+echo   v4 = 开发主线（默认）      quiet = 后台无控制台启动
 echo ============================================================
 echo.
 
@@ -16,8 +16,8 @@ set "MODE=console"
 set "SCRIPT=knowledge_ball.py"
 :parse
 if "%~1"=="" goto parsed
-if /i "%~1"=="v2"      set "APPDIR=v2"
-if /i "%~1"=="v3"      set "APPDIR=v3"
+if /i "%~1"=="v2"      echo [提示] v2/v3 冻结基线已于 2026-09-27 清理移除，改启动 v4 & set "APPDIR=v4"
+if /i "%~1"=="v3"      echo [提示] v2/v3 冻结基线已于 2026-09-27 清理移除，改启动 v4 & set "APPDIR=v4"
 if /i "%~1"=="v4"      set "APPDIR=v4"
 if /i "%~1"=="console" set "MODE=console"
 if /i "%~1"=="quiet"   set "MODE=quiet"
