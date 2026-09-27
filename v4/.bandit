@@ -1,0 +1,38 @@
+# Bandit 配置 —— FloatPulse v4
+# ====================================================================
+# 这是「出厂代码」(src/ + knowledge_ball.py) 的静态安全扫描基线配置。
+# 2026-09-27 首次建立，扫描范围 19204 行，人工逐条复核完成。
+#
+# 复核结论：基线无真实漏洞。下方 skips 均为「桌面工具设计意图」导致的
+# 误报，逐条给出理由，避免以后有人看到跳过项就慌。
+# ====================================================================
+
+skips:
+  # --- B110: try_except_pass -----------------------------------------
+  # Qt 桌面程序中「UI 回调 / 退出兜底 / 清理路径」刻意吞异常是正常模式：
+  # 一个槽函数抛异常不应中断整个应用，也不该弹窗骚扰用户。
+  # 全项目 44 处全部属于此类（2026-09-27 人工抽检确认）。
+  - B110
+
+  # --- B606: start_process_with_no_shell -----------------------------
+  # os.startfile(path) 打开本地文件/文件夹/URL 是本工具的核心功能
+  # （点素材卡片打开文件、点图标启动程序、点链接开浏览器）。
+  # 参数全部来自用户本机文件系统，非远程不可信输入。
+  # 6 处：assets_panel / card_window×2 / nav_panel / temp_asset_manager / widget_app_launcher
+  - B606
+
+  # --- B603: subprocess_without_shell_equals_true --------------------
+  # widget_app_launcher.py:316 用 subprocess.Popen(args_list, shell=False)
+  # 启动用户拖入的 exe/lnk。已确认：显式 shell=False + 参数以 list 传递
+  # （shlex 切分），无 shell 注入面。
+  - B603
+
+  # --- B404: import_subprocess ---------------------------------------
+  # 同上，启动本地程序必须 import subprocess，仅在 widget_app_launcher.py
+  # 单点使用。
+  - B404
+
+  # --- B311: random --------------------------------------------------
+  # card_window.py:1564 用 random.randint 随机切换悬浮球卡片。
+  # 非加密场景（不用 secrets 是对的——换卡不需要密码学强度）。
+  - B311

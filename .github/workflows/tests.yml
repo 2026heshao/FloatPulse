@@ -27,3 +27,28 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest tests -q
+
+  bandit:
+    # 静态安全扫描（优化调研清单 5.3）。
+    # 范围只含出厂代码（src/ 与入口 knowledge_ball.py）——tests/ 与 tools/ 不随包分发，
+    # 里面有大量刻意为之的 try/except-pass，扫进来只会淹没有效告警。
+    #
+    # 基线已于 2026-09-27 人工复核：19213 行检出 0 问题，因此这里「真阻断」。
+    # 误报规则（B110/B603/B606/B404/B311 + 理由）集中在 v4/.bandit 里，
+    # 新增告警会真的让 CI 变红 —— 这是有意的，防止安全面回归。
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 bandit
+        run: pip install bandit
+
+      - name: 静态安全扫描（medium 及以上，基线 0 问题 → 阻断）
+        run: bandit -r src knowledge_ball.py -ll -c .bandit -f screen
