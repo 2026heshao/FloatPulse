@@ -24,6 +24,12 @@
     / 导入异常 / 没有 BallPlugin 子类 / 实例化失败 / create_actions 抛异常
     → 只记 ``logger.warning`` 并跳过该插件
   - 动作级问题（run 抛异常、热键冲突）由 ActionRegistry 兜住
+  - 热键**格式**非法 → 只丢掉该热键、保留动作（菜单里仍可用）；
+    热键**被占用/冲突** → 整个动作让位。两者是不同处置，见开发说明第 7 节
+
+每个插件在 ``create_actions()`` 前会派生一个绑定自身身份的 PluginContext
+（``ctx.plugin_id`` / ``ctx.data_dir`` / ``ctx.plugin_dir``），
+并随动作一起交给注册表 —— 触发时 ``run(ctx)`` 拿到的就是这个实例。
 
 「禁用可以，真卸载不要」：
   ``deactivate()`` 只把动作从注册表摘掉（模块对象仍驻留 ``sys.modules``），
@@ -34,12 +40,14 @@
 import importlib.util
 import json
 import os
-import re
 import shutil
 import sys
 import zipfile
 
-from src.plugin_api import BallAction, BallPlugin, is_allowed_requirement
+from src.plugin_api import (
+    BallAction, BallPlugin, is_allowed_requirement, is_safe_plugin_id,
+    is_valid_hotkey,
+)
 
 # 插件包固定文件名
 MANIFEST_NAME = "manifest.json"
@@ -48,20 +56,13 @@ PLUGIN_PACKAGE_EXT = ".fpplug"
 # manifest 必需字段
 REQUIRED_FIELDS = ("id", "name", "version", "entry")
 
-# 插件 id 合法形态：字母数字开头，允许 . _ -，1~64 位（同时用作目录名，必须安全）
-_RE_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-
 # 导入到 sys.modules 时的模块名前缀（避免与主程序模块撞名）
 _MODULE_PREFIX = "floatpulse_plugin_"
 
 
 def is_safe_id(plugin_id) -> bool:
-    """插件 id 是否可安全用作目录名（拒绝路径分隔符 / ``..`` / 空）"""
-    if not isinstance(plugin_id, str) or not plugin_id:
-        return False
-    if plugin_id in (".", "..") or ".." in plugin_id:
-        return False
-    return bool(_RE_SAFE_ID.match(plugin_id))
+    """插件 id 是否可安全用作目录名（实现已上移到 plugin_api，此处保留兼容名）"""
+    return is_safe_plugin_id(plugin_id)
 
 
 def validate_manifest(data):
@@ -130,13 +131,14 @@ def validate_manifest(data):
 class LoadedPlugin:
     """一个已成功导入（可能尚未登记）的插件"""
 
-    def __init__(self, plugin_id, name, version, path, plugin, manifest):
+    def __init__(self, plugin_id, name, version, path, plugin, manifest, ctx=None):
         self.plugin_id = plugin_id
         self.name = name
         self.version = version
         self.path = path
         self.plugin = plugin
         self.manifest = manifest
+        self.ctx = ctx            # 绑定本插件身份的 PluginContext（loader 派生）
         self.actions_raw = []      # create_actions 的原始产出
         self.registered = False    # 当前是否已登记进注册表
 
@@ -379,8 +381,12 @@ class PluginLoader:
         plugin.name = manifest["name"]
         plugin.version = manifest["version"]
 
+        # 派生绑定本插件身份的上下文：插件由此拿到 plugin_id / data_dir /
+        # plugin_dir / parent_window，而不必自己记身份
+        plugin_ctx = self._ctx_for(plugin_id, dirpath)
+
         try:
-            actions = plugin.create_actions(self._ctx)
+            actions = plugin.create_actions(plugin_ctx)
         except Exception as exc:          # noqa: BLE001
             self._warn(f"create_actions 抛出异常，跳过插件：{plugin_id}（{exc!r}）")
             self._log_traceback("create_actions 异常详情")
@@ -394,7 +400,7 @@ class PluginLoader:
             return None
 
         lp = LoadedPlugin(plugin_id, manifest["name"], manifest["version"],
-                          dirpath, plugin, manifest)
+                          dirpath, plugin, manifest, ctx=plugin_ctx)
         lp.actions_raw = list(actions)
         self._info(f"已导入插件：{plugin_id} v{manifest['version']}"
                    f"（动作 {len(lp.actions_raw)} 个）")
@@ -467,6 +473,15 @@ class PluginLoader:
                 act.title = spec["title"]
             act.icon_path = icon_path
 
+            # 热键格式校验（加载期就报，别等注册期静默失败）：
+            # 格式非法 → 只丢掉这个热键，保留动作（菜单里仍可用），
+            # 与「热键被占用 → 整个动作让位」是两种不同处置，见开发说明第 7 节
+            if act.hotkey and not is_valid_hotkey(act.hotkey):
+                self._warn(f"{lp.plugin_id}/{aid}: 热键格式非法，已改为仅菜单触发："
+                           f"{act.hotkey!r}（正确形态如 'Ctrl+Alt+W'，"
+                           f"必须含修饰键 + 主键）")
+                act.hotkey = None
+
             hotkey = act.declared_hotkey()
             if hotkey:
                 if self._registry.hotkey_blocked_by_reserved(hotkey):
@@ -478,7 +493,7 @@ class PluginLoader:
                     self._warn(f"{lp.plugin_id}/{aid}: 热键 {act.hotkey} "
                                f"与 {taken} 冲突，后登记者让位（已跳过）")
                     continue
-            if self._registry.register(act, lp.plugin_id):
+            if self._registry.register(act, lp.plugin_id, lp.ctx):
                 ok += 1
 
         for leftover in impls:
@@ -489,6 +504,17 @@ class PluginLoader:
         self._info(f"插件登记完成：{lp.plugin_id} → 生效动作 {ok} 个")
 
     # ---------------- 工具 ----------------
+    def _ctx_for(self, plugin_id: str, plugin_dir: str):
+        """派生绑定插件身份的上下文；宿主 ctx 不支持派生时退回共享实例"""
+        factory = getattr(self._ctx, "for_plugin", None)
+        if not callable(factory):
+            return self._ctx
+        try:
+            return factory(plugin_id, plugin_dir)
+        except Exception as exc:          # noqa: BLE001 - 派生失败不该拖垮加载
+            self._warn(f"{plugin_id}: 上下文派生失败，退回共享上下文（{exc!r}）")
+            return self._ctx
+
     @staticmethod
     def _within(path: str, parent: str) -> bool:
         """path 是否位于 parent 目录内（归一化前缀比较，防目录穿越）"""
