@@ -72,7 +72,7 @@ _DENIED_REQUIRES = frozenset({
 
 # 已知的能力名（manifest.capabilities 合法取值）。
 # 未知能力名 → manifest 校验失败（防拼写错误静默失效，如 "netwrork"）。
-KNOWN_CAPABILITIES = frozenset({"network"})
+KNOWN_CAPABILITIES = frozenset({"network", "write"})
 
 
 def is_allowed_requirement(name: str) -> bool:
@@ -238,6 +238,136 @@ class PluginData:
             self._logger.warning(f"[插件] {msg}")
 
 
+class PluginWriter:
+    """插件可见的**受限写入口**（需声明 ``capabilities: ["write"]``）。
+
+    设计原则与 ``PluginData``（只读快照）完全对称，只是方向相反：
+
+      - 插件**拿不到** TaskManager / FragmentManager / NoteManager 对象，
+        只有三个"新增"方法，走宿主注入的 provider
+      - **只增不改删**：刻意不提供 update / delete。改删的破坏性远大于新增，
+        起步阶段不开口子
+      - 所有方法都不抛异常：未声明能力 / 宿主未注入 / 参数非法 → 记 warning
+        并返回 ``0``（0 = 没有写入任何东西）
+      - 内容有护栏：空内容拒写、非字符串拒写、超长截断（``MAX_CONTENT_LEN``）
+
+    返回值统一是**新记录的 id**（fragment_id / task_id / note_id），
+    写入失败返回 0。插件判 ``> 0`` 即知成败，不必读日志。
+    """
+
+    SOURCE_FRAGMENT = "fragment"
+    SOURCE_TASK = "task"
+    SOURCE_NOTE = "note"
+
+    # 单条内容长度上限（字符）。超长截断而非拒写——用户宁愿要截断版，
+    # 也不想看到"因为回答太长所以什么都没存"。
+    MAX_CONTENT_LEN = 8000
+
+    def __init__(self, logger=None, providers=None, plugin_id="",
+                 capabilities=()):
+        self._logger = logger if logger is not None else _NULL_LOGGER
+        # 只留下 callable，挡掉误注入的数据本体
+        self._providers = {name: fn for name, fn in dict(providers or {}).items()
+                           if callable(fn)}
+        self._plugin_id = str(plugin_id or "")
+        self._capabilities = frozenset(
+            c for c in (capabilities or ()) if isinstance(c, str))
+
+    # ---------------- 门禁 ----------------
+    def enabled(self) -> bool:
+        """本插件是否被授权写入（manifest 声明了 write 能力）"""
+        return "write" in self._capabilities
+
+    def sources(self) -> tuple:
+        """当前可用的写入目标（插件可据此决定降级策略）"""
+        return tuple(sorted(self._providers))
+
+    def _deny(self, reason: str) -> int:
+        self._warn(f"写入被拒绝：{reason}")
+        return 0
+
+    def _check(self, name: str, content):
+        """公共前置校验：返回规整后的字符串，或 None 表示应拒写"""
+        if not self.enabled():
+            self._deny("插件未在 manifest 声明 capabilities=[\"write\"]")
+            return None
+        if name not in self._providers:
+            self._deny(f"宿主未注入写入通道：{name}")
+            return None
+        if not isinstance(content, str):
+            self._deny(f"内容必须是字符串，收到 {type(content).__name__}")
+            return None
+        text = content.strip()
+        if not text:
+            self._deny("内容为空，未写入")
+            return None
+        if len(text) > self.MAX_CONTENT_LEN:
+            self._warn(f"内容超长（{len(text)} 字符），已截断到 "
+                       f"{self.MAX_CONTENT_LEN} 字符")
+            text = text[:self.MAX_CONTENT_LEN]
+        return text
+
+    @staticmethod
+    def _opt_str(value) -> str:
+        """可选字符串参数：None / 非字符串 → 空串（宽容处理，不拒写正文）"""
+        return value.strip() if isinstance(value, str) and value.strip() else ""
+
+    def _call(self, name: str, args: tuple) -> int:
+        try:
+            rid = self._providers[name](*args)
+        except Exception as exc:          # noqa: BLE001 - 宿主 provider 异常也要隔离
+            self._warn(f"写入失败（{name}）：{exc!r}")
+            return 0
+        # 只认真正的整数（bool 是 int 子类，也要挡掉）：provider 返回
+        # 3.7 这种浮点数说明写接口被改坏了，宁可当失败也不要悄悄取整
+        if isinstance(rid, bool) or not isinstance(rid, int):
+            self._warn(f"写入返回了非整数 id（{name}）：{rid!r}")
+            return 0
+        return rid if rid > 0 else 0
+
+    # ---------------- 三个写入方法 ----------------
+    def add_fragment(self, content: str, source: str = "") -> int:
+        """新增一条碎片，返回 fragment_id（失败 0）。
+
+        ``source`` 缺省自动填 ``插件:<插件id>``，落库后可追溯来源。
+        """
+        text = self._check(self.SOURCE_FRAGMENT, content)
+        if text is None:
+            return 0
+        src = self._opt_str(source) or f"插件:{self._plugin_id}"
+        return self._call(self.SOURCE_FRAGMENT, (text, src))
+
+    def add_task(self, title: str, note: str = "", deadline: str = "") -> int:
+        """新增一条任务，返回 task_id（失败 0）。
+
+        ``deadline`` 是 ``"YYYY-MM-DD"`` 形式的字符串；空串 = 无截止日期
+        （与宿主"脏日期 = 无日期"的口径一致）。日期合法性由宿主侧校验，
+        非法一律按无日期处理，不会因为插件传错格式而拒绝整条任务。
+        """
+        text = self._check(self.SOURCE_TASK, title)
+        if text is None:
+            return 0
+        return self._call(self.SOURCE_TASK,
+                          (text, self._opt_str(note),
+                           self._opt_str(deadline)))
+
+    def add_note(self, title: str, content: str = "") -> int:
+        """新增一条笔记，返回 note_id（失败 0）。
+
+        注意参数顺序与 ``add_task`` 不同：笔记以 title 为主键、
+        content 为正文，这里把 title 放前面更符合调用直觉。
+        """
+        text = self._check(self.SOURCE_NOTE, title)
+        if text is None:
+            return 0
+        return self._call(self.SOURCE_NOTE, (text, self._opt_str(content)))
+
+    # ---------------- 内部 ----------------
+    def _warn(self, msg: str):
+        if self._logger is not None:
+            self._logger.warning(f"[插件] {msg}")
+
+
 class PluginContext:
     """插件可见的宿主能力（白名单）。
 
@@ -257,7 +387,8 @@ class PluginContext:
                  show_toast=None, open_main_window=None, open_card_mode=None,
                  data=None, data_dir_base="", parent_window=None,
                  plugin_id="", plugin_dir="",
-                 capabilities=(), http_post_async=None):
+                 capabilities=(), http_post_async=None,
+                 write_providers=None):
         # logger=None → 退化为 NullHandler 日志器：插件可以无条件调用
         # ctx.logger.info(...)，不必自己判空
         self._logger = logger if logger is not None else _NULL_LOGGER
@@ -277,6 +408,13 @@ class PluginContext:
         # 宿主注入的网络桥：fn(url, headers_dict, body_json_str, timeout,
         # on_done) -> bool。None = 宿主未编译网络能力，桥一律拒绝。
         self._http_post_async = http_post_async
+        # 宿主注入的写入 provider：{"fragment"|"task"|"note": callable}。
+        # 与 _http_post_async 同构——宿主级共享，权限按派生时的声明逐实例判定。
+        self._write_providers = dict(write_providers or {})
+        # 写入门面：每次实例化都重新判权限（capabilities 是逐实例的）
+        self._write = PluginWriter(
+            logger=self._logger, providers=self._write_providers,
+            plugin_id=self._plugin_id, capabilities=self._capabilities)
 
     # ---------------- 身份与目录 ----------------
     @property
@@ -351,6 +489,7 @@ class PluginContext:
             plugin_dir=plugin_dir,
             capabilities=capabilities,
             http_post_async=self._http_post_async,
+            write_providers=dict(self._write_providers),
         )
 
     # ---------------- 白名单能力 ----------------
@@ -368,6 +507,16 @@ class PluginContext:
     def data(self):
         """只读数据快照门面（tasks / fragments / notes / pomodoro）"""
         return self._data
+
+    @property
+    def write(self) -> "PluginWriter":
+        """**受限写入口**（需声明 ``capabilities: ["write"]``）。
+
+        只有三个"新增"方法：``add_fragment`` / ``add_task`` / ``add_note``。
+        未声明能力的插件调用它们 → 记 warning 并返回 0（不写数据、不抛异常）。
+        刻意不提供 update / delete：改删的破坏性远大于新增。
+        """
+        return self._write
 
     def show_toast(self, text: str, ms: int = 2800) -> bool:
         """弹主窗口轻提示；宿主未提供该能力时返回 False"""
@@ -519,7 +668,13 @@ class BallAction(ABC):
 
 
 class BallPlugin(ABC):
-    """一个插件。loader 会实例化它（要求无参可构造）并调用 create_actions。"""
+    """一个插件。loader 会实例化它（要求无参可构造）并调用 create_actions。
+
+    除必须实现的 ``create_actions`` 外，还有四个**可选**方法
+    （``create_page`` / ``on_enable`` / ``on_disable`` / ``on_uninstall``）：
+    不实现也能正常工作，老插件零影响。loader 调用它们时一律吞掉异常，
+    单个插件的钩子出错不会拖垮宿主或其他插件。
+    """
 
     id: str = ""
     name: str = ""
@@ -528,6 +683,29 @@ class BallPlugin(ABC):
     @abstractmethod
     def create_actions(self, ctx: PluginContext) -> list:
         """产出本插件的动作列表（元素须为 BallAction 实例）"""
+
+    def create_page(self, ctx: PluginContext):
+        """可选：返回一个嵌入主窗口的导航页面（QWidget）。
+
+        只有 manifest 里声明了 ``"page": {"title": "..."}`` 的插件才会被
+        调用本方法；返回 None = 插件此次不提供页面（安全降级）。
+        页面应完全自包含（数据来自 ctx，不持有宿主内部对象引用），
+        主题由宿主 QSS 统一换肤。参考实现：plugins/ai-assistant/。
+        """
+        return None
+
+    def on_enable(self, ctx: PluginContext):
+        """可选：本插件被启用时调用（首次加载成功、以及从停用状态恢复都会调）。
+
+        适合做一次性准备：初始化缓存、按需打开句柄、预热数据。
+        注意它可能在 ``create_actions`` 之后立刻被调用，不要假设有延迟。
+        """
+
+    def on_disable(self, ctx: PluginContext):
+        """可选：本插件被停用 / 插件总闸关闭前调用（``unregister`` 之前）。
+
+        适合收尾：flush 未保存的配置、关闭句柄、停掉自己的定时器。
+        """
 
 
 class ActionRegistry:

@@ -35,6 +35,7 @@
   - pomodoro_break_minutes: 休息相位时长（分钟，1-60，默认 5）
   - pomodoro_auto_break:   专注结束后自动进入休息
   - plugins_enabled:      悬浮球外置插件总闸（启用 plugins/ 下的插件包）
+  - plugins_disabled:     被单独停用的插件 id 列表（空 = 全部启用）
   - obsidian_vault_path:  Obsidian vault 根目录（空串=未选择，导出时弹框让用户选）
   - export_notes:         导出笔记到 Obsidian（默认开）
   - export_fragments:     导出碎片到 Obsidian（默认开）
@@ -87,6 +88,7 @@ DEFAULT_CONFIG = {
     "pomodoro_break_minutes": 5,          # 休息相位时长（分钟，1-60）
     "pomodoro_auto_break":  False,        # 专注结束后是否自动进入休息
     "plugins_enabled":      True,         # 悬浮球外置插件总闸（plugins/ 下的插件包）
+    "plugins_disabled":     [],           # 被单独停用的插件 id 列表（插件中心开关落盘）
     "obsidian_vault_path":  "",           # Obsidian vault 根目录（空=未选择）
     "export_notes":         True,         # 导出笔记到 Obsidian
     "export_fragments":     True,         # 导出碎片到 Obsidian
@@ -131,6 +133,7 @@ _CONFIG_TYPES = {
     "pomodoro_break_minutes": int,
     "pomodoro_auto_break":  bool,
     "plugins_enabled":      bool,
+    "plugins_disabled":     list,
     "obsidian_vault_path":  str,
     "export_notes":         bool,
     "export_fragments":     bool,
