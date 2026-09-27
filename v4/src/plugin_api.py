@@ -31,7 +31,15 @@ ActionRegistry 负责登记、查询、触发与「入口冲突」判定：
 
 依赖白名单（硬性）：插件只允许依赖 PyQt6 + Python 标准库。
 is_allowed_requirement() 同时拒绝 ssl / 各种 http 客户端 ——
-FloatPulse.spec 的 excludes 含 "ssl"，打包后插件做不了 https 请求。
+插件**永远不直接持有网络库**，联网走宿主代理桥。
+
+能力模型（2026-09-27 起支持，对标 VSCode 扩展的声明式权限）：
+  - manifest 里声明 ``"capabilities": ["network"]`` 才能联网；
+  - 联网方式 = ``ctx.http_post_json_async(...)``（宿主在后台线程发请求，
+    完成后回调回 UI 线程），插件自身不 import 任何网络库；
+  - 未声明 network 能力的插件调用桥 → 安全拒绝（记 warning，回调错误结果），
+    不抛异常。requires 白名单规则**原样保留**：网络库仍然不允许出现在
+    requires 里，capability 授权的是「使用宿主桥」，不是「放开 import」。
 ====================================================================
 """
 
@@ -61,6 +69,10 @@ _DENIED_REQUIRES = frozenset({
     "socket", "http", "urllib", "ftplib", "smtplib", "telnetlib",
     "requests", "urllib3", "httpx", "aiohttp", "websockets", "websocket",
 })
+
+# 已知的能力名（manifest.capabilities 合法取值）。
+# 未知能力名 → manifest 校验失败（防拼写错误静默失效，如 "netwrork"）。
+KNOWN_CAPABILITIES = frozenset({"network"})
 
 
 def is_allowed_requirement(name: str) -> bool:
@@ -244,7 +256,8 @@ class PluginContext:
     def __init__(self, logger, config=None, *,
                  show_toast=None, open_main_window=None, open_card_mode=None,
                  data=None, data_dir_base="", parent_window=None,
-                 plugin_id="", plugin_dir=""):
+                 plugin_id="", plugin_dir="",
+                 capabilities=(), http_post_async=None):
         # logger=None → 退化为 NullHandler 日志器：插件可以无条件调用
         # ctx.logger.info(...)，不必自己判空
         self._logger = logger if logger is not None else _NULL_LOGGER
@@ -257,6 +270,13 @@ class PluginContext:
         self._parent_window = parent_window
         self._plugin_id = str(plugin_id or "")
         self._plugin_dir = str(plugin_dir or "")
+        # 本插件声明的能力集合（共享宿主 ctx 为空 = 无特殊权限）。
+        # 只保留合法字符串，防脏数据；未知能力名在 manifest 校验期已拒。
+        self._capabilities = frozenset(
+            c for c in (capabilities or ()) if isinstance(c, str))
+        # 宿主注入的网络桥：fn(url, headers_dict, body_json_str, timeout,
+        # on_done) -> bool。None = 宿主未编译网络能力，桥一律拒绝。
+        self._http_post_async = http_post_async
 
     # ---------------- 身份与目录 ----------------
     @property
@@ -308,11 +328,15 @@ class PluginContext:
             self._warn(f"parent_window 调用失败：{exc!r}")
             return None
 
-    def for_plugin(self, plugin_id: str, plugin_dir: str = "") -> "PluginContext":
+    def for_plugin(self, plugin_id: str, plugin_dir: str = "",
+                   capabilities=()) -> "PluginContext":
         """派生一个绑定了插件身份的上下文（共享全部能力，只换身份字段）。
 
         loader 在调用 ``create_actions()`` 前派生，并随动作一起交给注册表；
         这样插件能从 ``ctx`` 直接拿到自己的 id 与私有目录，不必自己传参。
+
+        ``capabilities`` 是**本插件**在 manifest 里声明的能力（宿主级桥
+        ``http_post_async`` 共享，权限按派生时的声明逐实例判定）。
         """
         return PluginContext(
             logger=self._logger,
@@ -325,6 +349,8 @@ class PluginContext:
             parent_window=self._parent_window,
             plugin_id=plugin_id,
             plugin_dir=plugin_dir,
+            capabilities=capabilities,
+            http_post_async=self._http_post_async,
         )
 
     # ---------------- 白名单能力 ----------------
@@ -381,6 +407,76 @@ class PluginContext:
         except Exception as exc:          # noqa: BLE001
             self._warn(f"open_card_mode 调用失败：{exc!r}")
             return False
+
+    # ---------------- 能力模型 ----------------
+    def has_capability(self, name: str) -> bool:
+        """本插件是否声明了某项能力（manifest.capabilities）"""
+        return name in self._capabilities
+
+    def capabilities(self) -> frozenset:
+        """本插件声明的能力集合（只读）"""
+        return frozenset(self._capabilities)
+
+    def http_post_json_async(self, url, headers=None, body=None,
+                             timeout=30.0, on_done=None) -> bool:
+        """通过宿主网络桥发一个 POST JSON 请求（需声明 network 能力）。
+
+        插件**不持有任何网络库**：宿主在后台线程发请求，完成后把结果
+        dict 回调进 ``on_done``（保证在 UI 线程执行，可直接更新控件）。
+
+        参数：
+          url     : 完整 URL（含 http:// 或 https://）
+          headers : 额外请求头 dict（如 {"Authorization": "Bearer ..."}）
+          body    : 请求体，dict 会被 JSON 序列化；None 视为 {}
+          timeout : 秒（默认 30）
+          on_done : 回调 fn(result: dict)，字段：
+                      ok     bool   请求是否成功（HTTP 2xx 且未超限）
+                      status int    HTTP 状态码（失败 0）
+                      body   str    响应文本（UTF-8 解码）
+                      error  str    失败原因（成功为空串）
+                      url    str    回显请求 URL
+
+        返回值：
+          True  = 请求已发起（结果走 on_done）
+          False = 未发起（能力未声明 / 宿主未注入桥 / 参数非法）；
+                  此时若传了 on_done，仍会回调一次 ok=False 的结果，
+                  插件只需统一处理 ``result["ok"]``，不必双轨判断。
+        """
+        result = {"ok": False, "status": 0, "body": "",
+                  "error": "", "url": str(url or "")}
+
+        def _fail(msg: str) -> bool:
+            result["error"] = msg
+            self._warn(f"http_post_json_async 被拒绝：{msg}")
+            if callable(on_done):
+                try:
+                    on_done(dict(result))
+                except Exception as exc:      # noqa: BLE001 - 回调异常不反噬宿主
+                    self._warn(f"on_done 回调异常：{exc!r}")
+            return False
+
+        if not self.has_capability("network"):
+            return _fail("插件未在 manifest 声明 capabilities=[\"network\"]")
+        if not callable(self._http_post_async):
+            return _fail("宿主未注入网络桥（宿主不支持联网）")
+        url_s = str(url or "").strip()
+        if not (url_s.startswith("http://") or url_s.startswith("https://")):
+            return _fail(f"URL 非法（必须以 http:// 或 https:// 开头）：{url_s!r}")
+        if body is not None and not isinstance(body, dict):
+            return _fail(f"body 必须是 dict（JSON 对象），收到 {type(body).__name__}")
+        try:
+            timeout_f = float(timeout)
+            if timeout_f <= 0 or timeout_f > 120:
+                return _fail(f"timeout 须在 (0, 120] 秒内：{timeout!r}")
+        except (TypeError, ValueError):
+            return _fail(f"timeout 非法：{timeout!r}")
+
+        try:
+            return bool(self._http_post_async(
+                url_s, dict(headers or {}), body if body is not None else {},
+                timeout_f, on_done))
+        except Exception as exc:              # noqa: BLE001 - 桥异常不反噬插件
+            return _fail(f"网络桥调用失败：{exc!r}")
 
     # ---------------- 内部 ----------------
     def _warn(self, msg: str):

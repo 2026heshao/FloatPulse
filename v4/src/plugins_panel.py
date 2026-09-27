@@ -420,7 +420,7 @@ class PluginsPanel(QWidget):
             no_act.setObjectName("pluginCardDesc")
             v.addWidget(no_act)
 
-        # ---- 依赖 + 操作按钮行 ----
+        # ---- 依赖 + 能力 + 操作按钮行 ----
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         requires = list(manifest.get("requires", []) or [])
@@ -428,6 +428,17 @@ class PluginsPanel(QWidget):
             req = QLabel("依赖: " + "、".join(requires))
             req.setObjectName("pluginCardId")
             bottom.addWidget(req)
+        caps = list(manifest.get("capabilities", []) or [])
+        if caps:
+            # 能力声明可视化（2026-09-27 权限模型）：目前仅 network。
+            # 让用户看到「这个插件会联网」，是声明式权限的最小可见性。
+            cap_labels = {"network": "🌐 网络访问"}
+            cap = QLabel("能力: " + "、".join(
+                cap_labels.get(c, c) for c in caps))
+            cap.setObjectName("pluginCardId")
+            cap.setToolTip("该插件在 manifest 里声明了 network 能力，"
+                           "可经宿主网络桥发起联网请求（app.log 可审计）")
+            bottom.addWidget(cap)
         bottom.addStretch()
 
         toggle_btn = self._make_toggle_btn(lp, actions)

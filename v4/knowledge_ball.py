@@ -2600,6 +2600,7 @@ def main():
     _mark("加载插件")
     from src.plugin_api import ActionRegistry, PluginContext, PluginData
     from src.plugin_loader import PluginLoader
+    from src.plugin_net import make_async_poster
 
     plugin_registry = ActionRegistry(
         logger=get_logger(),
@@ -2633,6 +2634,10 @@ def main():
         data_dir_base=os.path.join(data_dir, "plugins"),
         # 插件弹自定义对话框时的父窗口（保证居中、不被主窗口压住）
         parent_window=lambda: main_window,
+        # 宿主网络桥（2026-09-27 能力模型）：只有 manifest 声明
+        # capabilities=["network"] 的插件才能经它联网（PluginContext 判定），
+        # 请求在后台线程跑、回调回 UI 线程；审计日志见 [插件网络]
+        http_post_async=make_async_poster(logger=get_logger()),
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
