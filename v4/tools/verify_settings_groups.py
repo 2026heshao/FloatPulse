@@ -2,7 +2,7 @@
 """离屏功能验证：设置页分组重构 + 悬浮球自动隐藏总开关。
 
 覆盖：
-  A. 分组结构：6 个语义分组 + 1 个关于卡片，标题与顺序正确
+  A. 分组结构：7 个语义分组 + 1 个关于卡片，标题与顺序正确
   B. 分组末行不再追加分隔线（分隔线数 = 总行数 - 分组数，消除贴边悬空线）
   C. 自动隐藏开关默认开启；关闭 → 配置持久化 + 信号广播 + 秒数步进器灰化
   D. 重新打开 → 配置恢复 + 步进器恢复可编辑
@@ -41,10 +41,11 @@ from knowledge_ball import FloatingBall, get_screen_geometry  # noqa: E402
 PASS = 0
 
 EXPECTED_GROUPS = ["🎨 外观与主题", "🔵 悬浮球", "📋 剪贴板与碎片",
-                   "🖼 临时素材", "⚡ 全局工具", "🚀 启动与系统"]
+                   "🖼 临时素材", "⚡ 全局工具", "🚀 启动与系统",
+                   "📤 导出"]
 
-# 各组行数（组1..组6），用于推导分隔线数量
-GROUP_ROWS = [3, 7, 3, 3, 8, 4]
+# 各组行数（组1..组7），用于推导分隔线数量
+GROUP_ROWS = [3, 7, 3, 3, 8, 4, 2]
 
 
 def ok(msg):
@@ -127,10 +128,12 @@ def main():
     # ---------------- A. 分组结构 ----------------
     boxes = group_boxes(sp)
     titles = [section_title(b) for b in boxes]
-    assert len(boxes) == 7, f"A. 期望 6 分组 + 1 关于 = 7 张卡片，实际 {len(boxes)}"
-    assert titles[:6] == EXPECTED_GROUPS, f"A. 分组标题/顺序异常: {titles}"
-    assert "关于" in titles[6], f"A. 最后一张卡片应为关于，实际 {titles[6]!r}"
-    ok(f"A. 分组结构：{len(boxes) - 1} 组 + 关于，顺序 {' / '.join(t[:-4] for t in titles[:6])}")
+    n_groups = len(EXPECTED_GROUPS)
+    assert len(boxes) == n_groups + 1, \
+        f"A. 期望 {n_groups} 分组 + 1 关于 = {n_groups + 1} 张卡片，实际 {len(boxes)}"
+    assert titles[:n_groups] == EXPECTED_GROUPS, f"A. 分组标题/顺序异常: {titles}"
+    assert "关于" in titles[n_groups], f"A. 最后一张卡片应为关于，实际 {titles[n_groups]!r}"
+    ok(f"A. 分组结构：{len(boxes) - 1} 组 + 关于，顺序 {' / '.join(t[:-4] for t in titles[:n_groups])}")
 
     # ---------------- B. 分组末行无分隔线 ----------------
     seps = [w for w in sp.findChildren(QFrame)
