@@ -71,8 +71,14 @@ def test_manifest_caps_dedup_keep_order():
     assert m["capabilities"] == ["network"]
 
 
-def test_known_capabilities_only_network():
-    assert KNOWN_CAPABILITIES == frozenset({"network"})
+def test_known_capabilities_exact_set():
+    """能力集合是**显式白名单**：加新能力必须同时更新这条断言。
+
+    2026-09-27 起：network（网络桥） + write（受限写入口）。
+    这是故意的硬断言——防止有人随手往 KNOWN_CAPABILITIES 里塞东西，
+    每加一项都该是一次有意识的契约变更。
+    """
+    assert KNOWN_CAPABILITIES == frozenset({"network", "write"})
 
 
 # ---------------- B：能力判定 ----------------

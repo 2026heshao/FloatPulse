@@ -213,6 +213,128 @@ class TestPluginsPanel:
 
 
 # ====================================================================
+# 启停状态持久化（plugins_disabled）—— 面板侧写配置
+# ====================================================================
+class _FakeConfig:
+    """ConfigManager 的最小替身：只实现 set/get/save"""
+
+    def __init__(self, **initial):
+        self.data = dict(initial)
+        self.saved = 0
+
+    def get(self, key, default=None):
+        return self.data.get(key, default)
+
+    def set(self, key, value):
+        self.data[key] = value
+
+    def save(self):
+        self.saved += 1
+
+
+class _ToggleHost:
+    """带真 ConfigManager 替身 + 假注册表的 host"""
+
+    def __init__(self, loader, config):
+        self._config = config
+        self._loader = loader
+
+    @property
+    def plugin_loader(self):
+        return self._loader
+
+    def _rebuild_context_menu(self):
+        pass
+
+
+class _FakeAction:
+    def __init__(self, aid="demo.act"):
+        self.id = aid
+        self.title = "做件事"
+        self.hotkey = None
+        self.menu = True
+        self._en = True
+
+    def enabled(self):
+        return self._en
+
+    def set_enabled(self, on):
+        self._en = bool(on)
+
+
+class _FakeRegistry:
+    def __init__(self, actions):
+        self._actions = {a.id: a for a in actions}
+
+    def set_enabled(self, aid, on):
+        act = self._actions.get(aid)
+        if act is None:
+            return False
+        act.set_enabled(on)
+        return True
+
+
+class TestDisabledPersistence:
+    def _panel(self, qapp, config):
+        from src.plugins_panel import PluginsPanel
+        act = _FakeAction()
+        loader = _FakeLoader([])
+        loader.registry = _FakeRegistry([act])
+        panel = PluginsPanel(_ToggleHost(loader, config))
+        return panel, act
+
+    def test_disable_writes_config(self, qapp):
+        cfg = _FakeConfig(plugins_disabled=[])
+        panel, act = self._panel(qapp, cfg)
+        panel._toggle_plugin([act], False, plugin_id="demo")
+        assert cfg.get("plugins_disabled") == ["demo"]
+        assert cfg.saved == 1                      # 落盘只调一次
+
+    def test_enable_removes_from_config(self, qapp):
+        cfg = _FakeConfig(plugins_disabled=["demo", "other"])
+        panel, act = self._panel(qapp, cfg)
+        panel._toggle_plugin([act], True, plugin_id="demo")
+        assert cfg.get("plugins_disabled") == ["other"]
+
+    def test_disable_twice_no_duplicate_no_extra_save(self, qapp):
+        cfg = _FakeConfig(plugins_disabled=["demo"])
+        panel, act = self._panel(qapp, cfg)
+        panel._toggle_plugin([act], False, plugin_id="demo")
+        assert cfg.get("plugins_disabled") == ["demo"]
+        assert cfg.saved == 0                      # 值没变就不写盘
+
+    def test_unknown_or_empty_plugin_id_is_noop(self, qapp):
+        cfg = _FakeConfig(plugins_disabled=[])
+        panel, act = self._panel(qapp, cfg)
+        panel._toggle_plugin([act], False, plugin_id="")
+        assert cfg.get("plugins_disabled") == []
+        assert cfg.saved == 0
+
+    def test_dirty_config_value_is_sanitized(self, qapp):
+        """配置里混入非字符串（手改坏了）→ 只留下合法项，不崩"""
+        cfg = _FakeConfig(plugins_disabled=["keep", 123, None])
+        panel, act = self._panel(qapp, cfg)
+        panel._toggle_plugin([act], False, plugin_id="demo")
+        assert cfg.get("plugins_disabled") == ["keep", "demo"]
+
+    def test_no_config_manager_does_not_raise(self, qapp):
+        from src.plugins_panel import PluginsPanel
+
+        class _NoCfgHost:
+            def __init__(self):
+                self._config = None
+                self._loader = None
+
+            @property
+            def plugin_loader(self):
+                return None
+
+        act = _FakeAction()
+        panel = PluginsPanel(_NoCfgHost())
+        panel._persist_disabled("demo", False)     # 不应抛异常
+
+
+# ====================================================================
 # 使用说明 md：探测 / 摘要提取 / 卡片展示
 # ====================================================================
 class TestUsageDoc:

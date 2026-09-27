@@ -9,7 +9,8 @@
   E 插件 run() 抛异常 → 注册表兜住，返回 False，其他插件不受影响
   F 两个插件声明同一 hotkey → 后者让位 + 日志有记录
   G 插件抢核心热键（Ctrl+Alt+K / Ctrl+Alt+S）→ 跳过 + 日志有记录
-  H .fpplug（zip）→ 自动解压到 plugins/<id>/ 后加载，原文件保留
+  H 插件商店：load_all() **不再**自动解压；scan_store() 只读 manifest；
+    install_from_store() 显式安装；卸载后商店源包仍在、可再装
   I deactivate/activate → 摘掉/恢复动作，且**不重新导入模块**
   J 全程不 import knowledge_ball（插件层与宿主解耦的硬约束）
   K 只读数据门面：provider 缺失/抛错只降级不崩；返回深拷贝，插件改不到宿主数据
@@ -70,11 +71,13 @@ def env(tmp_path):
         open_card_mode=lambda mode: True,
     )
     plugins_dir = tmp_path / "plugins"
+    store_dir = tmp_path / "plugin_store"
     loader = PluginLoader(registry, ctx,
-                          plugins_dir=str(plugins_dir), logger=logger)
+                          plugins_dir=str(plugins_dir), logger=logger,
+                          store_dir=str(store_dir))
     return SimpleNamespace(
         registry=registry, ctx=ctx, loader=loader, plugins_dir=plugins_dir,
-        logger=logger, records=records, tmp=tmp_path,
+        store_dir=store_dir, logger=logger, records=records, tmp=tmp_path,
         messages=lambda: [r.getMessage() for r in records],
         warnings=lambda: [r.getMessage() for r in records
                           if r.levelno >= logging.WARNING],
@@ -457,61 +460,207 @@ def test_hotkey_claims_vs_entry_conflicts():
 
 
 # ====================================================================
-# H. .fpplug 自动解压
+# H. 插件商店：*.fpplug 惰性安装（load_all 不再自动解压）
 # ====================================================================
-def test_fpplug_auto_unpack_keeps_original(env):
+def _write_package(path, plugin_id, action_ids=None, hotkey=None,
+                   extra_members=None, nested=False):
+    """把一份最简插件打成 .fpplug（zip）写到 path"""
+    action_ids = action_ids or [f"{plugin_id}.pick"]
+    specs = [action_spec(a) for a in action_ids]
+    if hotkey:
+        specs[0]["hotkey"] = hotkey
+    manifest = manifest_of(plugin_id, specs)
+    prefix = (plugin_id + "/") if nested else ""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(f"{prefix}manifest.json",
+                    json.dumps(manifest, ensure_ascii=False))
+        zf.writestr(f"{prefix}plugin.py",
+                    make_code(plugin_id, action_ids))
+        zf.writestr(f"{prefix}icon.png", b"\x89PNG\r\n\x1a\n")
+        for member, data in (extra_members or {}).items():
+            zf.writestr(f"{prefix}{member}", data)
+    return path
+
+
+def test_load_all_no_longer_auto_unpacks_store_packages(env):
+    """核心回归钉：load_all() **不再**解压 plugins/ 里的 .fpplug。
+
+    这是「卸载后商店里的包仍在」的前提——否则每次启动都自动重装，
+    卸载等于没卸。
+    """
     env.plugins_dir.mkdir(parents=True, exist_ok=True)
-    package = env.plugins_dir / "zipped.fpplug"
-    manifest = manifest_of("zipped", [action_spec("zipped.pick", hotkey="Ctrl+Alt+Z")])
-    with zipfile.ZipFile(package, "w") as zf:
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
-        zf.writestr("plugin.py", make_code("zipped", ["zipped.pick"]))
-        zf.writestr("icon.png", b"\x89PNG\r\n\x1a\n")
+    _write_package(env.plugins_dir / "zipped.fpplug", "zipped")
 
     loaded = env.loader.load_all()
 
-    assert [p.plugin_id for p in loaded] == ["zipped"]
+    assert loaded == []
+    assert not (env.plugins_dir / "zipped").exists()
+    assert env.plugins_dir.joinpath("zipped.fpplug").is_file()   # 原包没被碰
+    # 但要提示用户：安装目录里不该放包
+    assert any("插件安装目录里发现" in m for m in env.warnings())
+
+
+def test_scan_store_reads_manifest_without_extracting(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    _write_package(env.store_dir / "alpha.fpplug", "alpha",
+                   hotkey="Ctrl+Alt+Z")
+
+    entries = env.loader.scan_store()
+
+    assert [e.plugin_id for e in entries] == ["alpha"]
+    e = entries[0]
+    assert e.usable and not e.installed
+    assert e.version == "1.0.0"
+    assert e.filename == "alpha.fpplug"
+    # 只读：一个字节都没落到磁盘
+    assert not (env.plugins_dir / "alpha").exists()
+    assert sorted(os.listdir(env.store_dir)) == ["alpha.fpplug"]
+
+
+def test_scan_store_with_nested_root_layout(env):
+    """常见打包失误：zip 里整体套一层目录 → 仍应能读到 manifest"""
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    _write_package(env.store_dir / "nested.fpplug", "nested", nested=True)
+
+    entries = env.loader.scan_store()
+
+    assert [e.plugin_id for e in entries] == ["nested"]
+    assert entries[0].usable
+
+
+def test_scan_store_reports_bad_package_without_crashing(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    (env.store_dir / "junk.fpplug").write_bytes(b"not a zip at all")
+    _write_package(env.store_dir / "good.fpplug", "good")
+
+    entries = env.loader.scan_store()
+
+    # 好包在前，坏包也不消失（用户需要知道它为什么装不了）
+    by_name = {e.filename: e for e in entries}
+    assert set(by_name) == {"junk.fpplug", "good.fpplug"}
+    assert by_name["good.fpplug"].usable
+    assert not by_name["junk.fpplug"].usable
+    assert "zip" in by_name["junk.fpplug"].error
+
+
+def test_scan_store_missing_dir_creates_nothing_and_returns_empty(env):
+    assert not env.store_dir.exists()
+    assert env.loader.scan_store() == []
+    # scan 是纯读操作：不该顺手建目录
+    assert not env.store_dir.exists()
+
+
+def test_install_from_store_extracts_and_loads(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    _write_package(env.store_dir / "zipped.fpplug", "zipped",
+                   hotkey="Ctrl+Alt+Z")
+    assert env.loader.scan_store()[0].installed is False
+
+    ok, msg = env.loader.install_from_store("zipped")
+
+    assert ok, msg
     assert (env.plugins_dir / "zipped" / "manifest.json").is_file()
     assert (env.plugins_dir / "zipped" / "icon.png").is_file()
-    assert package.is_file()                               # 原包保留
+    # 源包原封不动
+    assert (env.store_dir / "zipped.fpplug").is_file()
+    # 装完即可被加载
+    loaded = env.loader.load_all()
+    assert [p.plugin_id for p in loaded] == ["zipped"]
     action = env.registry.get("zipped.pick")
     assert action.icon_path and action.icon_path.endswith("icon.png")
+    # 商店条目转为「已安装」
+    assert env.loader.scan_store()[0].installed is True
 
 
-def test_fpplug_with_nested_root_unpacked(env):
-    """常见打包失误：zip 里整体套一层目录 → 仍应能解压到 plugins/<id>/"""
-    env.plugins_dir.mkdir(parents=True, exist_ok=True)
-    manifest = manifest_of("nested", [action_spec("nested.pick")])
-    with zipfile.ZipFile(env.plugins_dir / "nested.fpplug", "w") as zf:
-        zf.writestr("nested/manifest.json", json.dumps(manifest, ensure_ascii=False))
-        zf.writestr("nested/plugin.py", make_code("nested", ["nested.pick"]))
-
-    assert [p.plugin_id for p in env.loader.load_all()] == ["nested"]
-    assert (env.plugins_dir / "nested" / "plugin.py").is_file()
+def test_install_from_store_unknown_id_rejected(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    ok, msg = env.loader.install_from_store("nope")
+    assert not ok
+    assert "nope" in msg
 
 
-def test_bad_zip_skipped(env):
-    env.plugins_dir.mkdir(parents=True, exist_ok=True)
-    (env.plugins_dir / "junk.fpplug").write_bytes(b"not a zip at all")
-    assert env.loader.load_all() == []
-    assert any("不是合法的 zip 包" in m for m in env.warnings())
+def test_install_from_store_bad_id_rejected(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    ok, msg = env.loader.install_from_store("../evil")
+    assert not ok
+    assert "非法" in msg
 
 
-def test_fpplug_zip_slip_member_rejected(env):
+def test_install_refuses_to_overwrite_installed_plugin(env):
+    """已装插件不被商店包覆盖——保护用户在安装目录里的改动"""
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    _write_package(env.store_dir / "dupe.fpplug", "dupe")
+    assert env.loader.install_from_store("dupe")[0] is True
+
+    marker = env.plugins_dir / "dupe" / "local_edit.txt"
+    marker.write_text("本地改动", encoding="utf-8")
+    ok, msg = env.loader.install_from_store("dupe")
+
+    assert not ok
+    assert "已安装" in msg
+    assert marker.read_text(encoding="utf-8") == "本地改动"
+
+
+def test_install_package_rejects_path_outside_store(env):
+    """install_package 对外暴露：商店目录之外的 zip 一律拒绝解压"""
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    outside = env.tmp / "outside.fpplug"
+    _write_package(outside, "outside")
+
+    ok, msg = env.loader.install_package(str(outside))
+
+    assert not ok
+    assert "不在商店目录内" in msg
+    assert not (env.plugins_dir / "outside").exists()
+
+
+def test_install_package_id_mismatch_rejected(env):
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    pkg = _write_package(env.store_dir / "real.fpplug", "real")
+    ok, msg = env.loader.install_package(str(pkg), expect_id="other")
+    assert not ok
+    assert "不匹配" in msg
+
+
+def test_install_from_store_zip_slip_member_rejected(env):
     """zip-slip：压缩包内的路径穿越成员必须被剔除，不能写到插件目录之外"""
-    env.plugins_dir.mkdir(parents=True, exist_ok=True)
-    manifest = manifest_of("slip", [action_spec("slip.pick")])
-    with zipfile.ZipFile(env.plugins_dir / "slip.fpplug", "w") as zf:
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
-        zf.writestr("plugin.py", make_code("slip", ["slip.pick"]))
-        zf.writestr("../../evil.txt", "pwned")
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    _write_package(env.store_dir / "slip.fpplug", "slip",
+                   extra_members={"../../evil.txt": "pwned"})
 
-    env.loader.load_all()
+    ok, _msg = env.loader.install_from_store("slip")
 
+    assert ok
     assert (env.plugins_dir / "slip" / "plugin.py").is_file()
     assert not (env.tmp / "evil.txt").exists()
     assert not (env.tmp.parent / "evil.txt").exists()
     assert any("非法路径成员" in m for m in env.warnings())
+
+
+def test_uninstall_keeps_store_package_and_allows_reinstall(env):
+    """整套闭环：装 → 卸 → 商店包还在 → 还能再装。
+
+    这条钉住的正是用户提出的核心诉求：
+    「点击卸载后商店里还有，这样顺手就可以做插件市场了」。
+    """
+    env.store_dir.mkdir(parents=True, exist_ok=True)
+    pkg = _write_package(env.store_dir / "cycle.fpplug", "cycle",
+                         hotkey="Ctrl+Alt+Y")
+    assert env.loader.install_from_store("cycle")[0] is True
+    assert [p.plugin_id for p in env.loader.load_all()] == ["cycle"]
+
+    ok, _msg = env.loader.uninstall("cycle")
+
+    assert ok
+    assert not (env.plugins_dir / "cycle").exists()
+    assert pkg.is_file()                                  # ★ 商店源包仍在
+    assert env.registry.all_actions() == []
+    entry = env.loader.scan_store()[0]
+    assert entry.installed is False                       # 卡片回落「未安装」
+
+    # 再装一次仍然可用（模块缓存已被 uninstall 清掉，能真正重新导入）
+    assert env.loader.install_from_store("cycle")[0] is True
+    assert [p.plugin_id for p in env.loader.load_all()] == ["cycle"]
 
 
 # ====================================================================
@@ -922,3 +1071,55 @@ def test_plugin_using_ctx_logger_survives_null_logger():
     assert reg.register(A(), "") is True
     assert reg.trigger("a", ctx) is True
     assert seen == [True]
+
+
+# ====================================================================
+# L. 按插件 id 统一启停（plugins_disabled 配置回置的落点）
+# ====================================================================
+def test_loader_set_plugin_enabled_roundtrip(env):
+    write_plugin(env.plugins_dir, "demo",
+                 manifest_of("demo", [action_spec("demo.a"), action_spec("demo.b")]),
+                 make_code("demo", ["demo.a", "demo.b"]))
+    env.loader.load_all()
+    assert len(env.registry.all_actions()) == 2
+
+    assert env.loader.set_plugin_enabled("demo", False) == 2
+    assert [a.enabled() for a in env.registry.all_actions()] == [False, False]
+    # 停用的动作不进菜单、不绑热键
+    assert env.registry.menu_actions() == []
+    assert env.loader.disabled_plugin_ids() == ["demo"]
+
+    assert env.loader.set_plugin_enabled("demo", True) == 2
+    assert [a.enabled() for a in env.registry.all_actions()] == [True, True]
+    assert env.loader.disabled_plugin_ids() == []
+
+
+def test_loader_set_plugin_enabled_unknown_id_is_noop(env):
+    """配置里残留已删除插件的 id 是正常情况，不该报错也不该影响别的插件"""
+    write_plugin(env.plugins_dir, "demo",
+                 manifest_of("demo", [action_spec("demo.a")]),
+                 make_code("demo", ["demo.a"]))
+    env.loader.load_all()
+    assert env.loader.set_plugin_enabled("ghost", False) == 0
+    assert env.registry.get("demo.a").enabled() is True
+    assert env.loader.disabled_plugin_ids() == []
+
+
+def test_loader_set_plugin_enabled_before_load_is_safe(env):
+    """还没 load_all（插件未登记）时调用 → 返回 0，不抛异常"""
+    assert env.loader.set_plugin_enabled("demo", False) == 0
+
+
+def test_loader_set_plugin_enabled_isolates_single_plugin(env):
+    """停用 A 插件不能顺带把 B 插件也关掉"""
+    write_plugin(env.plugins_dir, "alpha",
+                 manifest_of("alpha", [action_spec("alpha.a")]),
+                 make_code("alpha", ["alpha.a"]))
+    write_plugin(env.plugins_dir, "beta",
+                 manifest_of("beta", [action_spec("beta.b")]),
+                 make_code("beta", ["beta.b"]))
+    env.loader.load_all()
+    env.loader.set_plugin_enabled("alpha", False)
+    assert env.registry.get("alpha.a").enabled() is False
+    assert env.registry.get("beta.b").enabled() is True
+    assert env.loader.disabled_plugin_ids() == ["alpha"]

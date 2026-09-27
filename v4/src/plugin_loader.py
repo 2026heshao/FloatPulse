@@ -5,18 +5,34 @@
 ====================================================================
 扫描 ``<base_dir>/plugins/``，把外置插件包导入进程并登记进 ActionRegistry。
 
-目录约定（与 docs/插件开发说明.md 一致）::
+**双目录模型**（2026-09-27 晚起，商店 / 安装分离）::
 
-    plugins/color-picker/
-      manifest.json    必需
-      plugin.py        入口模块，必需
-      icon.png         可选（右键菜单图标）
+    <base_dir>/plugin_store/         插件商店：放 *.fpplug 源包，**永不解压**
+      timer-tool.fpplug
+      ai-assistant.fpplug
+
+    <base_dir>/plugins/              插件安装目录：放解压后的插件文件夹
+      color-picker/                  ← 唯一被 load_all() 加载的位置
+        manifest.json               必需
+        plugin.py                   入口模块，必需
+        icon.png                    可选（右键菜单图标）
+
+为什么分两处：
+  - 商店是「可安装清单」，安装是**用户显式动作**（点「安装」→ 解压到 plugins/）
+  - 卸载只删 ``plugins/<id>/``，商店里的 ``.fpplug`` **一根毛都不动**
+    → 卡片回落为「未安装」，随时可再装。这正是「卸载后文件直接没了」
+    这个问题的解法：源包不在被删的那一侧。
+  - 开发者也因此能留着自己的包反复装/卸，不用改一行代码。
+
+兼容：历史上 ``plugins/*.fpplug`` 会被 ``load_all()`` 静默自动解压。
+该行为**已移除**——否则商店包被自动装上，卸载后立刻复活
+（这正是需要避免的）。老用户把包挪到 ``plugin_store/`` 即可。
 
 分发格式 ``<id>.fpplug``（本质是 zip）：
   - 运行时只加载**文件夹**，严禁 zipimport 直接从压缩包导入
     （PyInstaller 打包后 zipimport 行为不确定，且插件内资源读取会踩坑）
-  - 扫描到 ``plugins/*.fpplug`` → 先解压到 ``plugins/<manifest.id>/`` 再加载，
-    解压后**保留原 .fpplug 文件**（便于用户重新安装/备份）
+  - ``plugins/`` 下残留的 ``.fpplug`` 不再处理（仅记一条提示日志），
+    解压一律走 ``install_from_store()`` / ``install_package()`` 显式入口
 
 容错铁律（一条插件坏掉绝不能拖垮球或别的插件）：
   - 目录不存在 → 创建后返回空列表，不报错
@@ -44,6 +60,9 @@ import shutil
 import sys
 import zipfile
 
+from src.app_version import (
+    APP_VERSION, PLUGIN_API_VERSION, is_version_ge, parse_version,
+)
 from src.plugin_api import (
     KNOWN_CAPABILITIES,
     BallAction, BallPlugin, is_allowed_requirement, is_safe_plugin_id,
@@ -56,6 +75,12 @@ PLUGIN_PACKAGE_EXT = ".fpplug"
 
 # manifest 必需字段
 REQUIRED_FIELDS = ("id", "name", "version", "entry")
+
+# 「版本不匹配」类错误的统一前缀。``validate_manifest`` 返回的 error 若以此开头，
+# ``_load_one`` 就不再归为 STAGE_MANIFEST_INVALID，而是 STAGE_VERSION_MISMATCH ——
+# 两者对用户是完全不同的处置：前者是「你的 manifest 写错了」，
+# 后者是「插件太新，请升级程序」。混在一起会给出误导性的修复建议。
+VERSION_ERROR_PREFIX = "\x00version\x00"
 
 # 导入到 sys.modules 时的模块名前缀（避免与主程序模块撞名）
 _MODULE_PREFIX = "floatpulse_plugin_"
@@ -71,6 +96,7 @@ STAGE_NO_PLUGIN_CLASS = "no_plugin_class"  # 模块里没有 BallPlugin 子类
 STAGE_INSTANTIATE_FAILED = "instantiate"   # 插件类实例化失败
 STAGE_CREATE_ACTIONS_FAILED = "create_actions"  # create_actions 抛异常 / 返回值非法
 STAGE_REGISTER_FAILED = "register"         # 登记期整体失败（动作全被拒等）
+STAGE_VERSION_MISMATCH = "version_mismatch"  # 插件要求的 API / 程序版本高于宿主
 
 # 失败阶段的修复建议（面板直接展示；缺省给通用建议）
 FAIL_HINTS = {
@@ -102,6 +128,10 @@ FAIL_HINTS = {
     STAGE_REGISTER_FAILED:
         "动作登记全部被拒。检查 action id 是否与其他插件重复"
         "（建议写成 '<插件id>.<动作名>'），以及动作定义是否完整",
+    STAGE_VERSION_MISMATCH:
+        "插件要求的宿主 / API 版本高于当前程序，请升级 FloatPulse 或联系插件作者。"
+        "若你是插件作者：api_version 只在用到较新契约时才需要提高，"
+        "min_app_version 应填插件实际兼容的最低程序版本",
 }
 
 
@@ -117,6 +147,7 @@ def stage_label(stage: str) -> str:
         STAGE_INSTANTIATE_FAILED: "实例化失败",
         STAGE_CREATE_ACTIONS_FAILED: "动作创建失败",
         STAGE_REGISTER_FAILED: "动作登记失败",
+        STAGE_VERSION_MISMATCH: "版本不匹配",
     }.get(stage, "加载失败")
 
 
@@ -131,6 +162,10 @@ def validate_manifest(data):
     返回 ``(manifest, error)``：
       - 合法 → ``(归一化后的 dict, "")``
       - 不合法 → ``(None, 原因字符串)``
+
+    错误字符串若以 ``VERSION_ERROR_PREFIX`` 开头，表示这不是「字段写错了」，
+    而是「版本不匹配」——``_load_one`` 据此归到 ``STAGE_VERSION_MISMATCH``，
+    让面板显示针对性的修复建议（升级程序），而不是笼统的「manifest 不合法」。
     """
     if not isinstance(data, dict):
         return None, "manifest 顶层不是 JSON 对象"
@@ -199,6 +234,51 @@ def validate_manifest(data):
         return None, (f"capabilities 含未知能力名：{unknown}"
                       f"（合法取值：{sorted(KNOWN_CAPABILITIES)}）")
 
+    # 可选 page：声明本插件要注入主窗口导航页（2026-09-27 起支持）。
+    # 目前只有一个字段 title（侧栏按钮文案）；插件须实现 create_page()。
+    page = data.get("page")
+    if page is not None:
+        if not isinstance(page, dict):
+            return None, "page 必须是 JSON 对象（如 {\"title\": \"🤖 AI 助手\"}）"
+        ptitle = page.get("title")
+        if not isinstance(ptitle, str) or not ptitle.strip():
+            return None, "page.title 必须是非空字符串"
+        page = {"title": ptitle.strip()}
+
+    # 可选 api_version：插件要求的插件契约版本（2026-09-27 起支持）。
+    # 缺省 1；非 int / <=0 直接拒载（写错了就是写错了，别静默当 1）；
+    # 高于宿主 PLUGIN_API_VERSION → 拒载（插件用到了本程序还没有的契约）。
+    api_version = data.get("api_version", 1)
+    if api_version is None:
+        api_version = 1
+    if isinstance(api_version, bool) or not isinstance(api_version, int) \
+            or api_version <= 0:
+        return None, (f"api_version 必须是正整数（当前契约版本 "
+                      f"{PLUGIN_API_VERSION}）：{api_version!r}")
+    if api_version > PLUGIN_API_VERSION:
+        return None, (VERSION_ERROR_PREFIX +
+                      f"插件要求 plugin api_version={api_version}，"
+                      f"但当前程序只支持到 {PLUGIN_API_VERSION}"
+                      f"（请升级 FloatPulse 或联系插件作者）")
+
+    # 可选 min_app_version：插件要求的最低程序版本。
+    # 格式非法 → 拒载（这是作者显式写下的约束，格式错了就没法保证语义）；
+    # 格式合法但宿主版本偏低 → 拒载。
+    min_app_version = data.get("min_app_version", "")
+    if min_app_version is None:
+        min_app_version = ""
+    if not isinstance(min_app_version, str):
+        return None, "min_app_version 必须是字符串（如 \"4.6.0\"）"
+    min_app_version = min_app_version.strip()
+    if min_app_version:
+        if parse_version(min_app_version) is None:
+            return None, (f"min_app_version 必须是点分数字（如 \"4.6.0\"）："
+                          f"{min_app_version!r}")
+        if not is_version_ge(APP_VERSION, min_app_version):
+            return None, (VERSION_ERROR_PREFIX +
+                          f"插件要求 FloatPulse >= {min_app_version}，"
+                          f"当前版本 {APP_VERSION}（请升级程序）")
+
     return {
         "id": data["id"],
         "name": data["name"].strip(),
@@ -208,6 +288,9 @@ def validate_manifest(data):
         "actions": actions,
         "description": description.strip(),
         "capabilities": list(dict.fromkeys(caps)),   # 去重保序
+        "page": page,
+        "api_version": api_version,
+        "min_app_version": min_app_version,
     }, ""
 
 
@@ -268,20 +351,65 @@ class FailedPlugin:
                 f"reason={self.reason[:40]!r}>")
 
 
+class StoreEntry:
+    """插件商店里的一个可安装包（``plugin_store/*.fpplug``）。
+
+    **纯只读描述**：``scan_store()`` 只读 zip 内的 ``manifest.json``，
+    一个字节都不解压到磁盘。安装是用户的显式动作（``install_from_store``）。
+
+    字段：
+      plugin_id:   manifest.id（合法时）；非法/读不到时为 ""
+      name:        展示名；manifest.name 缺失时回退文件名
+      version:     manifest.version（可能为空串）
+      description: manifest.description（可空）
+      path:        该 .fpplug 的绝对路径（打开目录 / 安装都用它）
+      filename:    包文件名（列表展示 + 报错定位）
+      installed:   对应的 ``plugins/<id>/`` 当前是否存在
+      error:       包不合法时的原因（合法时为空串）
+      manifest:    已解析的完整 manifest（合法时）；否则 None
+    """
+
+    def __init__(self, plugin_id="", name="", version="", description="",
+                 path="", filename="", installed=False, error="",
+                 manifest=None):
+        self.plugin_id = plugin_id or ""
+        self.name = name or filename or plugin_id
+        self.version = version or ""
+        self.description = description or ""
+        self.path = path
+        self.filename = filename
+        self.installed = bool(installed)
+        self.error = error or ""
+        self.manifest = manifest
+
+    @property
+    def usable(self) -> bool:
+        """包是否可用（manifest 合法、id 也拿到了）"""
+        return bool(self.plugin_id) and not self.error
+
+    def __repr__(self):
+        return (f"<StoreEntry {self.plugin_id or '?'} v{self.version} "
+                f"installed={self.installed} err={self.error[:30]!r}>")
+
+
 class PluginLoader:
     """插件加载器。
 
     参数：
       registry:     ActionRegistry，动作登记目标
       ctx:          PluginContext，传给插件的能力集合
-      plugins_dir:  插件目录；None = ``<base_dir>/plugins``（延迟解析）
+      plugins_dir:  插件安装目录；None = ``<base_dir>/plugins``（延迟解析）
       logger:       日志器；None 时退化为静默
+      store_dir:    插件商店目录；None = ``<base_dir>/plugin_store``（延迟解析）
+                    只存 ``*.fpplug`` 源包，**永不被 load_all() 自动解压**
     """
 
-    def __init__(self, registry, ctx, plugins_dir=None, logger=None):
+    def __init__(self, registry, ctx, plugins_dir=None, logger=None,
+                 store_dir=None):
         self._registry = registry
         self._ctx = ctx
         self._dir = plugins_dir
+        self._store = store_dir
         self._logger = logger
         self._loaded = []        # list[LoadedPlugin]：导入成功后缓存，activate 复用
         self._failed = []        # list[FailedPlugin]：扫描到但加载失败的插件
@@ -290,11 +418,24 @@ class PluginLoader:
     # ---------------- 目录 ----------------
     @property
     def plugins_dir(self) -> str:
-        """插件目录绝对路径（默认 <base_dir>/plugins，源码运行即项目根/plugins）"""
+        """插件安装目录绝对路径（默认 <base_dir>/plugins，源码运行即项目根/plugins）"""
         if not self._dir:
             from src.app_paths import get_base_dir
             self._dir = os.path.join(get_base_dir(), "plugins")
         return self._dir
+
+    @property
+    def store_dir(self) -> str:
+        """插件商店目录绝对路径（默认 <base_dir>/plugin_store）。
+
+        与 ``plugins_dir`` 平级、**互为独立**：商店只放 ``*.fpplug`` 源包，
+        安装目录只放解压后的文件夹。两者分开是「卸载后商店包仍在」的前提
+        ——被删的只有安装目录那一侧。
+        """
+        if not self._store:
+            from src.app_paths import get_base_dir
+            self._store = os.path.join(get_base_dir(), "plugin_store")
+        return self._store
 
     @property
     def registry(self):
@@ -314,17 +455,30 @@ class PluginLoader:
             self._warn(f"插件目录不可用，跳过插件加载：{self.plugins_dir}（{exc}）")
             return False
 
+    def ensure_store_dir(self) -> bool:
+        """确保插件商店目录存在（不存在就创建，失败只记日志不抛异常）"""
+        try:
+            os.makedirs(self.store_dir, exist_ok=True)
+            return True
+        except OSError as exc:
+            self._warn(f"插件商店目录不可用：{self.store_dir}（{exc}）")
+            return False
+
     # ---------------- 对外入口 ----------------
     def load_all(self) -> list:
         """扫描 + 导入 + 登记，返回本轮可用的插件列表。
 
         幂等：重复调用不会重复导入，也不会重复登记
         （已 `deactivate()` 的会被重新登记）。
+
+        **不再自动解压** ``.fpplug``（2026-09-27 晚改）：商店/安装分离后，
+        只有 ``install_from_store()`` 才写 ``plugins/``。否则商店里的包
+        每次启动都被重新装上，卸载等于没卸。
         """
         if not self.ensure_dir():
             return []
         if not self._scanned:
-            self._unpack_packages()
+            self._warn_stray_packages()
             self._loaded = []
             self._failed = []
             for dirpath in self._candidate_dirs():
@@ -347,6 +501,8 @@ class PluginLoader:
         n = 0
         for lp in self._loaded:
             if lp.registered:
+                # 先给插件 flush 的机会，再摘动作（顺序：钩子 → unregister）
+                self._safe_hook(lp, "on_disable")
                 n += self._registry.unregister(lp.plugin_id)
                 lp.registered = False
         if n:
@@ -362,6 +518,39 @@ class PluginLoader:
 
     def loaded_plugins(self) -> list:
         return list(self._loaded)
+
+    def set_plugin_enabled(self, plugin_id: str, on: bool) -> int:
+        """按插件 id 统一开关该插件的全部动作，返回改动的动作数。
+
+        与插件中心卡片上的「停用 / 启用」是同一件事（``registry.set_enabled``
+        逐个动作调用），只是入口不同：面板点按钮，这里供宿主按配置回置状态。
+
+        未知 id / 未登记的插件 → 返回 0（**不报错**：配置里可能残留已被
+        删除的插件 id，那不该让启动流程出问题）。
+        """
+        n = 0
+        for lp in self._loaded:
+            if lp.plugin_id != plugin_id:
+                continue
+            for act in lp.actions_raw:
+                aid = getattr(act, "id", "")
+                if not aid or not hasattr(act, "set_enabled"):
+                    continue
+                try:
+                    if self._registry.set_enabled(aid, bool(on)):
+                        n += 1
+                except Exception:          # noqa: BLE001 - 单个动作失败不阻塞
+                    continue
+        return n
+
+    def disabled_plugin_ids(self) -> list:
+        """当前处于「全部动作已停用」状态的插件 id 列表（供面板/宿主回写配置）。"""
+        out = []
+        for lp in self._loaded:
+            acts = [a for a in lp.actions_raw if getattr(a, "id", "")]
+            if acts and all(hasattr(a, "enabled") and not a.enabled() for a in acts):
+                out.append(lp.plugin_id)
+        return out
 
     def load_errors(self) -> list:
         """扫描到但加载失败的插件（list[FailedPlugin]）。
@@ -389,50 +578,227 @@ class PluginLoader:
         self._scanned = False
         return self.load_all()
 
-    # ---------------- 打包解压 ----------------
-    def _unpack_packages(self):
-        """扫描 *.fpplug → 解压到 plugins/<manifest.id>/，原文件保留"""
+    # ---------------- 卸载 ----------------
+    def uninstall(self, plugin_id: str) -> tuple:
+        """删除插件目录并摘除其全部痕迹，返回 ``(ok, 消息)``。
+
+        做四件事，顺序有讲究：
+          1. 校验 —— id 合法 + 目标目录**确实在 plugins_dir 内**（防目录穿越；
+             越界一律拒绝，不动任何文件）
+          2. ``on_uninstall(ctx)`` 钩子（若插件实现了；异常只记日志不阻断）
+          3. ``shutil.rmtree`` 删目录 → ``unregister`` 摘动作 → 从 ``_loaded`` 移除
+          4. 清掉 ``sys.modules`` 里的模块缓存，使后续 ``rescan()`` 真正重新导入
+
+        **刻意不删** ``float_data/plugins/<id>/``：那是插件的私有数据，
+        用户可能还想留着重装后用。确认框里会明确说明这一点。
+
+        失败一律返回 ``(False, 原因)``，不抛异常——调用方（插件中心）负责展示。
+        """
+        if not is_safe_plugin_id(plugin_id):
+            return False, f"插件 id 非法，拒绝卸载：{plugin_id!r}"
+
+        target = os.path.join(self.plugins_dir, plugin_id)
+        if not self._within(target, self.plugins_dir):
+            return False, f"插件目录越出插件安装目录，拒绝卸载：{target}"
+        if not os.path.isdir(target):
+            return False, f"插件目录不存在（可能已手动删除）：{target}"
+
+        lp = next((p for p in self._loaded if p.plugin_id == plugin_id), None)
+
+        # 1. 卸载前钩子：给插件 flush 缓存 / 关闭句柄的机会
+        if lp is not None:
+            self._safe_hook(lp, "on_uninstall")
+
+        # 2. 删目录
         try:
-            names = sorted(os.listdir(self.plugins_dir))
+            shutil.rmtree(target)
         except OSError as exc:
-            self._warn(f"插件目录读取失败：{exc}")
-            return
+            return False, f"删除插件目录失败（文件可能被占用）：{target}（{exc}）"
+
+        # 3. 摘动作 + 移出内存列表
+        n = self._registry.unregister(plugin_id)
+        if lp is not None:
+            lp.registered = False
+            self._loaded = [p for p in self._loaded if p.plugin_id != plugin_id]
+
+        # 4. 清模块缓存（否则 rescan 会命中旧 sys.modules 条目，插件"删不掉"）
+        module_name = _MODULE_PREFIX + plugin_id.replace("-", "_").replace(".", "_")
+        sys.modules.pop(module_name, None)
+
+        self._info(f"插件已卸载：{plugin_id}（摘除动作 {n} 个，"
+                   f"私有数据保留在 float_data/plugins/{plugin_id}/）")
+        return True, f"已卸载 {plugin_id}（插件私有数据保留在数据目录）"
+
+    # ---------------- 插件商店（惰性安装） ----------------
+    def scan_store(self) -> list:
+        """扫描商店目录，返回 ``list[StoreEntry]``（**只读 manifest，不解压**）。
+
+        每个 ``*.fpplug`` 都尝试读 zip 内 ``manifest.json``：
+          - 合法 → ``StoreEntry(plugin_id=..., installed=<plugins/<id>/ 是否存在>)``
+          - 非法 → ``StoreEntry(error=原因)``，仍在列表里（面板可以提示用户）
+        按 ``plugin_id``（非法包按文件名）排序，保证顺序确定。
+
+        本方法不做任何写操作，随时可调，也不会因为一个坏包中断整轮扫描。
+        """
+        try:
+            names = sorted(os.listdir(self.store_dir))
+        except OSError as exc:
+            self._warn(f"插件商店目录读取失败：{self.store_dir}（{exc}）")
+            return []
+        entries = []
         for name in names:
             if not name.lower().endswith(PLUGIN_PACKAGE_EXT):
                 continue
-            self._unpack_one(os.path.join(self.plugins_dir, name))
+            entries.append(self._read_package(
+                os.path.join(self.store_dir, name)))
+        entries.sort(key=lambda e: (not e.usable, e.plugin_id or e.filename))
+        return entries
 
-    def _unpack_one(self, package_path: str):
+    def _read_package(self, package_path: str) -> StoreEntry:
+        """只读解析一个 ``.fpplug`` 的 manifest，构造 StoreEntry（不写盘）"""
         name = os.path.basename(package_path)
+        try:
+            with zipfile.ZipFile(package_path) as zf:
+                member, _prefix = self._locate_manifest_member(zf.namelist())
+                if member is None:
+                    return StoreEntry(path=package_path, filename=name,
+                                      error="包内未找到 manifest.json")
+                try:
+                    raw = zf.read(member).decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    return StoreEntry(path=package_path, filename=name,
+                                      error=f"manifest.json 不是 UTF-8：{exc}")
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    return StoreEntry(path=package_path, filename=name,
+                                      error=f"manifest.json 不是合法 JSON：{exc}")
+        except zipfile.BadZipFile:
+            return StoreEntry(path=package_path, filename=name,
+                              error="不是合法的 zip 包（.fpplug 本质是 zip）")
+        except OSError as exc:
+            return StoreEntry(path=package_path, filename=name,
+                              error=f"读取失败：{exc}")
+
+        manifest, err = validate_manifest(data)
+        if manifest is None:
+            return StoreEntry(path=package_path, filename=name,
+                              error=err[len(VERSION_ERROR_PREFIX):]
+                              if err.startswith(VERSION_ERROR_PREFIX) else err)
+
+        plugin_id = manifest["id"]
+        target = os.path.join(self.plugins_dir, plugin_id)
+        installed = os.path.isfile(os.path.join(target, MANIFEST_NAME))
+        return StoreEntry(
+            plugin_id=plugin_id,
+            name=manifest["name"],
+            version=manifest["version"],
+            description=(manifest.get("description") or "").strip(),
+            path=package_path,
+            filename=name,
+            installed=installed,
+            manifest=manifest,
+        )
+
+    def install_from_store(self, plugin_id: str) -> tuple:
+        """把商店里 id 为 ``plugin_id`` 的包装进 ``plugins/``，返回 ``(ok, 消息)``。
+
+        步骤：
+          1. ``scan_store()`` 找到这个 id 对应的 ``.fpplug``（找不到 → 失败）
+          2. 目标目录 ``plugins/<id>/`` 已存在 → **拒绝覆盖**（保护用户已装内容）
+          3. 解压 + 清扫描缓存，使下次 ``load_all()`` 重新扫到它
+
+        解压走 ``_safe_extract``（zip-slip 逐成员防护），与原自动解压同一条路径。
+        商店里的 ``.fpplug`` 全程只读，**永不移动、永不删除**。
+        """
+        if not is_safe_plugin_id(plugin_id):
+            return False, f"插件 id 非法，拒绝安装：{plugin_id!r}"
+        if not self.ensure_dir():
+            return False, f"插件目录不可用：{self.plugins_dir}"
+
+        entry = next((e for e in self.scan_store()
+                      if e.usable and e.plugin_id == plugin_id), None)
+        if entry is None:
+            return False, (f"商店里没有 id 为 {plugin_id!r} 的可用插件包"
+                           f"（目录：{self.store_dir}）")
+        return self.install_package(entry.path, expect_id=plugin_id)
+
+    def install_package(self, package_path: str,
+                        expect_id: str = "") -> tuple:
+        """解压指定 ``.fpplug`` 到 ``plugins/<manifest.id>/``，返回 ``(ok, 消息)``。
+
+        ``expect_id`` 非空时校验包内 id 与之一致（防止文件被换掉后装错东西）。
+        同样**不删源包**，且拒绝覆盖已有插件目录。
+        """
+        name = os.path.basename(package_path)
+        if not self.ensure_dir():
+            return False, f"插件目录不可用：{self.plugins_dir}"
+        if not os.path.isfile(package_path):
+            return False, f"插件包不存在：{package_path}"
+        # 防目录穿越：源包必须位于商店目录内（install_package 也对外暴露，
+        # 不能因为调用方传了任意路径就解压任意 zip 到插件目录）
+        if not self._within(package_path, self.store_dir):
+            return False, f"插件包不在商店目录内，拒绝安装：{package_path}"
+
         try:
             with zipfile.ZipFile(package_path) as zf:
                 member, prefix = self._locate_manifest_member(zf.namelist())
                 if member is None:
-                    self._warn(f"{name} 内未找到 manifest.json，跳过解压")
-                    return
+                    return False, f"{name} 内未找到 manifest.json，无法安装"
                 try:
                     data = json.loads(zf.read(member).decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                    self._warn(f"{name} 内 manifest.json 无法解析，跳过解压：{exc}")
-                    return
+                    return False, f"{name} 内 manifest.json 无法解析：{exc}"
                 manifest, err = validate_manifest(data)
                 if manifest is None:
-                    self._warn(f"{name} 内 manifest 不合法，跳过解压：{err}")
-                    return
+                    reason = (err[len(VERSION_ERROR_PREFIX):]
+                              if err.startswith(VERSION_ERROR_PREFIX) else err)
+                    return False, f"{name} 内 manifest 不合法：{reason}"
+
                 plugin_id = manifest["id"]
+                if expect_id and plugin_id != expect_id:
+                    return False, (f"插件包 id 不匹配（期望 {expect_id}，"
+                                   f"实际 {plugin_id}），拒绝安装")
+
                 target = os.path.join(self.plugins_dir, plugin_id)
-                if os.path.isfile(os.path.join(target, MANIFEST_NAME)):
-                    self._info(f"{name} 对应目录已存在（plugins/{plugin_id}/），"
-                               f"保留现有内容并跳过解压")
-                    return
+                if not self._within(target, self.plugins_dir):
+                    return False, f"目标目录越出插件安装目录，拒绝安装：{target}"
+                if os.path.isdir(target) and \
+                        os.path.isfile(os.path.join(target, MANIFEST_NAME)):
+                    return False, (f"插件 {plugin_id} 已安装"
+                                   f"（plugins/{plugin_id}/ 已存在）；"
+                                   f"如需重装请先卸载")
+
                 os.makedirs(target, exist_ok=True)
                 self._safe_extract(zf, target, prefix)
-            self._info(f"已解压插件包 {name} → plugins/{plugin_id}/（原文件保留）")
         except zipfile.BadZipFile:
-            self._warn(f"{name} 不是合法的 zip 包，已跳过")
+            return False, f"{name} 不是合法的 zip 包，无法安装"
         except OSError as exc:
-            self._warn(f"解压插件包失败：{name}（{exc}）")
+            return False, f"解压插件包失败：{name}（{exc}）"
 
+        # 新插件目录要能被下一轮 load_all 扫到
+        self._scanned = False
+        self._info(f"已从商店安装插件：{plugin_id} → plugins/{plugin_id}/"
+                   f"（源包保留在 plugin_store/）")
+        return True, f"已安装 {plugin_id}（源包保留在插件商店目录）"
+
+    def store_entries(self) -> list:
+        """``scan_store()`` 的别名（语义更贴近「取商店清单」，供面板调用）"""
+        return self.scan_store()
+
+    def _warn_stray_packages(self):
+        """提示 plugins/ 里残留的 .fpplug（新模型下这里不该有包）"""
+        try:
+            names = os.listdir(self.plugins_dir)
+        except OSError:
+            return
+        stray = [n for n in names if n.lower().endswith(PLUGIN_PACKAGE_EXT)]
+        if stray:
+            self._warn(
+                f"插件安装目录里发现 {len(stray)} 个插件包（{', '.join(sorted(stray))}）"
+                f"——新版本不再自动解压，请把它们移到插件商店目录：{self.store_dir}")
+
+    # ---------------- 打包解压 ----------------
     @staticmethod
     def _locate_manifest_member(names) -> tuple:
         """在 zip 成员里定位 manifest.json。
@@ -498,6 +864,12 @@ class PluginLoader:
 
         manifest, err = validate_manifest(data)
         if manifest is None:
+            # 版本类错误单独归类：面板据此给出「请升级程序」而非
+            # 「你的 manifest 写错了」，两者的处置完全不同
+            if err.startswith(VERSION_ERROR_PREFIX):
+                return self._fail(folder, dirpath, STAGE_VERSION_MISMATCH,
+                                  f"插件版本不兼容，跳过插件：{folder}"
+                                  f"（{err[len(VERSION_ERROR_PREFIX):]}）")
             return self._fail(folder, dirpath, STAGE_MANIFEST_INVALID,
                               f"manifest 不合法，跳过插件：{folder}（{err}）")
 
@@ -713,11 +1085,35 @@ class PluginLoader:
             self._warn_to(lp, "插件未提供任何动作，安装后不会产生可点击入口")
         self._info(f"插件登记完成：{lp.plugin_id} → 生效动作 {ok} 个")
 
+        # 登记成功后调 on_enable（可选钩子）。首次加载与「从停用恢复」都会走到
+        # 这里，插件只需在这里做一次性准备（初始化缓存 / 打开句柄）。
+        self._safe_hook(lp, "on_enable")
+
     def _warn_to(self, lp: LoadedPlugin, msg: str):
         """同时写日志 + 记进插件的告警清单（插件级告警的统一出口）"""
         full = f"{lp.plugin_id}: {msg}"
         lp.warnings.append(msg)
         self._warn(full)
+
+    def _safe_hook(self, lp: LoadedPlugin, name: str) -> bool:
+        """调用插件的可选生命周期钩子（``on_enable`` / ``on_disable`` / ``on_uninstall``）。
+
+        - 插件没实现该方法 → 直接返回 True（老插件零影响，不进 abstractmethod）
+        - 钩子抛异常 → 记 warning 并**继续流程**，绝不反噬宿主与其他插件
+        - 返回 True 表示钩子被成功调用或不存在（两种都算"正常"）
+        """
+        hook = getattr(lp.plugin, name, None)
+        if not callable(hook):
+            return True
+        try:
+            hook(lp.ctx)
+            return True
+        except Exception as exc:          # noqa: BLE001 - 插件钩子异常必须隔离
+            self._warn_to(lp, f"生命周期钩子 {name}() 抛异常，已忽略：{exc!r}")
+            if self._logger is not None:
+                self._logger.warning(f"[插件] {lp.plugin_id} {name} 异常详情",
+                                     exc_info=True)
+            return False
 
     # ---------------- 工具 ----------------
     def _ctx_for(self, plugin_id: str, plugin_dir: str, capabilities=()):

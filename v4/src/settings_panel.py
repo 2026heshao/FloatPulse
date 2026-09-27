@@ -812,7 +812,8 @@ class SettingsPanel(QWidget):
         ret = QMessageBox.question(
             self, "恢复默认设置",
             "将把所有设置恢复为默认值（主题、剪贴板、悬浮球行为等）。\n"
-            "软件导航条目、窗口位置、悬浮球位置会保留。\n\n确定继续？",
+            "软件导航条目、窗口位置、悬浮球位置会保留；\n"
+            "插件中心里单独停用过的插件会一并恢复为启用。\n\n确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )

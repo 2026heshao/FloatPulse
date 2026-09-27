@@ -1,10 +1,17 @@
 {
   "id": "ai-assistant",
   "name": "AI 助手",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "entry": "plugin.py",
-  "requires": ["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
-  "capabilities": ["network"],
+  "requires": [
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets"
+  ],
+  "capabilities": [
+    "network",
+    "write"
+  ],
   "page": {
     "title": "🤖 AI 助手"
   },

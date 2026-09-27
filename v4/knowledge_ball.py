@@ -64,7 +64,7 @@ from src.task_manager import (
     TaskManager, task_state, STATE_TODAY, STATE_OVERDUE,
 )
 from src.note_manager import NoteManager
-from src.fragment_manager import FragmentManager
+from src.fragment_manager import FragmentManager, TYPE_CLIPBOARD_TEXT
 from src.clipboard_monitor import ClipboardMonitor
 from src.docx_manager import DocxManager
 from src.temp_asset_manager import TempAssetManager, REJECT_TOO_LARGE
@@ -2623,6 +2623,35 @@ def main():
             "pomodoro": ball.pomodoro_state,
         },
     )
+
+    def _make_write_providers():
+        """插件写入口的宿主实现（2026-09-27 受限写能力）。
+
+        三个 provider 各自包一层「写库 + 刷新 UI」，插件拿不到管理器本体：
+          - 只增不改删：这里**刻意不提供** update / delete
+          - 碎片 source 由 PluginWriter 补 ``插件:<id>``，落库可追溯
+          - 写成功立即刷新对应面板与悬浮球徽标，与卡片数据变更走同一链路
+        """
+        def _add_fragment(content, source):
+            fid = fragment_manager.add_fragment(
+                TYPE_CLIPBOARD_TEXT, content, source)
+            main_window.refresh_fragments()
+            return fid
+
+        def _add_task(title, note, deadline):
+            tid = task_manager.add_task(title, note, deadline)
+            main_window.refresh_tasks()
+            ball.refresh_badge()          # 任务数变了，球体徽标同步
+            return tid
+
+        def _add_note(title, content):
+            nid = note_manager.add_note(content, title)
+            main_window.refresh_notes()
+            return nid
+
+        return {"fragment": _add_fragment, "task": _add_task,
+                "note": _add_note}
+
     plugin_ctx = PluginContext(
         logger=get_logger(),
         config=config_manager.as_dict(),        # 只读快照，插件改不了宿主配置
@@ -2638,6 +2667,10 @@ def main():
         # capabilities=["network"] 的插件才能经它联网（PluginContext 判定），
         # 请求在后台线程跑、回调回 UI 线程；审计日志见 [插件网络]
         http_post_async=make_async_poster(logger=get_logger()),
+        # 受限写入口（2026-09-27）：只有声明 capabilities=["write"] 的插件
+        # 才能经 ctx.write 新增碎片/任务/笔记。只增不改删，内容有长度护栏，
+        # 写成功后刷新对应面板（与卡片数据变更走同一条链路）。
+        write_providers=_make_write_providers(),
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
@@ -2670,13 +2703,87 @@ def main():
                     f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）")
 
     def _apply_plugins(_enabled=None):
-        """插件总闸：开 → 加载/登记；关 → 摘掉动作（模块仍驻留，不真卸载）"""
+        """插件总闸：开 → 加载/登记；关 → 摘动作 + 摘页面（模块仍驻留）"""
         if config_manager.get("plugins_enabled", True):
             plugin_loader.load_all()
+            _apply_disabled_plugins()
+            _register_plugin_pages()
         else:
+            _unregister_all_plugin_pages()
             plugin_loader.deactivate()
         ball.refresh_plugin_menu()
         _apply_plugin_hotkeys()
+
+    def _apply_disabled_plugins():
+        """按配置回置「被单独停用」的插件状态（2026-09-27）。
+
+        插件中心的启停开关此前只改内存（重启即复原，用户对「停用」的预期落空），
+        现在开关写入 config 的 ``plugins_disabled``，这里在登记完成后统一回置。
+        未知 id 静默跳过——配置里残留已删除插件的 id 是正常情况。
+        """
+        for pid in (config_manager.get("plugins_disabled", None) or []):
+            if not isinstance(pid, str) or not pid:
+                continue
+            n = plugin_loader.set_plugin_enabled(pid, False)
+            if not n:
+                get_logger().info(
+                    f"[插件] 配置里记录了停用 {pid}，但该插件未加载（已忽略）")
+
+    def _register_plugin_pages():
+        """页面插件：manifest.page → 主窗口导航页（2026-09-27）。
+
+        create_page 抛异常只跳过该插件，绝不拖垮加载（与动作同级容错）。
+        register_plugin_page 幂等，插件中心「重新扫描」重入安全。
+        被**单独停用**的插件（plugins_disabled）跳过——动作已被回置摘除，
+        页面若照常注册就会出现「停用了页面还挂在导航栏」（2026-09-27 修复）。
+        """
+        disabled = {p for p in (
+            config_manager.get("plugins_disabled", None) or [])
+            if isinstance(p, str) and p}
+        for lp in plugin_loader.loaded_plugins():
+            if lp.plugin_id in disabled:
+                get_logger().info(f"[插件] 页面跳过（插件被停用）：{lp.plugin_id}")
+                continue
+            page_spec = lp.manifest.get("page")
+            if not page_spec:
+                continue
+            page_key = f"plugin:{lp.plugin_id}"
+            try:
+                widget = lp.plugin.create_page(lp.ctx)
+                if widget is None:
+                    get_logger().warning(
+                        f"[插件] 声明了 page 但 create_page 返回空，跳过：{lp.plugin_id}")
+                    continue
+                main_window.register_plugin_page(page_key, page_spec["title"], widget)
+                lp.page_key = page_key     # 插件热键动作经 parent_window 切页用
+                get_logger().info(f"[插件] 页面已注入主窗口：{page_key}")
+            except Exception as exc:       # noqa: BLE001 - 页面失败不拖垮插件系统
+                get_logger().warning(
+                    f"[插件] 页面注入失败，跳过：{lp.plugin_id}（{exc!r}）",
+                    exc_info=True)
+
+    def _unregister_all_plugin_pages():
+        """总闸关闭 → 把全部插件页从主窗口摘掉（2026-09-27）。
+
+        此前总闸关只 deactivate 摘动作/热键，页面与导航键残留在主窗口。
+        page_key 记录在 LoadedPlugin 上（注册时写入），逐个注销后清空；
+        独立 try 容错——页面注销失败不阻断总闸关闭流程。
+        """
+        unreg = getattr(main_window, "unregister_plugin_page", None)
+        if not callable(unreg):
+            return
+        for lp in plugin_loader.loaded_plugins():
+            key = getattr(lp, "page_key", None)
+            if not key:
+                continue
+            try:
+                unreg(key)
+            except Exception:              # noqa: BLE001 - 单页失败不阻断
+                get_logger().warning(f"[插件] 页面注销失败：{key}", exc_info=True)
+            try:
+                lp.page_key = None
+            except Exception:              # noqa: BLE001
+                pass
 
     def _refresh_core_hotkey_reservation():
         """核心热键变更 → 刷新保留集并重绑插件热键（插件始终让位）"""
