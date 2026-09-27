@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -255,6 +256,144 @@ check("G3 球体未因插件异常被破坏（可见性与尺寸正常）",
       ball._host_size > 0 and ball._ball_size > 0)
 
 ball.deleteLater()
+
+# ====================================================================
+# H：加载失败可感知（2026-09-27 增强）
+#   此前所有失败路径都是 _warn + return None，失败项不进任何列表，
+#   用户只能看到「共 0 个插件」，无从判断原因。本节验证 FailurePlugin
+#   结构化记录全链路可用。
+# ====================================================================
+import json as _json                    # noqa: E402
+from src.plugin_loader import (         # noqa: E402
+    STAGE_MANIFEST_READ, STAGE_MANIFEST_INVALID,
+    STAGE_REQUIRES_REJECTED, STAGE_NO_PLUGIN_CLASS,
+    STAGE_ENTRY_MISSING, STAGE_IMPORT_FAILED,
+    STAGE_INSTANTIATE_FAILED, STAGE_CREATE_ACTIONS_FAILED,
+    STAGE_REGISTER_FAILED, stage_label, FailedPlugin,
+)
+from src.plugin_api import ActionRegistry as _AR  # noqa: E402
+
+_h_root = tempfile.mkdtemp(prefix="fp_loader_err_")
+
+
+def _hmk(name, files):
+    d = os.path.join(_h_root, name)
+    os.makedirs(d, exist_ok=True)
+    for fn, content in files.items():
+        with open(os.path.join(d, fn), "w", encoding="utf-8") as f:
+            f.write(content)
+
+
+_E_SRC = """
+from src.plugin_api import BallPlugin, BallAction
+class A(BallAction):
+    id = "%s.a"; title = "A"
+    def run(self, ctx): pass
+class P(BallPlugin):
+    def create_actions(self, ctx): return [A()]
+"""
+_hmk("e-read", {"manifest.json": "{not json"})
+_hmk("e-invalid", {"manifest.json": _json.dumps(
+    {"id": "e-invalid", "version": "1.0"})})            # 缺 name/entry
+_hmk("e-req", {"manifest.json": _json.dumps(
+    {"id": "e-req", "name": "R", "version": "1.0",
+     "entry": "plugin.py", "requires": ["socket"]}), "plugin.py": "x=1"})
+_hmk("e-entry", {"manifest.json": _json.dumps(
+    {"id": "e-entry", "name": "E", "version": "1.0",
+     "entry": "nope.py", "requires": []})})
+_hmk("e-import", {"manifest.json": _json.dumps(
+    {"id": "e-import", "name": "I", "version": "1.0",
+     "entry": "plugin.py", "requires": []}),
+    "plugin.py": "raise RuntimeError('boom on import')"})
+_hmk("e-noclass", {"manifest.json": _json.dumps(
+    {"id": "e-noclass", "name": "N", "version": "1.0",
+     "entry": "plugin.py", "requires": []}), "plugin.py": "x = 1\n"})
+_hmk("e-init", {"manifest.json": _json.dumps(
+    {"id": "e-init", "name": "In", "version": "1.0",
+     "entry": "plugin.py", "requires": []}),
+    "plugin.py": """
+from src.plugin_api import BallPlugin
+class P(BallPlugin):
+    def __init__(self): raise ValueError('ctor boom')
+    def create_actions(self, ctx): return []
+"""})
+_hmk("e-actions", {"manifest.json": _json.dumps(
+    {"id": "e-actions", "name": "Ac", "version": "1.0",
+     "entry": "plugin.py", "requires": []}),
+    "plugin.py": """
+from src.plugin_api import BallPlugin
+class P(BallPlugin):
+    def create_actions(self, ctx): raise KeyError('actions boom')
+"""})
+_hmk("e-ok", {"manifest.json": _json.dumps(
+    {"id": "e-ok", "name": "OK", "version": "1.0",
+     "entry": "plugin.py", "requires": [],
+     "actions": [{"id": "e-ok.a", "title": "A", "menu": True}]}),
+    "plugin.py": _E_SRC % "e-ok"})
+
+_hreg = _AR()
+_hloader = PluginLoader(_hreg, ctx=None, plugins_dir=_h_root)
+_hok = _hloader.load_all()
+_herr = _hloader.load_errors()
+
+check("H1 成功插件与失败插件分别记录（1 成功 / 8 失败）",
+      len(_hok) == 1 and len(_herr) == 8,
+      f"ok={len(_hok)} failed={len(_herr)}")
+check("H2 load_errors() 返回 FailedPlugin 实例",
+      all(isinstance(e, FailedPlugin) for e in _herr))
+check("H3 has_errors() 反映失败存在", _hloader.has_errors() is True)
+
+_stages = {e.folder: e.stage for e in _herr}
+check("H4 各失败阶段被正确归类",
+      _stages.get("e-read") == STAGE_MANIFEST_READ
+      and _stages.get("e-invalid") == STAGE_MANIFEST_INVALID
+      and _stages.get("e-req") == STAGE_REQUIRES_REJECTED
+      and _stages.get("e-entry") == STAGE_ENTRY_MISSING
+      and _stages.get("e-import") == STAGE_IMPORT_FAILED
+      and _stages.get("e-noclass") == STAGE_NO_PLUGIN_CLASS
+      and _stages.get("e-init") == STAGE_INSTANTIATE_FAILED
+      and _stages.get("e-actions") == STAGE_CREATE_ACTIONS_FAILED,
+      f"{_stages}")
+check("H5 每条失败都带非空修复建议",
+      all(e.hint for e in _herr))
+check("H6 每条失败都带可定位的 path 与 folder",
+      all(e.path and e.folder for e in _herr))
+check("H7 失败阶段都有中文标签",
+      all(stage_label(e.stage) != "加载失败" for e in _herr))
+check("H8 manifest 已解析的失败项带上 plugin_id / name",
+      any(e.plugin_id == "e-req" for e in _herr)
+      and any(e.name == "E" for e in _herr))
+
+# 全部动作登记失败的插件应转为 STAGE_REGISTER_FAILED
+_h2_root = tempfile.mkdtemp(prefix="fp_loader_reg_")
+with open(os.path.join(_h2_root, "x.mp"), "w") as f:
+    pass
+os.makedirs(os.path.join(_h2_root, "dup"), exist_ok=True)
+with open(os.path.join(_h2_root, "dup", "manifest.json"), "w",
+          encoding="utf-8") as f:
+    _json.dump({"id": "dup", "name": "Dup", "version": "1.0",
+                "entry": "plugin.py", "requires": [],
+                "actions": [{"id": "e-ok.a", "title": "冲突",
+                             "menu": True}]}, f)
+with open(os.path.join(_h2_root, "dup", "plugin.py"), "w",
+          encoding="utf-8") as f:
+    f.write(_E_SRC % "dup")
+_h2reg = _AR()
+_h2reg.register(_hok[0].actions_raw[0], "e-ok")      # 先占住 e-ok.a
+_h2loader = PluginLoader(_h2reg, ctx=None, plugins_dir=_h2_root)
+_h2loader.load_all()
+check("H9 动作 id 全被占用 → 记为登记失败（0 个生效）",
+      any(e.stage == STAGE_REGISTER_FAILED for e in _h2loader.load_errors()),
+      f"{[e.stage for e in _h2loader.load_errors()]}")
+
+# rescan 应重置失败列表（不累积陈旧失败）
+_hloader.rescan()
+check("H10 rescan 后失败列表被重置（不累积陈旧项）",
+      len(_hloader.load_errors()) == 8,
+      f"after_rescan={len(_hloader.load_errors())}")
+
+shutil.rmtree(_h_root, ignore_errors=True)
+shutil.rmtree(_h2_root, ignore_errors=True)
 
 # ---- 汇总 ----
 failed = [n_ for n_, ok in _results if not ok]
