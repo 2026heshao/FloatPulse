@@ -132,12 +132,51 @@ def test_classify_non_str_safe():
 
 
 def test_classify_100kb_fast():
+    """100KB 纯中文串必须廉价分类（回归护栏）。
+
+    历史：此用例曾断言 < 50ms，实测分类本身仅约 6ms，但全量 pytest 时
+    因 CPU 争抢偶发冲到 54ms 而假失败（单跑必过）。根因是 _is_code 里
+    用 _RE_CJK.sub() 数 CJK 个数，re.sub 在 188KB 串上要花 9.4ms；
+    已改为 str.translate(删除映射)，端到端 10.9ms -> 6.3ms。
+
+    阈值取 150ms：约为当前实测值的 24 倍余量，仍能在真出现 O(n^2)
+    退化时（例如换回 re.sub 叠加多轮扫描）稳定报警，同时隔绝机器负载抖动。
+    """
     import time
     big = ("这是一段很长的普通文本内容，没有任何代码特征。" * 8192)   # >100KB
     assert len(big) > 100 * 1024
     t0 = time.perf_counter()
     assert classify(big) == CAT_TEXT
-    assert time.perf_counter() - t0 < 0.05
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.15, f"100KB 分类耗时 {elapsed * 1000:.1f}ms，超出 150ms 护栏"
+
+
+def test_cjk_count_translate_equivalent_to_regex():
+    """_CJK_DELETE_MAP 必须与 _RE_CJK 严格等价（性能改写不能漂移语义）。
+
+    _is_code 的 CJK 占比守卫依赖这个计数。若两者范围不一致，
+    含中文的代码块判定会静默跑偏，且因缺少断言而难以察觉。
+    """
+    from src.fragment_classifier import _RE_CJK, _CJK_DELETE_MAP
+
+    # 映射规模与码位边界
+    assert len(_CJK_DELETE_MAP) == 0x9FFF - 0x4E00 + 1
+    for cp in (0x4DFF, 0x4E00, 0x9FFF, 0xA000, 0x1F389):
+        ch = chr(cp)
+        via_re = len(_RE_CJK.sub("", ch)) == 0
+        via_map = len(ch.translate(_CJK_DELETE_MAP)) == 0
+        assert via_re == via_map, f"U+{cp:04X} 计数口径不一致"
+
+    # 随机串交叉验证
+    import random
+
+    random.seed(20260927)
+    pool = "中文测试abcXYZ 123\n\t{}()[];=defclass import\u4dff\u4e00\u9fff\U0001F389"
+    for _ in range(500):
+        s = "".join(random.choice(pool) for _ in range(random.randint(0, 100)))
+        assert (
+            len(_RE_CJK.sub("", s)) == len(s.translate(_CJK_DELETE_MAP))
+        ), f"计数不一致: {s!r}"
 
 
 def test_classify_emoji_and_control_chars():
