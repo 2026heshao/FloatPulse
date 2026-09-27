@@ -281,6 +281,31 @@ class SettingsPanel(QWidget):
         add_row(bb_v, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
                 self._set_screenshot_hotkey)
 
+        # 番茄钟（V4）：总开关 + 时长两档 + 自动休息
+        self._set_pomodoro = self._toggle("pomodoro_enabled", True)
+        self._set_pomodoro.toggled.connect(self._on_pomodoro_changed)
+        add_row(bb_v, "番茄钟", "悬浮球外圈进度环计时，右键球体开始/暂停/结束",
+                self._set_pomodoro)
+
+        self._set_pomodoro_focus = Stepper(
+            1, 120, self._config.get("pomodoro_focus_minutes", 25),
+            suffix="分钟")
+        self._set_pomodoro_focus.valueChanged.connect(self._on_pomodoro_time_changed)
+        add_row(bb_v, "专注时长", "每个番茄的专注分钟数（1-120）",
+                self._set_pomodoro_focus)
+
+        self._set_pomodoro_break = Stepper(
+            1, 60, self._config.get("pomodoro_break_minutes", 5),
+            suffix="分钟")
+        self._set_pomodoro_break.valueChanged.connect(self._on_pomodoro_time_changed)
+        add_row(bb_v, "休息时长", "专注结束后的休息分钟数（1-60）",
+                self._set_pomodoro_break)
+
+        self._set_pomodoro_auto = self._toggle("pomodoro_auto_break", False)
+        self._set_pomodoro_auto.toggled.connect(self._on_pomodoro_changed)
+        add_row(bb_v, "自动进入休息", "专注计满后不回 idle，直接开始休息相位",
+                self._set_pomodoro_auto)
+
         # 悬浮球外置插件总闸：关掉后插件动作不挂菜单、不绑热键（模块仍驻留）
         self._set_plugins = self._toggle("plugins_enabled", True)
         self._set_plugins.toggled.connect(self._on_plugins_changed)
@@ -393,6 +418,22 @@ class SettingsPanel(QWidget):
             self._set_screenshot.blockSignals(False)
         if hasattr(self, '_set_screenshot_hotkey'):
             self._set_screenshot_hotkey.setText(self._config.get("screenshot_hotkey", "Ctrl+Alt+S"))
+        if hasattr(self, '_set_pomodoro'):
+            self._set_pomodoro.blockSignals(True)
+            self._set_pomodoro.setChecked(self._config.get("pomodoro_enabled", True))
+            self._set_pomodoro.blockSignals(False)
+        if hasattr(self, '_set_pomodoro_focus'):
+            self._set_pomodoro_focus.blockSignals(True)
+            self._set_pomodoro_focus.setValue(int(self._config.get("pomodoro_focus_minutes", 25)))
+            self._set_pomodoro_focus.blockSignals(False)
+        if hasattr(self, '_set_pomodoro_break'):
+            self._set_pomodoro_break.blockSignals(True)
+            self._set_pomodoro_break.setValue(int(self._config.get("pomodoro_break_minutes", 5)))
+            self._set_pomodoro_break.blockSignals(False)
+        if hasattr(self, '_set_pomodoro_auto'):
+            self._set_pomodoro_auto.blockSignals(True)
+            self._set_pomodoro_auto.setChecked(self._config.get("pomodoro_auto_break", False))
+            self._set_pomodoro_auto.blockSignals(False)
         if hasattr(self, '_set_plugins'):
             self._set_plugins.blockSignals(True)
             self._set_plugins.setChecked(self._config.get("plugins_enabled", True))
@@ -602,6 +643,24 @@ class SettingsPanel(QWidget):
         self._config.save()
         self._host.screenshot_changed.emit()
 
+    def _on_pomodoro_changed(self, _checked=None):
+        """番茄钟开关/自动休息：即时持久化并广播（悬浮球应用配置）"""
+        self._config.set("pomodoro_enabled",
+                         bool(self._set_pomodoro.isChecked()))
+        self._config.set("pomodoro_auto_break",
+                         bool(self._set_pomodoro_auto.isChecked()))
+        self._config.save()
+        self._host.pomodoro_changed.emit()
+
+    def _on_pomodoro_time_changed(self, _value=None):
+        """番茄钟时长步进：即时持久化并广播"""
+        self._config.set("pomodoro_focus_minutes",
+                         int(self._set_pomodoro_focus.value()))
+        self._config.set("pomodoro_break_minutes",
+                         int(self._set_pomodoro_break.value()))
+        self._config.save()
+        self._host.pomodoro_changed.emit()
+
     # 恢复默认设置时保留的键：属于用户数据/环境状态，不属于"设置"
     _RESET_PRESERVE_KEYS = (
         "apps",                 # 软件导航条目（用户录入的数据）
@@ -652,6 +711,7 @@ class SettingsPanel(QWidget):
         self._host.screenshot_changed.emit()     # 截图热键/开关同理
         self._host.plugins_changed.emit(
             self._config.get("plugins_enabled", True))  # 插件总闸同理
+        self._host.pomodoro_changed.emit()       # 番茄钟开关/时长同理
 
         # 3. 刷新面板控件（含自启勾选框——注册表未被本次重置触及）
         self.refresh()

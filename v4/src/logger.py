@@ -6,7 +6,7 @@
 统一的日志记录器，支持控制台 + 文件双输出。
 
 设计要点：
-  1. 日志文件自动创建在 data/app.log（运行时自动生成，无需打包）
+  1. 日志文件自动创建在 float_data/app.log（运行时自动生成，无需打包）
   2. 兼容 PyInstaller 打包环境（路径由外部传入）
   3. 日志文件超过 2MB 自动轮转，最多保留 3 个备份
   4. 单例模式，全局共享一个 logger 实例
@@ -44,7 +44,7 @@ def init_logger(base_dir: str, level: int = logging.INFO) -> logging.Logger:
     初始化全局日志记录器。
 
     参数：
-      base_dir: 程序根目录（日志文件存放在 base_dir/data/app.log）
+      base_dir: 程序根目录（日志文件存放在 base_dir/float_data/app.log）
       level:    日志级别，默认 INFO
 
     返回：
@@ -52,8 +52,9 @@ def init_logger(base_dir: str, level: int = logging.INFO) -> logging.Logger:
     """
     global _logger_instance, _log_file_path
 
-    # 日志文件路径：base_dir/data/app.log
-    log_dir = os.path.join(base_dir, "data")
+    # 日志文件路径：base_dir/float_data/app.log（目录名以 app_paths 为唯一真相源）
+    from src.app_paths import DATA_DIR_NAME
+    log_dir = os.path.join(base_dir, DATA_DIR_NAME)
     try:
         os.makedirs(log_dir, exist_ok=True)
     except OSError:

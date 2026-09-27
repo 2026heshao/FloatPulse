@@ -7,11 +7,13 @@
 与运行环境（开发 / PyInstaller 打包）相关的公共辅助逻辑。
 
 v2 起项目采用多版本目录结构（v1_baseline / v2 / shared），源码运行时
-数据与资源统一指向 **项目根目录**，两个版本共用同一份 data/
-（配置、碎片、笔记、知识库.docx、temp_assets）：
+数据与资源统一指向 **项目根目录**（配置、碎片、笔记、知识库.docx、temp_assets）。
 
-  - 打包运行（frozen）→ exe 所在目录（与部署约定一致，不受目录结构影响）
-  - 源码运行        → 向上查找项目根（含 data / v1_baseline / shared 的目录）
+2026-09-27 起数据目录统一收纳进项目根的 **float_data/**（单一标记目录）：
+
+  - 打包运行（frozen）→ exe 所在目录下的 float_data/
+  - 源码运行        → 项目根（向上查找，含 float_data 标记目录）
+  - 知识库.docx     → float_data/ 知识库.docx（打包后放 exe 同级的 float_data/ 内）
 """
 
 import os
@@ -21,8 +23,15 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QRect
 
 
+# ---- 数据目录统一标记（唯一真相源：所有数据目录名从这里取） ----
+DATA_DIR_NAME = "float_data"        # 数据根目录（json / app.log / temp_assets / 知识库.docx）
+TEMP_ASSETS_DIRNAME = "temp_assets"  # 临时素材目录（位于 float_data/ 内）
+DOCX_FILENAME = "知识库.docx"         # 知识库文件名（位于 float_data/ 内）
+
+
 # 项目根识别标记：某目录下存在任意一个同名子目录，即视为项目根
-_ROOT_MARKERS = ("data", "v1_baseline", "shared")
+# （保留 data/shared 兼容旧结构回退定位）
+_ROOT_MARKERS = ("float_data", "data", "shared")
 # 向上查找的最大层级（src → 版本目录 → 项目根，留足余量）
 _MAX_UP_LEVELS = 4
 
@@ -52,6 +61,39 @@ def get_base_dir() -> str:
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return get_project_root()
+
+
+def get_data_dir(base_dir: str = None) -> str:
+    """获取数据目录（float_data/），不存在则创建。
+
+    base_dir: 程序根目录；缺省时自动解析（打包=exe 目录，源码=项目根）。
+    """
+    if base_dir is None:
+        base_dir = get_base_dir()
+    data_dir = os.path.join(base_dir, DATA_DIR_NAME)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except OSError:
+        pass  # 创建失败不阻塞，由调用方按各自容错策略处理
+    return data_dir
+
+
+def get_temp_assets_dir(base_dir: str = None) -> str:
+    """获取临时素材目录（float_data/temp_assets/），不存在则创建。"""
+    data_dir = get_data_dir(base_dir)
+    assets_dir = os.path.join(data_dir, TEMP_ASSETS_DIRNAME)
+    try:
+        os.makedirs(assets_dir, exist_ok=True)
+    except OSError:
+        pass
+    return assets_dir
+
+
+def get_docx_path(base_dir: str = None) -> str:
+    """获取知识库.docx 完整路径（float_data/知识库.docx，不检查存在性）。"""
+    if base_dir is None:
+        base_dir = get_base_dir()
+    return os.path.join(base_dir, DATA_DIR_NAME, DOCX_FILENAME)
 
 
 def find_icon_file() -> str:

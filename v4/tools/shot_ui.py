@@ -59,14 +59,15 @@ def _compose(pixmap):
 
 def main():
     app = QApplication(sys.argv)
+    from src.app_paths import get_data_dir, get_docx_path
     base = get_base_dir()
-    data = os.path.join(base, "data")
+    data = get_data_dir(base)
 
     config = ConfigManager(os.path.join(data, "config.json"))
     # 只改内存值，不 save()，避免污染真实配置
     config.set("theme", THEME)
 
-    docx = DocxManager(os.path.join(base, "知识库.docx"),
+    docx = DocxManager(get_docx_path(base),
                        os.path.join(data, "docx_meta.json"))
     docx.load()
     cards = docx.get_cards()
