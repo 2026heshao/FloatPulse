@@ -39,7 +39,6 @@ import sys
 import os
 import struct
 import time
-import traceback
 import json
 import logging
 import threading
@@ -68,6 +67,7 @@ from src.note_manager import NoteManager
 from src.fragment_manager import FragmentManager
 from src.clipboard_monitor import ClipboardMonitor
 from src.docx_manager import DocxManager
+from src.temp_asset_manager import TempAssetManager, REJECT_TOO_LARGE
 from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
@@ -126,30 +126,9 @@ def _check_data_integrity(data_dir: str, logger):
         logger.info("启动检查完成：所有 JSON 文件完整")
 
 
-# ====================================================================
-# 全局异常钩子：未捕获异常时显示对话框，避免静默崩溃
-# ====================================================================
-def _install_global_excepthook():
-    """安装全局异常钩子，未捕获异常弹窗提示而非静默崩溃"""
-    def _hook(exc_type, exc_value, exc_tb):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.exit(0)
-        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        # 打印到 stderr 便于调试
-        try:
-            sys.stderr.write(msg)
-        except Exception:
-            pass
-        # 尝试弹窗提示（若 QApplication 已存在）
-        try:
-            if QApplication.instance() is not None:
-                QMessageBox.critical(
-                    None, "程序异常",
-                    f"程序发生未捕获异常：\n\n{msg[-1500:]}"
-                )
-        except Exception:
-            pass
-    sys.excepthook = _hook
+# 全局异常钩子的唯一实现是 src/logger.py 的 install_excepthook()（在 main() 中安装）。
+# 此处曾有一份重复实现，会被日志系统初始化时的 install_excepthook() 覆盖 ——
+# 已删除，避免后续排查「弹窗行为」时改错文件。
 
 
 # ====================================================================
@@ -800,6 +779,32 @@ class FloatingBall(QWidget):
         self._pomodoro.bound_title = str(title or "")
         self._pomodoro.start(PHASE_FOCUS)
 
+    def pomodoro_state(self) -> dict:
+        """公开入口：番茄钟当前状态快照（纯 dict，供插件等外部读取）。
+
+        功能关闭 / 计时器缺失时返回 idle 形态的空值，不抛异常。
+        """
+        t = getattr(self, "_pomodoro", None)
+        enabled = bool(getattr(self, "_pomodoro_enabled", False))
+        if not enabled or t is None:
+            return {"enabled": False, "state": STATE_IDLE, "phase": PHASE_FOCUS,
+                    "remaining_seconds": 0, "progress": 0.0,
+                    "focus_minutes": 0, "break_minutes": 0,
+                    "auto_break": False, "bound_task_id": None,
+                    "bound_title": ""}
+        return {
+            "enabled": True,
+            "state": t.state,                       # property
+            "phase": t.phase,                       # property
+            "remaining_seconds": int(t.remaining_seconds()),   # 方法
+            "progress": float(t.progress()),                   # 方法
+            "focus_minutes": int(t.focus_minutes),  # property
+            "break_minutes": int(t.break_minutes),  # property
+            "auto_break": bool(t.auto_break),       # property
+            "bound_task_id": t.bound_task_id,
+            "bound_title": str(t.bound_title or ""),
+        }
+
     def pomodoro_busy(self) -> bool:
         """是否有番茄钟计时会话在身（running/paused 均算）。
 
@@ -997,6 +1002,7 @@ class FloatingBall(QWidget):
 
         added_assets = 0
         added_frags = 0
+        rejected_large = 0          # 因超过单文件体积上限被拒的素材数
 
         # ---- 1. 本地文件 URL（资源管理器拖文件）----
         local_files = []
@@ -1044,8 +1050,11 @@ class FloatingBall(QWidget):
         # ---- 1b. 其他本地文件 → 临时素材 + 碎片拾取（原逻辑不变）----
         for path in normal_files:
             if self._temp_asset_manager is not None:
-                if self._temp_asset_manager.add_asset(path) > 0:
+                res = self._temp_asset_manager.add_asset(path)
+                if res > 0:
                     added_assets += 1
+                elif res == REJECT_TOO_LARGE:
+                    rejected_large += 1
             if self._fragment_manager is not None:
                 self._fragment_manager.add_file_pickup(path)
                 added_frags += 1
@@ -1060,8 +1069,11 @@ class FloatingBall(QWidget):
             saved_path = self._save_file_contents(file_data, file_name)
             if saved_path:
                 if self._temp_asset_manager is not None:
-                    if self._temp_asset_manager.add_asset(saved_path) > 0:
+                    res = self._temp_asset_manager.add_asset(saved_path)
+                    if res > 0:
                         added_assets += 1
+                    elif res == REJECT_TOO_LARGE:
+                        rejected_large += 1
                 if self._fragment_manager is not None:
                     self._fragment_manager.add_file_pickup(saved_path)
                     added_frags += 1
@@ -1085,8 +1097,11 @@ class FloatingBall(QWidget):
 
             if saved_path:
                 if self._temp_asset_manager is not None:
-                    if self._temp_asset_manager.add_asset(saved_path) > 0:
+                    res = self._temp_asset_manager.add_asset(saved_path)
+                    if res > 0:
                         added_assets += 1
+                    elif res == REJECT_TOO_LARGE:
+                        rejected_large += 1
                 if self._fragment_manager is not None:
                     self._fragment_manager.add_file_pickup(saved_path)
                     added_frags += 1
@@ -1101,8 +1116,11 @@ class FloatingBall(QWidget):
                 saved_path = self._download_url(url_str)
                 if saved_path:
                     if self._temp_asset_manager is not None:
-                        if self._temp_asset_manager.add_asset(saved_path) > 0:
+                        res = self._temp_asset_manager.add_asset(saved_path)
+                        if res > 0:
                             added_assets += 1
+                        elif res == REJECT_TOO_LARGE:
+                            rejected_large += 1
                     if self._fragment_manager is not None:
                         self._fragment_manager.add_file_pickup(saved_path)
                         added_frags += 1
@@ -1139,7 +1157,13 @@ class FloatingBall(QWidget):
                 tip = f"{dup_apps} 个应用已在启动器中，跳过"
             self._show_toast(tip)
         elif added_assets > 0:
-            self._show_toast(f"已收录 {added_assets} 个素材")
+            tip = f"已收录 {added_assets} 个素材"
+            if rejected_large > 0:
+                tip += f"（{rejected_large} 个超过体积上限，已跳过）"
+            self._show_toast(tip)
+        elif rejected_large > 0:
+            self._show_toast(
+                f"⚠️ {rejected_large} 个文件超过素材体积上限，未收进素材池")
 
         # 成功反馈（A4）：球体光晕脉冲一次，不用读 Toast 也知道"接住了"
         if (added_assets > 0 or added_frags > 0
@@ -2123,9 +2147,6 @@ def _find_icon_file() -> str:
 
 
 def main():
-    # ---- 安装全局异常钩子：未捕获异常弹窗提示而非静默崩溃 ----
-    _install_global_excepthook()
-
     app = QApplication(sys.argv)
     # 禁用"最后一个窗口关闭时自动退出"——悬浮球/主窗口可能同时隐藏，
     # 程序应保持后台运行，仅通过显式退出（右键/Esc/closeEvent）退出
@@ -2219,22 +2240,24 @@ def main():
     note_manager = NoteManager(notes_path)
     fragment_manager = FragmentManager(fragments_path)
 
-    # ---- 桌面便签（几何存独立 stickies.json，与 notes.json 生命周期解耦）----
+    # ---- 桌面便签（几何存独立 stickies.json，与 notes/schedule 生命周期解耦）----
     from src.sticky_notes import StickyStore, StickyNoteManager
     sticky_store = StickyStore(
         os.path.join(data_dir, "stickies.json"),
         note_ids=lambda: {n.note_id for n in note_manager.get_all_notes()},
+        task_ids=lambda: {t.task_id for t in task_manager.get_all_tasks()},
     )
     sticky_manager = StickyNoteManager(
         note_manager, sticky_store,
-        theme=config_manager.get("theme", DEFAULT_THEME))
+        theme=config_manager.get("theme", DEFAULT_THEME),
+        task_manager=task_manager)
 
     # ---- 临时素材管理器（拖图片/文件到悬浮球时复制保存）----
-    from src.temp_asset_manager import TempAssetManager
     temp_asset_manager = TempAssetManager(
         base_dir,
         max_assets=config_manager.get("temp_asset_max_count", 50),
         max_days=config_manager.get("temp_asset_max_days", 30),
+        max_file_mb=config_manager.get("temp_asset_max_file_mb", 50),
     )
 
     # ---- 网址导航管理器 ----
@@ -2386,8 +2409,9 @@ def main():
             empty = _tray_sticky_menu.addAction("（暂无便签）")
             empty.setEnabled(False)
         else:
-            for sid, title, _nid in entries:
-                act = _tray_sticky_menu.addAction(f"📄 {title[:24]}")
+            for sid, title, _aid, kind in entries:
+                icon = "📋" if kind == "task" else "📄"
+                act = _tray_sticky_menu.addAction(f"{icon} {title[:24]}")
                 act.triggered.connect(
                     lambda _checked=False, s=sid: sticky_manager.raise_sticky(s))
             _tray_sticky_menu.addSeparator()
@@ -2539,7 +2563,7 @@ def main():
     # ---- 悬浮球插件系统（外置专精功能：<base_dir>/plugins/ 下的插件包）----
     # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
     #       只把「新增的专精单一功能」外置。详见 docs/插件开发说明.md
-    from src.plugin_api import ActionRegistry, PluginContext
+    from src.plugin_api import ActionRegistry, PluginContext, PluginData
     from src.plugin_loader import PluginLoader
 
     plugin_registry = ActionRegistry(
@@ -2549,12 +2573,31 @@ def main():
             config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
         ),
     )
+
+    # 只读数据快照：provider 一律返回**新建的 dict 副本**，
+    # PluginData 再 deepcopy 一次才交给插件 —— 插件改不到宿主对象。
+    # 数据源故意只给只读的「任务 / 碎片 / 笔记 / 番茄」，不暴露球与主窗口本体。
+    plugin_data = PluginData(
+        logger=get_logger(),
+        providers={
+            "tasks": lambda: [t.to_dict() for t in task_manager.get_all_tasks()],
+            "fragments": lambda: [f.to_dict()
+                                  for f in fragment_manager.get_all_fragments()],
+            "notes": lambda: [n.to_dict() for n in note_manager.get_all_notes()],
+            "pomodoro": ball.pomodoro_state,
+        },
+    )
     plugin_ctx = PluginContext(
         logger=get_logger(),
         config=config_manager.as_dict(),        # 只读快照，插件改不了宿主配置
         show_toast=main_window.show_toast,
         open_main_window=ball.open_main_window,
         open_card_mode=ball.show_card_mode,
+        data=plugin_data,
+        # 插件私有可写目录：<float_data>/plugins/<插件id>/（首次访问自动创建）
+        data_dir_base=os.path.join(data_dir, "plugins"),
+        # 插件弹自定义对话框时的父窗口（保证居中、不被主窗口压住）
+        parent_window=lambda: main_window,
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
@@ -2665,10 +2708,15 @@ def main():
         elif kind == "fragment" and ball._card_window.isVisible():
             # 碎片变更后刷新小卡片碎片页
             ball._card_window._refresh_fragment_page()
-        elif kind == "note":
-            # 笔记被删除后，对应桌面便签自动关闭（孤儿窗口不留）
+        elif kind in ("note", "task"):
+            # 笔记/任务被删除后，对应桌面便签自动关闭（孤儿窗口不留）
             sticky_manager.validate_open_windows()
     main_window.data_changed.connect(_on_main_data_changed)
+
+    # 5b. 任务便签里改了备注/完成态 → 走主窗口 data_changed 刷新任务页
+    #（data_changed("task") 又会触发上面 validate_open_windows，无副作用）
+    sticky_manager.task_data_changed.connect(
+        lambda: main_window.data_changed.emit("task"))
 
     # 6. 主窗口悬浮球开关 → 显示/隐藏悬浮球
     main_window.ball_visibility_changed.connect(
@@ -2684,12 +2732,15 @@ def main():
     main_window.card_always_show_changed.connect(_on_card_always_show_changed)
 
     # 8. 主窗口临时素材上限变更 → 更新管理器并清理过期素材
-    def _on_asset_limits_changed(max_count: int, max_days: int):
-        temp_asset_manager.update_limits(max_assets=max_count, max_days=max_days)
+    def _on_asset_limits_changed(max_count: int, max_days: int, max_file_mb: int):
+        temp_asset_manager.update_limits(
+            max_assets=max_count, max_days=max_days, max_file_mb=max_file_mb)
         # 清理后刷新大小窗口的素材页
         main_window.refresh_temp_assets()
         ball._card_window.notify_assets_changed()
-        get_logger().info(f"临时素材上限已更新: max_count={max_count}, max_days={max_days}")
+        get_logger().info(
+            f"临时素材上限已更新: max_count={max_count}, max_days={max_days}, "
+            f"max_file_mb={max_file_mb}")
     main_window.asset_limits_changed.connect(_on_asset_limits_changed)
 
     # 8.5 主窗口动画速度档位变更 → 实时应用到悬浮球（统一缩放动画时长）
@@ -2779,6 +2830,13 @@ def main():
         # 立即落盘悬浮球位置（C4）：兜底 600ms 防抖窗口内尚未写入的位置
         try:
             ball.save_position_now()
+        except Exception:
+            pass
+        # 立即落盘主窗口几何：同样是兜底防抖窗口（窗口在托盘态时不可见）
+        try:
+            _save_geom = getattr(main_window, "save_geometry_now", None)
+            if _save_geom is not None:
+                _save_geom()
         except Exception:
             pass
     app.aboutToQuit.connect(_on_about_to_quit)
