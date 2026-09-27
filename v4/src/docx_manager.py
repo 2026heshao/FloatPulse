@@ -89,8 +89,14 @@ class DocxManager:
     # ---------------- 哈希与指纹 ----------------
     @staticmethod
     def _hash_text(text: str) -> str:
-        """段落哈希：sha1(去除首尾空格的文本)[:16]"""
-        return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:16]
+        """段落哈希：sha1(去除首尾空格的文本)[:16]
+
+        sha1 在此仅作内容指纹/去重，不涉及安全性。
+        usedforsecurity=False 显式声明该用途，同时让静态扫描器不再误判。
+        """
+        return hashlib.sha1(
+            text.strip().encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:16]
 
     @staticmethod
     def _make_preview(text: str, max_len: int = 30) -> str:
@@ -109,7 +115,8 @@ class DocxManager:
             return None, None
         try:
             mtime = os.path.getmtime(self._docx_path)
-            h = hashlib.sha1()
+            # sha1 仅作文件变更指纹，非安全用途（同 _hash_text）
+            h = hashlib.sha1(usedforsecurity=False)
             with open(self._docx_path, "rb") as f:
                 for chunk in iter(lambda: f.read(8192), b""):
                     h.update(chunk)
