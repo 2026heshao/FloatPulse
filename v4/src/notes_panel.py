@@ -446,6 +446,8 @@ class NotesPanel(QWidget):
                 else "🔄 标题跟随内容"
             )
         act_delete = menu.addAction("🗑 删除此笔记")
+        menu.addSeparator()
+        act_sticky = menu.addAction("📌 钉到桌面")
         action = menu.exec(self._note_list.mapToGlobal(pos))
         if action == act_rename:
             self._rename_dialog(note_id)
@@ -484,6 +486,19 @@ class NotesPanel(QWidget):
                 self.refresh()
                 self._note_status_label.setText("已删除")
                 self._host.data_changed.emit("note")
+        elif action == act_sticky:
+            self._pin_sticky(note_id)
+
+    def _pin_sticky(self, note_id: int):
+        """把当前笔记钉成桌面便签（管理器由宿主晚绑定注入；None 给轻提示）"""
+        manager = self._host.sticky_manager
+        if manager is None:
+            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            return
+        ok, reason = manager.open(note_id)
+        if not ok and reason == "limit":
+            self._host.show_toast(
+                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
 
     def _rename_dialog(self, note_id: int):
         """编辑笔记标题对话框"""
