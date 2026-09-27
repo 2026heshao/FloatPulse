@@ -272,6 +272,17 @@ class MainWindow(QWidget):
         """
         ScreenToast.show_msg(text, self.current_theme, ms)
 
+    # ---- 桌面便签管理器（knowledge_ball.main() 晚绑定注入；未注入为 None）----
+    # 面板通过本 @property 读取（铁律：host 只读属性必须 property，
+    # 否则子面板拿到 bound method 并静默回退）
+    @property
+    def sticky_manager(self):
+        return getattr(self, "_sticky_manager", None)
+
+    @sticky_manager.setter
+    def sticky_manager(self, manager):
+        self._sticky_manager = manager
+
     def _on_fragments_trimmed(self, count: int):
         """碎片池超限自动淘汰时通报用户（此前是静默删除，用户不知道数据少了）"""
         self.show_toast(f"🧩 碎片池已达上限，自动清理了 {count} 条最早的碎片")
