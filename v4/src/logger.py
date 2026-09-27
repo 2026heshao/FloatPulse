@@ -10,7 +10,7 @@
   2. 兼容 PyInstaller 打包环境（路径由外部传入）
   3. 日志文件超过 2MB 自动轮转，最多保留 3 个备份
   4. 单例模式，全局共享一个 logger 实例
-  5. 捕获未处理异常并记录到日志
+  5. 捕获未处理异常：完整堆栈写日志，弹窗只给摘要 + 日志路径（不泄露环境信息）
   6. 线程安全（logging 模块本身线程安全）
 
 日志级别：
@@ -127,31 +127,51 @@ def get_log_file_path() -> str:
 
 def install_excepthook():
     """
-    安装全局异常钩子，未捕获异常记录到日志并弹窗提示。
-    应在程序启动早期调用（QApplication 创建后）。
+    安装全局异常钩子：**完整堆栈只写日志，弹窗只给可操作的摘要**。
+
+    应在 QApplication 创建后、日志系统初始化后调用。设计约定（优化项 3.4）：
+      1. 完整 traceback 的唯一记录点是日志文件（float_data/app.log）——
+         用户报障时把日志附上即可，不必让堆栈显示在屏幕上
+      2. 弹窗正文只说「出了什么错 + 完整信息在哪个文件」，不再把整段堆栈
+         （含用户名、安装路径）贴到屏幕，避免用户截图/录屏外传时泄露环境信息
+      3. 同一异常（类型 + 消息相同）在本次运行内只弹一次：未捕获异常多来自
+         定时器回调，不去重会变成「弹窗风暴」，反而让程序没法用
     """
     logger = get_logger()
+    shown = set()          # 已弹过的摘要集合（仅本次运行有效，不落盘）
 
     def _hook(exc_type, exc_value, exc_tb):
         # KeyboardInterrupt 正常退出
         if issubclass(exc_type, KeyboardInterrupt):
             sys.exit(0)
-        # 记录到日志
+        # 完整堆栈 → 日志（这是唯一保留完整信息的地方）
         logger.critical(
             "未捕获异常",
             exc_info=(exc_type, exc_value, exc_tb)
         )
-        # 尝试弹窗提示
+        # 弹窗：仅摘要 + 日志路径
         try:
-            import traceback
             from PyQt6.QtWidgets import QApplication, QMessageBox
-            if QApplication.instance() is not None:
-                msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-                QMessageBox.critical(
-                    None, "程序异常",
-                    f"程序发生未捕获异常：\n\n{msg[-1500:]}\n\n"
-                    f"日志已记录到：{get_log_file_path()}"
-                )
+            if QApplication.instance() is None:
+                return
+            summary = f"{exc_type.__name__}: {exc_value}".strip()
+            if len(summary) > 200:
+                summary = summary[:200] + "…"
+            if summary in shown:
+                return
+            shown.add(summary)
+
+            log_path = get_log_file_path() or "float_data/app.log"
+            box = QMessageBox()
+            box.setIcon(QMessageBox.Icon.Critical)
+            box.setWindowTitle("程序异常")
+            box.setText("程序遇到一个未处理的错误，已捕获，程序会继续运行。")
+            box.setInformativeText(
+                f"{summary}\n\n"
+                f"完整错误信息已记录到日志：\n{log_path}"
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            box.exec()
         except Exception:
             pass
 
