@@ -705,6 +705,7 @@ class FragmentsPanel(QWidget):
         act_to_kb = menu.addAction("📚 加入知识库")
         act_to_nav = menu.addAction("🌐 添加至网址导航")
         act_to_sticky = menu.addAction("📌 钉为便签")
+        act_export = menu.addAction("📤 导出到 Obsidian")
         menu.addSeparator()
         # 手动归类子菜单（自动分类判错时的纠正入口）
         cat_menu = menu.addMenu("🏷 归类为")
@@ -729,6 +730,9 @@ class FragmentsPanel(QWidget):
             self._to_note(fid)
         elif action == act_to_sticky:
             self._to_sticky(fid)
+        elif action == act_export:
+            # 导出实现统一在宿主（三个面板共用，避免三份逻辑分叉）
+            self._host.export_to_obsidian()
         elif action == act_to_kb:
             self._to_knowledge(fid)
         elif action == act_to_nav:
