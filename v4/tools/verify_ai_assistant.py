@@ -35,7 +35,9 @@ ROOT = os.path.dirname(BASE)
 sys.path.insert(0, BASE)
 
 from PyQt6.QtCore import Qt, QEvent               # noqa: E402
-from PyQt6.QtWidgets import QApplication, QScrollArea  # noqa: E402
+from PyQt6.QtWidgets import (                     # noqa: E402
+    QApplication, QFrame, QLabel, QScrollArea,
+)
 from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
 from src.config import ConfigManager              # noqa: E402
@@ -404,6 +406,77 @@ check("C17b ready → 快捷行出现「⏹ 停止模型服务」（主界面直
 plug.LOCAL_SERVER._emit("stopped", "")   # 复位，别污染后面
 check("C17c stopped → 停止按钮隐藏（不占聊天界面空间）",
       not page2._stop_model_btn.isVisible())
+
+# ---- 左右气泡（2026-09-28 用户要求：一左一右对话式）----
+page2.add_bubble("你", "测试用户消息")
+page2.add_bubble("AI", "测试 AI 回复")
+page2.add_bubble("提示", "测试提示消息")
+pump(50)
+_stream_items = [page2._stream.itemAt(i)
+                 for i in range(page2._stream.count())]
+_user_cards = [it.widget() for it in _stream_items
+               if it.widget() is not None
+               and it.widget().objectName() == "chatBubbleUser"]
+_ai_cards = [it.widget() for it in _stream_items
+             if it.widget() is not None
+             and it.widget().objectName() == "chatBubbleAI"]
+_hint_cards = [it.widget() for it in _stream_items
+               if it.widget() is not None
+               and it.widget().objectName() == "chatBubbleHint"]
+check("C20 左右气泡：三种角色 objectName 正确（用户主色底/AI 中性/提示警示）",
+      len(_user_cards) == 1 and len(_ai_cards) >= 1 and len(_hint_cards) >= 1,
+      f"user={len(_user_cards)} ai={len(_ai_cards)} hint={len(_hint_cards)}")
+def _item_of(card):
+    """布局里这张卡对应的 QLayoutItem（读 insertWidget 设的 alignment）"""
+    for i in range(page2._stream.count()):
+        it = page2._stream.itemAt(i)
+        if it.widget() is card:
+            return it
+    return None
+
+
+_user_item = _item_of(_user_cards[0]) if _user_cards else None
+check("C21 用户气泡靠右对齐（insertWidget alignment=AlignRight）",
+      _user_item is not None
+      and bool(_user_item.alignment() & Qt.AlignmentFlag.AlignRight),
+      str(_user_item.alignment() if _user_item else "无 item"))
+check("C22 气泡是窄卡（最大宽 ≤ 可视区 78%，不撑满整行）",
+      bool(_user_cards)
+      and _user_cards[0].maximumWidth() <= max(
+          360, int(page2._scroll.viewport().width() * 0.78)),
+      f"maxW={_user_cards[0].maximumWidth() if _user_cards else '?'} "
+      f"vpW={page2._scroll.viewport().width()}")
+
+# ---- 云端断开连接（2026-09-28 用户要求：云端要有启动/暂停式控制）----
+check("C23 断开按钮存在（与保存并测试并排）",
+      page2._disconnect_btn is not None
+      and page2._disconnect_btn.text() == "断开连接",
+      page2._disconnect_btn.text() if page2._disconnect_btn else "无")
+n_before_disc = len(captured)
+# 闸门只拦云端（本地 URL 不受影响）：先把后端临时指到云端再测
+_real_url = page2._url_edit.text()
+page2._url_edit.setText("https://api.deepseek.com/v1")
+page2._collect_settings()
+page2._cloud_active = False
+page2._input.setPlainText("断开后发不出去")
+page2._on_send_clicked()
+pump(50)
+_hints_after = [w for w in page2._stream_host.findChildren(QFrame)
+                if w.objectName() == "chatBubbleHint"]
+check("C24 断开后云端请求被拦（桥零调用 + 提示气泡 + 展开设置卡 + 状态行反馈）",
+      len(captured) == n_before_disc
+      and page2._settings_card.isVisible()
+      and len(_hints_after) >= 2      # C20 的测试提示气泡 + 本条拦截气泡
+      and "已断开" in page2._status.text(),
+      f"captured={len(captured)} hints={len(_hints_after)} "
+      f"status={page2._status.text()}")
+page2._save_and_test()
+pump(50)
+check("C25 探活成功 → 云端闸门自动恢复（可再发）",
+      page2._cloud_active is True and len(captured) == n_before_disc + 1,
+      f"active={page2._cloud_active} captured={len(captured)}")
+page2._url_edit.setText(_real_url)     # 恢复原配置，别污染 C19 落盘结论
+page2._collect_settings()
 
 # ---- 清空 + 配置落盘 ----
 page2._clear_chat()
