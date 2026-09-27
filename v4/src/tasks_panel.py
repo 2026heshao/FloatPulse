@@ -328,6 +328,8 @@ class TasksPanel(QWidget):
         act_toggle = menu.addAction("取消完成" if task.done else "标记完成")
         # 番茄钟绑定：右键直接对该任务开始一次专注（悬浮球进度环可见）
         act_focus = menu.addAction("🎯 专注此任务")
+        # 任务便签：把任务（截止日徽章+备注）钉成桌面常驻浮窗
+        act_sticky = menu.addAction("📌 钉为便签")
         act_edit = menu.addAction("✏️ 编辑...")
         act_export = menu.addAction("📤 导出到 Obsidian")
         menu.addSeparator()
@@ -341,6 +343,8 @@ class TasksPanel(QWidget):
             self._host.data_changed.emit("task")
         elif action == act_focus:
             self._host.task_focus_requested.emit(task_id, task.title)
+        elif action == act_sticky:
+            self._pin_sticky(task_id)
         elif action == act_edit:
             self._edit_dialog(task)
         elif action == act_export:
@@ -360,6 +364,19 @@ class TasksPanel(QWidget):
         self._undo_target = None
         self._undo_bar.hide()
         self._delegate.clear_progress_except(None)
+
+    def _pin_sticky(self, task_id: int):
+        """把任务钉成桌面便签（管理器由宿主晚绑定注入；None 给轻提示）"""
+        manager = self._host.sticky_manager
+        if manager is None:
+            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            return
+        ok, reason = manager.open_task(task_id)
+        if not ok and reason == "limit":
+            self._host.show_toast(
+                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+        elif not ok and reason == "missing":
+            self._host.show_toast("任务不存在或已被删除")
 
     def _edit_dialog(self, task):
         """编辑任务对话框（截止日期用日历选择器）"""
