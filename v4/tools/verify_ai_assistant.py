@@ -6,10 +6,12 @@
   A 真实 plugins/ 目录扫到 ai-assistant：动作进注册表、热键生效且
     **不进悬浮球菜单**（menu=false）、manifest page 字段解析、
     create_page 返回真实页面、派生 ctx 带 network 能力
-  B 纯函数层：format_* / build_request（含校验）/ parse_reply
+  B 纯函数层：format_* / build_request（cloud/local 双模式校验 + 旧配置
+    迁移）/ parse_reply
   C 真实 AiChatPage：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥
     发出（假桥捕获）、Enter 发送 / Shift+Enter 换行、保存并测试连接
-    反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 自动接后端）、
+    反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 切本地模式 /
+    stopped → 回落云端）、云端/本地选择入口互斥高离、
     页面销毁退订本地服务 listener、配置落盘 data_dir
   E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
     show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
@@ -233,20 +235,43 @@ check("B2 format_fragments 分类计数", "[link] 共 1 条" in ff and "[code] �
 check("B3 format_notes 空数据直说空", plug.format_notes([], 6000) == "（暂无笔记）")
 
 url, headers, body = plug.build_request(
-    {"base_url": "http://127.0.0.1:11434/v1", "api_key": "", "model": "q3"},
+    {"backend_mode": "local", "local_port": 11434},
     [{"role": "user", "content": "hi"}])
-check("B4 build_request 本地端点：URL/无 Authorization",
+check("B4 build_request 本地模式：URL/无 Authorization/模型名 local",
       url == "http://127.0.0.1:11434/v1/chat/completions"
-      and "Authorization" not in headers and body["model"] == "q3")
+      and "Authorization" not in headers and body["model"] == "local")
 url2, h2, _ = plug.build_request(
-    {"base_url": "https://api.deepseek.com/v1", "api_key": "sk-1",
-     "model": "m"}, [])
+    {"backend_mode": "cloud", "cloud_base_url": "https://api.deepseek.com/v1",
+     "cloud_api_key": "sk-1", "cloud_model": "m"}, [])
 check("B5 build_request 云端带 Bearer",
       url2.endswith("/chat/completions") and h2["Authorization"] == "Bearer sk-1")
-bad = plug.build_request({"base_url": "", "model": ""}, [])
-check("B6 build_request 空配置被拦", bad[0] is None and "base_url" in bad[2])
-bad2 = plug.build_request({"base_url": "ftp://x", "model": "m"}, [])
+bad = plug.build_request(
+    {"backend_mode": "cloud", "cloud_base_url": "", "cloud_model": ""}, [])
+check("B6 build_request 空配置被拦", bad[0] is None and "云端地址" in bad[2])
+bad2 = plug.build_request(
+    {"backend_mode": "cloud", "cloud_base_url": "ftp://x",
+     "cloud_model": "m"}, [])
 check("B7 build_request 拒非 http scheme", bad2[0] is None)
+
+# B7b 旧配置迁移：旧单后端键 → cloud_*；被旧版缺陷写成本地地址的跳过
+class _Log:
+    def warning(self, *a, **k):
+        pass
+
+_mig_dir = os.path.join(data_dir, "mig_test")
+os.makedirs(_mig_dir, exist_ok=True)
+with open(os.path.join(_mig_dir, "config.json"), "w", encoding="utf-8") as f:
+    json.dump({"base_url": "http://127.0.0.1:8093/v1", "api_key": "sk-old",
+               "model": "local"}, f)
+_mig = plug.load_config(
+    __import__("types").SimpleNamespace(data_dir=_mig_dir, logger=_Log()))
+check("B7b 旧配置迁移：本地 URL 跳过 / key 照搬 / model=local 跳过",
+      "127.0.0.1" not in _mig["cloud_base_url"]
+      and _mig["cloud_api_key"] == "sk-old"
+      and _mig["cloud_model"] == "deepseek-chat"
+      and _mig["backend_mode"] == "cloud",
+      str({k: _mig[k] for k in ("cloud_base_url", "cloud_api_key",
+                                "cloud_model", "backend_mode")}))
 
 rep, err = plug.parse_reply({"ok": True, "status": 200,
                              "body": json.dumps(
@@ -257,7 +282,7 @@ _, err401 = plug.parse_reply({"ok": False, "status": 401, "body": "",
 check("B9 parse_reply 401 提示本地推理", err401 and "本地推理" in err401)
 _, err404 = plug.parse_reply({"ok": False, "status": 404, "body": "",
                               "error": "HTTP 404"})
-check("B10 parse_reply 404 提示地址", err404 and "base_url" in err404)
+check("B10 parse_reply 404 提示地址", err404 and "地址" in err404)
 _, errbad = plug.parse_reply({"ok": True, "status": 200, "body": "not-json"})
 check("B11 parse_reply 坏 JSON 归一错误", errbad and "协议" in errbad)
 
@@ -396,16 +421,41 @@ page2.show()
 plug.LOCAL_SERVER.port = 8093     # 模拟 start 成功后的状态（假路径未走到赋值）
 plug.LOCAL_SERVER._emit("ready", "本地服务就绪（127.0.0.1:8093）")
 pump()
-check("C17 ready → 按钮变「停止」+ URL 自动切本地 8093",
+check("C17 ready → 按钮变「停止」+ 自动切本地模式（云端字段不动）",
       page2._local_btn.text() == "停止本地服务"
-      and page2._url_edit.text() == "http://127.0.0.1:8093/v1",
-      f"{page2._local_btn.text()}/{page2._url_edit.text()}")
+      and page2._cfg["backend_mode"] == "local"
+      and page2._mode_local_btn.isChecked()
+      and not page2._mode_cloud_btn.isChecked()
+      and page2._cfg["cloud_base_url"] != "",
+      f"{page2._local_btn.text()}/mode={page2._cfg['backend_mode']}")
 check("C17b ready → 快捷行出现「⏹ 停止模型服务」（主界面直接可停）",
       page2._stop_model_btn.isVisible(),
       page2._stop_model_btn.text())
 plug.LOCAL_SERVER._emit("stopped", "")   # 复位，别污染后面
 check("C17c stopped → 停止按钮隐藏（不占聊天界面空间）",
       not page2._stop_model_btn.isVisible())
+check("C17d 本地停止 → 自动回落云端（双配置互不覆盖）",
+      page2._cfg["backend_mode"] == "cloud"
+      and page2._mode_cloud_btn.isChecked()
+      and page2._mode_local_btn.isChecked() is False,
+      f"mode={page2._cfg['backend_mode']}")
+
+# ---- 云端/本地选择入口（2026-09-28 用户建议）----
+page2._switch_mode("local")
+pump(50)
+check("C17e 选本地（服务未就绪）→ 模式落盘 + 展开设置卡引导启动",
+      page2._cfg["backend_mode"] == "local"
+      and page2._mode_local_btn.isChecked()
+      and page2._settings_card.isVisible()
+      and "启动" in page2._status.text(),
+      f"mode={page2._cfg['backend_mode']} status={page2._status.text()}")
+page2._switch_mode("cloud")
+pump(50)
+page2._settings_card.setVisible(False)
+check("C17f 选云端 → 模式切回 + 高亮跟随",
+      page2._cfg["backend_mode"] == "cloud"
+      and page2._mode_cloud_btn.isChecked(),
+      f"mode={page2._cfg['backend_mode']}")
 
 # ---- 左右气泡（2026-09-28 用户要求：一左一右对话式）----
 page2.add_bubble("你", "测试用户消息")
@@ -490,9 +540,11 @@ page2._model_edit.setText("qwen3-4b")
 page2._collect_settings()
 cfg_path = os.path.join(page_ctx.data_dir, "config.json")
 stored = json.load(open(cfg_path, encoding="utf-8"))
-check("C19 配置落盘 data_dir/config.json",
-      stored["base_url"] == "http://127.0.0.1:8080/v1"
-      and stored["api_key"] == "sk-test", str(stored))
+check("C19 配置落盘 data_dir/config.json（云端键 + 模式键齐备）",
+      stored["cloud_base_url"] == "http://127.0.0.1:8080/v1"
+      and stored["cloud_api_key"] == "sk-test"
+      and stored["cloud_model"] == "qwen3-4b"
+      and "backend_mode" in stored, str(stored))
 page2.deleteLater()
 page.deleteLater()
 
