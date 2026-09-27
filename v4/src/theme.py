@@ -539,11 +539,35 @@ QLabel#pluginSectionLabel {
     font-size: 12px;
     font-weight: 600;
 }
-/* ---- 插件中心：插件安装目录（等宽，便于核对路径）---- */
+/* ---- 插件中心：插件安装目录 / 商店目录（等宽，便于核对路径）---- */
 QLabel#pluginDirLabel {
     color: $text_secondary;
     font-family: 'Consolas', 'Cascadia Mono', monospace;
     font-size: 12px;
+}
+
+/* ---- 插件中心：插件商店（可安装包）---- */
+QFrame#pluginStoreBox {
+    background-color: transparent;
+}
+QFrame#pluginStoreCard {
+    background-color: $panel_fill;
+    border: 1px dashed $primary_border;
+    border-radius: 12px;
+}
+QLabel#pluginStoreTitle {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+/* 「未安装」标记：中性虚线色，与 pluginStatusOn（已装，绿）区分 */
+QLabel#pluginStoreBadge {
+    color: $secondary_text;
+    background-color: $primary_a12;
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid $primary_a30;
+    border-radius: 6px;
 }
 QLabel#fieldLabel {
     color: $text_secondary;
