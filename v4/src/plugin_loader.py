@@ -45,6 +45,7 @@ import sys
 import zipfile
 
 from src.plugin_api import (
+    KNOWN_CAPABILITIES,
     BallAction, BallPlugin, is_allowed_requirement, is_safe_plugin_id,
     is_valid_hotkey,
 )
@@ -78,7 +79,8 @@ FAIL_HINTS = {
         "（注意别把文件存成了 GBK，或用记事本另存时带了 BOM）",
     STAGE_MANIFEST_INVALID:
         "对照 docs/插件开发说明.md 第 3 节检查 manifest.json："
-        "id / name / version / entry 四个字段必需，且都必须是字符串",
+        "id / name / version / entry 四个字段必需，且都必须是字符串；"
+        "capabilities（可选）必须是字符串列表，能力名只能是 network",
     STAGE_REQUIRES_REJECTED:
         "插件只能依赖 PyQt6 和 Python 标准库。ssl / socket / requests 等"
         "联网库在打包后不可用，必须从 requires 里删掉并改用离线实现",
@@ -184,6 +186,19 @@ def validate_manifest(data):
     if not isinstance(description, str):
         return None, "description 必须是字符串"
 
+    # 可选 capabilities：能力声明（2026-09-27 起支持，目前仅 "network"）。
+    # 未知能力名 → 直接拒载（防 "netwrork" 这类拼写错误静默失效）。
+    caps = data.get("capabilities", [])
+    if caps is None:
+        caps = []
+    if not isinstance(caps, list) or \
+            not all(isinstance(c, str) for c in caps):
+        return None, "capabilities 必须是字符串列表"
+    unknown = [c for c in caps if c not in KNOWN_CAPABILITIES]
+    if unknown:
+        return None, (f"capabilities 含未知能力名：{unknown}"
+                      f"（合法取值：{sorted(KNOWN_CAPABILITIES)}）")
+
     return {
         "id": data["id"],
         "name": data["name"].strip(),
@@ -192,6 +207,7 @@ def validate_manifest(data):
         "requires": list(requires),
         "actions": actions,
         "description": description.strip(),
+        "capabilities": list(dict.fromkeys(caps)),   # 去重保序
     }, ""
 
 
@@ -537,8 +553,9 @@ class PluginLoader:
         plugin.version = manifest["version"]
 
         # 派生绑定本插件身份的上下文：插件由此拿到 plugin_id / data_dir /
-        # plugin_dir / parent_window，而不必自己记身份
-        plugin_ctx = self._ctx_for(plugin_id, dirpath)
+        # plugin_dir / parent_window，以及按 manifest 声明授权的能力（桥）
+        plugin_ctx = self._ctx_for(plugin_id, dirpath,
+                                   manifest.get("capabilities", ()))
 
         try:
             actions = plugin.create_actions(plugin_ctx)
@@ -703,13 +720,18 @@ class PluginLoader:
         self._warn(full)
 
     # ---------------- 工具 ----------------
-    def _ctx_for(self, plugin_id: str, plugin_dir: str):
+    def _ctx_for(self, plugin_id: str, plugin_dir: str, capabilities=()):
         """派生绑定插件身份的上下文；宿主 ctx 不支持派生时退回共享实例"""
         factory = getattr(self._ctx, "for_plugin", None)
         if not callable(factory):
             return self._ctx
         try:
-            return factory(plugin_id, plugin_dir)
+            # capabilities 只影响派生实例的权限判定（network 桥），
+            # 旧版 for_plugin 不收该参数时退回不传（能力自然全无）
+            try:
+                return factory(plugin_id, plugin_dir, capabilities)
+            except TypeError:
+                return factory(plugin_id, plugin_dir)
         except Exception as exc:          # noqa: BLE001 - 派生失败不该拖垮加载
             self._warn(f"{plugin_id}: 上下文派生失败，退回共享上下文（{exc!r}）")
             return self._ctx

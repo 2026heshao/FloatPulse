@@ -18,14 +18,20 @@ FloatPulse v4 打包配置（onedir + 轻量过滤，2026-09-27 自 v3 切换）
     - Qt6Pdf.dll        5.1MB PDF 模块（Qt6Gui 若硬依赖则回滚保留）
     - Qt6Svg.dll+插件   0.7MB 项目无 svg 资源
     - translations      ~6MB Qt 翻译（UI 全自绘中文，不需要）
-    - ssl/unicodedata   ~14MB 程序只用 socket 不用 ssl（lxml 用
-      libcrypto-3.dll 旧命名版，不受 excludes 影响）
+    - unicodedata       ~1MB 无国际化需求
 
 体积优化结论（2026-09-27 复核，优化调研清单 4.4）
 --------------------------------------------------------------------
 实测产物 75MB。构成（du -sm）：PyQt6 38MB / python312.dll 7MB / lxml 7MB /
 OpenSSL 三件套合计 12MB（libcrypto-3-x64.dll 6MB + libcrypto-3.dll 5MB +
 libssl-3-x64.dll 1MB）/ base_library.zip 2MB。
+
+  0. 【2026-09-27 晚补充：ssl 已恢复】插件能力模型（capabilities=[
+     "network"] + 宿主网络桥 plugin_net.py）上线，宿主需发 https 请求
+     调 LLM API → excludes 去掉 "ssl"（_ssl.pyd 约 +1MB；libssl DLL
+     本就在包内，见下）。urllib 依赖链会把 http.client/email 等标准库
+     带回包（约 +3MB）。总体积 75MB → 约 79MB，换取插件受控联网，
+     值。插件仍禁 import 网络库（白名单原样保留），联网只走宿主桥。
 
   1. 「再排一些标准库大件」这条路已经走完：实测 tkinter / unittest /
      email / http / xmlrpc / pydoc / doctest / lib2to3 / setuptools / numpy
@@ -69,7 +75,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["ssl", "unicodedata"],
+    excludes=["unicodedata"],
     noarchive=False,
     optimize=0,
 )
