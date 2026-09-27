@@ -440,6 +440,11 @@ QFrame#pluginCard {
     border: 1px solid $panel_edge;
     border-radius: 12px;
 }
+/* ---- 页面插件容器（AI 助手等）：实底遮住玻璃壳，避免透出屏幕后内容 ---- */
+QWidget#pluginPage {
+    background-color: $bg;
+    border-radius: 10px;
+}
 QLabel#pluginCardTitle {
     color: $text;
     font-size: 14px;
