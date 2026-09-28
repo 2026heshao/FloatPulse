@@ -510,6 +510,11 @@ class AiChatPage(QWidget):
         self._history = []          # 成功轮次 [{"role","content"}, ...]
         self._pending_user = ""     # 在途请求的用户消息（成功后落进历史）
         self._busy = False
+        # 云端后端是否可用（2026-09-28 用户要求「断开连接」控制）。
+        # True=可发；「断开连接」置 False → 非本地请求被拦下并提示。
+        # 本地 llama-server 不受它影响（本地有独立的启停状态机）；
+        # 探活成功（保存并测试 / 本地 ready 自动接管）都会把它置回 True。
+        self._cloud_active = True
 
         root = QVBoxLayout(self)
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
@@ -599,13 +604,23 @@ class AiChatPage(QWidget):
         local_btn_row.addWidget(self._local_status, 1)
         form.addLayout(local_btn_row)
 
-        # 保存并测试
+        # 保存并测试 + 断开连接（2026-09-28 用户要求：云端要有启动/暂停式控制）
         save_row = QHBoxLayout()
         self._save_btn = QPushButton("保存并测试连接")
         self._save_btn.setObjectName("primaryBtn")
         self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._save_btn.clicked.connect(self._save_and_test)
         save_row.addWidget(self._save_btn)
+        # 「断开」= 停止用该云端后端发请求（配置保留，不丢用户填的 key）；
+        # 重新点「保存并测试连接」探活成功即恢复。本地服务不受影响。
+        self._disconnect_btn = QPushButton("断开连接")
+        self._disconnect_btn.setObjectName("secondaryBtn")
+        self._disconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._disconnect_btn.setToolTip(
+            "停用当前云端后端（配置保留）；对话将提示后端不可用，"
+            "点「保存并测试连接」可重新接上")
+        self._disconnect_btn.clicked.connect(self._disconnect_cloud)
+        save_row.addWidget(self._disconnect_btn)
         save_row.addStretch()
         form.addLayout(save_row)
 
@@ -720,32 +735,31 @@ class AiChatPage(QWidget):
 
     # ---------------- 气泡 ----------------
     def add_bubble(self, role: str, text: str):
-        """往消息流追加一张卡片（角色行 + 全文，对话流式）
+        """往消息流追加一张左右气泡（2026-09-28 用户要求：一左一右对话式）。
 
-        AI 回复额外带一个「📥 存为笔记」按钮——这是插件受限写能力
-        （``ctx.write``，需 manifest 声明 ``capabilities: ["write"]``）的
-        实际用途：把整理结果一键落进笔记，不必让用户手动复制粘贴。
-        未声明能力时按钮点了也只会提示失败（宿主侧安全拒绝），
-        因此这里按 has_capability 决定是否显示，避免给用户假按钮。
+        - 「你」→ 窄卡**靠右** + 主色底（chatBubbleUser，文字用 on_primary
+          保证主色上的对比度）；AI / 提示 → 窄卡**靠左** + 中性底
+        - 气泡最大宽度取可视区 ~78%，长文本自动换行不撑满整行
+        - AI 回复带「📥 存为笔记」按钮——插件受限写能力（``ctx.write``，
+          需 manifest 声明 ``capabilities: ["write"]``）的实际用途：把整理
+          结果一键落进笔记。未声明能力时不显示，避免给用户假按钮。
         """
+        user = (role == "你")
         card = QFrame(self._stream_host)
-        card.setObjectName("glassCard")
+        card.setObjectName("chatBubbleUser" if user else
+                           "chatBubbleAI" if role == "AI" else "chatBubbleHint")
         box = QVBoxLayout(card)
         box.setContentsMargins(12, 8, 12, 8)
         box.setSpacing(4)
-        role_label = QLabel("你" if role == "你"
-                            else "AI 助手" if role == "AI" else role)
-        role_label.setObjectName("fieldLabel")
         body_label = QLabel(text)
+        body_label.setObjectName("chatBubbleText" if user else "")
         body_label.setWordWrap(True)
         body_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.addWidget(role_label)
         box.addWidget(body_label)
 
         if role == "AI" and text.strip() and self._can_write():
             row = QHBoxLayout()
-            row.addStretch()
             save_btn = QPushButton("📥 存为笔记")
             save_btn.setObjectName("secondaryBtn")
             save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -755,8 +769,15 @@ class AiChatPage(QWidget):
             row.addWidget(save_btn)
             box.addLayout(row)
 
-        # 插到末尾的 stretch 之前，保证消息从顶部排布
-        self._stream.insertWidget(self._stream.count() - 1, card)
+        # 窄卡：可视区 78%（构造早期宽度未知时退 640），长句换行不撑满整行
+        vis_w = self._scroll.viewport().width() if self._scroll else 0
+        card.setMaximumWidth(max(360, int(vis_w * 0.78)) if vis_w else 640)
+
+        # 靠右（用户）/ 靠左（AI 与提示）——alignment 不拉伸时卡片收缩为内容宽；
+        # 仍插到末尾 stretch 之前，保证消息从顶部排布
+        self._stream.insertWidget(
+            self._stream.count() - 1, card, 0,
+            Qt.AlignmentFlag.AlignRight if user else Qt.AlignmentFlag.AlignLeft)
         self._scroll_to_bottom()
 
     def _can_write(self) -> bool:
@@ -817,6 +838,15 @@ class AiChatPage(QWidget):
         url, headers, body = build_request(self._cfg, messages)
         if url is None:
             self.add_bubble("提示", body)      # body 在此路径是错误文案
+            self._settings_card.setVisible(True)
+            return
+        # 断开闸门：只拦云端（本地服务有自己的启停状态机，不走这里）
+        if not self._cloud_active and not self._is_local_url(url):
+            self.add_bubble(
+                "提示", "云端后端已断开连接，请求未发送。\n"
+                        "点「⚙ 后端设置 → 保存并测试连接」可重新接上；"
+                        "或用「本地推理」启动本地服务。")
+            self._status.setText("云端后端已断开，请求未发送")
             self._settings_card.setVisible(True)
             return
 
@@ -896,6 +926,8 @@ class AiChatPage(QWidget):
             self._save_btn.setEnabled(True)
             self._save_btn.setText(old_text)
             if result.get("ok"):
+                # 探活成功 = 后端可用，恢复云端闸门（覆盖「断开」后的重连）
+                self._cloud_active = True
                 self._status.setText(
                     f"✓ 连接成功（{self._cfg.get('model')}），可以开始对话")
             else:
@@ -903,6 +935,22 @@ class AiChatPage(QWidget):
                 self._status.setText(f"✗ {err or '连接失败'}")
 
         self._ctx.http_post_json_async(url, headers, body, 20.0, on_done)
+
+    # ---------------- 云端断开（2026-09-28 用户要求） ----------------
+    @staticmethod
+    def _is_local_url(url: str) -> bool:
+        """是否指向本机的服务（断开闸门只拦云端，本地服务不受影响）"""
+        u = (url or "").lower()
+        return "://127.0.0.1" in u or "://localhost" in u
+
+    def _disconnect_cloud(self):
+        """断开云端后端：停发请求，配置与 key 原样保留（用户不用重填）"""
+        if not self._cloud_active:
+            self._status.setText("云端后端本来就是断开状态")
+            return
+        self._cloud_active = False
+        self._status.setText(
+            "已断开云端连接（配置保留）；重新接上请点「保存并测试连接」")
 
     # ---------------- 本地推理 ----------------
     def _toggle_local_server(self):
@@ -931,6 +979,7 @@ class AiChatPage(QWidget):
             if not self._model_edit.text().strip():
                 self._model_edit.setText("local")
             self._collect_settings()
+            self._cloud_active = True   # 本地接管后端，云端断开闸门复位
             self._status.setText("✓ 本地服务就绪，已自动切换到本地后端")
         elif status == "starting":
             self._local_btn.setText("取消 / 停止")

@@ -569,6 +569,28 @@ QLabel#pluginStoreBadge {
     border: 1px solid $primary_a30;
     border-radius: 6px;
 }
+
+/* ---- AI 助手页面：左右对话气泡 ---- */
+/* 用户气泡靠右主色底——主色上的文字必须 $on_primary（对比度铁律）；
+   AI 气泡靠左中性底；提示气泡弱化为警示边框样式 */
+QFrame#chatBubbleUser {
+    background-color: $primary;
+    border-radius: 12px;
+}
+QLabel#chatBubbleText {
+    color: $on_primary;
+    font-size: 13px;
+}
+QFrame#chatBubbleAI {
+    background-color: $panel_fill;
+    border: 1px solid $panel_edge;
+    border-radius: 12px;
+}
+QFrame#chatBubbleHint {
+    background-color: $warn_alpha;
+    border: 1px solid $warn_border;
+    border-radius: 12px;
+}
 QLabel#fieldLabel {
     color: $text_secondary;
     font-size: 13px;
