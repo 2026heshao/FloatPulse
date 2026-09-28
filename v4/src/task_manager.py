@@ -143,6 +143,22 @@ def format_relative_deadline(deadline: str, today: str | None = None) -> str:
     return f"{d.month}月{d.day}日（周{_WEEKDAY_CN[d.weekday()]}）"
 
 
+def format_completed_date(completed_at: str) -> str:
+    """已完成任务行尾文案：完成日期「M月D日（周X）」。
+
+    已完成任务不再按 deadline 显示「逾期N天」等状态文案，只展示完成日期。
+    ``completed_at`` 形如 "YYYY-MM-DD HH:MM"（旧数据可能只有日期或为空）；
+    为空 / 解析失败 → 返回空串（调用方不再拼接）。
+    """
+    text = str(completed_at or "").strip()
+    if not text:
+        return ""
+    d = _parse_iso_date(text.split()[0])
+    if d is None:
+        return ""
+    return f"{d.month}月{d.day}日（周{_WEEKDAY_CN[d.weekday()]}）"
+
+
 def current_week_end(today: str | None = None) -> date:
     """本周日（自然周以周日为界，含今天）。
 

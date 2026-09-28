@@ -32,7 +32,7 @@ from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
 from src.glass_dialog import make_dialog_buttons
 from src.task_manager import (
-    task_state, format_relative_deadline, group_title,
+    task_state, format_relative_deadline, format_completed_date, group_title,
     KIND_ROW, KIND_HEADER,
 )
 from src.task_delegate import (
@@ -211,8 +211,12 @@ class TasksPanel(QWidget):
         self._task_count_label.setText(f"共 {total} 条")
 
     def _rel_text(self, t, today: str) -> str:
-        """行尾右侧文案：相对截止时间 + 番茄累计（🍅×N，0 次不显示）。"""
-        rel = format_relative_deadline(t.deadline, today)
+        """行尾右侧文案：已完成→完成日期，未完成→相对截止时间；
+        均追加番茄累计（🍅×N，0 次不显示）。"""
+        if t.done:
+            rel = format_completed_date(t.completed_at)
+        else:
+            rel = format_relative_deadline(t.deadline, today)
         n = getattr(t, "focus_sessions", 0) or 0
         if n > 0:
             tomato = f"🍅×{n}"
