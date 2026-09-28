@@ -76,10 +76,12 @@ def test_known_capabilities_exact_set():
 
     2026-09-27 起：network（网络桥） + write（受限写入口）。
     2026-09-28 起：+ manage（改/删既有数据，蕴含 write）。
+    2026-09-29 起：+ ai（读写设置页「AI 总配置」，授权在设置页勾选）。
     这是故意的硬断言——防止有人随手往 KNOWN_CAPABILITIES 里塞东西，
     每加一项都该是一次有意识的契约变更。
     """
-    assert KNOWN_CAPABILITIES == frozenset({"network", "write", "manage"})
+    assert KNOWN_CAPABILITIES == frozenset(
+        {"network", "write", "manage", "ai"})
 
 
 # ---------------- B：能力判定 ----------------
