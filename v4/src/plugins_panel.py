@@ -14,8 +14,10 @@
      （调用此前全项目无 UI 入口的 ActionRegistry.set_enabled）
   4. 顶部「重新扫描」按钮：无需重启即可加载新放入的插件
   5. 插件总闸关闭时显示提示条；无插件且无失败时显示安装引导空态
-  6. **插件商店区**（2026-09-27 晚）：列出商店目录里的 ``*.fpplug`` 可安装包，
-     每个包一个「安装」按钮；已装好的包标记「已安装」且按钮禁用
+  6. **插件商店独立弹窗**（2026-09-28 起，取代原先内嵌在页面里的商店区）：
+     「🏪 插件商店」按钮弹出独立窗口（GlassDialog，与主窗口同主题），
+     列出商店目录里的 ``*.fpplug`` 可安装包，每个包一个「安装」按钮；
+     已装好的包标记「已安装」且按钮禁用。页面本体只留已安装插件卡片
 
 成对目录（面板顶部都会写出绝对路径）：
   - 插件商店   ``<base_dir>/plugin_store/``  放 ``*.fpplug`` 源包，永不被自动解压
@@ -42,6 +44,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QTextBrowser, QMessageBox,
 )
+
+# 弹窗基类：PluginStoreDialog 在模块加载期就需要它作基类，
+# 因此必须是模块级 import（_build_usage_viewer 里的局部 import 只是历史写法）。
+from src.glass_dialog import GlassDialog
 
 # 插件包内使用说明文件约定（按优先级探测）
 USAGE_FILENAMES = ("使用说明.md", "README.md")
@@ -131,9 +137,7 @@ class PluginsPanel(QWidget):
         self._error_layout = None
         self._error_box = None
         self._error_label = None
-        self._store_layout = None
-        self._store_box = None
-        self._store_label = None
+        self._store_dialog = None     # 插件商店弹窗（懒创建，见 _on_open_store_dialog）
         self._empty_label = None
         self._gate_label = None
         self._count_label = None
@@ -200,10 +204,10 @@ class PluginsPanel(QWidget):
         open_dir_btn.clicked.connect(self._on_open_plugins_dir)
         toolbar.addWidget(open_dir_btn)
 
-        open_store_btn = QPushButton("🏪 打开插件商店")
+        open_store_btn = QPushButton("🏪 插件商店")
         open_store_btn.setObjectName("secondaryBtn")
-        open_store_btn.setToolTip("打开插件商店目录（放 .fpplug 插件包的地方）")
-        open_store_btn.clicked.connect(self._on_open_store_dir)
+        open_store_btn.setToolTip("浏览商店目录里的可安装插件包（独立窗口）")
+        open_store_btn.clicked.connect(self._on_open_store_dialog)
         toolbar.addWidget(open_store_btn)
 
         self._rescan_btn = QPushButton("🔄 重新扫描")
@@ -232,9 +236,9 @@ class PluginsPanel(QWidget):
         self._error_box.setVisible(False)
         v.addWidget(self._error_box)
 
-        # ---- 滚动区：插件卡片列表（商店区也在其中，见 refresh 的插入顺序）----
-        # 关键：商店卡片必须与已安装卡片**同处一个滚动容器**。
-        # 若把商店区放在滚动区之外，卡片会溢出面板可视高度被挤压、文字被裁切。
+        # ---- 滚动区：插件卡片列表 ----
+        # 2026-09-28 起商店区移入独立弹窗（PluginStoreDialog），
+        # 页面本体只保留已安装插件卡片，结构 [已装卡片..., stretch]。
         scroll = QScrollArea()
         scroll.setObjectName("pluginsScroll")
         scroll.setWidgetResizable(True)
@@ -248,31 +252,12 @@ class PluginsPanel(QWidget):
         scroll.setWidget(container)
         v.addWidget(scroll, 1)
 
-        # ---- 插件商店区（常驻容器；无可用包时整体隐藏）----
-        # 直接作为 _cards_layout 里的固定成员插入到 stretch 之前，
-        # 顺序：商店区（若可见）→ 已安装卡片。见 refresh 的插入逻辑。
-        self._store_box = QFrame()
-        self._store_box.setObjectName("pluginStoreBox")
-        sb = QVBoxLayout(self._store_box)
-        sb.setContentsMargins(0, 0, 0, 0)
-        sb.setSpacing(8)
-        self._store_label = QLabel("🏪 可安装的插件")
-        self._store_label.setObjectName("pluginSectionLabel")
-        sb.addWidget(self._store_label)
-        self._store_layout = QVBoxLayout()
-        self._store_layout.setContentsMargins(0, 0, 0, 0)
-        self._store_layout.setSpacing(8)
-        sb.addLayout(self._store_layout)
-        self._store_box.setVisible(False)
-        self._cards_layout.insertWidget(
-            self._cards_layout.count() - 1, self._store_box)
-
         # ---- 空态提示（默认显示，refresh 时按有无插件切换）----
         self._empty_label = QLabel(
             "还没有安装任何插件\n\n"
-            "把插件包（.fpplug 压缩包，或含 manifest.json 的文件夹）\n"
-            "放进插件商店目录，回到本页点「安装」即可\n\n"
-            "也可以直接放到插件安装目录后点「重新扫描」\n\n"
+            "点上方「🏪 插件商店」，把插件包（.fpplug 压缩包，"
+            "或含 manifest.json 的文件夹）安装进来\n\n"
+            "也可以直接把插件文件夹放到插件安装目录后点「重新扫描」\n\n"
             "插件包内建议放一份「使用说明.md」，卡片会自动显示其中的一句话摘要")
         self._empty_label.setObjectName("pluginEmptyHint")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -322,24 +307,18 @@ class PluginsPanel(QWidget):
         self._store_dir_label.setText("🏪 插件商店目录：%s" % store_text)
         self._store_dir_label.setToolTip(store_text)
 
-        # 清空旧卡片（保留 store_box 与末尾 stretch）
-        # _cards_layout 结构固定为 [store_box, 已装卡片..., stretch]
-        while self._cards_layout.count() > 2:
-            item = self._cards_layout.takeAt(1)
+        # 清空旧卡片（保留末尾 stretch）
+        # 2026-09-28 起商店区已移入独立弹窗，结构为 [已装卡片..., stretch]
+        while self._cards_layout.count() > 1:
+            item = self._cards_layout.takeAt(0)
             w = item.widget()
-            if w is not None and w is not self._store_box:
+            if w is not None:
+                w.hide()
                 w.deleteLater()
 
         # 清空旧失败卡片
         while self._error_layout.count():
             item = self._error_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-
-        # 清空旧商店卡片
-        while self._store_layout.count():
-            item = self._store_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
@@ -364,22 +343,13 @@ class PluginsPanel(QWidget):
             cnt += f"，商店可安装 {n_store} 个"
         self._count_label.setText(cnt)
 
-        # 已安装卡片插到 stretch 之前（即在商店区之后），保持 [商店, 卡片..., stretch]
+        # 已安装卡片插到 stretch 之前
         for lp in plugins:
             self._cards_layout.insertWidget(
                 self._cards_layout.count() - 1, self._make_card(lp))
 
-        # 商店区：列出商店里的包（含坏包，用户需要知道它为什么装不了）
-        entries = [e for e in store if self._entry_visible(e)]
-        self._store_box.setVisible(bool(entries))
-        if entries:
-            n_inst = sum(1 for e in entries if getattr(e, "installed", False))
-            extra = f"，{n_inst} 个已安装" if n_inst else ""
-            self._store_label.setText(
-                f"🏪 可安装的插件（{len(entries)} 个{extra}）"
-                f"——点「安装」解压到插件安装目录")
-            for e in entries:
-                self._store_layout.addWidget(self._make_store_card(e))
+        # 商店清单本身不在这页渲染（2026-09-28 起在独立弹窗 PluginStoreDialog），
+        # 这里只留计数与空态判据：让用户知道「有包可装」，去点工具栏的商店按钮。
 
     @staticmethod
     def _has_store_pkgs(store) -> bool:
@@ -538,16 +508,22 @@ class PluginsPanel(QWidget):
             bottom.addWidget(req)
         caps = list(manifest.get("capabilities", []) or [])
         if caps:
-            # 能力声明可视化（2026-09-27 权限模型）：network / write。
-            # 让用户看到「这个插件会联网 / 能往你的数据里写东西」，
+            # 能力声明可视化（2026-09-27 权限模型）：network / write / manage。
+            # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据」，
             # 是声明式权限的最小可见性。
-            cap_labels = {"network": "🌐 网络访问", "write": "✍ 写入数据"}
+            cap_labels = {
+                "network": "🌐 网络访问", "write": "✍ 写入数据",
+                "manage": "🛠 改删数据"}
             cap_tips = {
                 "network": "该插件在 manifest 里声明了 network 能力，"
                            "可经宿主网络桥发起联网请求（app.log 可审计）",
                 "write": "该插件在 manifest 里声明了 write 能力，"
                          "可经宿主桥新增碎片 / 任务 / 笔记（只能新增，"
                          "不能修改或删除已有数据）",
+                "manage": "该插件在 manifest 里声明了 manage 能力，"
+                          "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
+                          "笔记（同时具备 write 的只增权限）；删除可由插件"
+                          "侧发起撤销，每次操作记入 app.log",
             }
             cap = QLabel("能力: " + "、".join(
                 cap_labels.get(c, c) for c in caps))
@@ -654,7 +630,9 @@ class PluginsPanel(QWidget):
         fname = getattr(entry, "filename", "")
         meta_parts = []
         if caps:
-            cap_labels = {"network": "🌐 网络访问", "write": "✍ 写入数据"}
+            cap_labels = {
+                "network": "🌐 网络访问", "write": "✍ 写入数据",
+                "manage": "🛠 改删数据"}
             meta_parts.append("能力: " + "、".join(
                 cap_labels.get(c, c) for c in caps))
         if fname:
@@ -922,6 +900,16 @@ class PluginsPanel(QWidget):
         except OSError as e:
             print(f"[插件中心] 打开插件目录失败: {e}")
 
+    def _on_open_store_dialog(self):
+        """打开插件商店独立弹窗（懒创建；同一实例反复 exec，状态实时刷新）。
+
+        每次打开前都 reload：商店目录可能在两次打开之间被放入新包。
+        """
+        if self._store_dialog is None:
+            self._store_dialog = PluginStoreDialog(self)
+        self._store_dialog.reload()
+        self._store_dialog.exec()
+
     def _on_open_store_dir(self):
         """在资源管理器中打开插件商店目录（不存在则先创建）"""
         loader = getattr(self._host, "plugin_loader", None)
@@ -989,10 +977,24 @@ class PluginsPanel(QWidget):
             # 新插件会带来新动作 → 重建右键菜单 + 重新扫描 + 刷新卡片
             self._notify_menu_rebuild()
             self._on_rescan()
-            QMessageBox.information(self, "已安装",
+            # 商店弹窗若开着，同步刷新它的卡片（安装按钮 →「✓ 已安装」）
+            if self._store_dialog is not None:
+                self._store_dialog.reload()
+            # 反馈框挂**当前活动窗口**：挂 self（藏在主窗口 stack 里）时，
+            # ApplicationModal 消息框可能被模态弹窗盖住 → 用户点不到「确定」
+            # → 全应用看似锁死（2026-09-28 用户实测）
+            QMessageBox.information(self._active_dialog_or_self(), "已安装",
                                     f"{msg}\n\n插件已加载，可直接使用。")
         else:
-            QMessageBox.warning(self, "安装失败", msg)
+            QMessageBox.warning(self._active_dialog_or_self(), "安装失败", msg)
+
+    def _active_dialog_or_self(self) -> QWidget:
+        """消息框应该挂的 parent：商店弹窗开着就挂弹窗（保证 z 序可控），
+        否则挂面板自身（页面本体操作时行为与旧版一致）"""
+        dlg = getattr(self, "_store_dialog", None)
+        if dlg is not None and dlg.isVisible():
+            return dlg
+        return self
 
     def _on_uninstall(self, plugin_id: str, name: str, path: str):
         """卸载插件：二次确认（列出将被删除的绝对路径）→ 委托 loader.uninstall()
@@ -1035,6 +1037,145 @@ class PluginsPanel(QWidget):
             # 卸载会改变动作集合 → 重建右键菜单 + 刷新卡片
             self._notify_menu_rebuild()
             self.refresh()
-            QMessageBox.information(self, "已卸载", msg)
+            # parent 用当前活动窗口（同 _on_install：防消息框被模态弹窗盖住）
+            QMessageBox.information(self._active_dialog_or_self(), "已卸载", msg)
         else:
-            QMessageBox.warning(self, "卸载失败", msg)
+            QMessageBox.warning(self._active_dialog_or_self(), "卸载失败", msg)
+
+
+class PluginStoreDialog(GlassDialog):
+    """插件商店独立弹窗（2026-09-28 起，取代内嵌在插件中心页里的商店区）。
+
+    为什么拆出来：商店卡片与已安装卡片同页渲染时，插件中心页被拉得过长、
+    视觉拥挤（用户反馈「都显示在这不太美观」）。拆成独立窗口后：
+      - 页面本体只看「已装了什么」；
+      - 商店窗口只看「还能装什么」，安装/已安装/坏包三态照旧；
+      - 安装动作仍委托 panel._on_install（loader 层解压），本窗口不碰 zip。
+
+    主题：GlassDialog 直接取宿主主窗口的 QSS，light/dark 自动跟随；
+    卡片构建完全复用 PluginsPanel._make_store_card，三态行为与旧内嵌版一致。
+    """
+
+    def __init__(self, panel):
+        self._panel = panel
+        super().__init__(host=panel._host, title="🏪 插件商店",
+                         subtitle="浏览并安装插件包（安装 = 解压到插件目录）",
+                         size=(720, 560))
+
+        body = self.body_layout
+
+        # ---- 商店目录绝对路径（用户最常问「包放哪」）----
+        self._dir_label = QLabel()
+        self._dir_label.setObjectName("pluginDirLabel")
+        self._dir_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.addWidget(self._dir_label)
+
+        # ---- 已安装数量提示（默认隐藏）----
+        # 已安装的包**不重复列出**（页面本体已有同款插件卡片，用户反感重复），
+        # 只用一行交代数量；卸载后包回落「未安装」，会重新出现在列表里。
+        self._installed_hint = QLabel()
+        self._installed_hint.setObjectName("pluginDirLabel")
+        self._installed_hint.setWordWrap(True)
+        self._installed_hint.setVisible(False)
+        body.addWidget(self._installed_hint)
+
+        # ---- 滚动区：商店卡片列表（空态提示也在其中）----
+        scroll = QScrollArea()
+        scroll.setObjectName("storeScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        container.setObjectName("storeContainer")
+        self._list_layout = QVBoxLayout(container)
+        self._list_layout.setContentsMargins(0, 0, 8, 0)
+        self._list_layout.setSpacing(10)
+        # 固定结构 [空态label(可隐藏), 卡片..., stretch]：
+        # empty 先加、stretch 最后，卡片 reload 时插到 stretch 之前
+        self._empty_label = QLabel()
+        self._empty_label.setObjectName("pluginEmptyHint")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setStyleSheet("padding: 40px;")
+        self._empty_label.setWordWrap(True)
+        self._list_layout.addWidget(self._empty_label)
+        self._list_layout.addStretch()
+        scroll.setWidget(container)
+        body.addWidget(scroll, 1)
+
+        self.add_footer([
+            ("📁 打开商店目录", "secondaryBtn",
+             lambda _checked=False: self._panel._on_open_store_dir()),
+            ("🔄 刷新", "secondaryBtn", self.reload),
+            ("关闭", "primaryBtn", self.accept),
+        ])
+        self.reload()
+
+    # ---------------- 数据 ----------------
+    def reload(self):
+        """重扫商店目录并重建卡片（安装/卸载后由 panel 回调，也可手动触发）。
+
+        卡片必须 insertWidget 到 stretch 之前——addWidget 会排到 stretch
+        后面（QVBoxLayout 的 alignment 陷阱，见气泡卡片同款教训）。
+        """
+        panel = self._panel
+        loader = getattr(panel._host, "plugin_loader", None)
+
+        # 商店目录路径（label 单行 + tooltip 全文）
+        store_dir = ""
+        try:
+            if loader is not None:
+                store_dir = loader.store_dir
+        except Exception:                          # noqa: BLE001 - 旧 loader 兜底
+            store_dir = ""
+        if store_dir:
+            self._dir_label.setText("🏪 商店目录：%s" % store_dir)
+            self._dir_label.setToolTip(store_dir)
+            self._dir_label.setVisible(True)
+        else:
+            self._dir_label.setVisible(False)
+
+        # 清空旧卡片（按标记逆序删，空态 label 与末尾 stretch 保留）。
+        # 先 hide 再 deleteLater：deleteLater 要等事件循环才真正删除，
+        # 不 hide 的话旧卡片会残影叠加在新卡片上（离屏截图实测）。
+        for i in reversed(range(self._list_layout.count())):
+            item = self._list_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None and w is not self._empty_label:
+                self._list_layout.takeAt(i)
+                w.hide()
+                w.deleteLater()
+
+        # 扫描商店（只读 manifest，不解压；旧 loader 无此接口 → 空列表）
+        entries = []
+        try:
+            store = list(loader.scan_store()) if loader is not None else []
+            entries = [e for e in store if panel._entry_visible(e)]
+        except Exception:                          # noqa: BLE001 - 展示层兜底
+            entries = []
+
+        # 已安装的包**不重复列出**：页面本体的已装卡片就是它的展示位，
+        # 这里只列「未安装」与「坏包」（坏包要给出错原因，用户才能修）。
+        # 已装数量压缩成一行提示；卸载后包回落「未安装」，重新出现。
+        pending = [e for e in entries if not getattr(e, "installed", False)]
+        n_installed = len(entries) - len(pending)
+
+        if n_installed:
+            self._installed_hint.setText(
+                f"✓ 另有 {n_installed} 个插件包已安装——"
+                f"卸载插件后可回到此处重装")
+            self._installed_hint.setVisible(True)
+        else:
+            self._installed_hint.setVisible(False)
+
+        self._empty_label.setVisible(not pending)
+        if not pending:
+            self._empty_label.setText(
+                "商店目录里还没有可安装的插件包\n\n"
+                "把 .fpplug 插件包（或含 manifest.json 的文件夹）\n"
+                "放进上方商店目录，回到本窗口点「🔄 刷新」即可看到"
+                if not entries else
+                "商店里的插件包都已安装\n\n"
+                "卸载插件后，它的源包会回到这里，可随时重装")
+        for e in pending:
+            self._list_layout.insertWidget(
+                self._list_layout.count() - 1, panel._make_store_card(e))

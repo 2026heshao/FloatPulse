@@ -93,7 +93,13 @@ class GlassDialog(QDialog):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Dialog
-            | Qt.WindowType.WindowStaysOnTopHint   # 保持与旧详情弹窗一致的层级
+            # 刻意**不置顶**（2026-09-28 用户反馈）：此前带 WindowStaysOnTopHint
+            # 会导致 ① 商店弹窗压住资源管理器等外部窗口（用户点了「打开目录」
+            # 却看到弹窗一直在最上）；② QMessageBox（ApplicationModal）被
+            # 置顶弹窗完全盖住——用户看不到「确定」按钮 → 全应用看似锁死。
+            # 模态 Dialog 本身足以挡住宿主主窗口，无需置顶。
+            # 悬浮球/卡片/快捕条/钉屏/便签等桌面常驻小部件的置顶是各自
+            # 独立声明的，不受此改动影响。
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         w, h = size if size else self.DEFAULT_SIZE
