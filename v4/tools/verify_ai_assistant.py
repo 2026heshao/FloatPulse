@@ -7,11 +7,15 @@
     **不进悬浮球菜单**（menu=false）、manifest page 字段解析、
     create_page 返回真实页面、派生 ctx 带 network 能力
   B 纯函数层：format_* / build_request（cloud/local 双模式校验 + 旧配置
-    迁移）/ parse_reply
+    迁移）/ parse_reply / build_system_prompt（规则库追加，停用/空/脏跳过）
   C 真实 AiChatPage：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥
     发出（假桥捕获）、Enter 发送 / Shift+Enter 换行、保存并测试连接
     反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 切本地模式 /
     stopped → 回落云端）、云端/本地选择入口互斥高离、
+    规则库入口（展开编辑 → 保存落盘 → 对话注入生效规则、停用不注入、
+    后端设置保存不冲掉规则）、
+    气泡宽度/高度协调（sizeHint 塌缩与截字回归钉子）、
+    「存为笔记」右键菜单（菜单项可点 / 已存置灰、气泡内无常驻按钮）、
     页面销毁退订本地服务 listener、配置落盘 data_dir
   E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
     show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
@@ -38,7 +42,7 @@ sys.path.insert(0, BASE)
 
 from PyQt6.QtCore import Qt, QEvent               # noqa: E402
 from PyQt6.QtWidgets import (                     # noqa: E402
-    QApplication, QFrame, QLabel, QScrollArea,
+    QApplication, QFrame, QLabel, QPushButton, QScrollArea,
 )
 from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
@@ -286,6 +290,27 @@ check("B10 parse_reply 404 提示地址", err404 and "地址" in err404)
 _, errbad = plug.parse_reply({"ok": True, "status": 200, "body": "not-json"})
 check("B11 parse_reply 坏 JSON 归一错误", errbad and "协议" in errbad)
 
+# ---- 规则库：build_system_prompt（2026-09-28 用户要求，规则用户自编辑）----
+check("B12 build_system_prompt 无规则=基础提示词（行为不变）",
+      plug.build_system_prompt(None) == plug.SYSTEM_PROMPT
+      and plug.build_system_prompt([]) == plug.SYSTEM_PROMPT)
+_sp = plug.build_system_prompt([
+    {"text": "回答不超过 200 字", "enabled": True},
+    {"text": "   ", "enabled": True},          # 空白条目跳过
+    {"text": "已停用的规则", "enabled": False},
+    {"text": "周报用 Markdown 表格"},           # 缺 enabled 默认启用
+])
+check("B13 build_system_prompt 只拼启用规则（空白/停用跳过）",
+      "回答不超过 200 字" in _sp and "周报用 Markdown 表格" in _sp
+      and "已停用的规则" not in _sp and "规则库" in _sp
+      and "1. " in _sp and "2. " in _sp,
+      _sp[-120:])
+check("B14 build_system_prompt 纯字符串条目按启用处理（兼容手改配置）",
+      "手写规则" in plug.build_system_prompt(["手写规则"]))
+check("B15 build_system_prompt 全停用=基础提示词",
+      plug.build_system_prompt(
+          [{"text": "x", "enabled": False}]) == plug.SYSTEM_PROMPT)
+
 # ====================================================================
 # C. 真实页面（假桥捕获请求；页面代码路径全真）
 # ====================================================================
@@ -309,13 +334,22 @@ page_ctx = PluginContext(
     data_dir_base=os.path.join(data_dir, "plugins"),
     parent_window=lambda: win,
     http_post_async=fake_bridge,
-).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), ["network"])
+).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID),
+             ["network", "write"])
 
 page = plug.AiChatPage(page_ctx)
 check("C1 页面构造不崩（真实 MainWindow host）", page is not None)
 page.show()
 pump()
 check("C2 欢迎气泡已在流里", page._stream.count() == 2)   # stretch + 1 卡
+from PyQt6.QtWidgets import QLabel as _QLabel  # noqa: E402
+_welcome_lab = page._stream.itemAt(0).widget().findChild(_QLabel)
+check("C2b 欢迎气泡文字完整（对齐项 wordWrap 高度已按实际宽校正）",
+      _welcome_lab is not None
+      and _welcome_lab.minimumHeight()
+      >= _welcome_lab.heightForWidth(_welcome_lab.width()) - 2,
+      f"minH={_welcome_lab.minimumHeight() if _welcome_lab else '?'} "
+      f"needH={_welcome_lab.heightForWidth(_welcome_lab.width()) if _welcome_lab else '?'}")
 
 check("C3 设置卡默认收起", not page._settings_card.isVisible())
 page._toggle_settings()
@@ -418,6 +452,11 @@ check("C16 页面销毁退订本地服务 listener（防死引用累积）",
 # 就绪状态自动接后端（新页面重新挂 listener 验证页面响应）
 page2 = plug.AiChatPage(page_ctx)
 page2.show()
+# 顶部独立窗口给足高度：C20 加完气泡内容也不溢出 → 纵向滚动条不出现。
+# 否则气泡创建时（无滚动条）记下的 78% 最大宽，到 C22 断言时视口已被
+# 滚动条压窄 14px，宽度基准漂移会让断言随机翻车（2026-09-28 实测）。
+page2.resize(1000, 860)
+pump()
 plug.LOCAL_SERVER.port = 8093     # 模拟 start 成功后的状态（假路径未走到赋值）
 plug.LOCAL_SERVER._emit("ready", "本地服务就绪（127.0.0.1:8093）")
 pump()
@@ -462,20 +501,21 @@ page2.add_bubble("你", "测试用户消息")
 page2.add_bubble("AI", "测试 AI 回复")
 page2.add_bubble("提示", "测试提示消息")
 pump(50)
-_stream_items = [page2._stream.itemAt(i)
-                 for i in range(page2._stream.count())]
-_user_cards = [it.widget() for it in _stream_items
-               if it.widget() is not None
-               and it.widget().objectName() == "chatBubbleUser"]
-_ai_cards = [it.widget() for it in _stream_items
-             if it.widget() is not None
-             and it.widget().objectName() == "chatBubbleAI"]
-_hint_cards = [it.widget() for it in _stream_items
-               if it.widget() is not None
-               and it.widget().objectName() == "chatBubbleHint"]
+# 气泡卡：新结构每行是一个 [stretch, card] 行容器（避开 alignment 不吃
+# heightForWidth 的坑），故用 findChildren 按 objectName 取卡片
+def _bubble_cards(obj_name: str):
+    return [w for w in page2._stream_host.findChildren(QFrame)
+            if w.objectName() == obj_name]
+
+
+_user_cards = _bubble_cards("chatBubbleUser")
+_ai_cards = _bubble_cards("chatBubbleAI")
+_hint_cards = _bubble_cards("chatBubbleHint")
 check("C20 左右气泡：三种角色 objectName 正确（用户主色底/AI 中性/提示警示）",
       len(_user_cards) == 1 and len(_ai_cards) >= 1 and len(_hint_cards) >= 1,
       f"user={len(_user_cards)} ai={len(_ai_cards)} hint={len(_hint_cards)}")
+
+
 def _item_of(card):
     """布局里这张卡对应的 QLayoutItem（读 insertWidget 设的 alignment）"""
     for i in range(page2._stream.count()):
@@ -485,17 +525,99 @@ def _item_of(card):
     return None
 
 
-_user_item = _item_of(_user_cards[0]) if _user_cards else None
-check("C21 用户气泡靠右对齐（insertWidget alignment=AlignRight）",
-      _user_item is not None
-      and bool(_user_item.alignment() & Qt.AlignmentFlag.AlignRight),
-      str(_user_item.alignment() if _user_item else "无 item"))
+_row_lay = (_user_cards[0].parentWidget().layout()
+            if _user_cards and _user_cards[0].parentWidget() else None)
+check("C21 用户气泡靠右（行容器：[stretch, card]，卡片在最后）",
+      _row_lay is not None and _row_lay.count() == 2
+      and _row_lay.itemAt(0).spacerItem() is not None
+      and _row_lay.itemAt(1).widget() is _user_cards[0],
+      f"count={_row_lay.count() if _row_lay else '?'}")
 check("C22 气泡是窄卡（最大宽 ≤ 可视区 78%，不撑满整行）",
       bool(_user_cards)
       and _user_cards[0].maximumWidth() <= max(
           360, int(page2._scroll.viewport().width() * 0.78)),
       f"maxW={_user_cards[0].maximumWidth() if _user_cards else '?'} "
       f"vpW={page2._scroll.viewport().width()}")
+
+# ---- 气泡宽度/高度协调 + 存为笔记改右键菜单（2026-09-28 用户反馈）----
+_long_ai = ("这是一条用于验证气泡宽度与换行高度的较长 AI 回复，"
+            "包含足够文字让它在任何窗口宽度下都必须折行显示。") * 3
+page2.add_bubble("AI", _long_ai)
+pump(80)
+_ai_now = _bubble_cards("chatBubbleAI")
+_long_card = _ai_now[-1]
+_long_label = _long_card.findChild(QLabel)
+_vp = page2._scroll.viewport().width()
+check("C26 长 AI 气泡宽度撑到上限附近（wordWrap sizeHint 塌缩已修）",
+      _long_card.width() >= int(_vp * 0.6),
+      f"w={_long_card.width()} vp={_vp}")
+check("C27 长 AI 气泡高度覆盖全文（不截字）",
+      _long_label is not None
+      and _long_label.height()
+      >= _long_label.heightForWidth(_long_label.width()) - 2,
+      f"h={_long_label.height() if _long_label else '?'} "
+      f"need={_long_label.heightForWidth(_long_label.width()) if _long_label else '?'}")
+check("C28 短 AI 气泡贴合内容（不塌缩成窄条、也不撑满）",
+      bool(_ai_now) and _ai_now[0].width() >= 120
+      and _ai_now[0].width() <= _long_card.width(),
+      f"short={_ai_now[0].width() if _ai_now else '?'} long={_long_card.width()}")
+check("C29 AI 气泡内不再有常驻按钮（存为笔记已改右键菜单）",
+      not _long_card.findChildren(QPushButton),
+      f"btns={[b.text() for b in _long_card.findChildren(QPushButton)]}")
+check("C30 AI 气泡挂 CustomContextMenu（右键可存笔记）",
+      _long_card.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu)
+_menu_new = page2._build_bubble_menu("__some-new-text__")
+check("C31 右键菜单「📥 存为笔记」可点（未存过）",
+      len(_menu_new.actions()) == 1
+      and "存为笔记" in _menu_new.actions()[0].text()
+      and _menu_new.actions()[0].isEnabled(),
+      str([a.text() for a in _menu_new.actions()]))
+page2._noted_texts.add("__some-new-text__")
+_menu_done = page2._build_bubble_menu("__some-new-text__")
+check("C32 已存过 → 菜单项显示已存且禁用（防重复存）",
+      "已存为笔记" in _menu_done.actions()[0].text()
+      and not _menu_done.actions()[0].isEnabled(),
+      str([f"{a.text()}/{a.isEnabled()}" for a in _menu_done.actions()]))
+page2._noted_texts.discard("__some-new-text__")
+
+# ---- 思考动画（2026-09-28 用户要求：请求在途时消息流里有活的三点波）----
+# 挂起桥：捕获 on_done 但不回 → 模拟真实网络的在途窗口期
+_deferred = []
+
+
+def deferred_bridge(url, headers, body, timeout, on_done):
+    _deferred.append(on_done)
+    return True
+
+
+page2._ctx._http_post_async = deferred_bridge
+page2._input.setPlainText("在途测试")
+page2._on_send_clicked()
+pump(400)          # 跨 ≥2 个动画 tick（180ms/帧）
+_think_cards = [w for w in page2._stream_host.findChildren(QFrame)
+                if w.objectName() == "chatBubbleThinking"]
+_think_txt = page2._think_label.text() if page2._think_label else ""
+_think_item = _item_of(_think_cards[0]) if _think_cards else None
+check("C20b 请求在途 → 思考气泡挂进消息流（靠左）+ 计时器在跑 + 三点确实在动",
+      page2._busy and len(_think_cards) == 1
+      and page2._think_timer.isActive()
+      and _think_txt != page2._THINK_FRAMES[0]
+      and bool(_think_item.alignment() & Qt.AlignmentFlag.AlignLeft),
+      f"busy={page2._busy} cards={len(_think_cards)} "
+      f"timer={page2._think_timer.isActive()} text={_think_txt!r}")
+_deferred.pop()({"ok": True, "status": 200,
+                 "body": json.dumps(
+                     {"choices": [{"message": {"content": "回复到达"}}]})})
+pump()
+_still = [w for w in page2._stream_host.findChildren(QFrame)
+          if w.objectName() == "chatBubbleThinking"]
+check("C20c 回复到达 → 思考气泡拆除干净（计时器停 + busy 复位 + 布局计数回落）",
+      len(_still) == 0 and not page2._think_timer.isActive()
+      and not page2._busy and page2._think_bubble is None
+      and page2._think_label is None,
+      f"still={len(_still)} timer={page2._think_timer.isActive()} "
+      f"busy={page2._busy}")
+page2._ctx._http_post_async = fake_bridge        # 换回正常假桥
 
 # ---- 云端断开连接（2026-09-28 用户要求：云端要有启动/暂停式控制）----
 check("C23 断开按钮存在（与保存并测试并排）",
@@ -527,6 +649,57 @@ check("C25 探活成功 → 云端闸门自动恢复（可再发）",
       f"active={page2._cloud_active} captured={len(captured)}")
 page2._url_edit.setText(_real_url)     # 恢复原配置，别污染 C19 落盘结论
 page2._collect_settings()
+
+# ---- 规则库入口（2026-09-28 用户要求：入口让用户自己编辑，不写死）----
+check("C26 规则库按钮存在且卡片默认收起",
+      page2._rules_btn is not None and page2._rules_btn.text() == "📐 规则库"
+      and not page2._rules_card.isVisible())
+page2._toggle_rules()
+pump(50)
+check("C27 规则卡可展开；空规则库给一行可编辑空行",
+      page2._rules_card.isVisible() and len(page2._rules_rows) == 1
+      and page2._rules_rows[0]["edit"].text() == "")
+page2._rules_rows[0]["edit"].setText("回答保持简洁，不超过 200 字")
+page2._rule_add_btn.click()
+pump()
+check("C28 ＋ 添加规则 → 新空行（不被 checked=False 污染成 'False'）",
+      len(page2._rules_rows) == 2 and page2._rules_rows[1]["edit"].text() == "")
+page2._rules_rows[1]["edit"].setText("这条保持停用")
+page2._rules_rows[1]["check"].setChecked(False)
+page2._rule_add_btn.click()                          # 再加一行但不填：保存时应被跳过
+pump()
+page2._rules_rows[1]["edit"].returnPressed.emit()   # 文本框回车=直接保存
+pump()
+check("C29 保存规则落盘（空白行跳过 + 停用保留）",
+      page2._cfg["custom_rules"] == [
+          {"text": "回答保持简洁，不超过 200 字", "enabled": True},
+          {"text": "这条保持停用", "enabled": False}],
+      str(page2._cfg.get("custom_rules")))
+_stored_rules = json.load(open(os.path.join(page_ctx.data_dir,
+                                            "config.json"),
+                               encoding="utf-8")).get("custom_rules")
+check("C29b 规则写入插件私有 config.json",
+      _stored_rules == page2._cfg["custom_rules"], str(_stored_rules))
+n_before_rules = len(captured)
+page2._input.setPlainText("规则生效了吗")
+page2._on_send_clicked()
+pump(50)
+_sys_content = captured[-1]["body"]["messages"][0]["content"]
+check("C30 对话请求 system 提示词：启用规则注入、停用规则不注入",
+      len(captured) == n_before_rules + 1
+      and _sys_content.startswith("你是办公工具")
+      and "回答保持简洁，不超过 200 字" in _sys_content
+      and "这条保持停用" not in _sys_content,
+      _sys_content[-100:])
+page2._collect_settings()
+check("C31 后端设置保存不冲掉规则（_collect_settings 携带 custom_rules）",
+      page2._cfg.get("custom_rules")
+      and page2._cfg["custom_rules"][0]["text"] == "回答保持简洁，不超过 200 字",
+      str(page2._cfg.get("custom_rules")))
+page2._toggle_rules()
+pump(50)
+check("C32 规则卡可收起（重开会从配置重建行）",
+      not page2._rules_card.isVisible())
 
 # ---- 清空 + 配置落盘 ----
 page2._clear_chat()
