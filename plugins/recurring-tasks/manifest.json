@@ -1,0 +1,26 @@
+{
+  "id": "recurring-tasks",
+  "name": "周期任务",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "requires": ["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
+  "capabilities": ["write"],
+  "description": "只给规则（每天 / 每周几 / 每月几号 / 每 N 天），到点自动生成任务；错过的补一次、同一天不重复生成",
+  "page": {
+    "title": "🔁 周期任务"
+  },
+  "actions": [
+    {
+      "id": "recurring-tasks.manage",
+      "title": "🔁 周期任务",
+      "hotkey": "Ctrl+Alt+R",
+      "menu": true
+    },
+    {
+      "id": "recurring-tasks.check-now",
+      "title": "🔁 立即检查周期任务",
+      "hotkey": null,
+      "menu": true
+    }
+  ]
+}
