@@ -41,7 +41,7 @@ import os
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QTextBrowser, QMessageBox,
 )
 
@@ -53,6 +53,32 @@ from src.glass_dialog import GlassDialog
 USAGE_FILENAMES = ("使用说明.md", "README.md")
 # 卡片上显示的使用说明摘要最大长度（用户要求：简短一两句话）
 USAGE_SUMMARY_MAX = 90
+# 已装插件卡片双列网格的最小容器宽度：低于此值回落单列。
+# 依据实测（带主题 QSS，light/dark 一致）：最宽卡片（启停 + 打开目录 +
+# 查看使用说明 + 卸载四按钮行）最小宽 368px，两列需容器 ≥ 2×368 + 间距
+# 10 + 滚动条/边距余量 ≈ 760，取 780 再留呼吸空间。
+# 主窗口里容器 ≈ 窗口宽 − 252（阴影 36 + 侧栏 168 + 内容边距 48），
+# 即窗口 ≥ 约 1030 时双列：默认 1280 双列，最小 920 单列。
+GRID_TWO_COL_MIN_WIDTH = 780
+
+
+class _CardsScroll(QScrollArea):
+    """插件卡片滚动区：以**视口可用宽度**驱动列数自适应（双列 ↔ 单列）。
+
+    为什么不挂在网格容器上：widgetResizable 下容器被取 max(视口, 自身
+    最小宽)——双列网格的最小宽（两张最宽卡 + 间距）大于回落阈值时，
+    容器宽度永远压不进阈值以下，resizeEvent 不再触发，单列回落就死锁了
+    （离屏无字体环境实测复现）。视口宽度是「可用空间」的可靠信号：滚动区
+    本体每次尺寸变化都会走 resizeEvent，与容器是否被钳住无关。
+    """
+
+    def __init__(self, panel):
+        super().__init__()
+        self._panel = panel
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._panel._reflow_cards(self.viewport().width())
 
 
 def find_usage_file(plugin_dir: str) -> str:
@@ -236,19 +262,31 @@ class PluginsPanel(QWidget):
         self._error_box.setVisible(False)
         v.addWidget(self._error_box)
 
-        # ---- 滚动区：插件卡片列表 ----
+        # ---- 滚动区：插件卡片（双列网格，窄窗自动回落单列）----
         # 2026-09-28 起商店区移入独立弹窗（PluginStoreDialog），
-        # 页面本体只保留已安装插件卡片，结构 [已装卡片..., stretch]。
-        scroll = QScrollArea()
+        # 页面本体只保留已安装插件卡片。
+        # 2026-09-29 起卡片改双列网格：外层 vbox 只负责「网格 + 尾部
+        # stretch」，网格本身只装卡片本体——refresh 清空与列数重排都会把
+        # 网格整体拆装，stretch 放外层才不会被 takeAt 扫掉。
+        scroll = _CardsScroll(self)
         scroll.setObjectName("pluginsScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
         container.setObjectName("pluginsContainer")
-        self._cards_layout = QVBoxLayout(container)
-        self._cards_layout.setContentsMargins(0, 0, 8, 0)
+        self._cards_outer = QVBoxLayout(container)
+        self._cards_outer.setContentsMargins(0, 0, 8, 0)
+        self._cards_outer.setSpacing(0)
+        self._cards_layout = QGridLayout()
+        self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(10)
-        self._cards_layout.addStretch()          # 卡片永远顶对齐
+        self._cards_layout.setColumnStretch(0, 1)
+        self._cards_layout.setColumnStretch(1, 1)
+        self._cards_outer.addLayout(self._cards_layout)
+        self._cards_outer.addStretch()           # 卡片永远顶对齐
+        self._card_widgets = []                  # 插入顺序的卡片（重排依据）
+        self._card_cols = 2                      # 当前列数（_reflow_cards 维护）
         scroll.setWidget(container)
         v.addWidget(scroll, 1)
 
@@ -307,14 +345,14 @@ class PluginsPanel(QWidget):
         self._store_dir_label.setText("🏪 插件商店目录：%s" % store_text)
         self._store_dir_label.setToolTip(store_text)
 
-        # 清空旧卡片（保留末尾 stretch）
-        # 2026-09-28 起商店区已移入独立弹窗，结构为 [已装卡片..., stretch]
-        while self._cards_layout.count() > 1:
+        # 清空旧卡片（网格只装卡片本体；尾部 stretch 在外层 vbox，不会被动到）
+        while self._cards_layout.count():
             item = self._cards_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.hide()
                 w.deleteLater()
+        self._card_widgets = []
 
         # 清空旧失败卡片
         while self._error_layout.count():
@@ -343,13 +381,38 @@ class PluginsPanel(QWidget):
             cnt += f"，商店可安装 {n_store} 个"
         self._count_label.setText(cnt)
 
-        # 已安装卡片插到 stretch 之前
+        # 已安装卡片按行优先进网格（[c0 c1 / c2 c3 ...]，与列表顺序一致）
         for lp in plugins:
-            self._cards_layout.insertWidget(
-                self._cards_layout.count() - 1, self._make_card(lp))
+            self._grid_add_card(self._make_card(lp))
 
         # 商店清单本身不在这页渲染（2026-09-28 起在独立弹窗 PluginStoreDialog），
         # 这里只留计数与空态判据：让用户知道「有包可装」，去点工具栏的商店按钮。
+
+    # ---------------- 双列网格 ----------------
+    def _grid_add_card(self, card):
+        """把卡片按行优先顺序放进网格（刷新路径；列数随容器宽度自适应）"""
+        self._card_widgets.append(card)
+        self._place_card(len(self._card_widgets) - 1)
+
+    def _place_card(self, idx: int):
+        row, col = divmod(idx, self._card_cols)
+        self._cards_layout.addWidget(self._card_widgets[idx], row, col)
+
+    def _reflow_cards(self, width: int):
+        """容器宽度变化：两列放不下按钮行时回落单列（反之亦然），重排现有卡片。
+
+        由 _CardsContainer.resizeEvent 驱动；列数没变就不动（resize 高频
+        触发，重排一次要拆装全部条目）。
+        """
+        want = 2 if width >= GRID_TWO_COL_MIN_WIDTH else 1
+        if want == self._card_cols:
+            return
+        self._card_cols = want
+        while self._cards_layout.count():
+            self._cards_layout.takeAt(0)
+        for idx in range(len(self._card_widgets)):
+            self._place_card(idx)
+        self._cards_layout.setColumnStretch(1, 1 if want == 2 else 0)
 
     @staticmethod
     def _has_store_pkgs(store) -> bool:
@@ -498,41 +561,54 @@ class PluginsPanel(QWidget):
             no_act.setObjectName("pluginCardDesc")
             v.addWidget(no_act)
 
-        # ---- 依赖 + 能力 + 操作按钮行 ----
+        # ---- 依赖 + 能力（可换行）与操作按钮，拆成两行 ----
+        # 原单行「依赖 + 能力 + 按钮」全宽下已接近极限（ai-assistant 四能力
+        # + 四按钮 ≈ 1000px，超出最小窗口的全宽），双列后每列更窄必然溢出。
+        # 拆行后：元信息行自动折行，按钮行右对齐——单双列都放得下。
+        requires = list(manifest.get("requires", []) or [])
+        caps = list(manifest.get("capabilities", []) or [])
+        if requires or caps:
+            meta = QVBoxLayout()
+            meta.setContentsMargins(0, 0, 0, 0)
+            meta.setSpacing(2)
+            if requires:
+                req = QLabel("依赖: " + "、".join(requires))
+                req.setObjectName("pluginCardId")
+                req.setWordWrap(True)
+                meta.addWidget(req)
+            if caps:
+                # 能力声明可视化（2026-09-27 权限模型）：network / write / manage / ai。
+                # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据 /
+                # 可接入 AI 总配置」，是声明式权限的最小可见性。
+                cap_labels = {
+                    "network": "🌐 网络访问", "write": "✍ 写入数据",
+                    "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
+                cap_tips = {
+                    "network": "该插件在 manifest 里声明了 network 能力，"
+                               "可经宿主网络桥发起联网请求（app.log 可审计）",
+                    "write": "该插件在 manifest 里声明了 write 能力，"
+                             "可经宿主桥新增碎片 / 任务 / 笔记（只能新增，"
+                             "不能修改或删除已有数据）",
+                    "manage": "该插件在 manifest 里声明了 manage 能力，"
+                              "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
+                              "笔记（同时具备 write 的只增权限）；删除可由插件"
+                              "侧发起撤销，每次操作记入 app.log",
+                    "ai": "该插件在 manifest 里声明了 ai 能力，可接入设置页"
+                          "「AI 总配置」共用云端 / 本地后端——是否接入由你在"
+                          "设置页下拉框勾选决定（勾选 = 授权）",
+                }
+                cap = QLabel("能力: " + "、".join(
+                    cap_labels.get(c, c) for c in caps))
+                cap.setObjectName("pluginCardId")
+                cap.setWordWrap(True)
+                cap.setToolTip("；\n".join(
+                    cap_tips.get(c, "") for c in caps).strip("；\n"))
+                meta.addWidget(cap)
+            v.addLayout(meta)
+
+        # ---- 操作按钮行（右对齐，与原视觉一致）----
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
-        requires = list(manifest.get("requires", []) or [])
-        if requires:
-            req = QLabel("依赖: " + "、".join(requires))
-            req.setObjectName("pluginCardId")
-            bottom.addWidget(req)
-        caps = list(manifest.get("capabilities", []) or [])
-        if caps:
-            # 能力声明可视化（2026-09-27 权限模型）：network / write / manage / ai。
-            # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据 /
-            # 可接入 AI 总配置」，是声明式权限的最小可见性。
-            cap_labels = {
-                "network": "🌐 网络访问", "write": "✍ 写入数据",
-                "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
-            cap_tips = {
-                "network": "该插件在 manifest 里声明了 network 能力，"
-                           "可经宿主网络桥发起联网请求（app.log 可审计）",
-                "write": "该插件在 manifest 里声明了 write 能力，"
-                         "可经宿主桥新增碎片 / 任务 / 笔记（只能新增，"
-                         "不能修改或删除已有数据）",
-                "manage": "该插件在 manifest 里声明了 manage 能力，"
-                          "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
-                          "笔记（同时具备 write 的只增权限）；删除可由插件"
-                          "侧发起撤销，每次操作记入 app.log",
-                "ai": "该插件在 manifest 里声明了 ai 能力，可接入设置页"
-                      "「AI 总配置」共用云端 / 本地后端——是否接入由你在"
-                      "设置页下拉框勾选决定（勾选 = 授权）",
-            }
-            cap = QLabel("能力: " + "、".join(
-                cap_labels.get(c, c) for c in caps))
-            cap.setObjectName("pluginCardId")
-            cap.setToolTip("；\n".join(cap_tips.get(c, "") for c in caps).strip("；\n"))
-            bottom.addWidget(cap)
         bottom.addStretch()
 
         toggle_btn = self._make_toggle_btn(lp, actions)
