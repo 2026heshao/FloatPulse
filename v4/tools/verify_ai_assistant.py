@@ -8,6 +8,8 @@
     create_page 返回真实页面、派生 ctx 带 network 能力
   B 纯函数层：format_* / build_request（cloud/local 双模式校验 + 旧配置
     迁移）/ parse_reply / build_system_prompt（规则库追加，停用/空/脏跳过）
+    / 动作协议 parse_actions（合法动作分级、编造 id 与未知 op 丢弃、
+    坏 JSON 整块不执行、超上限截断、混合批次只丢非法条）
   C 真实 AiChatPage：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥
     发出（假桥捕获）、Enter 发送 / Shift+Enter 换行、保存并测试连接
     反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 切本地模式 /
@@ -16,6 +18,9 @@
     后端设置保存不冲掉规则）、
     气泡宽度/高度协调（sizeHint 塌缩与截字回归钉子）、
     「存为笔记」右键菜单（菜单项可点 / 已存置灰、气泡内无常驻按钮）、
+    数据操控全链路（授权才下发协议、add 直接执行、改删弹确认卡、
+    点执行真落库并带撤销按钮、撤销恢复内容、取消零改动、
+    未授权动作如实拒绝）、
     页面销毁退订本地服务 listener、配置落盘 data_dir
   E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
     show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
@@ -23,6 +28,8 @@
     自动切回首页 / 可重入）、重新启用走全新注册分支、
     rebuild_plugin_page（启用分支真实路径）、未知插件拒绝
   D light / dark 双主题真截图（页面嵌进真实 MainWindow）→ build/shots/
+    ├ ai_assistant_{theme}.png          常规页（设置卡展开）
+    └ ai_assistant_actions_{theme}.png  数据操控卡（结果卡 + 确认卡 + 撤销按钮）
 
 跑法：python tools/run_gui_check.py tools/verify_ai_assistant.py
 """
@@ -310,6 +317,95 @@ check("B14 build_system_prompt 纯字符串条目按启用处理（兼容手改�
 check("B15 build_system_prompt 全停用=基础提示词",
       plug.build_system_prompt(
           [{"text": "x", "enabled": False}]) == plug.SYSTEM_PROMPT)
+
+# ---- 动作协议（2026-09-28 用户要求：AI 按指令改数据，需要指令触发）----
+# 快照里的 id 必须是「真实存在的记录」：解析器拿它挡掉模型编造的编号
+_snap = {
+    "tasks": [{"task_id": 3, "title": "写周报", "done": False},
+              {"task_id": 7, "title": "买咖啡豆", "done": True}],
+    "fragments": [{"fragment_id": 2, "content": "https://a.com"}],
+    "notes": [{"note_id": 5, "title": "周会记录", "content": "正文"}],
+}
+
+_bt, _ba, _be = plug.parse_actions("这是普通回答，没有动作块。", _snap)
+check("B16 parse_actions 无动作块 → 正文原样、零动作零错误",
+      _bt == "这是普通回答，没有动作块。" and _ba == [] and _be == [],
+      f"text={_bt!r} acts={_ba} errs={_be}")
+
+_t, _a, _e = plug.parse_actions(
+    '已帮你建好任务。\n```actions\n'
+    '{"actions":[{"op":"add_task","title":"写季度总结"}]}\n```', _snap)
+check("B17 合法 add_task → level=write + 正文剥离 JSON 块",
+      len(_a) == 1 and _a[0]["op"] == "add_task" and _a[0]["level"] == "write"
+      and "{" not in _t and "actions" not in _t and _e == [],
+      f"acts={_a} clean={_t!r} errs={_e}")
+
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"complete_task","id":3}]}\n```', _snap)
+check("B18 合法 complete_task → level=manage + desc 引用真实标题",
+      len(_a) == 1 and _a[0]["level"] == "manage" and "写周报" in _a[0]["desc"],
+      f"acts={_a}")
+
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"delete_task","id":999}]}\n```', _snap)
+check("B19 id 不在快照（编造编号）→ 丢弃该条 + 给出原因",
+      _a == [] and any("999" in x for x in _e), f"acts={_a} errs={_e}")
+
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"drop_database","id":1}]}\n```', _snap)
+check("B20 未知 op → 丢弃（op 白名单之外一律不认）",
+      _a == [] and any("未知动作" in x for x in _e), f"acts={_a} errs={_e}")
+
+_t, _a, _e = plug.parse_actions(
+    '一些结论\n```actions\n{"actions":[{"op":"add_task", }\n```', _snap)
+check("B21 动作块坏 JSON → 整块不执行 + 原因（正文不被吞掉）",
+      _a == [] and _e and "一些结论" in _t, f"acts={_a} errs={_e} clean={_t!r}")
+
+_many = ",".join('{"op":"add_fragment","content":"x%d"}' % i
+                 for i in range(plug.MAX_ACTIONS + 5))
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[%s]}\n```' % _many, _snap)
+check("B22 动作数超上限 → 截断到 MAX_ACTIONS + 提示（防刷屏式输出）",
+      len(_a) == plug.MAX_ACTIONS and any("超过上限" in x for x in _e),
+      f"n={len(_a)} errs={_e}")
+
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"add_task","title":123}]}\n```', _snap)
+check("B23 参数类型错（title 非字符串）→ 丢该条",
+      _a == [] and _e, f"acts={_a} errs={_e}")
+
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"add_task","title":"合法新增"},'
+    '{"op":"delete_note","id":888}]}\n```', _snap)
+check("B24 混合批次：合法动作保留 / 非法单条丢弃（不整块作废）",
+      len(_a) == 1 and _a[0]["op"] == "add_task" and _e,
+      f"acts={_a} errs={_e}")
+
+_bs = "== 你可以执行的应用操作 =="
+check("B25 build_system_prompt：授权 manage 才下发动作协议",
+      _bs in plug.build_system_prompt(None, can_manage=True)
+      and _bs not in plug.build_system_prompt(None, can_manage=False))
+
+# 纯动作回复（只有 ```actions 块、没有正文）→ 正文必须是空串，
+# 不能回退成原文把 JSON 当正文显示（真截图发现的 bug）
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"delete_task","id":7}]}\n```', _snap)
+check("B26 纯动作回复 → 正文为空串（JSON 不得当正文渲染）",
+      _t == "" and len(_a) == 1 and _e == [], f"clean={_t!r} acts={_a}")
+
+# 正文里的普通 JSON 示例（不含 actions 键）→ 不是动作块，正文必须原样保留
+_ex = '这段配置就是 {"name": "FloatPulse", "version": 4} 的意思。'
+_t, _a, _e = plug.parse_actions(_ex, _snap)
+check("B27 正文里的 JSON 示例（非动作块）→ 不剥离、不误删正文",
+      _t == _ex and _a == [] and _e == [], f"clean={_t!r} acts={_a}")
+
+# 描述会进 QLabel（不渲染 Markdown）→ 不能带 ** 之类的标记
+_t, _a, _e = plug.parse_actions(
+    '```actions\n{"actions":[{"op":"delete_note","id":5}]}\n```', _snap)
+check("B28 删除类描述不带 Markdown 标记（QLabel 不渲染 **）",
+      len(_a) == 1 and "**" not in _a[0]["desc"]
+      and "删除" in _a[0]["desc"] and "周会记录" in _a[0]["desc"],
+      f"{_a}")
 
 # ====================================================================
 # C. 真实页面（假桥捕获请求；页面代码路径全真）
@@ -701,6 +797,256 @@ pump(50)
 check("C32 规则卡可收起（重开会从配置重建行）",
       not page2._rules_card.isVisible())
 
+# ---- 数据操控（2026-09-28 用户要求：AI 按指令改数据 + 分级确认 + 可撤销）----
+# 这条链路要真通道：写=增（write）、管理=改删（manage，带撤销栈）。
+# 全部接到真管理器，动作真的落库，撤销真的恢复。
+def _mk_manage_providers():
+    stack, seq = [], [1]
+
+    def _push(kind, payload):
+        tok = seq[0]
+        seq[0] += 1
+        stack.append({"token": tok, "kind": kind, "payload": payload,
+                      "used": False})
+        return tok
+
+    def _take(tok):
+        for rec in stack:
+            if rec["token"] == tok and not rec["used"]:
+                rec["used"] = True
+                return rec
+        return None
+
+    def _update_task(tid, title, note, deadline):
+        cur = task_mgr.get_task(tid)
+        if cur is None:
+            return False
+        d = cur.to_dict()
+        return bool(task_mgr.update_task(
+            tid, d["title"] if title is None else title,
+            d["note"] if note is None else note,
+            d["deadline"] if deadline is None else deadline))
+
+    def _delete_task(tid):
+        cur = task_mgr.get_task(tid)
+        if cur is None:
+            return 0
+        payload = cur.to_dict()
+        if not task_mgr.delete_task(tid):
+            return 0
+        return _push("task", payload)
+
+    def _delete_fragment(fid):
+        cur = frag_mgr.get_fragment(fid)
+        if cur is None:
+            return 0
+        payload = cur.to_dict()
+        if not frag_mgr.delete_fragment(fid):
+            return 0
+        return _push("fragment", payload)
+
+    def _delete_note(nid):
+        cur = note_mgr.get_note(nid)
+        if cur is None:
+            return 0
+        payload = cur.to_dict()
+        if not note_mgr.delete_note(nid):
+            return 0
+        return _push("note", payload)
+
+    def _undo(tok):
+        rec = _take(tok)
+        if rec is None:
+            return False
+        kind, p = rec["kind"], rec["payload"]
+        if kind == "task":
+            nid = task_mgr.add_task(p.get("title") or "", p.get("note") or "",
+                                    p.get("deadline") or "")
+            if not nid:
+                return False
+            if p.get("done"):
+                task_mgr.set_done(nid, True)
+            return True
+        if kind == "fragment":
+            return bool(frag_mgr.add_fragment(
+                p.get("type") or "clipboard_text", p.get("content") or "",
+                p.get("source") or "撤销恢复"))
+        return bool(note_mgr.add_note(p.get("content") or "",
+                                      p.get("title") or ""))
+
+    return {
+        "update_task": _update_task,
+        "set_task_done": lambda tid, done: bool(task_mgr.set_done(tid, done)),
+        "delete_task": _delete_task,
+        "update_fragment": lambda fid, content, source: bool(
+            frag_mgr.update_fragment(fid, content=content, source=source)),
+        "delete_fragment": _delete_fragment,
+        "update_note": lambda nid, title, content: bool(note_mgr.update_note(
+            nid, (note_mgr.get_note(nid).content if content is None
+                  else content), title=title)),
+        "delete_note": _delete_note,
+        "undo_delete": _undo,
+    }
+
+
+_write_providers = {
+    "task": lambda title, note, deadline:
+        task_mgr.add_task(title, note, deadline),
+    "fragment": lambda content, source:
+        frag_mgr.add_clipboard_text(content, source=source),
+    "note": lambda title, content: note_mgr.add_note(content, title),
+}
+
+
+def _mk_mgmt_ctx(caps):
+    return PluginContext(
+        logger=_logger, config=config.as_dict(),
+        show_toast=lambda *a, **k: None, data=plugin_data,
+        data_dir_base=os.path.join(data_dir, "plugins"),
+        parent_window=lambda: win, http_post_async=fake_bridge,
+        write_providers=_write_providers,
+        manage_providers=_mk_manage_providers(),
+    ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), caps)
+
+
+def _cards(pg, obj):
+    return [w for w in pg._stream_host.findChildren(QFrame)
+            if w.objectName() == obj]
+
+
+def _btns(pg, text):
+    return [b for b in pg._stream_host.findChildren(QPushButton)
+            if b.text() == text]
+
+
+def _feed(pg, text):
+    """模拟「模型回复到达」：走真实 _on_reply（含 parse_reply/parse_actions）"""
+    pg._on_reply({"ok": True, "status": 200,
+                  "body": json.dumps(
+                      {"choices": [{"message": {"content": text}}]})})
+    pump(30)
+
+
+def _titles():
+    return [t.title for t in task_mgr.get_all_tasks()]
+
+
+pageM = plug.AiChatPage(_mk_mgmt_ctx(["network", "write", "manage"]))
+pageM.resize(760, 640)
+pageM.show()
+pump(60)
+check("C33 授权 manage → 页面识别可写可管（_can_write / _can_manage）",
+      pageM._can_write() is True and pageM._can_manage() is True)
+
+n_before = len(captured)
+pageM._input.setPlainText("帮我加个任务")
+pageM._on_send_clicked()
+pump(50)
+check("C34 授权 manage → 对话请求下发动作协议（system 提示词含协议段）",
+      len(captured) == n_before + 1
+      and "== 你可以执行的应用操作 ==" in
+      captured[-1]["body"]["messages"][0]["content"])
+
+# 新增类：直接执行，不弹确认
+_n0 = len(_titles())
+_feed(pageM, '好的，已为你创建。\n```actions\n'
+      '{"actions":[{"op":"add_task","title":"AI 建的任务"}]}\n```')
+_res = _cards(pageM, "chatBubbleHint")
+_ai_text = " ".join(lb.text() for w in _cards(pageM, "chatBubbleAI")
+                    for lb in w.findChildren(QLabel))
+check("C35 add_task 直接执行（任务 +1、标题正确、正文剥离 JSON）",
+      len(_titles()) == _n0 + 1 and "AI 建的任务" in _titles()
+      and "actions" not in _ai_text and "{" not in _ai_text
+      and _res and any("✅" in lb.text()
+                       for lb in _res[-1].findChildren(QLabel)),
+      f"titles={_titles()} res={len(_res)} ai={_ai_text!r}")
+
+# 改删类：不直接执行，先弹确认卡
+_victim = task_mgr.add_task("待删除的任务", "备注", "")
+_n1 = len(_titles())
+_feed(pageM, '```actions\n{"actions":[{"op":"delete_task","id":%d}]}\n```'
+      % _victim)
+_hint = _cards(pageM, "chatBubbleHint")
+check("C36 delete_task 不直接执行（弹确认卡，数据未动）",
+      len(_titles()) == _n1 and "待删除的任务" in _titles()
+      and _btns(pageM, "执行") and _btns(pageM, "取消"),
+      f"titles={_titles()} yes={len(_btns(pageM, '执行'))} "
+      f"no={len(_btns(pageM, '取消'))}")
+check("C37 确认卡列出将执行的操作（含目标记录标题）",
+      any("待删除的任务" in lb.text() for lb in _hint[-1].findChildren(QLabel)),
+      str([lb.text() for lb in _hint[-1].findChildren(QLabel)]))
+
+# 点「执行」→ 真落库 + 结果卡带撤销按钮
+_btns(pageM, "执行")[-1].click()
+pump(30)
+check("C38 点「执行」→ 真删除 + 结果卡带「↩ 撤销删除」",
+      "待删除的任务" not in _titles() and _btns(pageM, "↩ 撤销删除"),
+      f"titles={_titles()} undo={len(_btns(pageM, '↩ 撤销删除'))}")
+
+# 点「撤销删除」→ 内容恢复
+_btns(pageM, "↩ 撤销删除")[-1].click()
+pump(30)
+check("C39 点「↩ 撤销删除」→ 内容恢复（重新插入，标题原样回来）",
+      "待删除的任务" in _titles(),
+      f"titles={_titles()}")
+
+# 点「取消」→ 不执行
+_victim2 = task_mgr.add_task("不该被删的任务", "", "")
+_feed(pageM, '```actions\n{"actions":[{"op":"delete_task","id":%d}]}\n```'
+      % _victim2)
+_btns(pageM, "取消")[-1].click()
+pump(30)
+check("C40 点「取消」→ 未执行（数据零改动）",
+      "不该被删的任务" in _titles(), f"titles={_titles()}")
+
+# 坏 JSON：整块不执行 + 提示气泡（不猜意图）
+_n2 = len(_titles())
+_feed(pageM, '我改好了\n```actions\n{"actions":[{"op":"add_task", }\n```')
+check("C41 动作块坏 JSON → 零执行 + 出现「未被执行」提示气泡",
+      len(_titles()) == _n2
+      and any("未被执行" in lb.text()
+              for w in _cards(pageM, "chatBubbleHint")
+              for lb in w.findChildren(QLabel)),
+      f"titles={_titles()}")
+
+# 纯动作回复（正文本该为空）→ 不留 JSON 气泡（真截图发现的 bug 的页面级钉子）
+_n3 = len(_titles())
+_feed(pageM, '```actions\n{"actions":[{"op":"add_task","title":"静默新增"}]}\n```')
+_ai_all = " ".join(lb.text() for w in _cards(pageM, "chatBubbleAI")
+                   for lb in w.findChildren(QLabel))
+check("C45 纯动作回复 → 不渲染 JSON 正文（只留结果卡）+ 动作照常执行",
+      len(_titles()) == _n3 + 1 and "静默新增" in _titles()
+      and "actions" not in _ai_all and "{" not in _ai_all,
+      f"titles={_titles()} ai={_ai_all!r}")
+pageM.deleteLater()
+
+# 未授权 manage：不下发协议 + 改删被宿主安全拒绝（数据零改动）
+pageN = plug.AiChatPage(_mk_mgmt_ctx(["network"]))
+pageN.resize(760, 640)
+pageN.show()
+pump(60)
+check("C42 未声明 manage → _can_manage 为假（不下发动作协议）",
+      pageN._can_manage() is False and pageN._can_write() is False)
+n_before2 = len(captured)
+pageN._input.setPlainText("随便问问")
+pageN._on_send_clicked()
+pump(50)
+check("C43 未声明 manage → 请求里没有动作协议段",
+      len(captured) == n_before2 + 1
+      and "== 你可以执行的应用操作 ==" not in
+      captured[-1]["body"]["messages"][0]["content"])
+_probe = task_mgr.add_task("未授权探测任务", "", "")
+_feed(pageN, '```actions\n{"actions":[{"op":"delete_task","id":%d}]}\n```'
+      % _probe)
+check("C44 未声明 manage 却收到改删动作 → 如实拒绝（不弹确认卡 + 数据零改动）",
+      "未授权探测任务" in _titles()
+      and not _btns(pageN, "执行")
+      and any("未授权" in lb.text()
+              for w in _cards(pageN, "chatBubbleHint")
+              for lb in w.findChildren(QLabel)),
+      f"titles={_titles()} yes={len(_btns(pageN, '执行'))}")
+pageN.deleteLater()
+
 # ---- 清空 + 配置落盘 ----
 page2._clear_chat()
 pump()
@@ -798,6 +1144,7 @@ check("F9 收尾注销成功（全局 dict 已清）",
 shots = os.path.join(ROOT, "build", "shots")
 os.makedirs(shots, exist_ok=True)
 saved = []
+saved_actions = []
 for theme in ("light", "dark"):
     config.set("theme", theme)
     # NAV_PAGE_INDEX/NAV_PAGE_TITLES 是模块级单例：前面的窗口实例已注册过
@@ -817,7 +1164,10 @@ for theme in ("light", "dark"):
         data_dir_base=os.path.join(data_dir, "plugins"),
         parent_window=lambda w=win_t: w,
         http_post_async=fake_bridge,
-    ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), ["network"])
+        write_providers=_write_providers,
+        manage_providers=_mk_manage_providers(),
+    ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID),
+                 ["network", "write", "manage"])
     page_t = plug.AiChatPage(ctx_t)
     # 真实时序：先注入主窗口（reparent 到 QSS 作用域内）再显示页面；
     # 反过来先 show 会让页面先成为无 QSS 祖先的顶层窗口，离屏下样式残留
@@ -833,11 +1183,27 @@ for theme in ("light", "dark"):
     # （实测 dark 下字色残留 light 态），真实显示无此问题
     if win_t.grab().save(path):
         saved.append(theme)
+    # 第二批截图：数据操控卡（结果卡 + 确认卡 + 撤销按钮）——2026-09-28 新 UI，
+    # 必须真出图人工核对双主题（仅靠断言看不出配色/截断问题）
+    page_t._toggle_settings()          # 收起设置卡，让消息流占满可视区
+    pump(120)
+    _feed(page_t, '好的，已建好任务。\n```actions\n'
+          '{"actions":[{"op":"add_task","title":"整理本周会议纪要"}]}\n```')
+    del_id = task_mgr.add_task("要合并的重复条目", "", "")
+    _feed(page_t, '```actions\n{"actions":['
+          '{"op":"complete_task","id":%d},'
+          '{"op":"delete_task","id":%d}]}\n```' % (done_id, del_id))
+    pump(250)
+    apath = os.path.join(shots, f"ai_assistant_actions_{theme}.png")
+    if win_t.grab().save(apath):
+        saved_actions.append(theme)
     page_t.deleteLater()
     win_t.close()
     pump(100)
 check("D1 light/dark 双主题截图落盘 build/shots/", saved == ["light", "dark"],
       str(saved))
+check("D2 双主题「数据操控卡」截图落盘（确认卡/结果卡/撤销按钮）",
+      saved_actions == ["light", "dark"], str(saved_actions))
 
 # ====================================================================
 # 汇总
