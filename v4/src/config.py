@@ -201,24 +201,32 @@ _LEGACY_NAV_KEYS = NAV_PAGE_KEYS - {"plugins"}
 
 
 def sanitize_nav_order(raw, valid_keys=NAV_PAGE_KEYS):
-    """校验 nav_order 配置：必须是全部功能页 key 的一个排列。
+    """校验 nav_order 配置：固定功能页 key 的排列 + 可选插件页 key。
 
-    - ``raw`` 非 list / 长度不符 / 含非法 key / 缺 key / 重复 → 返回 None
-      （调用方回退默认顺序，不崩溃）
-    - 合法 → 返回 list 副本
-    - **旧版兼容**：7 键旧排列（缺 plugins）→ 保留用户自定义顺序，
-      把 "plugins" 追加到末尾返回，不丢弃用户的排序偏好
+    2026-09-28 起插件页导航键（``plugin:<id>``）参与拖拽换位，顺序里
+    可以混有插件 key。校验规则：
+      - 固定功能页 key（valid_keys）必须**恰好各出现一次**（缺/多/重复 → None）
+      - 非固定 key 必须 ``plugin:`` 开头（防拼写错误 / 非法值混入）且不重复
+      - 合法 → 返回 list 副本（顺序即用户偏好，原样保留）
+      - **旧版兼容**：7 键旧排列（缺 plugins）→ 保留用户自定义顺序，
+        把 "plugins" 追加到末尾返回，不丢弃用户的排序偏好
     """
-    if not isinstance(raw, list) or len(raw) != len(valid_keys):
-        # 旧版 7 键排列 → 追加 plugins 后放行
-        if (isinstance(raw, list) and len(raw) == len(_LEGACY_NAV_KEYS)
-                and all(isinstance(k, str) for k in raw)
-                and set(raw) == _LEGACY_NAV_KEYS):
-            return list(raw) + ["plugins"]
+    if not isinstance(raw, list) or not all(isinstance(k, str) for k in raw):
         return None
-    if not all(isinstance(k, str) for k in raw):
+    fixed = [k for k in raw if k in valid_keys]
+    # 旧版 7 键排列 → 追加 plugins 后放行
+    if len(fixed) == len(_LEGACY_NAV_KEYS) and set(fixed) == _LEGACY_NAV_KEYS:
+        extra = [k for k in raw if k not in valid_keys]
+        if all(k.startswith("plugin:") for k in extra) \
+                and len(set(extra)) == len(extra):
+            return fixed + ["plugins"] + extra
+        return fixed + ["plugins"] if not extra else None
+    if set(fixed) != set(valid_keys) or len(fixed) != len(valid_keys):
         return None
-    if set(raw) != set(valid_keys):
+    extra = [k for k in raw if k not in valid_keys]
+    if any(not k.startswith("plugin:") for k in extra):
+        return None
+    if len(set(extra)) != len(extra):
         return None
     return list(raw)
 
