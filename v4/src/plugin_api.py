@@ -72,7 +72,10 @@ _DENIED_REQUIRES = frozenset({
 
 # 已知的能力名（manifest.capabilities 合法取值）。
 # 未知能力名 → manifest 校验失败（防拼写错误静默失效，如 "netwrork"）。
-KNOWN_CAPABILITIES = frozenset({"network", "write"})
+#   network —— 经宿主桥联网
+#   write   —— 新增数据（只增）
+#   manage  —— 修改 / 删除既有数据（比 write 危险一档，声明即含 write）
+KNOWN_CAPABILITIES = frozenset({"network", "write", "manage"})
 
 
 def is_allowed_requirement(name: str) -> bool:
@@ -239,20 +242,25 @@ class PluginData:
 
 
 class PluginWriter:
-    """插件可见的**受限写入口**（需声明 ``capabilities: ["write"]``）。
+    """插件可见的**受限数据入口**，分两档能力：
+
+    - ``capabilities: ["write"]``（只增）→ ``ctx.write`` 的三个 add_* 方法
+    - ``capabilities: ["manage"]``（改删，**蕴含 write**）→ ``ctx.manage``
+      的 update_* / set_* / delete_* / undo_delete
 
     设计原则与 ``PluginData``（只读快照）完全对称，只是方向相反：
 
       - 插件**拿不到** TaskManager / FragmentManager / NoteManager 对象，
-        只有三个"新增"方法，走宿主注入的 provider
-      - **只增不改删**：刻意不提供 update / delete。改删的破坏性远大于新增，
-        起步阶段不开口子
+        只有白名单方法，走宿主注入的 provider
       - 所有方法都不抛异常：未声明能力 / 宿主未注入 / 参数非法 → 记 warning
-        并返回 ``0``（0 = 没有写入任何东西）
+        并返回失败值（add 返回 0，bool 方法返回 False）
       - 内容有护栏：空内容拒写、非字符串拒写、超长截断（``MAX_CONTENT_LEN``）
+      - **删除可撤销**：``delete_*`` 返回**撤销令牌**（>0 成功，0 失败），
+        误删后调 ``undo_delete(token)`` 恢复；宿主侧撤销栈有容量上限
+      - 每次管理操作都记审计日志（动作 / 参数 / 结果）
 
-    返回值统一是**新记录的 id**（fragment_id / task_id / note_id），
-    写入失败返回 0。插件判 ``> 0`` 即知成败，不必读日志。
+    返回值约定：add_* / delete_* 返回 **id 或撤销令牌**（> 0 判成功）；
+    update_* / set_* / undo_delete 返回 **bool**。插件据此判成败，不必读日志。
     """
 
     SOURCE_FRAGMENT = "fragment"
@@ -264,23 +272,35 @@ class PluginWriter:
     MAX_CONTENT_LEN = 8000
 
     def __init__(self, logger=None, providers=None, plugin_id="",
-                 capabilities=()):
+                 capabilities=(), manage_providers=None):
         self._logger = logger if logger is not None else _NULL_LOGGER
         # 只留下 callable，挡掉误注入的数据本体
         self._providers = {name: fn for name, fn in dict(providers or {}).items()
                            if callable(fn)}
+        # 管理通道（改删）：与只增通道分开注入，权限也分开判定
+        self._manage = {name: fn for name, fn
+                        in dict(manage_providers or {}).items()
+                        if callable(fn)}
         self._plugin_id = str(plugin_id or "")
         self._capabilities = frozenset(
             c for c in (capabilities or ()) if isinstance(c, str))
 
     # ---------------- 门禁 ----------------
     def enabled(self) -> bool:
-        """本插件是否被授权写入（manifest 声明了 write 能力）"""
-        return "write" in self._capabilities
+        """本插件是否被授权写入（write 或更高一档的 manage）"""
+        return bool(self._capabilities & {"write", "manage"})
+
+    def can_manage(self) -> bool:
+        """本插件是否被授权修改/删除既有数据（需单独声明 manage）"""
+        return "manage" in self._capabilities
 
     def sources(self) -> tuple:
         """当前可用的写入目标（插件可据此决定降级策略）"""
         return tuple(sorted(self._providers))
+
+    def manage_sources(self) -> tuple:
+        """当前可用的管理操作名（插件可据此决定降级策略）"""
+        return tuple(sorted(self._manage))
 
     def _deny(self, reason: str) -> int:
         self._warn(f"写入被拒绝：{reason}")
@@ -289,7 +309,8 @@ class PluginWriter:
     def _check(self, name: str, content):
         """公共前置校验：返回规整后的字符串，或 None 表示应拒写"""
         if not self.enabled():
-            self._deny("插件未在 manifest 声明 capabilities=[\"write\"]")
+            self._deny("插件未在 manifest 声明 capabilities=[\"write\"]/"
+                       "[\"manage\"]")
             return None
         if name not in self._providers:
             self._deny(f"宿主未注入写入通道：{name}")
@@ -362,7 +383,148 @@ class PluginWriter:
             return 0
         return self._call(self.SOURCE_NOTE, (text, self._opt_str(content)))
 
+    # ---------------- 管理方法（需 capabilities: ["manage"]） ----------------
+    # 语义约定：``None`` = 该字段不动（部分更新）；给值 = 改成该值。
+    # 传 None 而不是空串来"不动"，避免小模型把没提到的字段清空。
+    def update_task(self, task_id, title=None, note=None,
+                    deadline=None) -> bool:
+        """改任务字段（None = 不动该字段），返回是否成功"""
+        if not self._check_id(task_id, "task_id"):
+            return False
+        if not self._check_opt_text(title, "title"):
+            return False
+        if not self._check_opt_text(note, "note"):
+            return False
+        if not self._check_opt_text(deadline, "deadline"):
+            return False
+        return self._manage_call("update_task", (task_id, title, note, deadline))
+
+    def set_task_done(self, task_id, done=True) -> bool:
+        """标记任务完成 / 未完成，返回是否成功"""
+        if not self._check_id(task_id, "task_id"):
+            return False
+        return self._manage_call("set_task_done", (task_id, bool(done)))
+
+    def delete_task(self, task_id) -> int:
+        """删除任务，返回**撤销令牌**（>0 成功；0 失败）。
+
+        误删后调 ``undo_delete(token)`` 恢复（内容原样回来，编号可能变新）。
+        """
+        if not self._check_id(task_id, "task_id"):
+            return 0
+        return self._manage_call("delete_task", (task_id,), expect="token")
+
+    def update_fragment(self, fragment_id, content=None, source=None) -> bool:
+        """改碎片正文 / 来源（None = 不动该字段），返回是否成功"""
+        if not self._check_id(fragment_id, "fragment_id"):
+            return False
+        if content is not None and not self._check_content(content, "content"):
+            return False
+        if not self._check_opt_text(source, "source"):
+            return False
+        return self._manage_call("update_fragment", (fragment_id, content, source))
+
+    def delete_fragment(self, fragment_id) -> int:
+        """删除碎片，返回撤销令牌（>0 成功；0 失败）"""
+        if not self._check_id(fragment_id, "fragment_id"):
+            return 0
+        return self._manage_call("delete_fragment", (fragment_id,),
+                                 expect="token")
+
+    def update_note(self, note_id, title=None, content=None) -> bool:
+        """改笔记标题 / 正文（None = 不动该字段），返回是否成功"""
+        if not self._check_id(note_id, "note_id"):
+            return False
+        if not self._check_opt_text(title, "title"):
+            return False
+        if content is not None and not self._check_content(content, "content"):
+            return False
+        return self._manage_call("update_note", (note_id, title, content))
+
+    def delete_note(self, note_id) -> int:
+        """删除笔记，返回撤销令牌（>0 成功；0 失败）"""
+        if not self._check_id(note_id, "note_id"):
+            return 0
+        return self._manage_call("delete_note", (note_id,), expect="token")
+
+    def undo_delete(self, token) -> bool:
+        """撤销此前的一次删除（token 来自 delete_* 的返回值），返回是否成功。
+
+        每个令牌只能用一次；撤销后内容原样回来（编号可能变新，因为宿主
+        走的是"重新插入"路径）。
+        """
+        if not self._check_id(token, "token"):
+            return False
+        return self._manage_call("undo_delete", (token,))
+
     # ---------------- 内部 ----------------
+    def _check_id(self, value, name: str) -> bool:
+        """id / 令牌必须是真的正整数（bool 是 int 子类，要挡掉）"""
+        ok = (isinstance(value, int) and not isinstance(value, bool)
+              and value > 0)
+        if not ok:
+            self._warn(f"参数被拒：{name} 必须是正整数 id，"
+                       f"收到 {value!r}（{type(value).__name__}）")
+        return ok
+
+    def _check_opt_text(self, value, name: str) -> bool:
+        """可选文本参数：None 放行（= 不动），给了就必须是字符串"""
+        if value is None:
+            return True
+        if not isinstance(value, str):
+            self._warn(f"参数被拒：{name} 必须是字符串或 None，"
+                       f"收到 {type(value).__name__}")
+            return False
+        return True
+
+    def _check_content(self, value, name: str) -> bool:
+        """正文字段：必须是字符串（None 场景已由调用方先拦）"""
+        if not isinstance(value, str):
+            self._warn(f"参数被拒：{name} 必须是字符串，"
+                       f"收到 {type(value).__name__}")
+            return False
+        return True
+
+    def _manage_call(self, name: str, args: tuple,
+                     expect: str = "bool"):
+        """manage 类调用：能力门禁 + 通道存在性 + 异常隔离 + 返回校验。
+
+        ``expect``：``"bool"``（默认）或 ``"token"``（撤销令牌，正整数）。
+        """
+        fail = 0 if expect == "token" else False
+        if not self.can_manage():
+            self._warn("管理操作被拒绝：插件未在 manifest 声明 "
+                       "capabilities=[\"manage\"]")
+            return fail
+        fn = self._manage.get(name)
+        if fn is None:
+            self._warn(f"管理操作被拒绝：宿主未注入管理通道：{name}")
+            return fail
+        try:
+            result = fn(*args)
+        except Exception as exc:          # noqa: BLE001 - 宿主异常也要隔离
+            self._warn(f"管理操作失败（{name}）：{exc!r}")
+            return fail
+        if expect == "token":
+            # 与 _call 同款严格性：只认真正的正整数，bool/float 视为接口坏了
+            if isinstance(result, bool) or not isinstance(result, int):
+                self._warn(f"管理操作返回了非整数令牌（{name}）：{result!r}")
+                return 0
+            token = result if result > 0 else 0
+        else:
+            if not isinstance(result, bool):
+                self._warn(f"管理操作返回了非布尔值（{name}）：{result!r}"
+                           "（宿主 provider 应返回 True/False）")
+                return False
+            token = result
+        # 审计日志：动作 / 目标 / 结果，事后可查（app.log）
+        self._audit(f"[插件管理] {self._plugin_id} {name}{args} -> {token!r}")
+        return token
+
+    def _audit(self, msg: str):
+        if self._logger is not None:
+            self._logger.info(msg)
+
     def _warn(self, msg: str):
         if self._logger is not None:
             self._logger.warning(f"[插件] {msg}")
@@ -388,7 +550,7 @@ class PluginContext:
                  data=None, data_dir_base="", parent_window=None,
                  plugin_id="", plugin_dir="",
                  capabilities=(), http_post_async=None,
-                 write_providers=None):
+                 write_providers=None, manage_providers=None):
         # logger=None → 退化为 NullHandler 日志器：插件可以无条件调用
         # ctx.logger.info(...)，不必自己判空
         self._logger = logger if logger is not None else _NULL_LOGGER
@@ -411,10 +573,17 @@ class PluginContext:
         # 宿主注入的写入 provider：{"fragment"|"task"|"note": callable}。
         # 与 _http_post_async 同构——宿主级共享，权限按派生时的声明逐实例判定。
         self._write_providers = dict(write_providers or {})
-        # 写入门面：每次实例化都重新判权限（capabilities 是逐实例的）
-        self._write = PluginWriter(
+        # 宿主注入的管理 provider（改删）：{"update_task"|...|"undo_delete"}。
+        # 与只增通道分开，权限也分开（manage 是一档更危险的能力）。
+        self._manage_providers = dict(manage_providers or {})
+        # 数据入口门面：每次实例化都重新判权限（capabilities 是逐实例的）。
+        # write 与 manage 指向同一对象——门禁在方法级按能力名判定，
+        # 插件按语义选名字用（ctx.write.add_note / ctx.manage.delete_task）。
+        self._data_gateway = PluginWriter(
             logger=self._logger, providers=self._write_providers,
-            plugin_id=self._plugin_id, capabilities=self._capabilities)
+            plugin_id=self._plugin_id, capabilities=self._capabilities,
+            manage_providers=self._manage_providers)
+        self._write = self._data_gateway
 
     # ---------------- 身份与目录 ----------------
     @property
@@ -490,6 +659,7 @@ class PluginContext:
             capabilities=capabilities,
             http_post_async=self._http_post_async,
             write_providers=dict(self._write_providers),
+            manage_providers=dict(self._manage_providers),
         )
 
     # ---------------- 白名单能力 ----------------
@@ -514,9 +684,23 @@ class PluginContext:
 
         只有三个"新增"方法：``add_fragment`` / ``add_task`` / ``add_note``。
         未声明能力的插件调用它们 → 记 warning 并返回 0（不写数据、不抛异常）。
-        刻意不提供 update / delete：改删的破坏性远大于新增。
+        修改 / 删除走另一档能力 ``ctx.manage``。
         """
-        return self._write
+        return self._data_gateway
+
+    @property
+    def manage(self) -> "PluginWriter":
+        """**数据管理入口**（需声明 ``capabilities: ["manage"]``，蕴含 write）。
+
+        方法：``update_task`` / ``set_task_done`` / ``delete_task`` /
+        ``update_fragment`` / ``delete_fragment`` / ``update_note`` /
+        ``delete_note`` / ``undo_delete``。
+
+        与 ``ctx.write`` 是同一个门面对象，门禁在方法级按能力判定：
+        只声明 write 的插件调这些方法 → 记 warning 并返回 False/0。
+        删除类方法返回**撤销令牌**，可用于 ``undo_delete`` 恢复。
+        """
+        return self._data_gateway
 
     def show_toast(self, text: str, ms: int = 2800) -> bool:
         """弹主窗口轻提示；宿主未提供该能力时返回 False"""

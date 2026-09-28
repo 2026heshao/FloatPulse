@@ -207,7 +207,7 @@ def test_manifest_still_rejects_unknown_capability():
 
 
 def test_known_capabilities_set():
-    assert KNOWN_CAPABILITIES == frozenset({"network", "write"})
+    assert KNOWN_CAPABILITIES == frozenset({"network", "write", "manage"})
 
 
 # ---------------- G：loader 集成 ----------------
