@@ -273,6 +273,65 @@ check("F9. 注销后键消失、order 移除（不残留死引用）",
 
 win2._force_end_nav_drag()
 
+# ---------- G. 显示前注册（启动时序回归钉：首开导航键错乱、拖一下才恢复） ----------
+# 根因：register_plugin_page 在窗口 show 之前走 _apply_nav_order，
+# 落定动画以 show 前未校准的几何为起止值，show 后布局不再主动重排，
+# 按钮被动画钉死在错位上。修复=不可见时不播动画。
+from PyQt6.QtTest import QTest                              # noqa: E402
+
+win3 = MainWindow(TaskManager(os.path.join(root, "schedule3.json")),
+                  NoteManager(os.path.join(root, "notes3.json")),
+                  FragmentManager(os.path.join(root, "fragments3.json")),
+                  docx, cm, ClipboardMonitor(
+                      FragmentManager(os.path.join(root, "fragments3.json")), cm),
+                  temp_asset_manager=TempAssetManager(_base),
+                  nav_manager=NavManager(os.path.join(root, "nav3.json")))
+win3.resize(1280, 740)
+idx3 = win3.register_plugin_page("plugin:demo2", "🧩 演示", QWidget())   # show 之前
+# ★核心不变量：窗口不可见时绝不播落定动画（动画会把按钮钉在 show 前
+#   未校准的几何上 → 首开错乱、拖一下才恢复；离屏几何前后一致复现不了
+#   错位本身，故直接钉「动画未启动」这个行为）
+check("G0. 显示前注册不启动落定动画（首开错乱根因钉）",
+      win3._nav_settle_animations == [],
+      f"anims={len(win3._nav_settle_animations)}")
+win3.show()
+for _ in range(5):
+    app.processEvents()
+QTest.qWait(350)                 # 越过可能的落定动画时长（修复后不会启动）
+for _ in range(3):
+    app.processEvents()
+
+btns3 = [win3._nav_btns[k] for k in win3._nav_order if k in win3._nav_btns]
+ys3 = [b.geometry().y() for b in btns3]
+steps3 = [ys3[i + 1] - ys3[i] for i in range(len(ys3) - 1)]
+check("G1. 显示前注册：show 后按钮等距无错位（动画未钉错位）",
+      len(set(steps3)) == 1 and ys3 == sorted(ys3),
+      f"steps={steps3} ys={ys3}")
+
+check("G2. 显示前注册：插件键在布局里、顺序追加末位",
+      win3._nav_btns_layout.indexOf(win3._nav_btns["plugin:demo2"]) >= 0
+      and win3._nav_order[-1] == "plugin:demo2",
+      f"order={win3._nav_order} "
+      f"layout_idx={win3._nav_btns_layout.indexOf(win3._nav_btns['plugin:demo2'])}")
+
+check("G3. 显示前注册：插件键与设置键不重叠",
+      win3._nav_btns["plugin:demo2"].geometry().y()
+      + win3._nav_btns["plugin:demo2"].height()
+      <= win3._settings_btn.geometry().y() + 1,
+      f"btn_bottom={win3._nav_btns['plugin:demo2'].geometry().y() + win3._nav_btns['plugin:demo2'].height()} "
+      f"settings_y={win3._settings_btn.geometry().y()}")
+
+# 反向钉：可见状态重排必须照常播落定动画（守卫只限不可见期）
+_o = list(win3._nav_order)
+_o[0], _o[1] = _o[1], _o[0]
+win3._apply_nav_order(_o, save=False)
+check("G4. 可见状态重排仍播落定动画（守卫不过度抑制）",
+      len(win3._nav_settle_animations) > 0,
+      f"anims={len(win3._nav_settle_animations)}")
+win3._abort_nav_settle_animations()
+win3._apply_nav_order(list(win3._nav_order), save=False)   # 换回，清场
+win3._abort_nav_settle_animations()
+
 print()
 failed = [r for r in results if not r[1]]
 print(f"[DONE] {len(results) - len(failed)}/{len(results)} 项通过")

@@ -1099,7 +1099,13 @@ class MainWindow(QWidget):
         self._sync_nav_selection()
         if save:
             self._save_nav_order(order)
-        self._start_nav_settle_animations(old_pos)
+        # ⚠ 窗口尚未显示（启动装配期 register_plugin_page 走到这里）时
+        #   **绝不播落定动画**：此时几何未经 show/polish 校准，动画会把
+        #   按钮钉在错位上，而 show 后主布局不再主动重排 → 首开导航键
+        #   错乱、拖一下换位才恢复（2026-09-28 用户实测）。显示状态下
+        #   重排（插件中心运行时启停/换位）才需要且才值得做动画。
+        if self.isVisible():
+            self._start_nav_settle_animations(old_pos)
 
     def _save_nav_order(self, order: list):
         """把左栏显示顺序写入 config 并落盘（失败静默，不阻断 UI）"""
