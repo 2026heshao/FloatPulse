@@ -51,9 +51,13 @@ PAGE_KEY = f"plugin:{PLUGIN_ID}"       # 主窗口页面 key（与 loader 约定
 # ---------------- 配置 ----------------
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
-    "base_url": "https://api.deepseek.com/v1",
-    "api_key": "",
-    "model": "deepseek-chat",
+    # 双后端模型（2026-09-28 用户要求「云端和本地做一个选择入口」）：
+    # backend_mode 决定对话实际调用哪套后端；两套配置各自独立保存，
+    # 切换/启动本地都不再覆盖云端字段（旧版会冲掉用户填的云端地址）
+    "backend_mode": "cloud",      # cloud=云端 API / local=本机 llama-server
+    "cloud_base_url": "https://api.deepseek.com/v1",
+    "cloud_api_key": "",
+    "cloud_model": "deepseek-chat",
     "max_data_chars": 6000,       # 单块数据塞进提示词的最大字符数
     # 本地自带推理（浏览 gguf + llama-server.exe，插件自己拉起服务）
     "local_server_exe": "",
@@ -165,6 +169,19 @@ def load_config(ctx) -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
             if isinstance(stored, dict):
+                # 旧版单后端字段 → 云端字段一次性迁移（v1.3 双后端模型）。
+                # 旧版「本地 ready 覆盖 base_url」的缺陷会把 127.0.0.1 写进
+                # base_url——这类值不是真实云端配置，迁移时跳过。
+                if "cloud_base_url" not in stored:
+                    old_url = str(stored.get("base_url") or "").strip()
+                    if old_url and "127.0.0.1" not in old_url \
+                            and "localhost" not in old_url:
+                        cfg["cloud_base_url"] = old_url
+                    if stored.get("api_key"):
+                        cfg["cloud_api_key"] = stored["api_key"]
+                    old_model = str(stored.get("model") or "").strip()
+                    if old_model and old_model != "local":
+                        cfg["cloud_model"] = old_model
                 for key in DEFAULT_CONFIG:
                     if key in stored:
                         cfg[key] = stored[key]
@@ -274,18 +291,33 @@ QUICK_COMMANDS = (
 # OpenAI 兼容协议（/chat/completions，非流式）
 # ====================================================================
 def build_request(cfg: dict, messages: list, max_tokens=None):
-    """配置 + 消息 → (url, headers, body)；配置不完整返回 (None, None, 错误)"""
-    base = str(cfg.get("base_url") or "").strip().rstrip("/")
-    model = str(cfg.get("model") or "").strip()
-    if not base:
-        return None, None, "后端地址为空：请在「后端设置」里填 base_url"
-    if not model:
-        return None, None, "模型名为空：请在「后端设置」里填模型名"
+    """配置 + 消息 → (url, headers, body)；配置不完整返回 (None, None, 错误)
+
+    backend_mode 决定调用哪套后端（2026-09-28 双后端模型）：
+    - cloud → cloud_base_url/cloud_api_key/cloud_model（OpenAI 兼容 API）
+    - local → 本机 llama-server（127.0.0.1:{local_port}/v1，模型名固定
+      "local"——llama-server 忽略该字段；服务是否就绪由调用方把关）
+    """
+    if cfg.get("backend_mode") == "local":
+        try:
+            port = int(cfg.get("local_port") or 8093)
+        except (TypeError, ValueError):
+            port = 8093
+        base = f"http://127.0.0.1:{port}/v1"
+        model = "local"
+        key = ""
+    else:
+        base = str(cfg.get("cloud_base_url") or "").strip().rstrip("/")
+        model = str(cfg.get("cloud_model") or "").strip()
+        key = str(cfg.get("cloud_api_key") or "").strip()
+        if not base:
+            return None, None, "云端地址为空：点「⚙ 后端设置」填写云端地址"
+        if not model:
+            return None, None, "模型名为空：点「⚙ 后端设置」填写模型名"
     if not (base.startswith("http://") or base.startswith("https://")):
-        return None, None, f"base_url 必须以 http:// 或 https:// 开头：{base}"
+        return None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
     url = f"{base}/chat/completions"
     headers = {}
-    key = str(cfg.get("api_key") or "").strip()
     if key:
         headers["Authorization"] = f"Bearer {key}"
     body = {"model": model, "messages": messages,
@@ -305,7 +337,7 @@ def parse_reply(result: dict):
             hint = ("（key 缺失或无效？本地服务若要求认证，可在其配置里关闭；"
                     "更简单的做法：用下方「本地推理」自己拉起一个无认证服务）")
         elif "HTTP 404" in err:
-            hint = ("（base_url 或模型名不对？确认端口上跑的确实是 OpenAI "
+            hint = ("（云端地址或模型名不对？确认端口上跑的确实是 OpenAI "
                     "兼容服务——llama-server 应以 .../v1 结尾）")
         elif "timed out" in err.lower() or "timeout" in err.lower():
             hint = "（本地模型首次加载较慢，可重试一次）"
@@ -538,8 +570,8 @@ class AiChatPage(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
 
-        # 区块 A：在线 / 常驻后端
-        cap_a = QLabel("后端服务")
+        # 区块 A：云端 API（与本地推理两套配置独立保存，互不覆盖）
+        cap_a = QLabel("云端 API")
         cap_a.setObjectName("sectionLabel")
         form.addWidget(cap_a)
         preset_row = QHBoxLayout()
@@ -554,12 +586,12 @@ class AiChatPage(QWidget):
         preset_row.addWidget(self._preset, 1)
         form.addLayout(preset_row)
 
-        self._url_edit = QLineEdit(str(self._cfg.get("base_url") or ""))
+        self._url_edit = QLineEdit(str(self._cfg.get("cloud_base_url") or ""))
         self._url_edit.setPlaceholderText("https://api.deepseek.com/v1")
-        self._key_edit = QLineEdit(str(self._cfg.get("api_key") or ""))
-        self._key_edit.setPlaceholderText("云端 API key（本地服务留空）")
+        self._key_edit = QLineEdit(str(self._cfg.get("cloud_api_key") or ""))
+        self._key_edit.setPlaceholderText("API key")
         self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._model_edit = QLineEdit(str(self._cfg.get("model") or ""))
+        self._model_edit = QLineEdit(str(self._cfg.get("cloud_model") or ""))
         self._model_edit.setPlaceholderText("模型名，如 deepseek-chat")
         for label, widget in (("地址", self._url_edit),
                               ("Key", self._key_edit),
@@ -670,6 +702,24 @@ class AiChatPage(QWidget):
         self._stop_model_btn.clicked.connect(LOCAL_SERVER.stop)
         self._stop_model_btn.setVisible(False)   # ready/starting 才显示
         quick_row.addWidget(self._stop_model_btn)
+        # 后端选择入口（2026-09-28 用户建议）：云端 / 本地一键切换，
+        # 当前模式高亮；两套配置独立保存，切换不丢任何一方。
+        # objectName=modeBtn 复用 theme.py 既有的 checked 样式（主色填充）
+        self._mode_cloud_btn = QPushButton("云端", self)
+        self._mode_local_btn = QPushButton("本地", self)
+        for _b in (self._mode_cloud_btn, self._mode_local_btn):
+            _b.setObjectName("modeBtn")
+            _b.setCheckable(True)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mode_cloud_btn.setToolTip(
+            "对话走云端 API（地址 / 模型在 ⚙ 后端设置里配置）")
+        self._mode_local_btn.setToolTip(
+            "对话走本机 llama-server（未启动时点它会带你去启动）")
+        self._mode_cloud_btn.clicked.connect(lambda: self._switch_mode("cloud"))
+        self._mode_local_btn.clicked.connect(lambda: self._switch_mode("local"))
+        quick_row.addWidget(self._mode_cloud_btn)
+        quick_row.addWidget(self._mode_local_btn)
+        self._apply_mode_ui()            # 初始高亮当前模式
         self._toggle_btn = QPushButton("⚙ 后端设置", self)
         self._toggle_btn.setObjectName("secondaryBtn")
         self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -835,6 +885,14 @@ class AiChatPage(QWidget):
         messages = ([{"role": "system", "content": SYSTEM_PROMPT}]
                     + self._history
                     + [{"role": "user", "content": user_content}])
+        # 本地模式但服务未就绪：明确引导，不发注定 refused 的请求
+        if self._cfg.get("backend_mode") == "local" \
+                and LOCAL_SERVER.status != "ready":
+            self.add_bubble(
+                "提示", "本地服务未运行：点「⚙ 后端设置 → 启动本地服务」，"
+                        "或点上方「云端」切回云端后端。")
+            self._settings_card.setVisible(True)
+            return
         url, headers, body = build_request(self._cfg, messages)
         if url is None:
             self.add_bubble("提示", body)      # body 在此路径是错误文案
@@ -896,9 +954,10 @@ class AiChatPage(QWidget):
         except ValueError:
             port = 8093
         new = {
-            "base_url": self._url_edit.text().strip(),
-            "api_key": self._key_edit.text().strip(),
-            "model": self._model_edit.text().strip(),
+            "backend_mode": self._cfg.get("backend_mode", "cloud"),
+            "cloud_base_url": self._url_edit.text().strip(),
+            "cloud_api_key": self._key_edit.text().strip(),
+            "cloud_model": self._model_edit.text().strip(),
             "max_data_chars": self._cfg.get("max_data_chars", 6000),
             "local_server_exe": self._exe_edit.text().strip(),
             "local_gguf": self._gguf_edit.text().strip(),
@@ -910,11 +969,16 @@ class AiChatPage(QWidget):
         return save_config(self._ctx, new)
 
     def _save_and_test(self):
-        """保存全部配置 + 发一个 1-token 探活请求，给用户明确反馈"""
+        """保存全部配置 + 发一个 1-token 探活请求，给用户明确反馈
+
+        探活对象恒为云端（「测试连接」测的是云端 API 配置）；
+        本地服务的可用性由它自己的探活状态机负责。
+        """
         changed = self._collect_settings()
         self._status.setText("配置已保存" if changed else "配置未变化")
+        probe_cfg = {**self._cfg, "backend_mode": "cloud"}
         url, headers, body = build_request(
-            self._cfg, [{"role": "user", "content": "ping"}], max_tokens=1)
+            probe_cfg, [{"role": "user", "content": "ping"}], max_tokens=1)
         if url is None:
             self._status.setText(f"⚠ {body}")     # body 在此路径是错误文案
             return
@@ -952,6 +1016,36 @@ class AiChatPage(QWidget):
         self._status.setText(
             "已断开云端连接（配置保留）；重新接上请点「保存并测试连接」")
 
+    # ---------------- 后端模式切换（2026-09-28 用户建议） ----------------
+    def _apply_mode_ui(self):
+        """把当前 backend_mode 反映到选择按钮（checked 高亮）"""
+        local = self._cfg.get("backend_mode") == "local"
+        self._mode_local_btn.setChecked(local)
+        self._mode_cloud_btn.setChecked(not local)
+
+    def _switch_mode(self, mode: str):
+        """云端/本地一键切换（配置即时落盘）。
+
+        目标侧不可用时仍切模式（尊重用户选择），但展开设置卡引导：
+        本地未就绪 → 引导启动服务；云端没配地址 → 引导填写。
+        """
+        if self._cfg.get("backend_mode") != mode:
+            self._cfg = {**self._cfg, "backend_mode": mode}
+            save_config(self._ctx, self._cfg)
+        self._apply_mode_ui()
+        if mode == "local" and LOCAL_SERVER.status != "ready":
+            self._settings_card.setVisible(True)
+            self._status.setText("已选本地后端：先在「本地推理」里启动服务")
+            return
+        if mode == "cloud" \
+                and not str(self._cfg.get("cloud_base_url") or "").strip():
+            self._settings_card.setVisible(True)
+            self._status.setText(
+                "已选云端后端：请填写地址与 key 后「保存并测试连接」")
+            return
+        self._status.setText("当前后端：本机 llama-server" if mode == "local"
+                             else "当前后端：云端 API")
+
     # ---------------- 本地推理 ----------------
     def _toggle_local_server(self):
         if LOCAL_SERVER.running:
@@ -965,8 +1059,10 @@ class AiChatPage(QWidget):
                            int(self._cfg.get("local_port") or 8093))
 
     def _on_local_status(self, status: str, detail: str):
-        """本地服务状态 → 状态行 + 按钮文案；就绪时自动接上该后端
+        """本地服务状态 → 状态行 + 按钮文案；就绪自动接管后端
 
+        - ready → backend_mode 切 local（双后端配置独立，云端字段不动）
+        - stopped/error → 正用本地时自动回落云端（云端没配则留本地）
         停止按钮显隐：ready/starting（运行或拉起中）显示，其余隐藏——
         停止入口常驻聊天界面，用完一键释放显存（2026-09-27 用户反馈）。
         """
@@ -974,17 +1070,23 @@ class AiChatPage(QWidget):
         self._stop_model_btn.setVisible(status in ("ready", "starting"))
         if status == "ready":
             self._local_btn.setText("停止本地服务")
-            base = f"http://127.0.0.1:{LOCAL_SERVER.port}/v1"
-            self._url_edit.setText(base)
-            if not self._model_edit.text().strip():
-                self._model_edit.setText("local")
-            self._collect_settings()
+            if self._cfg.get("backend_mode") != "local":
+                self._cfg = {**self._cfg, "backend_mode": "local"}
+                save_config(self._ctx, self._cfg)
+                self._apply_mode_ui()
             self._cloud_active = True   # 本地接管后端，云端断开闸门复位
-            self._status.setText("✓ 本地服务就绪，已自动切换到本地后端")
+            self._status.setText("✓ 本地服务就绪，已切换到本地后端")
         elif status == "starting":
             self._local_btn.setText("取消 / 停止")
         else:
             self._local_btn.setText("启动本地服务")
+            if status in ("stopped", "error") \
+                    and self._cfg.get("backend_mode") == "local":
+                if str(self._cfg.get("cloud_base_url") or "").strip():
+                    self._cfg = {**self._cfg, "backend_mode": "cloud"}
+                    save_config(self._ctx, self._cfg)
+                    self._apply_mode_ui()
+                    self._status.setText("本地服务已停止，已切回云端后端")
 
     # ---------------- 杂项 ----------------
     def _set_busy(self, busy: bool, text: str = ""):
