@@ -169,16 +169,16 @@ class PluginsPanel(QWidget):
         v.addWidget(hint)
 
         # ---- 两个目录的绝对路径（用户最常搞混「装在哪 / 包放哪」）----
+        # 单行显示 + 完整路径进 tooltip：路径很长时会自动换行占掉太多竖向空间，
+        # 单行截断、tooltip 给全文，兼顾可读与紧凑。
         self._dir_label = QLabel()
         self._dir_label.setObjectName("pluginDirLabel")
-        self._dir_label.setWordWrap(True)
         self._dir_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self._dir_label)
 
         self._store_dir_label = QLabel()
         self._store_dir_label.setObjectName("pluginDirLabel")
-        self._store_dir_label.setWordWrap(True)
         self._store_dir_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self._store_dir_label)
@@ -232,7 +232,25 @@ class PluginsPanel(QWidget):
         self._error_box.setVisible(False)
         v.addWidget(self._error_box)
 
-        # ---- 插件商店区（默认隐藏；商店里没有可用包时不显示）----
+        # ---- 滚动区：插件卡片列表（商店区也在其中，见 refresh 的插入顺序）----
+        # 关键：商店卡片必须与已安装卡片**同处一个滚动容器**。
+        # 若把商店区放在滚动区之外，卡片会溢出面板可视高度被挤压、文字被裁切。
+        scroll = QScrollArea()
+        scroll.setObjectName("pluginsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        container.setObjectName("pluginsContainer")
+        self._cards_layout = QVBoxLayout(container)
+        self._cards_layout.setContentsMargins(0, 0, 8, 0)
+        self._cards_layout.setSpacing(10)
+        self._cards_layout.addStretch()          # 卡片永远顶对齐
+        scroll.setWidget(container)
+        v.addWidget(scroll, 1)
+
+        # ---- 插件商店区（常驻容器；无可用包时整体隐藏）----
+        # 直接作为 _cards_layout 里的固定成员插入到 stretch 之前，
+        # 顺序：商店区（若可见）→ 已安装卡片。见 refresh 的插入逻辑。
         self._store_box = QFrame()
         self._store_box.setObjectName("pluginStoreBox")
         sb = QVBoxLayout(self._store_box)
@@ -246,21 +264,8 @@ class PluginsPanel(QWidget):
         self._store_layout.setSpacing(8)
         sb.addLayout(self._store_layout)
         self._store_box.setVisible(False)
-        v.addWidget(self._store_box)
-
-        # ---- 滚动区：插件卡片列表 ----
-        scroll = QScrollArea()
-        scroll.setObjectName("pluginsScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        container = QWidget()
-        container.setObjectName("pluginsContainer")
-        self._cards_layout = QVBoxLayout(container)
-        self._cards_layout.setContentsMargins(0, 0, 8, 0)
-        self._cards_layout.setSpacing(10)
-        self._cards_layout.addStretch()          # 卡片永远顶对齐
-        scroll.setWidget(container)
-        v.addWidget(scroll, 1)
+        self._cards_layout.insertWidget(
+            self._cards_layout.count() - 1, self._store_box)
 
         # ---- 空态提示（默认显示，refresh 时按有无插件切换）----
         self._empty_label = QLabel(
@@ -309,16 +314,20 @@ class PluginsPanel(QWidget):
 
         # 安装目录 / 商店目录（绝对路径）——用户最常搞混「装在哪 / 包放哪」，
         # 直接写出来比「与程序同级」这类相对说法可核对得多。
-        self._dir_label.setText(
-            "📂 插件安装目录：%s" % self._plugins_dir_text(loader))
-        self._store_dir_label.setText(
-            "🏪 插件商店目录：%s" % self._store_dir_text(loader))
+        # 标签单行显示（长路径由 Qt 自带省略），完整路径挂在 tooltip 上。
+        plugins_text = self._plugins_dir_text(loader)
+        store_text = self._store_dir_text(loader)
+        self._dir_label.setText("📂 插件安装目录：%s" % plugins_text)
+        self._dir_label.setToolTip(plugins_text)
+        self._store_dir_label.setText("🏪 插件商店目录：%s" % store_text)
+        self._store_dir_label.setToolTip(store_text)
 
-        # 清空旧卡片（保留末尾 stretch）
-        while self._cards_layout.count() > 1:
-            item = self._cards_layout.takeAt(0)
+        # 清空旧卡片（保留 store_box 与末尾 stretch）
+        # _cards_layout 结构固定为 [store_box, 已装卡片..., stretch]
+        while self._cards_layout.count() > 2:
+            item = self._cards_layout.takeAt(1)
             w = item.widget()
-            if w is not None:
+            if w is not None and w is not self._store_box:
                 w.deleteLater()
 
         # 清空旧失败卡片
@@ -355,13 +364,12 @@ class PluginsPanel(QWidget):
             cnt += f"，商店可安装 {n_store} 个"
         self._count_label.setText(cnt)
 
+        # 已安装卡片插到 stretch 之前（即在商店区之后），保持 [商店, 卡片..., stretch]
         for lp in plugins:
             self._cards_layout.insertWidget(
                 self._cards_layout.count() - 1, self._make_card(lp))
 
-        # 商店区：只列「可用」的包（manifest 合法的），坏包不在这里刷屏——
-        # 它们的 error 会由 _make_store_card 以提示形式展示，但为确保列表
-        # 不因一个坏包变噪音，这里仍把坏包一并列出并标出原因（用户需要知道）。
+        # 商店区：列出商店里的包（含坏包，用户需要知道它为什么装不了）
         entries = [e for e in store if self._entry_visible(e)]
         self._store_box.setVisible(bool(entries))
         if entries:
@@ -640,21 +648,26 @@ class PluginsPanel(QWidget):
             el.setWordWrap(True)
             v.addWidget(el)
 
-        # ---- 底部：能力提示 + 源包文件名 + 操作按钮 ----
-        bottom = QHBoxLayout()
-        bottom.setSpacing(8)
+        # ---- 元信息行（能力 + 源包名）：单独一行，不跟按钮抢横向空间 ----
         caps = list((getattr(entry, "manifest", None) or {}).get(
             "capabilities", []) or [])
+        fname = getattr(entry, "filename", "")
+        meta_parts = []
         if caps:
             cap_labels = {"network": "🌐 网络访问", "write": "✍ 写入数据"}
-            cap = QLabel("能力: " + "、".join(cap_labels.get(c, c) for c in caps))
-            cap.setObjectName("pluginCardId")
-            bottom.addWidget(cap)
-        fname = getattr(entry, "filename", "")
+            meta_parts.append("能力: " + "、".join(
+                cap_labels.get(c, c) for c in caps))
         if fname:
-            fn = QLabel(f"包: {fname}")
-            fn.setObjectName("pluginCardId")
-            bottom.addWidget(fn)
+            meta_parts.append(f"包: {fname}")
+        if meta_parts:
+            meta = QLabel("　".join(meta_parts))
+            meta.setObjectName("pluginCardId")
+            meta.setWordWrap(True)
+            v.addWidget(meta)
+
+        # ---- 底部操作行：按钮靠右，独占横向空间（避免文字挤压按钮）----
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
         bottom.addStretch()
 
         install_btn = QPushButton("⬇ 安装")
@@ -662,10 +675,14 @@ class PluginsPanel(QWidget):
         install_btn.setToolTip(
             "把该插件包解压到插件安装目录并加载；源包保留在商店目录，"
             "卸载后仍可再装")
-        if not usable or installed:
+        if not usable:
             install_btn.setEnabled(False)
-            if installed:
-                install_btn.setText("✓ 已安装")
+            install_btn.setText("⊘ 无法安装")
+            install_btn.setToolTip("插件包不合法，先按下方提示修正后再试")
+        elif installed:
+            install_btn.setEnabled(False)
+            install_btn.setText("✓ 已安装")
+            install_btn.setToolTip("该插件已装在插件安装目录；如需重装请先卸载")
         else:
             install_btn.clicked.connect(
                 lambda _checked=False, p=plugin_id,
