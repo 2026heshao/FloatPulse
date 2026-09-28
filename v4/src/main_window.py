@@ -999,6 +999,10 @@ class MainWindow(QWidget):
         self._nav_btns = {}
         self._nav_order = self._load_nav_order()
         for key in self._nav_order:
+            if key.startswith("plugin:"):
+                # 插件页键由 register_plugin_page 在插件装配时补建
+                # （此时插件尚未加载）；order 里保留它的记忆位置
+                continue
             btn = self._make_nav_button(NAV_PAGE_TITLES[key],
                                         NAV_PAGE_INDEX[key], key)
             self._nav_btns[key] = btn
@@ -1073,15 +1077,20 @@ class MainWindow(QWidget):
         self._abort_nav_settle_animations()
         # 记录重排前各按钮位置（父级坐标）
         old_pos = {key: btn.pos() for key, btn in self._nav_btns.items()}
-        # 先把 8 个功能页按钮全部移出布局，再按新顺序插回槽位 1..8
-        # ⚠ 只摘 order 里的键：插件页按钮（AI 助手等）也在 _nav_btns 里
-        #   （register_plugin_page 登记），但**不参与换位**、不在 order 里。
-        #   若按 values() 全量摘除，插件键会被摘下后无人插回——布局瞬时
-        #   塌缩一行（设置/说明/版本号上移「震荡」一下再弹回），插件键则
-        #   自由漂浮与设置键重叠（2026-09-28 用户实测截图）。
-        for key in order:
+        # order 里可能含尚未注册的插件 key（启动时序：sidebar 先建、
+        # 插件装配在后）——**布局**只摘/插真正已建按钮的键；但顺序表与
+        # 落盘**保留完整顺序**：register_plugin_page 传进来的就是完整
+        # 列表，先注册的插件不得把后注册插件的记忆位置挤掉（2026-09-28）。
+        # 拖拽落定传入的是已注册键子集（拖拽只发生在已建按钮上），
+        # 未注册键随之从顺序表掉出属预期——插件恢复注册时会重新入表。
+        layout_order = [k for k in order if k in self._nav_btns]
+        # 先把参与换位的按钮全部移出布局，再按新顺序插回槽位 1..N
+        # ⚠ 只摘 layout_order 里的键：其余布局成员（spacer/设置键等）
+        #   不归换位管（2026-09-28 修复：此前按 _nav_btns.values() 全量
+        #   摘除，插件键被摘下后无人插回 → 设置键震荡 + 插件键漂浮重叠）
+        for key in layout_order:
             v.removeWidget(self._nav_btns[key])
-        for i, key in enumerate(order):
+        for i, key in enumerate(layout_order):
             v.insertWidget(1 + i, self._nav_btns[key])
         # 强制布局立即生效：Qt 布局是惰性应用的，不 activate 的话下面
         # 读取的 btn.pos() 仍是旧几何，落定动画的起止值会算错
@@ -1163,6 +1172,11 @@ class MainWindow(QWidget):
             key = self._nav_order[n]
         except (IndexError, TypeError, AttributeError):
             return
+        if key not in NAV_PAGE_INDEX:
+            return
+        # 顺序表可能含尚未注册的插件 key（无按钮无页面），Ctrl+N 跳过
+        if key.startswith("plugin:") and key not in self._nav_btns:
+            return
         self._switch_page(NAV_PAGE_INDEX[key])
 
     # ---------------- 拖拽换位 ----------------
@@ -1232,7 +1246,8 @@ class MainWindow(QWidget):
         按钮几何保持不变，随后由拖拽逻辑直接改 y 实现"空档跟着鼠标走"。
         """
         v = self._nav_btns_layout
-        keys = list(self._nav_order)
+        # _nav_order 可能含尚未注册的插件 key（无按钮），只冻结已建的
+        keys = [k for k in self._nav_order if k in self._nav_btns]
         btns = [self._nav_btns[k] for k in keys]
         if not btns:
             return False
@@ -1251,7 +1266,9 @@ class MainWindow(QWidget):
             b.show()
         self._nav_slot_ys = [g.y() for g in geos]
         self._nav_slot_h = geos[0].height()
-        self._nav_drag_order = list(self._nav_order)
+        # 拖拽序只含已注册键（与 slot_ys 一一对齐）；未注册插件键不进拖拽
+        self._nav_drag_order = [k for k in self._nav_order
+                                if k in self._nav_btns]
         return True
 
     def _restore_nav_layout(self):
@@ -1267,14 +1284,16 @@ class MainWindow(QWidget):
         if self._nav_free_spacer is not None:
             v.removeItem(self._nav_free_spacer)
             self._nav_free_spacer = None
-        for i, key in enumerate(self._nav_order):
+        # _nav_order 可能含未注册插件键（无按钮），插回/钉死都跳过
+        restore_keys = [k for k in self._nav_order if k in self._nav_btns]
+        for i, key in enumerate(restore_keys):
             v.insertWidget(1 + i, self._nav_btns[key])
         self._nav_free_layout = False
         v.activate()
         # 拖拽态样式会让 QPushButton 的 sizeHint 内部缓存 +1px（Qt 私有缓存，
         # polish/updateGeometry 不一定失效）→ 交还布局后按冻结的槽位几何钉死，
         # 保证侧栏精确回到拖拽前的排版
-        for i, key in enumerate(self._nav_order):
+        for i, key in enumerate(restore_keys):
             b = self._nav_btns[key]
             b.setGeometry(b.x(), self._nav_slot_y(i), b.width(), self._nav_slot_h)
         v.invalidate()
@@ -1363,7 +1382,8 @@ class MainWindow(QWidget):
                 pass
         self._nav_shift_anims.clear()
         if self._nav_free_layout:
-            for i, key in enumerate(self._nav_order):
+            for i, key in enumerate(k for k in self._nav_order
+                                    if k in self._nav_btns):
                 b = self._nav_btns[key]
                 b.move(b.x(), self._nav_slot_y(i))
         self._nav_drag_order = []
@@ -1663,14 +1683,20 @@ class MainWindow(QWidget):
         """注册插件提供的导航页面（knowledge_ball 对页面插件调用）。
 
         - 物理索引 = QStackedWidget 追加到末尾（0-9 为固定页，插件页 10+）
-        - 侧栏按钮插在「设置」之前；插件页**不参与**拖动换位、不写入
-          ``last_page_index``（config 范围上限 9，越界写入会被静默丢弃）
+        - 侧栏按钮**参与拖拽换位**（2026-09-28 用户要求：AI 助手先行，
+          后续所有页面插件一致）：顺序记进 ``nav_order`` 持久化，新插件
+          默认排在末位（设置之前），重启后沿用用户调整过的位置
+        - **不写入** ``last_page_index``（config 范围上限 9）
         - **幂等**：同一 key 重复注册（插件中心「重新扫描」会重跑装配）
           只替换页面内容，索引与按钮保持稳定，旧页面被安全销毁
         返回物理索引。
         """
         old_index = NAV_PAGE_INDEX.get(key)
-        if old_index is not None:
+        # ⚠ 幂等判定必须以「本实例已持有该键的按钮」为准：
+        #   NAV_PAGE_INDEX 是模块级 dict，跨 MainWindow 实例共享（测试 /
+        #   多窗口场景会建第二个实例）——只看 old_index 会让新实例误判
+        #   「已注册」，只换 widget 不建按钮，插件导航键永远出不来。
+        if old_index is not None and key in self._nav_btns:
             old = self._stack.widget(old_index)
             if old is not None:
                 self._stack.removeWidget(old)
@@ -1687,10 +1713,13 @@ class MainWindow(QWidget):
         NAV_PAGE_TITLES[key] = title
         NAV_PAGE_INDEX[key] = index
         self._stack.addWidget(widget)
-        btn = self._make_nav_button(title, index)   # 无 nav_key → 不参与换位
+        btn = self._make_nav_button(title, index, nav_key=key)   # 参与换位
         self._nav_btns[key] = btn
-        lay = self._nav_btns_layout
-        lay.insertWidget(lay.indexOf(self._settings_btn), btn)
+        # 顺序：config 里记过位置（上次会话拖过）→ 沿用；新插件 → 追加
+        # 到末位（设置之前）。_apply_nav_order 统一重排并交还布局。
+        if key not in self._nav_order:
+            self._nav_order.append(key)
+        self._apply_nav_order(list(self._nav_order), save=True)
         return index
 
     def show_plugin_page(self, key: str) -> bool:
@@ -1740,6 +1769,11 @@ class MainWindow(QWidget):
             self._nav_group.removeButton(btn)
             self._nav_btns_layout.removeWidget(btn)
             btn.deleteLater()
+        # 顺序表同步移除并重排落盘（插件键参与换位后它是 order 成员，
+        # 留着会让 _apply_nav_order 引用已删除的按钮）
+        if key in self._nav_order:
+            self._nav_order.remove(key)
+            self._apply_nav_order(list(self._nav_order), save=True)
         return True
 
     def rebuild_plugin_page(self, plugin_id: str) -> bool:

@@ -114,12 +114,16 @@ check("B4. 插件键与设置键不重叠（截图 bug 消失）",
       geo_y(btn) + btn.height() <= geo_y(settings_btn) + 1,
       f"btn_bottom={geo_y(btn) + btn.height()} settings_y={geo_y(settings_btn)}")
 
-# ---------- C. 换位后插件键仍紧贴第 8 功能键之下 ----------
-_last_bottom = (win._nav_btns[order[-1]].geometry().y()
-                + win._nav_btns[order[-1]].height())
+# ---------- C. 换位后插件键仍紧贴末位功能键之下 ----------
+# 注意：插件键参与换位后 order 里也含 plugin: 键，order[-1] 可能就是
+# 插件键自己——必须取**最后一个固定功能键**作参照。
+_last_fixed = [k for k in order if not k.startswith("plugin:")][-1]
+_last_bottom = (win._nav_btns[_last_fixed].geometry().y()
+                + win._nav_btns[_last_fixed].height())
 check("C1. 插件键紧跟末位功能键（间距 ≤ 布局 spacing，无空隙无重叠）",
       0 <= geo_y(btn) - _last_bottom <= max(2, lay.spacing() + 1),
-      f"last_fn_bottom={_last_bottom} btn_y={geo_y(btn)} spacing={lay.spacing()}")
+      f"last_fn={_last_fixed} last_fn_bottom={_last_bottom} "
+      f"btn_y={geo_y(btn)} spacing={lay.spacing()}")
 
 # ---------- D. 拖拽冻结/恢复路径同样安全 ----------
 ok_d = win._freeze_nav_buttons()
@@ -165,6 +169,109 @@ check("E3. 拖拽落定后插件键不漂移不重叠",
       f"y={geo_y(btn)} layout_idx={lay.indexOf(btn)}")
 
 win._force_end_nav_drag()                 # 清场，防动画残留
+
+# ====================================================================
+# F. 插件页键参与换位（2026-09-28 用户要求：AI 助手先行，后续页面插件一致）
+# ====================================================================
+check("F1. 插件页键可拖（nav_key 非空 + 拖拽信号已连）",
+      btn.nav_key == "plugin:demo"
+      and btn._is_dragging is not None,          # 信号连接无法直接断言，drag 态存在即可
+      f"nav_key={btn.nav_key!r}")
+
+# 注销再注册第二个插件，验证多插件 + 记忆位置
+idx2 = win.register_plugin_page("plugin:second", "🧩 第二插件", QWidget())
+app.processEvents()
+btn2 = win._nav_btns["plugin:second"]
+check("F2. 第二个插件键注册（同样可拖）",
+      idx2 == 11 and btn2.nav_key == "plugin:second",
+      f"idx={idx2} nav_key={btn2.nav_key!r}")
+
+# F2 注册多了一个键，设置键自然下移——「不震荡」基线必须在此重取
+settings_y1 = geo_y(settings_btn)
+
+# 拖 demo 键到第 3 槽位（真实回调端到端），落定后顺序落盘
+drag_btn = win._nav_btns["plugin:demo"]
+drag_btn._press_global = drag_btn.mapToGlobal(QPoint(10, 10))
+win._on_nav_drag_started(drag_btn)
+target_y = win._nav_slot_ys[2]
+global_target = win._nav_area.mapToGlobal(
+    QPoint(drag_btn.x(), target_y + win._nav_drag_grab_dy))
+win._on_nav_drag_moved(drag_btn, global_target)
+win._on_nav_drag_finished(drag_btn, global_target)
+app.processEvents()
+
+check("F3. ★插件键拖到中间槽位：order 更新且含插件 key",
+      win._nav_order[2] == "plugin:demo"
+      and "plugin:second" in win._nav_order,
+      f"order={win._nav_order}")
+
+saved = cm._config.get("nav_order") if hasattr(cm, "_config") else None
+check("F4. ★换位顺序已落盘（config nav_order 含插件 key）",
+      isinstance(saved, list) and "plugin:demo" in saved
+      and saved[2] == "plugin:demo",
+      f"saved={saved}")
+
+check("F5. 换位后设置键仍不震荡（回归钉，基线取自 F2 注册后）",
+      geo_y(settings_btn) == settings_y1,
+      f"y={geo_y(settings_btn)} baseline={settings_y1}")
+
+# ---------- F6. 模拟重启：新 MainWindow 同 config → 记忆位置沿用 ----------
+win._force_end_nav_drag()
+win.hide()
+win2 = MainWindow(TaskManager(os.path.join(root, "schedule2.json")),
+                  NoteManager(os.path.join(root, "notes2.json")),
+                  FragmentManager(os.path.join(root, "fragments2.json")),
+                  docx, cm, ClipboardMonitor(
+                      FragmentManager(os.path.join(root, "fragments2.json")), cm),
+                  temp_asset_manager=TempAssetManager(_base),
+                  nav_manager=NavManager(os.path.join(root, "nav2.json")))
+win2.resize(1280, 740)
+win2.show()
+app.processEvents()
+app.processEvents()
+
+check("F6. 重启后 sidebar 只建固定键（插件键待注册补建）",
+      "plugin:demo" not in win2._nav_btns
+      and "plugin:second" not in win2._nav_btns
+      and len(win2._nav_order) == 10          # 8 固定 + demo + second 记忆
+      and [k for k in win2._nav_order if not k.startswith("plugin:")]
+      and sum(1 for k in win2._nav_order if k.startswith("plugin:")) == 2,
+      f"order={win2._nav_order}")
+
+win2.register_plugin_page("plugin:demo", "🤖 AI 助手", QWidget())
+app.processEvents()
+btn_r = win2._nav_btns["plugin:demo"]
+check("F7. ★重启注册后插件键回到记忆位置（第 3 槽位，不回尾部）",
+      win2._nav_order[2] == "plugin:demo"
+      and win2._nav_btns_layout.indexOf(btn_r) == 3,   # slot = index+1
+      f"order={win2._nav_order} layout_idx={win2._nav_btns_layout.indexOf(btn_r)}")
+
+check("F8. 重启后插件键仍可拖（nav_key 非空）",
+      btn_r.nav_key == "plugin:demo",
+      f"nav_key={btn_r.nav_key!r}")
+
+check("F10. ★注册第一插件不挤掉未注册插件键的记忆位置",
+      "plugin:second" in win2._nav_order,
+      f"order={win2._nav_order}")
+
+idx2r = win2.register_plugin_page("plugin:second", "🧩 第二插件", QWidget())
+app.processEvents()
+check("F11. 重启注册第二插件回到记忆位置（末位）",
+      idx2r == 11 and win2._nav_order[-1] == "plugin:second"
+      and win2._nav_btns["plugin:second"].nav_key == "plugin:second",
+      f"idx={idx2r} order={win2._nav_order}")
+
+# ---------- F9. 注销插件页：键移除 + 顺序表同步 ----------
+ok_un = win2.unregister_plugin_page("plugin:demo")
+app.processEvents()
+check("F9. 注销后键消失、order 移除（不残留死引用）",
+      ok_un and "plugin:demo" not in win2._nav_btns
+      and "plugin:demo" not in win2._nav_order
+      and win2._nav_btns_layout.indexOf(btn_r) == -1,
+      f"in_btns={'plugin:demo' in win2._nav_btns} "
+      f"in_order={'plugin:demo' in win2._nav_order}")
+
+win2._force_end_nav_drag()
 
 print()
 failed = [r for r in results if not r[1]]
