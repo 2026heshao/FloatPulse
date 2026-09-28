@@ -49,6 +49,12 @@ SNAP = {
               {"task_id": 7, "title": "买咖啡豆", "done": True}],
     "fragments": [{"fragment_id": 2, "content": "https://a.com"}],
     "notes": [{"note_id": 5, "title": "周会记录", "content": "正文"}],
+    "knowledge": [
+        {"num": 1, "text": "第一条知识正文", "preview": "第一条知识正文",
+         "hash": "a1" * 8},
+        {"num": 2, "text": "第二条知识正文", "preview": "第二条知识正文",
+         "hash": "b2" * 8},
+    ],
 }
 
 
@@ -60,18 +66,24 @@ def _block(*items):
 # ---------------- A. 白名单与分级 ----------------
 class TestOpTable:
     def test_write_level_ops(self, plug):
-        for op in ("add_task", "add_fragment", "add_note"):
+        for op in ("add_task", "add_fragment", "add_note", "add_knowledge"):
             assert plug.ACTION_OPS[op] == "write"
 
     def test_manage_level_ops(self, plug):
         for op in ("complete_task", "reopen_task", "update_task",
                    "delete_task", "update_fragment", "delete_fragment",
-                   "update_note", "delete_note"):
+                   "update_note", "delete_note",
+                   "update_knowledge", "delete_knowledge"):
             assert plug.ACTION_OPS[op] == "manage"
 
     def test_every_manage_op_needs_id_and_add_ops_do_not(self, plug):
         for op in plug.ACTION_OPS:
             assert (op in plug._OP_TARGET) == (plug.ACTION_OPS[op] == "manage")
+
+    def test_knowledge_targets_resolve_by_num(self, plug):
+        for op in ("update_knowledge", "delete_knowledge"):
+            assert plug._OP_TARGET[op][0] == "knowledge"
+            assert plug._OP_TARGET[op][1] == "num"
 
     def test_action_upper_bound_is_sane(self, plug):
         assert plug.MAX_ACTIONS >= 1
@@ -175,6 +187,163 @@ class TestParseActions:
             '```actions\n{"actions":["nope"]}\n```', SNAP)
         assert acts == []
         assert errs
+
+
+# ---------------- B2. 知识库动作（位置型标识 + 指纹绑定） ----------------
+class TestKnowledgeActions:
+    def test_add_knowledge_is_write_level(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "add_knowledge", "content": "新增一条知识正文"}), SNAP)
+        assert errs == []
+        assert acts[0]["level"] == "write"
+        assert "新增一条知识正文" in acts[0]["desc"]
+
+    def test_add_knowledge_needs_non_empty_content(self, plug):
+        for bad in (None, "", "   ", 123):
+            _, acts, errs = plug.parse_actions(
+                _block({"op": "add_knowledge", "content": bad}), SNAP)
+            assert acts == []
+            assert errs
+
+    def test_delete_knowledge_binds_snapshot_hash(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "delete_knowledge", "id": 2}), SNAP)
+        assert errs == []
+        assert acts[0]["level"] == "manage"
+        assert acts[0]["args"]["expect_hash"] == "b2" * 8
+
+    def test_update_knowledge_binds_hash_and_content(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "update_knowledge", "id": 1,
+                    "content": "改写后的知识正文"}), SNAP)
+        assert errs == []
+        assert acts[0]["args"]["expect_hash"] == "a1" * 8
+        assert acts[0]["args"]["content"] == "改写后的知识正文"
+
+    def test_update_knowledge_requires_content(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "update_knowledge", "id": 1}), SNAP)
+        assert acts == []
+        assert any("content" in e for e in errs)
+
+    @pytest.mark.parametrize("bad", [123, ["x"], {"a": 1}, ""])
+    def test_update_knowledge_rejects_bad_content_type(self, plug, bad):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "update_knowledge", "id": 1, "content": bad}), SNAP)
+        assert acts == []
+        assert errs
+
+    def test_knowledge_num_must_exist_in_snapshot(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "delete_knowledge", "id": 99}), SNAP)
+        assert acts == []
+        assert any("99" in e for e in errs)
+
+    def test_knowledge_num_zero_is_rejected(self, plug):
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "delete_knowledge", "id": 0}), SNAP)
+        assert acts == []
+        assert errs
+
+    def test_missing_hash_in_snapshot_drops_action(self, plug):
+        """快照里没带指纹 → 无法保证不改错段落，宁可丢掉这条"""
+        snap = {"knowledge": [{"num": 1, "text": "无指纹段落"}]}
+        _, acts, errs = plug.parse_actions(
+            _block({"op": "delete_knowledge", "id": 1}), snap)
+        assert acts == []
+        assert any("指纹" in e for e in errs)
+
+    def test_add_knowledge_has_no_id(self, plug):
+        _, acts, _ = plug.parse_actions(
+            _block({"op": "add_knowledge", "content": "新增知识", "id": 1}),
+            SNAP)
+        assert "id" not in acts[0]["args"]
+
+    def test_knowledge_desc_is_plain_text(self, plug):
+        _, acts, _ = plug.parse_actions(
+            _block({"op": "delete_knowledge", "id": 1}), SNAP)
+        desc = acts[0]["desc"]
+        assert "**" not in desc
+        assert "删除" in desc
+        assert "第一条知识正文" in desc
+
+    def test_update_knowledge_desc_names_the_paragraph(self, plug):
+        _, acts, _ = plug.parse_actions(
+            _block({"op": "update_knowledge", "id": 2,
+                    "content": "改写后的正文"}), SNAP)
+        assert "第二条知识正文" in acts[0]["desc"]
+
+
+class TestDeleteOrdering:
+    """知识库删除必须降序执行：删第 3 段会让原第 5 段变成第 4 段"""
+
+    def _acts(self, plug, *pairs):
+        return [{"op": op, "args": {"id": num}} for op, num in pairs]
+
+    def test_knowledge_deletes_go_last_descending(self, plug):
+        acts = self._acts(plug, ("delete_knowledge", 3),
+                          ("add_task", 0),
+                          ("delete_knowledge", 7),
+                          ("delete_knowledge", 5))
+        ordered = plug._order_actions(acts)
+        got = [(a["op"], a["args"].get("id")) for a in ordered]
+        assert got == [("add_task", 0), ("delete_knowledge", 7),
+                       ("delete_knowledge", 5), ("delete_knowledge", 3)]
+
+    def test_other_actions_keep_relative_order(self, plug):
+        acts = self._acts(plug, ("delete_note", 9), ("add_task", 0),
+                          ("update_task", 4))
+        assert plug._order_actions(acts) == acts
+
+    def test_empty_batch_is_safe(self, plug):
+        assert plug._order_actions([]) == []
+
+    def test_bool_or_junk_num_does_not_crash(self, plug):
+        acts = [{"op": "delete_knowledge", "args": {"id": True}},
+                {"op": "delete_knowledge", "args": {"id": "x"}},
+                {"op": "delete_knowledge", "args": {"id": 2}}]
+        ordered = plug._order_actions(acts)
+        assert [a["args"]["id"] for a in ordered][0] == 2
+
+
+# ---------------- B3. 知识库数据块 ----------------
+class TestKnowledgeDataBlock:
+    def test_format_lists_num_and_head(self, plug):
+        text = plug.format_knowledge(
+            [{"num": 1, "text": "第一条知识正文"}, {"num": 2,
+                                              "text": "第二条知识正文"}], 6000)
+        assert "[1] 第一条知识正文" in text
+        assert "[2] 第二条知识正文" in text
+
+    def test_format_handles_empty_and_none(self, plug):
+        assert plug.format_knowledge([], 6000) == "（知识库为空）"
+        assert plug.format_knowledge(None, 6000) == "（知识库为空）"
+
+    def test_format_truncates(self, plug):
+        rows = [{"num": i, "text": "内容" * 30} for i in range(1, 200)]
+        text = plug.format_knowledge(rows, 500)
+        assert "已截断" in text
+
+    def test_format_single_line_head(self, plug):
+        text = plug.format_knowledge(
+            [{"num": 1, "text": "第一行\n第二行"}], 6000)
+        assert "第一行 第二行" in text
+
+    def test_build_data_block_mentions_num(self, plug):
+        class _Data:
+            def knowledge(self):
+                return [{"num": 7, "text": "第七段内容"}]
+
+        class _Ctx:
+            data = _Data()
+
+        block = plug.build_data_block(_Ctx(), "knowledge", 6000)
+        assert "[7] 第七段内容" in block
+        assert "编号" in block
+
+    def test_quick_commands_include_knowledge(self, plug):
+        kinds = [k for _, k, _ in plug.QUICK_COMMANDS]
+        assert "knowledge" in kinds
 
 
 # ---------------- C. 正文语义 ----------------

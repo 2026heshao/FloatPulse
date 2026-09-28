@@ -175,6 +175,9 @@ class PluginData:
       - 插件改的是自己的副本，**碰不到宿主的 Task / Fragment / Note 对象**
       - 宿主内部结构调整时，只需同步 provider，插件的读法不用改
 
+    内置数据源名：``tasks`` / ``fragments`` / ``notes`` / ``pomodoro`` /
+    ``knowledge``（知识库 docx 段落）。
+
     所有方法都不抛异常：数据源缺失 / 调用失败 → 记 warning 并返回空值，
     插件据此自然降级（例如「本周没有已完成任务」），而不是崩掉。
     """
@@ -183,6 +186,7 @@ class PluginData:
     SOURCE_FRAGMENTS = "fragments"
     SOURCE_NOTES = "notes"
     SOURCE_POMODORO = "pomodoro"
+    SOURCE_KNOWLEDGE = "knowledge"
 
     def __init__(self, logger=None, providers=None):
         self._logger = logger
@@ -235,6 +239,18 @@ class PluginData:
         focus_minutes/break_minutes/auto_break/bound_task_id）"""
         return self.fetch(self.SOURCE_POMODORO) or {}
 
+    def knowledge(self) -> list:
+        """知识库段落快照（``num`` / ``text`` / ``preview`` / ``hash``）
+
+        ``num`` 是**用户可见编号**（从 1 开始），与知识库面板展示的编号
+        一致——改 / 删知识库段落要用它寻址，命名 ``id`` 是为了和其它数据源
+        统一，但知识库是**位置型**标识：删除后编号会整体前移。
+
+        ``hash`` 是段落内容的指纹，供写入方做「这次操作针对的还是我看到的
+        那一段吗」校验：知识库 docx 允许用户用 Word 外部编辑。
+        """
+        return self.fetch(self.SOURCE_KNOWLEDGE) or []
+
     # ---------------- 内部 ----------------
     def _warn(self, msg: str):
         if self._logger is not None:
@@ -244,17 +260,21 @@ class PluginData:
 class PluginWriter:
     """插件可见的**受限数据入口**，分两档能力：
 
-    - ``capabilities: ["write"]``（只增）→ ``ctx.write`` 的三个 add_* 方法
+    - ``capabilities: ["write"]``（只增）→ ``ctx.write`` 的四个 add_* 方法
+      （碎片 / 任务 / 笔记 / **知识库段落**）
     - ``capabilities: ["manage"]``（改删，**蕴含 write**）→ ``ctx.manage``
       的 update_* / set_* / delete_* / undo_delete
 
     设计原则与 ``PluginData``（只读快照）完全对称，只是方向相反：
 
-      - 插件**拿不到** TaskManager / FragmentManager / NoteManager 对象，
-        只有白名单方法，走宿主注入的 provider
+      - 插件**拿不到** TaskManager / FragmentManager / NoteManager /
+        DocxManager 对象，只有白名单方法，走宿主注入的 provider
       - 所有方法都不抛异常：未声明能力 / 宿主未注入 / 参数非法 → 记 warning
         并返回失败值（add 返回 0，bool 方法返回 False）
       - 内容有护栏：空内容拒写、非字符串拒写、超长截断（``MAX_CONTENT_LEN``）
+      - **知识库是位置型 + 外部可编辑的**：``update_knowledge`` /
+        ``delete_knowledge`` 强制要求 ``expect_hash``（从 ``ctx.data``
+        快照取该段指纹原样回传），对不上即拒绝——防「编号漂移后改错段落」
       - **删除可撤销**：``delete_*`` 返回**撤销令牌**（>0 成功，0 失败），
         误删后调 ``undo_delete(token)`` 恢复；宿主侧撤销栈有容量上限
       - 每次管理操作都记审计日志（动作 / 参数 / 结果）
@@ -266,6 +286,7 @@ class PluginWriter:
     SOURCE_FRAGMENT = "fragment"
     SOURCE_TASK = "task"
     SOURCE_NOTE = "note"
+    SOURCE_KNOWLEDGE = "knowledge"
 
     # 单条内容长度上限（字符）。超长截断而非拒写——用户宁愿要截断版，
     # 也不想看到"因为回答太长所以什么都没存"。
@@ -383,6 +404,17 @@ class PluginWriter:
             return 0
         return self._call(self.SOURCE_NOTE, (text, self._opt_str(content)))
 
+    def add_knowledge(self, content: str) -> int:
+        """往知识库追加一段，返回该段的**编号**（从 1 开始；失败 0）。
+
+        知识库（``float_data/知识库.docx``）是用户自己写的长文文档，追加是
+        破坏性最低的写操作——不动任何既有段落。编号口径与知识库面板一致。
+        """
+        text = self._check(self.SOURCE_KNOWLEDGE, content)
+        if text is None:
+            return 0
+        return self._call(self.SOURCE_KNOWLEDGE, (text,))
+
     # ---------------- 管理方法（需 capabilities: ["manage"]） ----------------
     # 语义约定：``None`` = 该字段不动（部分更新）；给值 = 改成该值。
     # 传 None 而不是空串来"不动"，避免小模型把没提到的字段清空。
@@ -447,11 +479,42 @@ class PluginWriter:
             return 0
         return self._manage_call("delete_note", (note_id,), expect="token")
 
+    # ---- 知识库（位置型标识：改删必须带内容指纹 expect_hash）----
+    # 知识库段落用「编号」寻址，而编号会随删除前移；docx 还允许用户用
+    # Word 直接改。二者都意味着「编号 N」可能是过期引用。因此这里**强制**
+    # 校验段落内容指纹：对不上就拒改拒删（宁可失败也不改错段落）。
+    def update_knowledge(self, num, content, expect_hash) -> bool:
+        """改知识库第 ``num`` 段的正文，返回是否成功
+
+        ``expect_hash`` 必填：调用方从 ``ctx.data.knowledge()`` 快照里取
+        该段的 ``hash`` 原样回传，宿主比对当前段落指纹，不一致即拒绝。
+        """
+        if not self._check_id(num, "num"):
+            return False
+        if not self._check_content(content, "content"):
+            return False
+        if not self._check_hash(expect_hash):
+            return False
+        return self._manage_call("update_knowledge", (num, content, expect_hash))
+
+    def delete_knowledge(self, num, expect_hash) -> int:
+        """删除知识库第 ``num`` 段，返回撤销令牌（>0 成功；0 失败）
+
+        ``expect_hash`` 必填，语义同 ``update_knowledge``。
+        """
+        if not self._check_id(num, "num"):
+            return 0
+        if not self._check_hash(expect_hash):
+            return 0
+        return self._manage_call("delete_knowledge", (num, expect_hash),
+                                 expect="token")
+
     def undo_delete(self, token) -> bool:
         """撤销此前的一次删除（token 来自 delete_* 的返回值），返回是否成功。
 
-        每个令牌只能用一次；撤销后内容原样回来（编号可能变新，因为宿主
-        走的是"重新插入"路径）。
+        每个令牌只能用一次；撤销后内容原样回来。任务 / 碎片 / 笔记的编号
+        可能变新（宿主走"重新插入"路径）；知识库段落会**放回原位**（原编号
+        之后可能因为别处的改动而不同）。
         """
         if not self._check_id(token, "token"):
             return False
@@ -482,6 +545,18 @@ class PluginWriter:
         if not isinstance(value, str):
             self._warn(f"参数被拒：{name} 必须是字符串，"
                        f"收到 {type(value).__name__}")
+            return False
+        return True
+
+    def _check_hash(self, value) -> bool:
+        """内容指纹：必须是非空字符串（None = 调用方偷懒，直接拒）
+
+        比 ``_check_opt_text`` 严：这里没有"不校验"这个选项。知识库是
+        位置型 + 外部可编辑的数据，缺指纹就等于允许改错段落。
+        """
+        if not isinstance(value, str) or not value.strip():
+            self._warn(f"参数被拒：expect_hash 必填（从 ctx.data.knowledge() "
+                       f"快照取该段 hash 原样回传），收到 {value!r}")
             return False
         return True
 

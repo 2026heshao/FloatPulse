@@ -53,6 +53,8 @@ from PyQt6.QtWidgets import (                     # noqa: E402
 )
 from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
+from docx import Document                        # noqa: E402
+
 from src.config import ConfigManager              # noqa: E402
 from src.docx_manager import DocxManager          # noqa: E402
 from src.task_manager import TaskManager          # noqa: E402
@@ -126,8 +128,14 @@ data_dir = os.path.join(tmp, "data")
 os.makedirs(data_dir, exist_ok=True)
 
 config = ConfigManager(os.path.join(data_dir, "config.json"))
-docx_mgr = DocxManager(os.path.join(tmp, "知识库.docx"),
-                       os.path.join(data_dir, "docx_meta.json"))
+# 知识库：现造一份带内容的 docx（真实 DocxManager 读写它）
+_kb_path = os.path.join(tmp, "知识库.docx")
+_kb_seed = Document()
+for _t in ("知识库第一条内容", "知识库第二条内容", "知识库第三条内容",
+           "知识库第四条内容"):
+    _kb_seed.add_paragraph(_t)
+_kb_seed.save(_kb_path)
+docx_mgr = DocxManager(_kb_path, os.path.join(data_dir, "docx_meta.json"))
 docx_mgr.load()
 task_mgr = TaskManager(os.path.join(data_dir, "schedule.json"))
 note_mgr = NoteManager(os.path.join(data_dir, "notes.json"))
@@ -169,6 +177,9 @@ plugin_data = PluginData(providers={
     "fragments": lambda: [f.to_dict() for f in frag_mgr.get_all_fragments()],
     "notes": lambda: [n.to_dict() for n in note_mgr.get_all_notes()],
     "pomodoro": lambda: {"state": "idle"},
+    "knowledge": lambda: [
+        {"num": i + 1, "text": p.text, "preview": p.preview, "hash": p.hash}
+        for i, p in enumerate(docx_mgr.get_paragraphs())],
 })
 ctx = PluginContext(
     logger=_logger,
@@ -210,6 +221,20 @@ check("A7 未声明的插件没有能力（weekly-report）",
           for pid in ("weekly-report",)
           for suffix in ("draft",)
           if registry.context_of(f"{pid}.{suffix}") is not None))
+
+# 知识库只读快照：num 从 1 起（与知识库面板编号一致）+ 内容指纹
+_kb_rows = plugin_data.knowledge()
+check("A9 ctx.data.knowledge() 给编号 / 文本 / 指纹（只读快照）",
+      len(_kb_rows) == 4 and _kb_rows[0]["num"] == 1
+      and _kb_rows[0]["text"] == "知识库第一条内容"
+      and _kb_rows[3]["num"] == 4
+      and all(len(r["hash"]) == 16 for r in _kb_rows),
+      f"rows={[(r['num'], r['text'], len(r['hash'])) for r in _kb_rows]}")
+_kb_copy = plugin_data.knowledge()
+_kb_copy[0]["text"] = "改坏了"
+check("A9b 知识库快照是副本（插件改不到宿主内存模型）",
+      docx_mgr.get_paragraphs()[0].text == "知识库第一条内容",
+      docx_mgr.get_paragraphs()[0].text)
 
 # create_page 入口（knowledge_ball._register_plugin_pages 的调用方式）
 page_from_plugin = lp_ai.plugin.create_page(lp_ai.ctx)
@@ -854,11 +879,46 @@ def _mk_manage_providers():
             return 0
         return _push("note", payload)
 
+    def _delete_knowledge(num, expect_hash):
+        if _kb_blocked():
+            return 0
+        items = _kb_rows()
+        if num < 1 or num > len(items) or items[num - 1].hash != expect_hash:
+            return 0
+        payload = {"text": items[num - 1].text, "pos": num - 1}
+        if not docx_mgr.delete_paragraph(num - 1):
+            return 0
+        if not docx_mgr.save():
+            docx_mgr.reload()
+            return 0
+        win.refresh_knowledge()
+        return _push("knowledge", payload)
+
     def _undo(tok):
         rec = _take(tok)
         if rec is None:
             return False
         kind, p = rec["kind"], rec["payload"]
+        if kind == "knowledge":
+            # 原位恢复（结构化文档里位置本身就是信息）
+            if _kb_blocked():
+                return False
+            text = p.get("text") or ""
+            pos = int(p.get("pos") or 0)
+            items = _kb_rows()
+            if pos < 0 or pos > len(items):
+                pos = len(items)
+            if pos < len(items):
+                new_idx = docx_mgr.insert_paragraph_before(pos, text)
+            else:
+                new_idx = docx_mgr.append_paragraph(text)
+            if new_idx < 0:
+                return False
+            if not docx_mgr.save():
+                docx_mgr.reload()
+                return False
+            win.refresh_knowledge()
+            return True
         if kind == "task":
             nid = task_mgr.add_task(p.get("title") or "", p.get("note") or "",
                                     p.get("deadline") or "")
@@ -885,6 +945,8 @@ def _mk_manage_providers():
             nid, (note_mgr.get_note(nid).content if content is None
                   else content), title=title)),
         "delete_note": _delete_note,
+        "update_knowledge": _update_knowledge,
+        "delete_knowledge": _delete_knowledge,
         "undo_delete": _undo,
     }
 
@@ -896,6 +958,47 @@ _write_providers = {
         frag_mgr.add_clipboard_text(content, source=source),
     "note": lambda title, content: note_mgr.add_note(content, title),
 }
+
+
+# ---- 知识库通道（镜像 knowledge_ball 的实现，走真 DocxManager）----
+def _kb_rows():
+    return docx_mgr.get_paragraphs()
+
+
+def _kb_blocked():
+    """外部改动未重新加载时拒绝写（否则 save() 整篇回写会覆盖 Word 里的改动）"""
+    return docx_mgr.check_external_modification()
+
+
+def _add_knowledge(content):
+    if _kb_blocked():
+        return 0
+    idx = docx_mgr.append_paragraph(content)
+    if idx < 0:
+        return 0
+    if not docx_mgr.save():
+        docx_mgr.reload()
+        return 0
+    win.refresh_knowledge()
+    return idx + 1
+
+
+def _update_knowledge(num, content, expect_hash):
+    if _kb_blocked():
+        return False
+    items = _kb_rows()
+    if num < 1 or num > len(items) or items[num - 1].hash != expect_hash:
+        return False
+    if not docx_mgr.update_paragraph_text(num - 1, content):
+        return False
+    if not docx_mgr.save():
+        docx_mgr.reload()
+        return False
+    win.refresh_knowledge()
+    return True
+
+
+_write_providers["knowledge"] = _add_knowledge
 
 
 def _mk_mgmt_ctx(caps):
@@ -1046,6 +1149,117 @@ check("C44 未声明 manage 却收到改删动作 → 如实拒绝（不弹确�
               for lb in w.findChildren(QLabel)),
       f"titles={_titles()} yes={len(_btns(pageN, '执行'))}")
 pageN.deleteLater()
+
+# ---- 知识库操作（2026-09-28 用户要求：增加 AI 对知识库的操作能力）----
+# 与任务/碎片/笔记的关键差别：知识库用**编号（位置）**寻址，且 docx 允许
+# 用户用 Word 外部编辑 → 改删必须带内容指纹，编号漂移时拒绝而不是改错段落。
+pageK = plug.AiChatPage(_mk_mgmt_ctx(["network", "write", "manage"]))
+pageK.resize(760, 640)
+pageK.show()
+pump(60)
+
+
+def _kb_texts():
+    return [p.text for p in docx_mgr.get_paragraphs()]
+
+
+# 快照下发：「查知识库」快捷指令带编号清单
+_n_kb = len(captured)
+pageK.send_quick("knowledge", "请概括知识库内容")
+pump(50)
+_kb_body = captured[-1]["body"]["messages"][-1]["content"]
+check("C46 查知识库快捷指令：请求携带编号清单（编号来自快照，不是模型编的）",
+      len(captured) == _n_kb + 1
+      and "[1] 知识库第一条内容" in _kb_body
+      and "[4] 知识库第四条内容" in _kb_body
+      and "编号" in _kb_body,
+      _kb_body[-160:])
+
+# 新增：直接执行，不带确认
+_kb_before = _kb_texts()
+_feed(pageK, '好的。\n```actions\n'
+      '{"actions":[{"op":"add_knowledge","content":"AI 追加的知识条目"}]}\n```')
+check("C47 add_knowledge 直接执行：docx 真的多了一段且编号正确",
+      _kb_texts() == _kb_before + ["AI 追加的知识条目"]
+      and any("5" in lb.text() and "知识库" in lb.text()
+              for w in _cards(pageK, "chatBubbleHint")
+              for lb in w.findChildren(QLabel)),
+      f"kb={_kb_texts()}")
+
+# 改写：走确认卡，点「执行」才落库
+_kb_before = _kb_texts()
+_feed(pageK, '```actions\n{"actions":[{"op":"update_knowledge","id":2,'
+      '"content":"第二条已被 AI 改写"}]}\n```')
+_kb_hint_cards = _cards(pageK, "chatBubbleHint")
+_kb_hint_text = " ".join(lb.text() for lb in _kb_hint_cards[-1].findChildren(
+    QLabel)) if _kb_hint_cards else ""
+check("C48a update_knowledge 先弹确认卡（未执行，docx 零改动）",
+      _kb_texts() == _kb_before and _btns(pageK, "执行")
+      and "待确认" in _kb_hint_text
+      and "知识库第二条内容" in _kb_hint_text,
+      f"kb={_kb_texts()} hint={_kb_hint_text!r}")
+_btns(pageK, "执行")[-1].click()
+pump(30)
+check("C48b 点执行 → docx 段落文本真的被改写（落盘生效）",
+      _kb_texts() == ["知识库第一条内容", "第二条已被 AI 改写",
+                      "知识库第三条内容", "知识库第四条内容",
+                      "AI 追加的知识条目"],
+      f"kb={_kb_texts()}")
+
+# 指纹过期保护：确认卡弹出后该段被改过 → 执行时必须拒绝（不误删/误改）
+_kb_before = _kb_texts()
+_feed(pageK, '```actions\n{"actions":[{"op":"delete_knowledge","id":1}]}\n```')
+docx_mgr.update_paragraph_text(0, "第一条被外部改掉了")     # 模拟引用已过期
+_btns(pageK, "执行")[-1].click()
+pump(30)
+check("C49 指纹过期 → 拒绝执行（编号漂移时绝不改错段落）",
+      _kb_texts() == ["第一条被外部改掉了", "第二条已被 AI 改写",
+                      "知识库第三条内容", "知识库第四条内容",
+                      "AI 追加的知识条目"],
+      f"kb={_kb_texts()}")
+
+# 删除 + 撤销：撤销要**放回原位**
+_kb_before = _kb_texts()
+_feed(pageK, '```actions\n{"actions":[{"op":"delete_knowledge","id":3}]}\n```')
+_btns(pageK, "执行")[-1].click()
+pump(30)
+check("C50a 删除知识库段落落盘（该段消失 + 结果卡带撤销按钮）",
+      "知识库第三条内容" not in _kb_texts()
+      and len(_kb_texts()) == len(_kb_before) - 1
+      and _btns(pageK, "↩ 撤销删除"),
+      f"kb={_kb_texts()}")
+_btns(pageK, "↩ 撤销删除")[-1].click()
+pump(30)
+check("C50b 撤销 → 内容与**位置**都恢复（不是追加到末尾）",
+      _kb_texts() == _kb_before,
+      f"got={_kb_texts()} want={_kb_before}")
+
+# 同批多个删除：编号升序给出，仍须全部成功（靠降序执行）
+_kb_before = _kb_texts()
+_feed(pageK, '```actions\n{"actions":['
+      '{"op":"delete_knowledge","id":1},'
+      '{"op":"delete_knowledge","id":3}]}\n```')
+_btns(pageK, "执行")[-1].click()
+pump(30)
+check("C51 同批两个删除（升序编号）→ 全部成功（内部按编号降序执行）",
+      _kb_texts() == ["第二条已被 AI 改写", "知识库第四条内容",
+                      "AI 追加的知识条目"],
+      f"kb={_kb_texts()}")
+_kb_ok = [lb.text() for w in _cards(pageK, "chatBubbleHint")
+          for lb in w.findChildren(QLabel)]
+check("C51b 结果卡两条都是成功（没有因编号前移而失败）",
+      sum(1 for t in _kb_ok if t.startswith("✅ 已删除")) >= 2,
+      str(_kb_ok[-3:]))
+
+# 太短的内容会被拒（docx 段落最小 4 字）——如实报告失败而不是静默
+_feed(pageK, '```actions\n{"actions":[{"op":"add_knowledge","content":"短"}]}\n```')
+check("C52 过短内容被拒：如实报失败 + 提示可能原因",
+      not any(t == "短" for t in _kb_texts())
+      and any("✗" in lb.text() and "知识库" in lb.text()
+              for w in _cards(pageK, "chatBubbleHint")
+              for lb in w.findChildren(QLabel)),
+      f"kb={_kb_texts()}")
+pageK.deleteLater()
 
 # ---- 清空 + 配置落盘 ----
 page2._clear_chat()

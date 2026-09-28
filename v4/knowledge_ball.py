@@ -2612,7 +2612,8 @@ def main():
 
     # 只读数据快照：provider 一律返回**新建的 dict 副本**，
     # PluginData 再 deepcopy 一次才交给插件 —— 插件改不到宿主对象。
-    # 数据源故意只给只读的「任务 / 碎片 / 笔记 / 番茄」，不暴露球与主窗口本体。
+    # 数据源故意只给只读的「任务 / 碎片 / 笔记 / 番茄 / 知识库」，
+    # 不暴露球与主窗口本体。
     plugin_data = PluginData(
         logger=get_logger(),
         providers={
@@ -2621,16 +2622,48 @@ def main():
                                   for f in fragment_manager.get_all_fragments()],
             "notes": lambda: [n.to_dict() for n in note_manager.get_all_notes()],
             "pomodoro": ball.pomodoro_state,
+            # 知识库：num 从 1 开始（与知识库面板「编号」一致）；
+            # hash 是段落指纹，供写入侧校验「还是我看到的这一段吗」
+            "knowledge": lambda: [
+                {"num": i + 1, "text": p.text, "preview": p.preview,
+                 "hash": p.hash}
+                for i, p in enumerate(docx_manager.get_paragraphs())],
         },
     )
+
+    def _kb_blocked():
+        """知识库写入前的安全闸：检测到外部改动就拒绝写。
+
+        知识库是用户可直接用 Word/WPS 打开编辑的 docx。外部改过之后内存
+        模型已过期，而 ``DocxManager.save()`` 是**整篇回写**——此时落盘会把
+        用户在 Word 里的改动整篇覆盖掉。宁可拒绝并要求先重新加载。
+
+        write 与 manage 两组 provider 共用（故定义在外层）。
+        """
+        if docx_manager.check_external_modification():
+            get_logger().warning(
+                "[插件] 知识库检测到外部修改，已拒绝写入"
+                "（请先在知识库页点「🔄 重新加载」）")
+            return True
+        return False
+
+    def _kb_paragraph(num):
+        """知识库编号（1 起）→ ParagraphInfo；非法或越界返回 None"""
+        if not isinstance(num, int) or isinstance(num, bool) or num < 1:
+            return None
+        items = docx_manager.get_paragraphs()
+        if num > len(items):
+            return None
+        return items[num - 1]
 
     def _make_write_providers():
         """插件写入口的宿主实现（2026-09-27 受限写能力）。
 
-        三个 provider 各自包一层「写库 + 刷新 UI」，插件拿不到管理器本体：
+        四个 provider 各自包一层「写库 + 刷新 UI」，插件拿不到管理器本体：
           - 只增不改删：这里**刻意不提供** update / delete
           - 碎片 source 由 PluginWriter 补 ``插件:<id>``，落库可追溯
           - 写成功立即刷新对应面板与悬浮球徽标，与卡片数据变更走同一链路
+          - 知识库额外过 ``_kb_blocked()`` 安全闸
         """
         def _add_fragment(content, source):
             fid = fragment_manager.add_fragment(
@@ -2649,8 +2682,22 @@ def main():
             main_window.refresh_notes()
             return nid
 
+        def _add_knowledge(content):
+            """追加一段知识，返回编号（从 1 开始，与面板一致）；失败 0"""
+            if _kb_blocked():
+                return 0
+            idx = docx_manager.append_paragraph(content)
+            if idx < 0:
+                return 0
+            if not docx_manager.save():
+                # 落盘失败 → 丢弃内存改动，避免面板显示磁盘上没有的段落
+                docx_manager.reload()
+                return 0
+            main_window.refresh_knowledge()
+            return idx + 1
+
         return {"fragment": _add_fragment, "task": _add_task,
-                "note": _add_note}
+                "note": _add_note, "knowledge": _add_knowledge}
 
     def _make_manage_providers():
         """插件管理入口的宿主实现（2026-09-28 数据管理能力）。
@@ -2660,6 +2707,8 @@ def main():
 
         撤销走"重新插入"路径（宿主 add_* 是唯一入口，不去碰内部 id 分配），
         恢复后编号可能是新的，但内容与关键状态（完成态 / 专注次数）原样还原。
+        知识库段落例外：按删除前的 0 基位置 ``insert_paragraph_before`` 放回
+        原位（结构化文档里位置本身就是信息）。
         安全三层：能力声明（manage）→ 插件侧分级确认（改删需用户点确认）
         → 这里的内容护栏 + 撤销栈 + 每次操作进审计日志。
         """
@@ -2755,12 +2804,71 @@ def main():
             main_window.refresh_notes()
             return _push_undo("note", payload)
 
+        # ---------- 知识库（位置型标识：必须校验内容指纹） ----------
+        # 编号会随删除前移，docx 又能被外部编辑，所以「编号 N」可能是过期
+        # 引用。这里比对调用方回传的段落指纹，对不上就拒改拒删——宁可失败
+        # 也不改错段落。
+        def _update_knowledge(num, content, expect_hash):
+            if _kb_blocked():
+                return False
+            cur = _kb_paragraph(num)
+            if cur is None or cur.hash != expect_hash:
+                get_logger().warning(
+                    f"[插件] 知识库第 {num} 段指纹不匹配，已拒绝修改"
+                    "（内容可能已变化）")
+                return False
+            if not docx_manager.update_paragraph_text(num - 1, content):
+                return False
+            if not docx_manager.save():
+                docx_manager.reload()
+                return False
+            main_window.refresh_knowledge()
+            return True
+
+        def _delete_knowledge(num, expect_hash):
+            if _kb_blocked():
+                return 0
+            cur = _kb_paragraph(num)
+            if cur is None or cur.hash != expect_hash:
+                get_logger().warning(
+                    f"[插件] 知识库第 {num} 段指纹不匹配，已拒绝删除"
+                    "（内容可能已变化）")
+                return 0
+            # pos 记**删除前**的 0 基位置：撤销时照它放回原位
+            payload = {"text": cur.text, "pos": num - 1}
+            if not docx_manager.delete_paragraph(num - 1):
+                return 0
+            if not docx_manager.save():
+                docx_manager.reload()
+                return 0
+            main_window.refresh_knowledge()
+            return _push_undo("knowledge", payload)
+
         # ---------- 撤销 ----------
         def _undo_delete(token):
             rec = _take_undo(token)
             if rec is None:
                 return False
             kind, p = rec["kind"], rec["payload"]
+            if kind == "knowledge":
+                if _kb_blocked():
+                    return False
+                text = p.get("text") or ""
+                pos = int(p.get("pos") or 0)
+                items = docx_manager.get_paragraphs()
+                if pos < 0 or pos > len(items):
+                    pos = len(items)          # 越界（别处又改过）→ 追加到末尾
+                if pos < len(items):
+                    new_idx = docx_manager.insert_paragraph_before(pos, text)
+                else:
+                    new_idx = docx_manager.append_paragraph(text)
+                if new_idx < 0:
+                    return False
+                if not docx_manager.save():
+                    docx_manager.reload()
+                    return False
+                main_window.refresh_knowledge()
+                return True
             if kind == "task":
                 new_id = task_manager.add_task(
                     p.get("title") or "", p.get("note") or "",
@@ -2794,6 +2902,8 @@ def main():
             "update_fragment": _update_fragment,
             "delete_fragment": _delete_fragment,
             "update_note": _update_note, "delete_note": _delete_note,
+            "update_knowledge": _update_knowledge,
+            "delete_knowledge": _delete_knowledge,
             "undo_delete": _undo_delete,
         }
 

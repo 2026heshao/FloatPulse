@@ -298,13 +298,37 @@ def format_notes(notes, limit: int) -> str:
     return _truncate("\n".join(lines), limit)
 
 
+def format_knowledge(items, limit: int) -> str:
+    """知识库快照 → 「编号 + 首行摘要」清单
+
+    编号是知识库页显示的编号，改 / 删时用它指定段落。每段只给摘要而不是
+    全文：知识库是长文文档（几百段很常见），全量塞进提示词会挤掉真正需要
+    的上下文；模型要细节时可以让用户指定编号。
+    """
+    lines = []
+    for it in items or []:
+        num = it.get("num")
+        text = it.get("text") or it.get("preview") or ""
+        head = " ".join(str(text).split())[:60]
+        lines.append(f"[{num}] {head}")
+    if not lines:
+        return "（知识库为空）"
+    return _truncate("\n".join(lines), limit)
+
+
 def build_data_block(ctx, kind: str, limit: int) -> str:
-    """按指令类型取对应数据并格式化（kind: tasks/fragments/weekly）"""
+    """按指令类型取对应数据并格式化（kind: tasks/fragments/weekly/knowledge）"""
     if kind == "tasks":
         return f"以下是应用内的全部任务数据：\n{format_tasks(ctx.data.tasks(), limit)}"
     if kind == "fragments":
         return (f"以下是应用内的全部碎片（随手记片段）数据：\n"
                 f"{format_fragments(ctx.data.fragments(), limit)}")
+    if kind == "knowledge":
+        return ("以下是知识库（float_data/知识库.docx）的全部段落，"
+                "方括号里是编号：\n"
+                f"{format_knowledge(ctx.data.knowledge(), limit)}\n\n"
+                "要改 / 删某一段就用它的编号；不确定是哪一段就先向用户确认，"
+                "不要猜。")
     # weekly：三样全上
     return ("以下是应用内工作相关的全部数据。\n\n"
             f"== 任务 ==\n{format_tasks(ctx.data.tasks(), limit)}\n\n"
@@ -319,6 +343,9 @@ QUICK_COMMANDS = (
      "最后给 1-3 条优先级建议。"),
     ("整理碎片", "fragments",
      "请把我记的碎片按主题归类整理，指出哪些看起来可以转成任务或笔记。"),
+    ("查知识库", "knowledge",
+     "请根据下面的知识库段落，先用 3-5 句话概括它都在讲什么，"
+     "再列出其中看起来最值得展开或最可能需要更新的编号。"),
     ("本周小结", "weekly",
      "请根据下面的任务、碎片、笔记数据，写一段本周工作小结"
      "（分「做了什么 / 进行中 / 建议」三节）。"),
@@ -337,14 +364,17 @@ QUICK_COMMANDS = (
 # 也不去猜它的意图（猜错就是改了用户的数据）。
 ACTION_OPS = {
     "add_task": "write", "add_fragment": "write", "add_note": "write",
+    "add_knowledge": "write",
     "complete_task": "manage", "reopen_task": "manage",
     "update_task": "manage", "delete_task": "manage",
     "update_fragment": "manage", "delete_fragment": "manage",
     "update_note": "manage", "delete_note": "manage",
+    "update_knowledge": "manage", "delete_knowledge": "manage",
 }
 MAX_ACTIONS = 10          # 单轮动作数上限：防模型刷屏式输出
 
 # 动作 → 目标数据源（用于把 id 校验到快照里的真实记录）
+# 知识库的 id 键是 ``num``：知识库段落用「编号」寻址（位置型标识）
 _OP_TARGET = {
     "complete_task": ("tasks", "task_id", "任务"),
     "reopen_task": ("tasks", "task_id", "任务"),
@@ -354,7 +384,14 @@ _OP_TARGET = {
     "delete_fragment": ("fragments", "fragment_id", "碎片"),
     "update_note": ("notes", "note_id", "笔记"),
     "delete_note": ("notes", "note_id", "笔记"),
+    "update_knowledge": ("knowledge", "num", "知识"),
+    "delete_knowledge": ("knowledge", "num", "知识"),
 }
+
+# 知识库改删失败时要提示的常见原因：编号会随删除漂移、docx 还能被 Word
+# 外部编辑，所以失败多半是「引用过期」而不是「操作写错了」。
+_KB_FAIL_HINT = ("（该段内容可能已变化，或知识库被外部改动过——"
+                 "请先到知识库页点「🔄 重新加载」再试）")
 
 ACTION_PROTOCOL = (
     "\n\n== 你可以执行的应用操作 ==\n"
@@ -370,13 +407,20 @@ ACTION_PROTOCOL = (
     "- update_task{id,title?,note?,deadline?} / delete_task{id}\n"
     "- update_fragment{id,content?,source?} / delete_fragment{id}\n"
     "- update_note{id,title?,content?} / delete_note{id}\n"
+    "- add_knowledge{content} —— 往知识库（知识库.docx）追加一段"
+    "（每段至少 4 个字，过短会被拒绝）\n"
+    "- update_knowledge{id,content} / delete_knowledge{id} —— 知识库的 id "
+    "就是它方括号里的编号\n"
     "规则：①只在用户明确要求改动时输出动作；②不确定是哪条记录就先问，"
     "不要猜；③一次最多 10 条；④动作块之外照常用文字说明你做了什么。"
 )
 
 
 def describe_action(op: str, args: dict, snapshot: dict | None) -> str:
-    """动作 → 人类可读描述（确认卡与结果气泡共用）"""
+    """动作 → 人类可读描述（确认卡与结果气泡共用）
+
+    描述会进 QLabel（不渲染 Markdown），所以只用纯文本与【】这类全角符号。
+    """
     snap = snapshot or {}
 
     def _label(kind_key) -> str:
@@ -389,6 +433,8 @@ def describe_action(op: str, args: dict, snapshot: dict | None) -> str:
                 head = str(item.get("title") or "").strip()
                 if not head:
                     head = " ".join(str(item.get("content") or "").split())[:24]
+                if not head:            # 知识库段落用的是 text
+                    head = " ".join(str(item.get("text") or "").split())[:24]
                 return f"{name} #{rid}「{head}」" if head else f"{name} #{rid}"
         return f"{name} #{rid}"
 
@@ -399,18 +445,43 @@ def describe_action(op: str, args: dict, snapshot: dict | None) -> str:
         return f"记一条碎片「{head}」"
     if op == "add_note":
         return f"新增笔记「{str(args.get('title') or '').strip()}」"
+    if op == "add_knowledge":
+        head = " ".join(str(args.get("content") or "").split())[:24]
+        return f"往知识库追加一段「{head}」"
     if op == "complete_task":
         return f"把{_label(_OP_TARGET[op])}标记为已完成"
     if op == "reopen_task":
         return f"把{_label(_OP_TARGET[op])}恢复为未完成"
+    if op == "update_knowledge":
+        return f"改写{_label(_OP_TARGET[op])}的正文"
     if op in ("update_task", "update_fragment", "update_note"):
         fields = [k for k in ("title", "note", "deadline", "content", "source")
                   if args.get(k) is not None]
         return f"修改{_label(_OP_TARGET[op])}（{'、'.join(fields) or '字段'}）"
-    if op in ("delete_task", "delete_fragment", "delete_note"):
+    if op.startswith("delete_"):
         # 用【】而不是 Markdown 的 **：描述会进 QLabel，星号不会被渲染
         return f"【删除】{_label(_OP_TARGET[op])}"
     return f"{op} {args}"
+
+
+def _order_actions(actions):
+    """动作执行顺序：知识库删除排到最后，且按编号**降序**执行。
+
+    知识库是位置型标识——删掉第 3 段，原来的第 5 段就变成第 4 段。同一批里
+    有多个删除时，按升序执行第二个编号就指向了别的段落（宿主有指纹校验会
+    拒绝，但那是「本该成功却失败」）。降序执行则前面的编号不受影响。
+
+    其余动作保持原顺序（稳定排序），结果卡里的顺序与模型给的顺序一致。
+    """
+    def key(pair):
+        idx, act = pair
+        if act.get("op") == "delete_knowledge":
+            num = (act.get("args") or {}).get("id")
+            return (1, -(num if isinstance(num, int)
+                         and not isinstance(num, bool) else 0))
+        return (0,)
+
+    return [act for _, act in sorted(enumerate(actions), key=key)]
 
 
 def _looks_like_actions(raw: str) -> bool:
@@ -508,11 +579,26 @@ def parse_actions(text: str, snapshot: dict | None = None):
                 errors.append(f"{op} 的 id 不是正整数，跳过：{rid!r}")
                 continue
             src, id_key, _name = _OP_TARGET[op]
-            ids = {it.get(id_key) for it in (snap.get(src) or [])}
-            if rid not in ids:
+            items_src = snap.get(src) or []
+            target = next((it for it in items_src
+                           if it.get(id_key) == rid), None)
+            if target is None:
                 errors.append(f"{op} 的目标 #{rid} 不在当前数据里"
                               "（可能已删除或编号编造），跳过")
                 continue
+            if op in ("update_knowledge", "delete_knowledge"):
+                # 知识库是位置型 + 外部可编辑的：把快照里的段落指纹一并带上，
+                # 宿主比对不上就拒绝——防止编号漂移后改错段落。
+                expect = target.get("hash")
+                if not isinstance(expect, str) or not expect:
+                    errors.append(f"{op} 无法取得第 {rid} 段的内容指纹，跳过")
+                    continue
+                args["expect_hash"] = expect
+                if op == "update_knowledge":
+                    val = args.get("content")
+                    if not isinstance(val, str) or not val.strip():
+                        errors.append("update_knowledge 缺少有效的 content，跳过")
+                        continue
         else:
             args.pop("id", None)
             need = "title" if op in ("add_task", "add_note") else "content"
@@ -1230,11 +1316,16 @@ class AiChatPage(QWidget):
     # → 分级处理：新增类直接执行；改删类弹确认卡，用户点「执行」才落库。
     # AI 永远拿不到管理器本体，只能经 ctx.write / ctx.manage 白名单方法。
     def _snapshot(self) -> dict:
-        """当前数据快照（动作校验用：id 必须是真实存在的记录）"""
+        """当前数据快照（动作校验用：id 必须是真实存在的记录）
+
+        知识库段落带 ``hash``：校验通过后由 ``parse_actions`` 绑定进动作，
+        供宿主比对——编号是位置型的，删除会前移。
+        """
         try:
             return {"tasks": self._ctx.data.tasks(),
                     "fragments": self._ctx.data.fragments(),
-                    "notes": self._ctx.data.notes()}
+                    "notes": self._ctx.data.notes(),
+                    "knowledge": self._ctx.data.knowledge()}
         except Exception:                       # noqa: BLE001 - 校验降级为无数据
             return {}
 
@@ -1282,6 +1373,11 @@ class AiChatPage(QWidget):
             if op == "add_note":
                 rid = w.add_note(a.get("title") or "", a.get("content") or "")
                 return rid > 0, (f"已新增笔记 #{rid}" if rid else "新增笔记失败"), 0
+            if op == "add_knowledge":
+                num = w.add_knowledge(a.get("content") or "")
+                if num:
+                    return True, f"已追加到知识库（编号 {num}）", 0
+                return False, "追加知识库失败" + _KB_FAIL_HINT, 0
             if op == "complete_task":
                 ok = m.set_task_done(a["id"], True)
                 return ok, (f"已完成 {desc}" if ok else f"操作失败：{desc}"), 0
@@ -1304,6 +1400,17 @@ class AiChatPage(QWidget):
                                    content=a.get("content"))
                 return ok, (f"已修改 {desc}" if ok else
                             f"未生效（可能无变化或失败）：{desc}"), 0
+            if op == "update_knowledge":
+                ok = m.update_knowledge(a["id"], a.get("content") or "",
+                                        a.get("expect_hash") or "")
+                if ok:
+                    return True, f"已改写 {desc}", 0
+                return False, f"未改写 {desc}{_KB_FAIL_HINT}", 0
+            if op == "delete_knowledge":
+                token = m.delete_knowledge(a["id"], a.get("expect_hash") or "")
+                if token > 0:
+                    return True, f"已删除 {desc}", token
+                return False, f"未删除 {desc}{_KB_FAIL_HINT}", 0
             if op in ("delete_task", "delete_fragment", "delete_note"):
                 fn = {"delete_task": m.delete_task,
                       "delete_fragment": m.delete_fragment,
@@ -1317,9 +1424,13 @@ class AiChatPage(QWidget):
         return False, f"未知动作：{op}", 0
 
     def _execute_and_report(self, actions):
-        """执行一批动作 → 结果卡（删除成功的带「↩ 撤销」）"""
+        """执行一批动作 → 结果卡（删除成功的带「↩ 撤销」）
+
+        执行前先排序：知识库删除按编号降序排到末尾（见 ``_order_actions``），
+        否则同批多个删除会因为编号前移而互相踩。
+        """
         lines, tokens = [], []
-        for act in actions:
+        for act in _order_actions(actions):
             ok, msg, token = self._run_action(act)
             lines.append(("✅ " if ok else "✗ ") + msg)
             if token:
