@@ -398,7 +398,12 @@ check("C17 ready → 按钮变「停止」+ URL 自动切本地 8093",
       page2._local_btn.text() == "停止本地服务"
       and page2._url_edit.text() == "http://127.0.0.1:8093/v1",
       f"{page2._local_btn.text()}/{page2._url_edit.text()}")
+check("C17b ready → 快捷行出现「⏹ 停止模型服务」（主界面直接可停）",
+      page2._stop_model_btn.isVisible(),
+      page2._stop_model_btn.text())
 plug.LOCAL_SERVER._emit("stopped", "")   # 复位，别污染后面
+check("C17c stopped → 停止按钮隐藏（不占聊天界面空间）",
+      not page2._stop_model_btn.isVisible())
 
 # ---- 清空 + 配置落盘 ----
 page2._clear_chat()

@@ -645,6 +645,16 @@ class AiChatPage(QWidget):
                                 self.send_quick(k, p))
             quick_row.addWidget(btn)
         quick_row.addStretch()
+        # 停止模型服务（仅本地服务运行中显示）：聊天主界面直接可停，
+        # 不必展开后端设置卡——用户反馈「连接后一直跑在后台」没有顺手的停止入口
+        self._stop_model_btn = QPushButton("⏹ 停止模型服务", self)
+        self._stop_model_btn.setObjectName("secondaryBtn")
+        self._stop_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._stop_model_btn.setToolTip(
+            "结束 llama-server 进程并释放显存；需要时再到后端设置里重新启动")
+        self._stop_model_btn.clicked.connect(LOCAL_SERVER.stop)
+        self._stop_model_btn.setVisible(False)   # ready/starting 才显示
+        quick_row.addWidget(self._stop_model_btn)
         self._toggle_btn = QPushButton("⚙ 后端设置", self)
         self._toggle_btn.setObjectName("secondaryBtn")
         self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -676,7 +686,8 @@ class AiChatPage(QWidget):
                   "首次使用：点右下角「⚙ 后端设置」选好后端，"
                   "或用「本地推理」选 gguf 一键启动。")
 
-        # 本地服务状态跟随（模块级单例：页面重建后状态不丢）
+        # 本地服务状态跟随（模块级单例：页面重建后状态不丢；
+        # add_listener 内部会立即回放当前状态，新页面按钮/显隐自动对齐）
         LOCAL_SERVER.add_listener(self._on_local_status)
         # 页面销毁时退订，避免 _listeners 里累积已销毁页面的死引用
         self.destroyed.connect(
@@ -906,8 +917,13 @@ class AiChatPage(QWidget):
                            int(self._cfg.get("local_port") or 8093))
 
     def _on_local_status(self, status: str, detail: str):
-        """本地服务状态 → 状态行 + 按钮文案；就绪时自动接上该后端"""
+        """本地服务状态 → 状态行 + 按钮文案；就绪时自动接上该后端
+
+        停止按钮显隐：ready/starting（运行或拉起中）显示，其余隐藏——
+        停止入口常驻聊天界面，用完一键释放显存（2026-09-27 用户反馈）。
+        """
         self._local_status.setText(detail or status)
+        self._stop_model_btn.setVisible(status in ("ready", "starting"))
         if status == "ready":
             self._local_btn.setText("停止本地服务")
             base = f"http://127.0.0.1:{LOCAL_SERVER.port}/v1"
