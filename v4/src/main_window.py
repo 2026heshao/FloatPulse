@@ -1074,8 +1074,13 @@ class MainWindow(QWidget):
         # 记录重排前各按钮位置（父级坐标）
         old_pos = {key: btn.pos() for key, btn in self._nav_btns.items()}
         # 先把 8 个功能页按钮全部移出布局，再按新顺序插回槽位 1..8
-        for btn in self._nav_btns.values():
-            v.removeWidget(btn)
+        # ⚠ 只摘 order 里的键：插件页按钮（AI 助手等）也在 _nav_btns 里
+        #   （register_plugin_page 登记），但**不参与换位**、不在 order 里。
+        #   若按 values() 全量摘除，插件键会被摘下后无人插回——布局瞬时
+        #   塌缩一行（设置/说明/版本号上移「震荡」一下再弹回），插件键则
+        #   自由漂浮与设置键重叠（2026-09-28 用户实测截图）。
+        for key in order:
+            v.removeWidget(self._nav_btns[key])
         for i, key in enumerate(order):
             v.insertWidget(1 + i, self._nav_btns[key])
         # 强制布局立即生效：Qt 布局是惰性应用的，不 activate 的话下面
