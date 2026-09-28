@@ -7,21 +7,109 @@
 日志查看等设置项 UI 与交互逻辑。
 通过 host（MainWindow）访问配置管理器、主题切换、各业务信号与
 软件导航页面实例。
+
+2026-09-29 起页内带左侧分类导航（SETTINGS_CATEGORIES）：每个分类
+独立成滚动页挂在 QStackedWidget 上，「恢复默认设置」移到页底常驻栏。
 """
 
 import os
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QStackedWidget,
     QLineEdit,
+    QMenu, QCheckBox, QWidgetAction, QButtonGroup,
     QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal
+# ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
+#   此前漏了这行导入 → MainWindow 构造走到设置页就 NameError，
+#   程序直接起不来（2026-09-29 11:07 修）。
+from PyQt6.QtGui import QAction
+
 
 from src.controls import Stepper, ToggleSwitch
 from src.glass_dialog import make_separator
+from src.plugin_net import make_async_poster
+from src.ai_server import AI_SERVER, ST_READY, ST_STARTING
+from src.app_version import APP_VERSION
 from src import autostart
+
+
+# 设置页内部分类导航：顺序即左栏展示顺序，(key, 图标, 名称)。
+# 8 个行为配置分类沿用原单页分组的语义（不合并不改名），
+# 「关于」从滚动页尾独立成分类，「恢复默认设置」移至页底常驻栏。
+SETTINGS_CATEGORIES = (
+    ("appearance", "🎨", "外观"),
+    ("ball", "🔵", "悬浮球"),
+    ("clipboard", "📋", "剪贴板与碎片"),
+    ("assets", "🖼", "临时素材"),
+    ("tools", "⚡", "全局工具"),
+    ("system", "🚀", "启动与系统"),
+    ("export", "📤", "导出"),
+    ("ai", "🧠", "AI 配置"),
+    ("about", "ℹ️", "关于"),
+)
+
+
+class PluginsPickButton(QPushButton):
+    """「接入插件」多选选择器：按钮 + 下拉菜单内嵌勾选框。
+
+    用户要求：下拉选择、可多选。用 QMenu + QCheckBox（原生控件自己
+    处理点击）而不是 QComboBox 勾选条目——后者要吞弹层鼠标事件才能
+    不收起，真实环境下点击路径不稳定（实测勾选失效）；QWidgetAction
+    里的复选框点击不收起菜单，连续多选天然可靠。
+
+    信号 ``changed(list[str])``：勾选集合变化时发出（元素为插件 id）。
+    按钮文案聚合已勾选插件名，空时显示占位提示。
+    """
+
+    changed = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__("（未勾选任何插件）", parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._menu = QMenu(self)
+        self._boxes = {}          # plugin_id -> QCheckBox
+        self._block = False       # reload 批量重建时静音 toggled
+        self.setMenu(self._menu)
+
+    def reload(self, selected, candidates):
+        """重建菜单条目。candidates: [(plugin_id, 展示名)]；selected: 已勾选"""
+        self._block = True
+        self._menu.clear()
+        self._boxes = {}
+        sel = set(selected or [])
+        for pid, name in candidates or []:
+            box = QCheckBox(name if pid == name else f"{name}（{pid}）",
+                            self._menu)
+            box.setChecked(pid in sel)
+            box.toggled.connect(
+                lambda _on, p=pid: self._on_toggled(p))
+            wa = QWidgetAction(self._menu)
+            wa.setDefaultWidget(box)
+            self._menu.addAction(wa)
+            self._boxes[pid] = box
+        if not candidates:
+            empty = QAction("（暂无可接入的 AI 插件）", self._menu)
+            empty.setEnabled(False)
+            self._menu.addAction(empty)
+        self._block = False
+        self._update_text()
+
+    def selected(self) -> list:
+        """当前勾选的插件 id 列表（按条目顺序）"""
+        return [pid for pid, box in self._boxes.items() if box.isChecked()]
+
+    def _on_toggled(self, pid: str):
+        if not self._block:
+            self._update_text()
+            self.changed.emit(self.selected())
+
+    def _update_text(self):
+        names = [box.text() for box in self._boxes.values()
+                 if box.isChecked()]
+        self.setText("、".join(names) if names else "（未勾选任何插件）")
 
 
 class SettingsPanel(QWidget):
@@ -31,6 +119,7 @@ class SettingsPanel(QWidget):
         super().__init__()
         self._host = host
         self._config = host._config
+        self._row_sep = {}          # 行 widget → 其下方分隔线（显隐联动用）
         self._build_ui()
 
     # ---------------- 小工具 ----------------
@@ -106,7 +195,12 @@ class SettingsPanel(QWidget):
                     | Qt.AlignmentFlag.AlignVCenter)
         vbox.addWidget(row)
         if not last:
-            vbox.addWidget(make_separator())
+            sep = make_separator()
+            vbox.addWidget(sep)
+            # 登记行与分隔线的从属关系：整行隐藏时（如 AI 本地配置区）
+            # 分隔线必须跟着藏，否则卡片里会留下一串悬空横线撑出空档
+            self._row_sep[row] = sep
+        return row
 
     def _build_ui(self):
         page = self
@@ -114,30 +208,34 @@ class SettingsPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        scroll = QScrollArea()
-        scroll.setObjectName("settingsScroll")
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        inner = QWidget()
-        v = QVBoxLayout(inner)
-        v.setContentsMargins(0, 0, 8, 0)
-        v.setSpacing(8)
-
         page_title = QLabel("⚙️ 设置")
         page_title.setObjectName("pageTitle")
-        v.addWidget(page_title)
+        outer.addWidget(page_title)
+        outer.addSpacing(8)
 
-        # 分组顺序：外观 → 悬浮球 → 剪贴板 → 素材 → 全局工具 → 启动系统
-        # 组内行顺序 = 功能亲密度（同组相邻项最常被一起调整）
+        # ---- 中部：左分类导航 + 右分类内容，每个分类独立滚动 ----
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(14)
+        body.addWidget(self._build_nav_rail())
+        divider = QFrame()
+        divider.setObjectName("settingsNavDivider")
+        divider.setFixedWidth(1)
+        body.addWidget(divider)
+        self._cat_stack = QStackedWidget()
+        body.addWidget(self._cat_stack, 1)
+        outer.addLayout(body, 1)
+        self._cat_vboxes = {}
+
+        # 分类顺序 = SETTINGS_CATEGORIES；组内行顺序 = 功能亲密度
+        # （同组相邻项最常被一起调整），沿用原单页语义不合并不改名。
         self._toggles = []
         add_row = self._add_row
         group = self._group_card
 
-        # ================= 1. 外观与主题 =================
-        gv = group(v, "🎨 外观与主题")
+        # ================= 1. 外观（外观与主题） =================
+        cv = self._new_category_page("appearance")
+        gv = group(cv, "🎨 外观与主题")
 
         theme_ctl = QWidget()
         theme_row = QHBoxLayout(theme_ctl)
@@ -179,7 +277,8 @@ class SettingsPanel(QWidget):
                 self._set_card_size, last=True)
 
         # ================= 2. 悬浮球 =================
-        gv = group(v, "🔵 悬浮球")
+        cv = self._new_category_page("ball")
+        gv = group(cv, "🔵 悬浮球")
 
         self._set_ball_visible = self._toggle("ball_visible", True)
         self._set_ball_visible.toggled.connect(self._on_ball_visibility_changed)
@@ -226,7 +325,8 @@ class SettingsPanel(QWidget):
                 self._set_plugins, last=True)
 
         # ================= 3. 剪贴板与碎片 =================
-        gv = group(v, "📋 剪贴板与碎片")
+        cv = self._new_category_page("clipboard")
+        gv = group(cv, "📋 剪贴板与碎片")
 
         self._set_clipboard_max = Stepper(10, 10000,
                                           self._config.get("clipboard_max_items", 200),
@@ -251,7 +351,8 @@ class SettingsPanel(QWidget):
                 self._set_clipboard_images, last=True)
 
         # ================= 4. 临时素材 =================
-        gv = group(v, "🖼 临时素材")
+        cv = self._new_category_page("assets")
+        gv = group(cv, "🖼 临时素材")
 
         self._set_temp_asset_max_count = Stepper(
             5, 500, self._config.get("temp_asset_max_count", 50),
@@ -283,7 +384,8 @@ class SettingsPanel(QWidget):
                 self._set_asset_thumb, last=True)
 
         # ================= 5. 全局工具 =================
-        gv = group(v, "⚡ 全局工具")
+        cv = self._new_category_page("tools")
+        gv = group(cv, "⚡ 全局工具")
 
         self._set_quick_capture = self._toggle("quick_capture_enabled", True)
         self._set_quick_capture.toggled.connect(self._on_quick_capture_changed)
@@ -338,7 +440,8 @@ class SettingsPanel(QWidget):
                 self._set_pomodoro_auto, last=True)
 
         # ================= 6. 启动与系统 =================
-        gv = group(v, "🚀 启动与系统")
+        cv = self._new_category_page("system")
+        gv = group(cv, "🚀 启动与系统")
 
         self._set_autostart = self._toggle("autostart", False)
         self._set_autostart.setChecked(autostart.is_autostart_enabled())
@@ -365,7 +468,7 @@ class SettingsPanel(QWidget):
         # 单列一组而非并入现有组：现有六组各管一类"行为配置"，
         # 导出是「数据出口」而非行为开关，且需要承载路径 + 操作两个控件，
         # 并入任一组都会破坏该组"同类项相邻"的语义。
-        gv = group(v, "📤 导出")
+        gv = group(self._new_category_page("export"), "📤 导出")
 
         vault_ctl = QWidget()
         vault_row = QHBoxLayout(vault_ctl)
@@ -396,19 +499,165 @@ class SettingsPanel(QWidget):
         add_row(gv, "一键导出", "笔记 / 碎片 / 任务导出为 Markdown，重复导出覆盖同名文件",
                 self._set_export_btn, last=True)
 
-        # ---- 恢复默认：全局操作，不属于任何分组 ----
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        # ================= 8. AI 总配置 =================
+        # 插件 AI 后端的单一真相源（2026-09-29）：云端 / 本地只配一次，
+        # 接入哪些插件由用户在下拉框勾选（勾选 = 授权）。接入的插件经
+        # ctx.ai 实时读取这里的配置，不再各自维护后端设置；未接入的
+        # 插件照旧用各自私有配置（向后兼容，互不影响）。
+        gv = group(self._new_category_page("ai"), "🧠 AI 总配置")
+
+        # ---- 后端模式：云端 / 本地（modeBtn checked 高亮，与插件页同款）----
+        mode_ctl = QWidget()
+        mode_row = QHBoxLayout(mode_ctl)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.setSpacing(8)
+        self._ai_mode_cloud = QPushButton("☁ 云端", self)
+        self._ai_mode_local = QPushButton("💻 本地", self)
+        for _b in (self._ai_mode_cloud, self._ai_mode_local):
+            _b.setObjectName("modeBtn")
+            _b.setCheckable(True)
+            _b.setFixedHeight(28)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ai_mode_cloud.clicked.connect(
+            lambda: self._on_ai_mode("cloud"))
+        self._ai_mode_local.clicked.connect(
+            lambda: self._on_ai_mode("local"))
+        mode_row.addWidget(self._ai_mode_cloud)
+        mode_row.addWidget(self._ai_mode_local)
+        self._ai_row_mode = add_row(
+            gv, "后端模式", "云端 API 或本机 llama-server；切换即显示对应配置区",
+            mode_ctl)
+
+        # ---- 云端字段（OpenAI 兼容 /chat/completions；仅云端模式显示）----
+        self._ai_url = QLineEdit(str(self._config.get("ai_cloud_base_url", "")
+                                     or ""))
+        self._ai_url.setPlaceholderText("https://api.deepseek.com/v1")
+        self._ai_url.setFixedWidth(240)
+        self._ai_row_url = add_row(
+            gv, "云端地址", "OpenAI 兼容接口；回环地址（Ollama 等）可免 key",
+            self._ai_url)
+        self._ai_key = QLineEdit(str(self._config.get("ai_cloud_api_key", "")
+                                     or ""))
+        self._ai_key.setPlaceholderText("API key（回环地址可留空）")
+        self._ai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._ai_key.setFixedWidth(240)
+        self._ai_row_key = add_row(gv, "云端 Key", "云端服务的 API key；只存本机配置文件",
+                                   self._ai_key)
+        self._ai_model = QLineEdit(str(self._config.get("ai_cloud_model", "")
+                                       or ""))
+        self._ai_model.setPlaceholderText("模型名，如 deepseek-chat")
+        self._ai_model.setFixedWidth(240)
+        self._ai_row_model = add_row(gv, "云端模型", "模型名，如 deepseek-chat / qwen-plus",
+                                     self._ai_model)
+
+        # ---- 本地字段（宿主自己拉起 llama-server；仅本地模式显示）----
+        exe_ctl = QWidget()
+        exe_row = QHBoxLayout(exe_ctl)
+        exe_row.setContentsMargins(0, 0, 0, 0)
+        exe_row.setSpacing(8)
+        self._ai_exe = QLineEdit(str(self._config.get("ai_local_server_exe",
+                                                      "") or ""))
+        self._ai_exe.setPlaceholderText("llama-server.exe 路径")
+        self._ai_exe.setFixedWidth(160)
+        exe_row.addWidget(self._ai_exe)
+        exe_btn = QPushButton("浏览…")
+        exe_btn.setObjectName("secondaryBtn")
+        exe_btn.setFixedHeight(30)
+        exe_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        exe_btn.clicked.connect(
+            lambda: self._on_ai_browse(self._ai_exe, "程序 (*.exe)"))
+        exe_row.addWidget(exe_btn)
+        self._ai_row_exe = add_row(gv, "本地程序", "llama.cpp 的 llama-server.exe 路径",
+                                   exe_ctl)
+
+        gguf_ctl = QWidget()
+        gguf_row = QHBoxLayout(gguf_ctl)
+        gguf_row.setContentsMargins(0, 0, 0, 0)
+        gguf_row.setSpacing(8)
+        self._ai_gguf = QLineEdit(str(self._config.get("ai_local_gguf", "")
+                                      or ""))
+        self._ai_gguf.setPlaceholderText("模型文件（.gguf）")
+        self._ai_gguf.setFixedWidth(160)
+        gguf_row.addWidget(self._ai_gguf)
+        gguf_btn = QPushButton("浏览…")
+        gguf_btn.setObjectName("secondaryBtn")
+        gguf_btn.setFixedHeight(30)
+        gguf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        gguf_btn.clicked.connect(
+            lambda: self._on_ai_browse(self._ai_gguf, "GGUF 模型 (*.gguf)"))
+        gguf_row.addWidget(gguf_btn)
+        self._ai_row_gguf = add_row(gv, "本地模型", ".gguf 模型文件路径", gguf_ctl)
+
+        self._ai_port = QLineEdit(str(self._config.get("ai_local_port", 8095)
+                                      or 8095))
+        self._ai_port.setFixedWidth(72)
+        self._ai_row_port = add_row(
+            gv, "本地端口", "宿主本地服务端口（默认 8095，避开插件自管端口）",
+            self._ai_port)
+
+        local_ctl = QWidget()
+        local_row = QHBoxLayout(local_ctl)
+        local_row.setContentsMargins(0, 0, 0, 0)
+        local_row.setSpacing(8)
+        self._ai_local_btn = QPushButton("启动本地服务", self)
+        self._ai_local_btn.setObjectName("primaryBtn")
+        self._ai_local_btn.setFixedHeight(30)
+        self._ai_local_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ai_local_btn.clicked.connect(self._on_ai_local_toggle)
+        local_row.addWidget(self._ai_local_btn)
+        self._ai_local_status = QLabel("本地服务未运行")
+        self._ai_local_status.setObjectName("hintLabel")
+        local_row.addWidget(self._ai_local_status, 1)
+        self._ai_row_local = add_row(
+            gv, "本地服务", "启动后所有接入插件共用；退出程序自动结束、不占显存",
+            local_ctl)
+
+        # ---- 保存并测试 ----
+        self._ai_save_btn = QPushButton("💾 保存并测试连接", self)
+        self._ai_save_btn.setObjectName("primaryBtn")
+        self._ai_save_btn.setFixedHeight(30)
+        self._ai_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ai_save_btn.clicked.connect(self._on_ai_save_test)
+        add_row(gv, "保存并测试连接", "配置落盘；云端发 1-token 探活，本地拉起服务并探活",
+                self._ai_save_btn)
+        self._ai_status = QLabel("")
+        self._ai_status.setObjectName("hintLabel")
+        self._ai_status.setMinimumHeight(18)
+        gv.addWidget(self._ai_status)
+
+        # ---- 接入插件（多选下拉：已安装 + 已启用 + 声明 ai 能力）----
+        self._ai_plugins_combo = PluginsPickButton(self)
+        self._ai_plugins_combo.setFixedWidth(240)
+        self._ai_plugins_combo.changed.connect(self._on_ai_plugins_changed)
+        self._ai_plugins_reload()
+        add_row(gv, "接入插件",
+                "勾选哪些插件，哪些就改用这里配置的 AI 后端（设置改完即生效）；"
+                "未勾选的插件继续用自己的配置",
+                self._ai_plugins_combo, last=True)
+
+        # 宿主 AI 服务状态跟随（设置页常驻；销毁时退订防死引用）
+        AI_SERVER.add_listener(self._on_ai_local_status)
+        self.destroyed.connect(
+            lambda: AI_SERVER.remove_listener(self._on_ai_local_status))
+        self._ai_apply_mode_ui()
+
+        # ---- 恢复默认：全局操作 → 页底常驻栏 ----
+        # 不属于任何分类，放 outer 层常驻可见：跨分类的全局动作不用翻找。
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 0, 0, 0)
+        foot.setSpacing(8)
         # 所有设置项均已实时持久化（改动即写盘并联动），无"保存"按钮
-        reset_btn = QPushButton("↺ 恢复默认设置")
-        reset_btn.setObjectName("secondaryBtn")
-        reset_btn.setFixedHeight(32)
-        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.setToolTip("所有设置恢复默认值；软件导航条目、窗口/悬浮球位置会保留")
-        reset_btn.clicked.connect(self._on_reset_settings)
-        btn_row.addWidget(reset_btn)
-        btn_row.addStretch()
-        v.addLayout(btn_row)
+        self._reset_btn = QPushButton("↺ 恢复默认设置")
+        self._reset_btn.setObjectName("secondaryBtn")
+        self._reset_btn.setFixedHeight(32)
+        self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_btn.setToolTip("所有设置恢复默认值；软件导航条目、窗口/悬浮球位置会保留")
+        self._reset_btn.clicked.connect(self._on_reset_settings)
+        foot.addStretch()
+        foot.addWidget(self._reset_btn)
+        outer.addWidget(make_separator())
+        outer.addSpacing(4)
+        outer.addLayout(foot)
 
         # ================= 关于 =================
         about_box = self._group_box()
@@ -421,7 +670,7 @@ class SettingsPanel(QWidget):
         ab_v.addWidget(about_title)
 
         about_text = QLabel(
-            "生活悬浮球 v2.0 | PyQt6 + python-docx\n"
+            f"生活悬浮球 v{APP_VERSION} | PyQt6 + python-docx\n"
             "功能：知识卡片 / 日程任务 / 临时笔记 / 碎片合并\n\n"
             "快捷键：Esc 退出 | Ctrl+W/H 隐藏 | Ctrl+T 主题 | Ctrl+K 站内搜索\n"
             "F1 使用说明 | Ctrl+1~7 切换面板 | Ctrl+Alt+K 快速捕捉\n"
@@ -431,12 +680,70 @@ class SettingsPanel(QWidget):
         about_text.setWordWrap(True)
         ab_v.addWidget(about_text)
 
-        v.addWidget(about_box)
+        av = self._new_category_page("about")
+        av.addWidget(about_box)
 
-        v.addStretch()
+        # 每个分类页尾统一补 stretch：卡片顶对齐、不随窗口高度拉伸
+        for cat_v in self._cat_vboxes.values():
+            cat_v.addStretch()
 
+        # 初始落在第一个分类（不做跨会话记忆——设置访问短平快）
+        self.show_category(SETTINGS_CATEGORIES[0][0])
+
+    # ---- 页内分类导航 ----
+    def _build_nav_rail(self) -> QWidget:
+        """左分类导航栏：按 SETTINGS_CATEGORIES 逐项建钮，QButtonGroup 互斥"""
+        rail = QWidget()
+        rv = QVBoxLayout(rail)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(4)
+        self._cat_btns = {}
+        self._cat_index = {}
+        self._cat_group = QButtonGroup(self)
+        self._cat_group.setExclusive(True)
+        for idx, (key, icon, label) in enumerate(SETTINGS_CATEGORIES):
+            btn = QPushButton(f"{icon}  {label}")
+            btn.setObjectName("settingsNavBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self.show_category(k))
+            self._cat_group.addButton(btn)
+            self._cat_btns[key] = btn
+            self._cat_index[key] = idx
+            rv.addWidget(btn)
+        rv.addStretch()
+        rail.setFixedWidth(140)
+        return rail
+
+    def _new_category_page(self, key: str) -> QVBoxLayout:
+        """为分类 key 建一个滚动页（挂入 stack），返回其内容竖直布局。
+
+        边距沿用原单页 scroll 的约定：右留 8px 给滚动条；
+        页尾 stretch 由 _build_ui 末尾统一补。
+        """
+        scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(0, 0, 8, 0)
+        v.setSpacing(8)
         scroll.setWidget(inner)
-        outer.addWidget(scroll)
+        self._cat_stack.addWidget(scroll)
+        self._cat_vboxes[key] = v
+        return v
+
+    def show_category(self, key: str):
+        """切到指定分类；未知 key 静默忽略（导航点击与外部深链共用此入口）"""
+        btn = self._cat_btns.get(key)
+        if btn is None:
+            return
+        btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
+        self._cat_stack.setCurrentIndex(self._cat_index[key])
 
     def apply_theme(self):
         """主题切换：同步开关配色与主题按钮选中态（由主窗口 _apply_theme 调用）"""
@@ -499,6 +806,9 @@ class SettingsPanel(QWidget):
                 self._config.get("clipboard_capture_images", True))
         if hasattr(self, '_set_task_reminder'):
             self._set_task_reminder.setChecked(self._config.get("task_reminder_enabled", True))
+        # AI 总配置：恢复默认等批量重置后，把字段 / 模式 / 接入下拉框同步回来
+        if hasattr(self, '_ai_url'):
+            self._ai_refresh_fields()
         if hasattr(self, '_set_quick_capture'):
             self._set_quick_capture.setChecked(self._config.get("quick_capture_enabled", True))
         if hasattr(self, '_set_capture_hotkey'):
@@ -806,6 +1116,176 @@ class SettingsPanel(QWidget):
         "last_page_index",      # 上次浏览页面（与启动行为联动）
         "nav_order",            # 左栏功能页显示顺序（用户自定义排序偏好）
     )
+
+    # ---- 🧠 AI 总配置（2026-09-29：插件 AI 后端单一真相源） ----
+    def _ai_poster(self):
+        """懒创建探活桥（与插件网络桥同一条受控通道，UI 线程回调）"""
+        if getattr(self, "_ai_poster_fn", None) is None:
+            self._ai_poster_fn = make_async_poster()
+        return self._ai_poster_fn
+
+    def _ai_refresh_fields(self):
+        """把配置值同步进 AI 卡控件（恢复默认 / 外部改配置后调用）"""
+        self._ai_url.setText(str(self._config.get("ai_cloud_base_url", "") or ""))
+        self._ai_key.setText(str(self._config.get("ai_cloud_api_key", "") or ""))
+        self._ai_model.setText(str(self._config.get("ai_cloud_model", "") or ""))
+        self._ai_exe.setText(str(self._config.get("ai_local_server_exe", "") or ""))
+        self._ai_gguf.setText(str(self._config.get("ai_local_gguf", "") or ""))
+        self._ai_port.setText(str(self._config.get("ai_local_port", 8095) or 8095))
+        self._ai_apply_mode_ui()
+        self._ai_plugins_reload()
+
+    def _ai_apply_mode_ui(self):
+        """当前 ai_backend_mode 反映到模式按钮，并**只显示对应配置区**：
+
+        云端模式 → 云端地址/Key/模型；本地模式 → 程序/模型/端口/本地服务。
+        分隔线登记在 _row_sep 里，随所属行一起显隐——只藏行不藏线的话，
+        卡片里会留下一串悬空横线撑出空档（拆页后 AI 独占一页尤其明显）。
+        """
+        local = self._config.get("ai_backend_mode", "cloud") == "local"
+        self._ai_mode_local.setChecked(local)
+        self._ai_mode_cloud.setChecked(not local)
+        for row, show in (
+            (self._ai_row_url, not local), (self._ai_row_key, not local),
+            (self._ai_row_model, not local), (self._ai_row_exe, local),
+            (self._ai_row_gguf, local), (self._ai_row_port, local),
+            (self._ai_row_local, local),
+        ):
+            row.setVisible(show)
+            sep = self._row_sep.get(row)
+            if sep is not None:
+                sep.setVisible(show)
+
+    def _on_ai_mode(self, mode: str):
+        """云端 / 本地模式切换：即时落盘（探活在保存并测试时做）"""
+        if self._config.get("ai_backend_mode") != mode:
+            self._config.set("ai_backend_mode", mode)
+            self._config.save()
+        self._ai_apply_mode_ui()
+
+    def _on_ai_browse(self, line_edit, name_filter: str):
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "选择文件", "", name_filter)
+        if path:
+            line_edit.setText(path)
+
+    def _ai_collect(self) -> dict:
+        """AI 卡当前值 → 配置键值 dict（不落盘，落盘在保存/启动处）"""
+        try:
+            port = int(self._ai_port.text().strip() or 8095)
+        except ValueError:
+            port = 8095
+        return {
+            "ai_backend_mode": ("local"
+                                if self._ai_mode_local.isChecked()
+                                else "cloud"),
+            "ai_cloud_base_url": self._ai_url.text().strip(),
+            "ai_cloud_api_key": self._ai_key.text().strip(),
+            "ai_cloud_model": self._ai_model.text().strip(),
+            "ai_local_server_exe": self._ai_exe.text().strip(),
+            "ai_local_gguf": self._ai_gguf.text().strip(),
+            "ai_local_port": port,
+        }
+
+    def _on_ai_save_test(self):
+        """保存 AI 总配置；云端发 1-token 探活，本地拉起服务（状态行走广播）"""
+        cfg = self._ai_collect()
+        for key, val in cfg.items():
+            self._config.set(key, val)
+        self._config.save()
+        if cfg["ai_backend_mode"] == "local":
+            self._ai_status.setText("配置已保存，正在拉起本地服务…")
+            AI_SERVER.start(self._ai_poster(), cfg["ai_local_server_exe"],
+                            cfg["ai_local_gguf"], cfg["ai_local_port"])
+            return
+        base = cfg["ai_cloud_base_url"].rstrip("/")
+        model = cfg["ai_cloud_model"]
+        if not base or not model:
+            self._ai_status.setText("⚠ 地址或模型名为空，已保存但无法测试")
+            return
+        if not (base.startswith("http://") or base.startswith("https://")):
+            self._ai_status.setText(f"⚠ 地址必须以 http:// 或 https:// 开头：{base}")
+            return
+        self._ai_status.setText("配置已保存，正在测试连接…")
+        headers = ({"Authorization": f"Bearer {cfg['ai_cloud_api_key']}"}
+                   if cfg["ai_cloud_api_key"] else {})
+        body = {"model": model, "max_tokens": 1, "temperature": 0,
+                "messages": [{"role": "user", "content": "ping"}]}
+        ok = self._ai_poster()(
+            f"{base}/chat/completions", headers, body, 15.0,
+            self._on_ai_probe_done)
+        if not ok:
+            # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复
+            self._ai_status.setText("⚠ 探活请求未能发出（详见 app.log）")
+
+    def _on_ai_probe_done(self, result: dict):
+        """云端探活回调（UI 线程）：✓ / ✗ + 针对性提示"""
+        if result.get("ok"):
+            self._ai_status.setText("✓ 连接成功，接入的插件即刻可用")
+            return
+        err = str(result.get("error") or "未知错误")
+        hint = ""
+        if "401" in err or "403" in err:
+            hint = "（key 缺失或无效）"
+        elif "404" in err:
+            hint = "（地址或模型名不对，地址应以 /v1 结尾）"
+        elif "timed out" in err.lower() or "timeout" in err.lower():
+            hint = "（超时，可重试一次）"
+        elif "refused" in err.lower():
+            hint = "（端口没有服务在听）"
+        self._ai_status.setText(f"✗ 连接失败：{err}{hint}")
+
+    def _on_ai_local_toggle(self):
+        """启动 / 停止宿主本地 AI 服务（先落盘当前字段再启动）"""
+        if AI_SERVER.running:
+            AI_SERVER.stop()
+            return
+        cfg = self._ai_collect()
+        for key, val in cfg.items():
+            self._config.set(key, val)
+        self._config.save()
+        AI_SERVER.start(self._ai_poster(), cfg["ai_local_server_exe"],
+                        cfg["ai_local_gguf"], cfg["ai_local_port"])
+
+    def _on_ai_local_status(self, status: str, detail: str):
+        """宿主 AI 服务状态广播 → 按钮文案 + 状态行"""
+        self._ai_local_status.setText(detail or status)
+        self._ai_local_btn.setText(
+            "停止本地服务" if status in (ST_READY, ST_STARTING)
+            else "启动本地服务")
+
+    def _ai_candidate_plugins(self) -> list:
+        """接入下拉框的候选：已安装 + 已启用 + manifest 声明 ai 能力"""
+        loader = getattr(self._host, "_plugin_loader", None)
+        if loader is None:
+            return []
+        disabled = set(self._config.get("plugins_disabled", []) or [])
+        out = []
+        try:
+            plugins = loader.loaded_plugins()
+        except Exception:                 # noqa: BLE001 - 面板不能因插件崩
+            return []
+        for lp in plugins or []:
+            manifest = getattr(lp, "manifest", None) or {}
+            caps = manifest.get("capabilities") or []
+            if "ai" not in caps:
+                continue
+            pid = getattr(lp, "plugin_id", "")
+            if not pid or pid in disabled:
+                continue
+            out.append((pid, str(manifest.get("name") or pid)))
+        return out
+
+    def _ai_plugins_reload(self):
+        """重建接入插件下拉框（选项 = 候选；勾选态 = 配置里的 ai_plugins）"""
+        self._ai_plugins_combo.reload(
+            self._config.get("ai_plugins", []) or [],
+            self._ai_candidate_plugins())
+
+    def _on_ai_plugins_changed(self, selected: list):
+        """接入集合变化：即时落盘（插件下一发请求即生效，无需重启）"""
+        self._config.set("ai_plugins", list(selected))
+        self._config.save()
 
     def _on_reset_settings(self):
         """恢复默认设置：二次确认 → 重置配置 → 广播全部联动信号 → 刷新面板"""

@@ -52,6 +52,7 @@ from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QPixmap, QShortcut, QK
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
+from src.app_version import APP_VERSION
 from src.config import (
     sanitize_nav_order, DEFAULT_NAV_ORDER, LAST_PAGE_INDEX_MAX,
 )
@@ -993,7 +994,8 @@ class MainWindow(QWidget):
         title.setObjectName("titleBarLabel")
         h.addWidget(title)
 
-        sub = QLabel("v2.0")
+        # ★ 版本号读 app_version.APP_VERSION（2026-09-29 修，原因同侧栏底部版本号）
+        sub = QLabel(f"v{APP_VERSION}")
         sub.setObjectName("titleBarSub")
         h.addWidget(sub)
         h.addStretch()
@@ -1155,7 +1157,12 @@ class MainWindow(QWidget):
         cv.addStretch()
 
         # 底部版本信息（固定在滚动区之外，始终可见）
-        ver = QLabel("v2.0 · PyQt6")
+        # ★ 版本号取 app_version.APP_VERSION（单一真相源，2026-09-29 修）：
+        #   此前硬编码 "v2.0"，程序都已经 4.6.0 了侧栏还显示 v2.0 ——
+        #   截图里一眼可见（README 首屏图也带着这个错），属于用户可见的
+        #   对外口径错误，而 app_version.py 的注释明确要求它与 CHANGELOG /
+        #   Release tag 对齐，所以这里必须读常量而不是再写一遍字面量。
+        ver = QLabel(f"v{APP_VERSION} · PyQt6")
         ver.setObjectName("sideBarFoot")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v.addWidget(ver)
@@ -1340,10 +1347,6 @@ class MainWindow(QWidget):
         用户找不到"在哪展开"。
         """
         cv = self._nav_btns_layout
-        # 进行中的展开/折叠动画必须先落终态：动画把条目的 maximumHeight
-        # 压在 0~row_h 之间，此时重排会按"半截高度"排布，而且动画还会
-        # 继续改几何 → 重排结果被动画覆盖
-        self._stop_nav_group_anims()
         # 拖拽残留的占位 spacer 必须先摘掉，否则下面的下标全部偏移
         if self._nav_free_spacer is not None:
             cv.removeItem(self._nav_free_spacer)
@@ -1358,7 +1361,14 @@ class MainWindow(QWidget):
         self._nav_layout_seq = seq
         self._nav_order = list(order)
         cv.activate()
-        self._apply_nav_visibility()
+        # 进行中的展开/折叠动画必须先落终态：动画把条目的 maximumHeight
+        # 压在 0~row_h 之间，此时重排会按"半截高度"排布，而且动画还会
+        # 继续改几何 → 重排结果被动画覆盖。
+        # ★ 必须在 insertWidget **之后**：落终态会走 _apply_nav_visibility
+        #   → setVisible(True)，此时按钮必须已带父级 —— 首次铺开时按钮
+        #   还是无父级的裸控件，提前 setVisible 会把它们变成真实顶层
+        #   窗口，在屏幕左上角闪现一排小黑窗（2026-09-29 启动闪窗排查）。
+        self._stop_nav_group_anims()
         self._nav_free_layout = False
 
     def _nav_sequence(self, order: list) -> list:
@@ -2399,11 +2409,17 @@ class MainWindow(QWidget):
         self.activateWindow()
         self._switch_page(5)
 
-    def show_settings_page(self):
+    def show_settings_page(self, category=None):
+        """跳转设置页；category 可选，直接落到设置页内部分类
+        （SettingsPanel.SETTINGS_CATEGORIES 的 key，非法值由其自行忽略）"""
         self.show()
         self.raise_()
         self.activateWindow()
         self._switch_page(6)
+        if category is not None:
+            panel = getattr(self, "_page_settings", None)
+            if panel is not None:
+                panel.show_category(category)
 
     def show_plugins_page(self):
         """打开并跳转到插件中心（补齐其余面板都有的 show_xxx_page 入口）。

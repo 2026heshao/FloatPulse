@@ -497,6 +497,34 @@ QWidget#settingsGroup {
     border-radius: 12px;
 }
 
+/* ---- 设置页内部分类导航（2026-09-29）：三态对齐侧栏 navBtn、去掉拖拽态 ----
+   checked 的 font-weight 变粗会改 sizeHint —— 侧栏 navBtn 因此禁止加粗
+   （拖拽期间 sizeHint 缓存失效），这里的条目是静态 VBox、无高度动画，
+   加粗安全。 */
+QPushButton#settingsNavBtn {
+    background-color: transparent;
+    color: $text_secondary;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    padding: 8px 12px;
+    text-align: left;
+    font-size: 13px;
+}
+QPushButton#settingsNavBtn:hover {
+    background-color: $primary_a08;
+    color: $text;
+}
+QPushButton#settingsNavBtn:checked {
+    background-color: $primary_a18;
+    color: $primary;
+    border: 1px solid $primary_a30;
+    font-weight: 600;
+}
+QFrame#settingsNavDivider {
+    background-color: $hair;
+    border: none;
+}
+
 /* ---- 插件中心 ---- */
 QFrame#pluginCard {
     background-color: $panel_fill;
