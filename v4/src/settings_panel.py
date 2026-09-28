@@ -423,7 +423,7 @@ class SettingsPanel(QWidget):
         about_text = QLabel(
             "生活悬浮球 v2.0 | PyQt6 + python-docx\n"
             "功能：知识卡片 / 日程任务 / 临时笔记 / 碎片合并\n\n"
-            "快捷键：Esc 退出 | Ctrl+W/H 隐藏 | Ctrl+T 主题 | Ctrl+K 全库搜索\n"
+            "快捷键：Esc 退出 | Ctrl+W/H 隐藏 | Ctrl+T 主题 | Ctrl+K 站内搜索\n"
             "F1 使用说明 | Ctrl+1~7 切换面板 | Ctrl+Alt+K 快速捕捉\n"
             "Ctrl+Alt+S 截图钉屏 | 右键悬浮球 / 右键卡片也可退出"
         )

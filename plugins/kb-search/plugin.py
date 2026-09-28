@@ -72,7 +72,58 @@ KIND_LABEL = {
     "note": "笔记",
     "fragment": "碎片",
     "task": "任务",
+    "asset": "素材",
 }
+
+# 结果标题行锚点用的 URL scheme。用自定义 scheme 而不是 http/file：
+# 宿主 QTextBrowser 关掉 openExternalLinks 后只发 anchorClicked，
+# 不会被系统浏览器抢走。
+RESULT_SCHEME = "fp-result"
+
+# 富文本里的强调色**不能靠 QSS**：QTextBrowser 的 setHtml 只认行内样式，
+# 所以颜色必须由插件自己按主题注入。取不到主题色时的兜底值。
+_ACCENT_FALLBACK = {"light": "#27787A", "dark": "#6FFFE9"}
+DEFAULT_THEME = "light"
+
+
+def accent_for(theme) -> str:
+    """当前主题下「既当链接色又当高亮色」的强调色。
+
+    为什么复用宿主的 ``$secondary_text``（次按钮文字色）：那个 token 的选型
+    标准正是「浅底和深底都要读得清」——light 压深到 #27787A（白底约 4.6:1），
+    dark 直接用 #6FFFE9（深底 14.7:1）。早期版本在这里写死了 #0a7d7b，
+    浅色主题下没问题，**深色主题下结果标题几乎看不见**（实测截图确认）。
+    """
+    theme = theme if theme in _ACCENT_FALLBACK else DEFAULT_THEME
+    try:
+        from src.theme import get_colors
+        color = (get_colors(theme) or {}).get("secondary_text")
+        if isinstance(color, str) and color.startswith("#") \
+                and len(color) in (4, 7):
+            return color
+    except Exception:                             # noqa: BLE001 - 取不到就用兜底
+        pass
+    return _ACCENT_FALLBACK[theme]
+
+
+def theme_of(host) -> str:
+    """从宿主窗口读当前主题名；读不到按 light 处理（不抛）"""
+    try:
+        theme = getattr(host, "current_theme", None)
+    except Exception:                             # noqa: BLE001
+        theme = None
+    return theme if theme in ("light", "dark") else DEFAULT_THEME
+
+
+def _host_window(ctx):
+    """取宿主窗口；没有 / 抛异常都返回 None（配色退化，不影响功能）"""
+    getter = getattr(ctx, "parent_window", None) if ctx is not None else None
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:                             # noqa: BLE001
+        return None
 
 
 # ====================================================================
@@ -135,6 +186,18 @@ def collect_documents(data):
         docs.append((f"task:{task.get('task_id')}", "task",
                      f"任务 · {title}{suffix}", body))
 
+    # 素材：宿主只给元数据（没有文件路径），所以按**文件名**索引，
+    # 与并入前的宿主全库搜索口径一致——用户找的是「那个 Excel」，不是内容
+    for asset in (data.assets() if hasattr(data, "assets") else []) or []:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("original_name") or "").strip()
+        if not name:
+            continue
+        docs.append((f"asset:{asset.get('asset_id')}", "asset",
+                     f"素材 · {name}{' · 图片' if asset.get('is_image') else ''}",
+                     name))
+
     # 单条正文过长时截断：索引成本与噪声都主要来自这里
     return [(uid, kind, title, text[:PREVIEW_CHARS])
             for uid, kind, title, text in docs]
@@ -153,19 +216,26 @@ def build_index(docs, index=None):
 # ====================================================================
 # 结果渲染（HTML 高亮）
 # ====================================================================
-def render_results_html(hits, query):
+def render_results_html(hits, query, accent=None):
     """把命中列表渲染成一段 HTML。
 
     - **一律 html.escape**：命中片段是用户自己的原文，里面必然有 ``<``
       ``&``（贴代码是常态），不转义会被 QTextBrowser 当标签吃掉
     - 命中区间用 ``<span>`` 着色加粗；用 ``core.split_by_spans`` 算区间，
       核心层只给下标、不知道渲染方式（控件换了也不用改核心）
+    - **每条结果的标题行是一个锚点** ``fp-result:<下标>``：点它就跳转到
+      对应面板（下标由渲染顺序决定，调用方必须缓存同一份 hits 列表来反查）
+    - ⚠ 锚点标签是**我们自己生成的**，不进 html.escape；用户文本（标题、
+      片段）照旧全部转义——两者混在一起时最容易漏掉一处
+    - ``accent`` 是主题相关的强调色（QTextBrowser 不认 QSS，只能行内注入）；
+      不传则用 light 主题的值，保证纯函数调用方（测试）行为稳定
     - 分数也显示出来（保留 2 位）：调参和判断「为什么这条排前」时有用
     """
     if not hits:
         return ""
+    color = accent or _ACCENT_FALLBACK[DEFAULT_THEME]
     blocks = []
-    for hit in hits:
+    for i, hit in enumerate(hits):
         kind = KIND_LABEL.get(hit.kind, hit.kind or "其它")
         head = html.escape(f"[{kind}] {hit.title}")
         pieces = []
@@ -174,16 +244,46 @@ def render_results_html(hits, query):
             pieces.append(f'<span class="hit">{esc}</span>' if is_hit
                           else esc)
         blocks.append(
-            f'<p class="head">{head}'
+            f'<p class="head">'
+            f'<a class="res" href="{RESULT_SCHEME}:{i}">{head}</a>'
             f'<span class="score">　{hit.score:.2f}</span></p>'
             f'<p class="body">…{"".join(pieces)}…</p>')
     return ("<style>"
             ".head{font-weight:600;margin:10px 0 2px}"
             ".score{font-size:11px;opacity:.55}"
             ".body{margin:0 0 8px;line-height:1.55}"
-            ".hit{font-weight:700;color:#0a7d7b}"
-            ".empty{opacity:.6}"
+            f".hit{{font-weight:700;color:{color}}}"
+            f".res{{color:{color};text-decoration:underline}}"
             "</style>" + "".join(blocks))
+
+
+def parse_result_anchor(url_text):
+    """``fp-result:<下标>`` → 下标；不是本插件的锚点返回 ``None``。
+
+    单独抽出来是因为这里错起来是静默的：解析歪一点就会跳到**另一条**结果上，
+    用户只会觉得「点了没反应 / 点错了」，不会报错。纯函数便于直接钉住。
+    """
+    prefix = f"{RESULT_SCHEME}:"
+    text = url_text if isinstance(url_text, str) else str(url_text or "")
+    if not text.startswith(prefix):
+        return None
+    try:
+        idx = int(text[len(prefix):])
+    except ValueError:
+        return None
+    return idx if idx >= 0 else None
+
+
+def pick_jump_keyword(matched, fallback=""):
+    """跳转时带进目标面板搜索框的关键词。
+
+    目标面板（碎片 / 笔记）的搜索框是**原样子串过滤**：拿整条查询
+    「月报 归档」去过滤，什么都匹配不上，表现为「切过去列表是空的」。
+    所以优先取**命中的检索项里最长的一个**——``hit.matched`` 里的项由
+    ``make_snippet`` 保证在原文里字面出现过，拿它过滤必有结果。
+    """
+    items = [m for m in (matched or ()) if isinstance(m, str) and m]
+    return max(items, key=len) if items else str(fallback or "").strip()
 
 
 # ====================================================================
@@ -229,12 +329,29 @@ class SearchPage(QWidget):
         self.setObjectName("pluginPage")
         self._index = core.SearchIndex()
         self._docs = 0
+        # 渲染顺序的命中列表：锚点 href 里存的是它的下标，点击时靠它反查
+        self._hits = []
         self._build_ui()
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(SEARCH_DEBOUNCE_MS)
         self._debounce.timeout.connect(self._run_search)
         self.index_ready.connect(self._on_index_ready)
+        # 富文本的强调色要跟着主题走（QSS 管不到 QTextBrowser 内部），
+        # 所以订阅宿主的 theme_changed，切换后立即重渲染已有结果
+        self._accent = accent_for(theme_of(_host_window(ctx)))
+        theme_sig = getattr(_host_window(ctx), "theme_changed", None)
+        if theme_sig is not None and hasattr(theme_sig, "connect"):
+            try:
+                theme_sig.connect(self._on_theme_changed)
+            except Exception:                     # noqa: BLE001 - 订阅失败只影响配色
+                pass
+
+    def _on_theme_changed(self, *_args):
+        """主题切换 → 换强调色并重渲染（不重建索引，数据没变）"""
+        self._accent = accent_for(theme_of(_host_window(self._ctx)))
+        if self._input.text().strip():
+            self._run_search()
 
     # ---------------- 界面 ----------------
     def _build_ui(self):
@@ -247,7 +364,8 @@ class SearchPage(QWidget):
         title.setObjectName("pageTitle")
         head.addWidget(title)
         head.addWidget(make_hint_label(
-            "搜知识库 / 笔记 / 碎片 / 任务的正文；只索引本程序内的数据，不扫硬盘"))
+            "搜知识库 / 笔记 / 碎片 / 任务 / 素材；"
+            "点结果标题跳转到对应面板"))
         head.addStretch(1)
         root.addLayout(head)
 
@@ -276,14 +394,17 @@ class SearchPage(QWidget):
         box_lay.setContentsMargins(10, 8, 10, 8)
         self._view = QTextBrowser()
         self._view.setObjectName("kbSearchResults")
-        self._view.setOpenExternalLinks(False)
+        self._view.setOpenExternalLinks(False)   # 自定义 scheme 只发信号
+        self._view.setOpenLinks(False)           # 不让浏览器自己导航
         self._view.setFrameShape(QFrame.Shape.NoFrame)
+        self._view.anchorClicked.connect(self._on_anchor)
         box_lay.addWidget(self._view)
         root.addWidget(box, 1)
 
         self._empty = QLabel("输入关键词开始搜索\n\n"
                              "· 支持中文短语与英文单词混合，例如「月报 归档」\n"
-                             "· 命中处加粗着色，括号里是相关度分数")
+                             "· 命中处加粗着色，右边的数字是相关度分数\n"
+                             "· 点结果标题跳转到对应面板（知识库会定位到那一段）")
         self._empty.setObjectName("pluginEmptyHint")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
@@ -320,21 +441,62 @@ class SearchPage(QWidget):
     def _run_search(self):
         query = self._input.text().strip()
         if not query:
+            self._hits = []
             self._view.setHtml("")
             self._empty.setVisible(True)
             return
         try:
             hits = self._index.search(query, top_n=MAX_RESULTS)
         except Exception as exc:                  # noqa: BLE001
+            self._hits = []
             self._stat.setText(f"⚠ 检索失败：{exc!r}")
             return
+        # ⚠ 必须与 render_results_html 用的是**同一个列表**：锚点 href 里存的
+        # 是它在列表里的下标，渲染完再改列表就会点错行
+        self._hits = hits
         self._empty.setVisible(not hits)
-        self._view.setHtml(render_results_html(hits, query))
+        self._view.setHtml(render_results_html(hits, query, self._accent))
         if hits:
             self._stat.setText(f"命中 {len(hits)} 条（最多显示 {MAX_RESULTS} 条）"
                                f" ｜ 索引 {self._docs} 条")
         else:
             self._stat.setText(f"没有匹配「{query}」的内容 ｜ 索引 {self._docs} 条")
+
+    # ---------------- 跳转 ----------------
+    def _on_anchor(self, url):
+        """点结果标题 → 跳转到对应面板（QTextBrowser 的锚点回调）。
+
+        宿主侧只暴露一个**公开入口** ``show_search_result(kind, keyword, num)``
+        （与 ``show_plugin_page`` 同款约定）；宿主没有这个入口时提示一句，
+        不让点击静默失败。
+        """
+        text = url.toString() if hasattr(url, "toString") else str(url)
+        idx = parse_result_anchor(text)
+        if idx is None or idx >= len(self._hits):
+            return
+        self._jump_to(self._hits[idx])
+
+    def _jump_to(self, hit):
+        """把一条命中转成宿主跳转调用"""
+        host = self._ctx.parent_window()
+        jump = getattr(host, "show_search_result", None) if host else None
+        if not callable(jump):
+            self._toast("当前宿主版本不支持结果跳转，请升级后再试")
+            return
+        num = None
+        if hit.kind == "knowledge":
+            # uid 形如 "knowledge:3"——知识库是位置型数据源，段号就是它的地址
+            try:
+                num = int(str(hit.uid).split(":", 1)[1])
+            except (IndexError, ValueError):
+                num = None
+        keyword = pick_jump_keyword(hit.matched, self._input.text())
+        try:
+            if not jump(hit.kind, keyword, num):
+                self._toast("这条结果没有对应的面板，无法跳转")
+        except Exception as exc:                  # noqa: BLE001
+            self._ctx.logger.warning(f"[{PLUGIN_ID}] 结果跳转失败：{exc!r}")
+            self._toast("跳转失败，详见日志")
 
     def focus_input(self):
         self._input.setFocus()

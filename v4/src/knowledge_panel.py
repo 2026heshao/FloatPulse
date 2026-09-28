@@ -169,6 +169,55 @@ class KnowledgePanel(QWidget):
             self._kb_modify_label.setText("✓ 文件无外部修改")
             self._kb_modify_label.setStyleSheet("")
 
+    def _find_row(self, index) -> int:
+        """按段落 index（0 基）找列表行号；找不到返回 -1"""
+        for row in range(self._kb_list.count()):
+            if self._kb_list.item(row).data(Qt.ItemDataRole.UserRole) == index:
+                return row
+        return -1
+
+    def locate_paragraph(self, num: int) -> bool:
+        """定位到第 num 段（1 基编号）——供站内搜索等「跳转过来」的入口调用。
+
+        两个容易做错的地方：
+
+        1. **必须先清空搜索框**：目标段落可能正被当前关键词过滤掉，不清空
+          的话列表里根本没有这一行，表现为「切到知识库页但什么都没选中」。
+           清空时 blockSignals 绕开去抖定时器，否则 refresh 会被排到
+           250ms 之后再跑一遍、把刚做好的选中状态冲掉。
+        2. **索引口径是过滤后位置**，不是 docx 里的原始段落下标（见
+           DocxManager.load 的说明），所以 UserRole 里存的 p.index 才能和
+           ``ctx.data.knowledge()`` 的 num 直接换算：num = p.index + 1。
+
+        返回是否真的定位成功（段号越界 / 文档为空 → False，不抛异常）。
+        """
+        try:
+            num = int(num)
+        except (TypeError, ValueError):
+            return False
+        if num < 1:
+            return False
+
+        self._search_timer.stop()
+        if self._kb_search.text():
+            self._kb_search.blockSignals(True)
+            self._kb_search.setText("")
+            self._kb_search.blockSignals(False)
+            self.refresh(preserve_view=False, recheck=False)
+
+        row = self._find_row(num - 1)
+        if row < 0:
+            # 列表可能还没建（首次切到本页）或已过期 → 重建一次再试
+            self.refresh(preserve_view=False, recheck=True)
+            row = self._find_row(num - 1)
+        if row < 0:
+            return False
+
+        item = self._kb_list.item(row)
+        self._kb_list.setCurrentItem(item)
+        self._kb_list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+        return True
+
     def _on_context_menu(self, pos):
         item = self._kb_list.itemAt(pos)
         if not item:

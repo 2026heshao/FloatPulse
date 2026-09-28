@@ -5,13 +5,17 @@
   A 真实 plugins/ 目录被真加载器扫到：动作进注册表、热键 Ctrl+Alt+F 不与
     核心（K/S）及其它插件冲突；**capabilities 为空** → 写/改/网络三档
     能力必须全部被门禁拒掉（检索是只读功能）
-  B 真实数据 → 真实索引：把任务/笔记/碎片/知识库四类宿主数据喂进去，
-    逐项验证「四类都能搜到」「词典外专有名词能搜到」「全角与英文能搜到」
+  B 真实数据 → 真实索引：把任务/笔记/碎片/知识库/素材五类宿主数据喂进去，
+    逐项验证「五类都能搜到」「词典外专有名词能搜到」「全角与英文能搜到」
     「多命中项排更前」「结果条数与 kind 正确」
   C 页面真身：注册进主窗口导航、show_plugin_page 切过去、去抖定时器生效、
-    结果 HTML 带 <span class="hit"> 高亮、用户原文里的 < 被转义、
-    空查询/无匹配两种空态、重建索引按钮走真回调
-  D 视觉：页面在 light / dark 各截一张真图，且两图确实不同（主题生效）
+    结果 HTML 带加粗着色、用户原文里的 < 被转义、空查询/无匹配两种空态、
+    重建索引按钮走真回调
+  D **结果跳转**（并入宿主全库搜索后新增的能力）：点结果标题 → 真跑
+    anchorClicked 回调 → 切到对应页；知识库要**定位到那一段**
+  E **Ctrl+K 两态**：插件启用 → 切到站内搜索页；插件停用 → 只提示不崩
+    （宿主侧不做第二套 UI）
+  F 视觉：页面在 light / dark 各截一张真图，且两图确实不同（主题生效）
 
 跑法：python tools/run_gui_check.py tools/verify_kb_search.py
 产物：build/shots/kb-search-page-{light,dark}.png
@@ -31,6 +35,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # v4/
 ROOT = os.path.dirname(BASE)                                        # 仓库根
 sys.path.insert(0, BASE)
 
+from PyQt6.QtCore import Qt, QUrl                                   # noqa: E402
 from PyQt6.QtWidgets import QApplication, QTextBrowser                # noqa: E402
 from PyQt6.QtGui import QFontDatabase                                # noqa: E402
 
@@ -138,6 +143,11 @@ frags.add_clipboard_text(FRAG_TEXT, "剪贴板")
 # 用户原文里带尖括号：渲染必须转义
 XSS_ID = notes.add_note("数据库索引 <script>alert(1)</script> 的复现步骤",
                         "代码片段")
+# 素材：并入宿主全库搜索后新增的第 5 类数据源（只索引文件名）
+_dummy = os.path.join(tmp, "客户报价单.xlsx")
+with open(_dummy, "w", encoding="utf-8") as f:
+    f.write("dummy")
+ASSET_ID = assets.add_asset(_dummy, "客户报价单.xlsx")
 
 win = MainWindow(tasks, notes, frags, docx, cm, clip,
                  temp_asset_manager=assets, nav_manager=nav)
@@ -168,6 +178,11 @@ plugin_data = PluginData(providers={
     "knowledge": lambda: [
         {"num": i + 1, "text": p.text, "preview": p.preview, "hash": p.hash}
         for i, p in enumerate(docx.get_paragraphs())],
+    "assets": lambda: [
+        {"asset_id": a.asset_id, "original_name": a.original_name,
+         "is_image": a.is_image, "size_bytes": a.size_bytes,
+         "added_time": a.added_time}
+        for a in assets.get_all_assets()],
 })
 ctx = PluginContext(
     logger=logger,
@@ -240,8 +255,8 @@ check("B2 切入页面即自动重建索引，状态行给出条数",
       "已索引" in stat and "检索项" in stat, stat)
 
 n_docs = page._docs
-# 3 段知识库 + 1 条任务 + 2 条笔记 + 1 条碎片 = 7
-check(f"B3 四类数据都进了索引（{n_docs} 条）", n_docs == 7, f"n={n_docs}")
+# 3 段知识库 + 1 条任务 + 2 条笔记 + 1 条碎片 + 1 条素材 = 8
+check(f"B3 五类数据都进了索引（{n_docs} 条）", n_docs == 8, f"n={n_docs}")
 
 
 def _run(q):
@@ -256,7 +271,8 @@ for kind, query, hint in (
         ("knowledge", "报价流程", "知识库"),
         ("note", "结算方式", "笔记"),
         ("fragment", "bm25-index", "碎片"),
-        ("task", "验收结论", "任务")):
+        ("task", "验收结论", "任务"),
+        ("asset", "客户报价单", "素材")):
     hits = _run(query)
     kinds = {h.kind for h in hits}
     check(f"B4 搜「{query}」命中 {hint}（kind={kind}）",
@@ -383,28 +399,143 @@ check("C12 打开动作延后执行并真的切到插件页（Ctrl+Alt+F 的实�
       f"idx={win._stack.currentIndex()} target={target_idx}")
 
 # ====================================================================
-# D. 双主题真截图
+# D. 结果跳转（并入宿主全库搜索后新增的能力）
 # ====================================================================
-page._input.setText("月报 归档")
-page._run_search()
+# 知识库那一段的编号：KB_PARAS 第 3 条「每周五下班前把本周的月报归档到知识库」
+KB_TARGET_NUM = 3
+hits = _run("月报 归档")
+kb_hits = [i for i, h in enumerate(hits) if h.kind == "knowledge"]
+check("D0 「月报 归档」命中知识库那一段", bool(kb_hits),
+      f"{[(h.uid, h.kind) for h in hits]}")
+
+if kb_hits:
+    i = kb_hits[0]
+    win._switch_page(0)                       # 先离开，确保是跳转把它带过去的
+    pump(150)
+    # 真跑锚点回调（等价于用户点了结果标题）
+    page._on_anchor(QUrl(f"{plug.RESULT_SCHEME}:{i}"))
+    pump(250)
+    check("D1 点结果标题切到知识库页",
+          win._stack.currentIndex() == NAV_PAGE_INDEX["knowledge"],
+          f"idx={win._stack.currentIndex()}")
+    kp = win._page_knowledge
+    cur = kp._kb_list.currentItem()
+    got = cur.data(Qt.ItemDataRole.UserRole) if cur is not None else None
+    check(f"D2 知识库定位到第 {KB_TARGET_NUM} 段（选中项 = 那一段）",
+          got == KB_TARGET_NUM - 1, f"current={got}")
+    check("D3 定位时清空了知识库搜索框（否则那一段可能被过滤掉）",
+          kp._kb_search.text() == "", repr(kp._kb_search.text()))
+
+# 碎片：带关键词进去后列表应当被过滤（宿主 _on_search_jump 的既有能力）
+frag_hits = [i for i, h in enumerate(_run("bm25-index")) if h.kind == "fragment"]
+if frag_hits:
+    win._switch_page(0)
+    pump(150)
+    page._on_anchor(QUrl(f"{plug.RESULT_SCHEME}:{frag_hits[0]}"))
+    pump(250)
+    check("D4 点碎片结果：切到碎片页并把关键词带进搜索框",
+          win._stack.currentIndex() == NAV_PAGE_INDEX["fragments"]
+          and win._page_fragments._frag_search.text() != "",
+          f"kw={win._page_fragments._frag_search.text()!r}")
+
+# 关键词必须是**字面命中的单项**，不能是整条查询（多词查询在目标面板
+# 的子串过滤里匹配不到任何东西 → 切过去列表是空的）
+multi = [(i, h) for i, h in enumerate(_run("月报 归档")) if h.kind == "note"]
+check("D5 多词查询跳转时取字面命中的最长项，而不是整条查询",
+      all(plug.pick_jump_keyword(h.matched, "月报 归档") != "月报 归档"
+          for _i, h in multi) or not multi,
+      f"{[(h.uid, h.matched[:3]) for _i, h in multi]}")
+
+# 未知 kind / 越界下标：不能崩、不能跳到错误页面
+before_idx = win._stack.currentIndex()
+page._on_anchor(QUrl(f"{plug.RESULT_SCHEME}:99999"))
+page._on_anchor(QUrl("http://example.com/not-ours"))
+pump(120)
+check("D6 越界下标 / 外来链接被忽略（不切页、不崩）",
+      win._stack.currentIndex() == before_idx)
+check("D7 宿主 show_search_result 对未知 kind 返回 False（不静默落到 0 号页）",
+      win.show_search_result("不存在的来源", "关键词") is False)
+
+# ====================================================================
+# E. Ctrl+K 两态（宿主侧不做第二套 UI）
+# ====================================================================
+win.show_plugin_page(PAGE_KEY)
+pump(200)
+win._switch_page(0)
+pump(150)
+win._open_search_entry()
+pump(250)
+check("E1 插件启用时 Ctrl+K 切到站内搜索页",
+      win._stack.currentIndex() == target_idx,
+      f"idx={win._stack.currentIndex()} target={target_idx}")
+
+# 停用插件页（等价于用户在插件中心点「停用」）→ Ctrl+K 只提示，不弹对话框
+_toasts = []
+_real_toast = win.show_toast
+
+
+def _fake_toast(text, ms=2800):
+    _toasts.append(text)
+
+
+win.show_toast = _fake_toast
+win.unregister_plugin_page(PAGE_KEY)
+pump(150)
+win._switch_page(0)
+pump(150)
+try:
+    win._open_search_entry()
+    pump(200)
+    crashed = False
+except Exception as exc:                      # noqa: BLE001
+    crashed = True
+    print(f"    Ctrl+K 抛异常：{exc!r}", flush=True)
+check("E2 插件停用后 Ctrl+K 不抛异常", crashed is False)
+check("E3 插件停用后 Ctrl+K 给出提示（否则用户以为程序坏了）",
+      len(_toasts) == 1 and "插件中心" in _toasts[0], f"{_toasts}")
+check("E4 插件停用后 Ctrl+K 不切页（停用即停用，不做第二套 UI）",
+      win._stack.currentIndex() == 0, f"idx={win._stack.currentIndex()}")
+win.show_toast = _real_toast
+
+# 重新启用（页面上插件中心走的 rebuild 路径），恢复后续截图所需的页面
+rebuild = getattr(win, "rebuild_plugin_page", None)
+if callable(rebuild):
+    rebuild(PLUGIN_ID)
+pump(300)
+page = win._stack.widget(NAV_PAGE_INDEX[PAGE_KEY])
+check("E5 重新启用后插件页回来了",
+      win.show_plugin_page(PAGE_KEY) is True and page is not None,
+      f"{type(page).__name__ if page else None}")
+
+# ====================================================================
+# F. 双主题（真截图 + 富文本强调色跟随）
+# ====================================================================
 win.show_plugin_page(PAGE_KEY)
 pump(400)
+page = win._stack.widget(NAV_PAGE_INDEX[PAGE_KEY])
+page._input.setText("月报 归档")
+page._run_search()
+pump(120)
 sizes = {}
+html_by_theme = {}
 for theme in ("light", "dark"):
     cm.set("theme", theme)
-    win._theme = theme
-    win._apply_theme()
+    # ⚠ 走 apply_external_theme（设置面板的真实路径）：它会广播
+    # theme_changed，插件页据此换强调色。直接调 _apply_theme() 只换 QSS，
+    # QTextBrowser 里的行内颜色不会变——这正是本条要钉的东西。
+    win.apply_external_theme(theme)
     pump(300)
     page._input.setText("月报 归档")
     page._run_search()
     pump(120)
+    html_by_theme[theme] = page._view.toHtml()
     p = os.path.join(OUT_DIR, f"kb-search-page-{theme}.png")
     img = win.grab()
     img.save(p)
     sizes[theme] = os.path.getsize(p) if os.path.isfile(p) else 0
     print(f"    saved {p} ({sizes[theme]} bytes)", flush=True)
 
-check("D1 两张截图都落盘且非空",
+check("F1 两张截图都落盘且非空",
       all(v > 20000 for v in sizes.values()), f"{sizes}")
 
 # 主题真的生效：两张图的字节不同（不是同一张）
@@ -412,12 +543,54 @@ with open(os.path.join(OUT_DIR, "kb-search-page-light.png"), "rb") as f:
     light_bytes = f.read()
 with open(os.path.join(OUT_DIR, "kb-search-page-dark.png"), "rb") as f:
     dark_bytes = f.read()
-check("D2 light / dark 两图不同（主题确实生效）",
+check("F2 light / dark 两图不同（主题确实生效）",
       light_bytes != dark_bytes)
+
+# 富文本强调色必须跟随主题（QSS 管不到 QTextBrowser 内部的行内样式）。
+# 修复前这里写死 #0a7d7b：深色主题下结果标题对比度只有 3.05:1，几乎看不见。
+# ⚠ toHtml() 会把颜色统一成**小写**（#6FFFE9 → #6fffe9），比较前要归一
+def _has_accent(html, accent):
+    return accent.lower() in (html or "").lower()
+
+
+check("F3 切到 dark 后插件页强调色换成 dark 主题色",
+      page._accent == plug.accent_for("dark")
+      and _has_accent(html_by_theme["dark"], plug.accent_for("dark")),
+      f"accent={page._accent}")
+check("F4 light / dark 的强调色不相同，且各自用在对应主题的渲染里",
+      plug.accent_for("light") != plug.accent_for("dark")
+      and _has_accent(html_by_theme["light"], plug.accent_for("light")),
+      f"light={plug.accent_for('light')} dark={plug.accent_for('dark')}")
+
+
+def _lin(v):
+    v /= 255.0
+    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def _contrast(c1, c2):
+    def _lum(hx):
+        hx = hx.lstrip("#")
+        if len(hx) == 3:
+            hx = "".join(c * 2 for c in hx)
+        r, g, b = (int(hx[i:i + 2], 16) for i in (0, 2, 4))
+        return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+    a, b = _lum(c1), _lum(c2)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+from src.theme import get_colors                                # noqa: E402
+
+ratios = {}
+for theme in ("light", "dark"):
+    accent = plug.accent_for(theme)
+    ratios[theme] = round(_contrast(accent, get_colors(theme)["card_bg_solid"]), 2)
+check("F5 两个主题下强调色对卡片底色的 WCAG 对比度都 ≥ 4.5",
+      all(r >= 4.5 for r in ratios.values()), f"{ratios}")
 
 # 宿主 QSS 覆盖插件页用到的样式钩子
 qss = win._container.styleSheet()
-check("D3 宿主 QSS 覆盖插件页样式钩子",
+check("F6 宿主 QSS 覆盖插件页样式钩子",
       "pluginPage" in qss and "pluginEmptyHint" in qss
       and "secondaryBtn" in qss, f"qss_len={len(qss)}")
 
