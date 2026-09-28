@@ -3,43 +3,45 @@
 ====================================================================
 AI 助手  -  FloatPulse 外置插件（ai-assistant）
 ====================================================================
-第一个「页面插件」+ 第一个声明式联网插件 + 第一个声明式写权限插件：
+「页面插件」+ 声明式联网 / 写权限 / 改删权限 / AI 总配置插件：
 
   - manifest 声明 ``"page"`` → 主窗口新增「🤖 AI 助手」导航页
     （不占悬浮球右键菜单；热键 Ctrl+Alt+I 直接切到该页）
   - manifest 声明 ``"capabilities": ["network"]`` → 经宿主网络桥联网
   - manifest 声明 ``"capabilities": ["write"]`` → 经 ``ctx.write``
-    把回复存成笔记（「📥 存为笔记」按钮），只增不改删
+    把回复存成笔记（气泡右键菜单），只增不改删
+  - manifest 声明 ``"capabilities": ["manage"]`` → 自然语言改删数据
+    （分级确认 + 撤销令牌）
+  - manifest 声明 ``"capabilities": ["ai"]`` → 经 ``ctx.ai`` 实时读取
+    设置页「🧠 AI 总配置」
 
 功能：读应用内任务 / 碎片 / 笔记的只读快照，交给 OpenAI 兼容接口做
-总结、分类与问答。三种后端统一走 ``/chat/completions`` 协议：
+总结、分类与问答。
 
-  云端    DeepSeek / 硅基流动（填 base_url + key）
-  本地常驻 Ollama(11434) / llama-server(8080)（无需 key）
-  本地自带 浏览选 .gguf + llama-server.exe → 插件用 QProcess 拉起
-          服务（默认端口 8093），探活就绪后自动接上 —— 与 CodeDrill
-          同款的引擎与参数（-ngl 99 全量显卡卸载）
+AI 后端（2026-09-29 起收归宿主，本插件**零配置**）：
+  后端参数全部来自设置页「🧠 AI 总配置」（云端 / 本地 + 接入插件
+  下拉框），经 ``ctx.ai.params()`` 实时读取——设置页改完即刻生效。
+  本插件不再有任何模型配置代码（v1.7 之前的私有后端配置、本地
+  llama-server 管理器已全部删除）。未接入时对话被拦下并引导去
+  设置页配置 + 勾选接入，绝不发出注定失败的请求。
 
 诚实性与安全约定：
-  - API key 明文存在插件私有目录（data_dir/config.json）。安全边界 =
-    本机用户账户；桌面应用不做私密存储，但这扇门只对用户本人打开。
   - 发给模型的数据只有用户显式点快捷指令 / 输入框内容，插件**从不**
     在后台静默上传任何数据（app.log 的 [插件网络] 行只有 URL 与耗时）。
-  - 写数据只在用户点「📥 存为笔记」时发生（``ctx.write``，只增不改删）。
-  - 本地推理子进程挂进 Windows Job Object（KILL_ON_JOB_CLOSE）：
-    FloatPulse 无论正常退出还是被强杀，内核都会带走 llama-server，
-    不会出现「关了程序，进程还占着 2.9GB 显存」的孤儿（CodeDrill 同款方案）。
+  - 写数据只在用户点「📥 存为笔记」/ 确认改删动作时发生
+    （``ctx.write`` / ``ctx.manage``，全程审计、删除可撤销）。
+  - 宿主本地 llama-server 由设置页启停（Windows JobObject 防孤儿），
+    本插件经 ``ctx.ai.stop_local()`` 提供快捷停止入口。
 ====================================================================
 """
 
 import json
 import os
-import sys
 
-from PyQt6.QtCore import QProcess, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
@@ -50,38 +52,14 @@ from src.plugin_ui import make_hint_label
 PLUGIN_ID = "ai-assistant"
 PAGE_KEY = f"plugin:{PLUGIN_ID}"       # 主窗口页面 key（与 loader 约定一致）
 
-# ---------------- 配置 ----------------
+# ---------------- 配置（仅本插件自己的 UI 偏好；AI 后端在设置页）----------------
 CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
-    # 双后端模型（2026-09-28 用户要求「云端和本地做一个选择入口」）：
-    # backend_mode 决定对话实际调用哪套后端；两套配置各自独立保存，
-    # 切换/启动本地都不再覆盖云端字段（旧版会冲掉用户填的云端地址）
-    "backend_mode": "cloud",      # cloud=云端 API / local=本机 llama-server
-    "cloud_base_url": "https://api.deepseek.com/v1",
-    "cloud_api_key": "",
-    "cloud_model": "deepseek-chat",
     "max_data_chars": 6000,       # 单块数据塞进提示词的最大字符数
-    # 规则库（2026-09-28 用户要求「入口让用户自己编辑，不写死」）：
-    # [{"text": 规则文本, "enabled": 是否启用}, ...]，随 config.json 落盘，
-    # 已启用规则由 build_system_prompt 追加到系统提示词末尾（双后端共用）
+    # 规则库：[{"text": 规则文本, "enabled": 是否启用}, ...]，随 config.json
+    # 落盘，已启用规则由 build_system_prompt 追加到系统提示词末尾
     "custom_rules": [],
-    # 本地自带推理（浏览 gguf + llama-server.exe，插件自己拉起服务）
-    "local_server_exe": "",
-    "local_gguf": "",
-    "local_port": 8093,           # 避开 CodeDrill 的 8080 与 Ollama 的 11434
 }
-
-# 后端预设：(显示名, base_url, model, 说明)
-BACKEND_PRESETS = (
-    ("云端 · DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat",
-     "需在 api.deepseek.com 申请 key"),
-    ("云端 · 硅基流动", "https://api.siliconflow.cn/v1", "",
-     "需在 siliconflow.cn 申请 key"),
-    ("本地 · Ollama", "http://127.0.0.1:11434/v1", "qwen3:4b",
-     "需先安装 Ollama 并 ollama pull 模型"),
-    ("本地 · llama-server", "http://127.0.0.1:8080/v1", "",
-     "已手动启动的 llama.cpp 服务（注意是否要求 API key）"),
-)
 
 SYSTEM_PROMPT = (
     "你是办公工具 FloatPulse 内置的 AI 助手。用户可能把应用内的任务、"
@@ -126,74 +104,6 @@ def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
 # 上下文历史最多保留的条数（role 消息条数，防 token 无限膨胀）
 MAX_HISTORY = 12
 
-# 本地服务探活间隔 / 总超时（秒）
-PROBE_INTERVAL_MS = 2500
-PROBE_TIMEOUT_S = 90
-
-
-# ====================================================================
-# Windows Job Object：把 llama-server 与本进程「同生共死」交给内核
-# （精简自 CodeDrill runtime/job_object.py 的实测实现，MIT 自用）
-# ====================================================================
-def assign_to_job(pid: int) -> bool:
-    """把子进程挂进 KILL_ON_JOB_CLOSE 的 Job。
-
-    本进程无论正常退出、被强杀还是崩溃，内核关闭 Job 句柄时都会
-    终止里面的子进程 —— 不靠 atexit（被强杀时它不会执行）。
-    非 Windows / 任何一步失败 → 返回 False（只失去保护，不影响启动）。
-    """
-    if sys.platform != "win32" or not pid:
-        return False
-    try:
-        import ctypes
-
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-        class _IO(ctypes.Structure):
-            _fields_ = [(n, ctypes.c_ulonglong) for n in
-                        ("r_op", "w_op", "o_op", "r_tr", "w_tr", "o_tr")]
-
-        class _Basic(ctypes.Structure):
-            _fields_ = [
-                ("per_proc_user_time", ctypes.c_longlong),
-                ("per_job_user_time", ctypes.c_longlong),
-                ("limit_flags", ctypes.c_uint32),
-                ("min_wss", ctypes.c_size_t),
-                ("max_wss", ctypes.c_size_t),
-                ("active_procs", ctypes.c_uint32),
-                ("affinity", ctypes.c_size_t),
-                ("priority_class", ctypes.c_uint32),
-                ("sched_class", ctypes.c_uint32),
-            ]
-
-        class _Ext(ctypes.Structure):
-            _fields_ = [
-                ("basic", _Basic),
-                ("io", _IO),
-                ("proc_mem", ctypes.c_size_t),
-                ("job_mem", ctypes.c_size_t),
-                ("peak_proc_mem", ctypes.c_size_t),
-                ("peak_job_mem", ctypes.c_size_t),
-            ]
-
-        job = k32.CreateJobObjectW(None, None)
-        if not job:
-            return False
-        info = _Ext()
-        info.basic.limit_flags = 0x00002000      # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info),
-                                           ctypes.sizeof(info)):
-            return False
-        h = k32.OpenProcess(0x0100 | 0x0001, False, pid)   # SET_QUOTA|TERMINATE
-        if not h:
-            return False
-        try:
-            return bool(k32.AssignProcessToJobObject(job, h))
-        finally:
-            k32.CloseHandle(h)    # 进程句柄用完即关；**Job 句柄故意不关**
-    except Exception:             # noqa: BLE001 - 保护失败只降级
-        return False
-
 
 # ====================================================================
 # 配置读写（插件私有目录 data_dir/config.json）
@@ -207,19 +117,8 @@ def load_config(ctx) -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 stored = json.load(f)
             if isinstance(stored, dict):
-                # 旧版单后端字段 → 云端字段一次性迁移（v1.3 双后端模型）。
-                # 旧版「本地 ready 覆盖 base_url」的缺陷会把 127.0.0.1 写进
-                # base_url——这类值不是真实云端配置，迁移时跳过。
-                if "cloud_base_url" not in stored:
-                    old_url = str(stored.get("base_url") or "").strip()
-                    if old_url and "127.0.0.1" not in old_url \
-                            and "localhost" not in old_url:
-                        cfg["cloud_base_url"] = old_url
-                    if stored.get("api_key"):
-                        cfg["cloud_api_key"] = stored["api_key"]
-                    old_model = str(stored.get("model") or "").strip()
-                    if old_model and old_model != "local":
-                        cfg["cloud_model"] = old_model
+                # 后端字段（cloud_* / local_* / backend_mode）已收归设置页「AI 总配置」；旧配置文件里的这些键不在
+                # DEFAULT_CONFIG 里，合并时自然被忽略，无需迁移代码。
                 for key in DEFAULT_CONFIG:
                     if key in stored:
                         cfg[key] = stored[key]
@@ -622,30 +521,33 @@ def parse_actions(text: str, snapshot: dict | None = None):
 # ====================================================================
 # OpenAI 兼容协议（/chat/completions，非流式）
 # ====================================================================
-def build_request(cfg: dict, messages: list, max_tokens=None):
-    """配置 + 消息 → (url, headers, body)；配置不完整返回 (None, None, 错误)
+def build_request(params: dict, messages: list, max_tokens=None):
+    """AI 总配置参数 + 消息 → (url, headers, body)；参数不完整返回 (None, None, 错误)
 
-    backend_mode 决定调用哪套后端（2026-09-28 双后端模型）：
-    - cloud → cloud_base_url/cloud_api_key/cloud_model（OpenAI 兼容 API）
-    - local → 本机 llama-server（127.0.0.1:{local_port}/v1，模型名固定
-      "local"——llama-server 忽略该字段；服务是否就绪由调用方把关）
+    ``params`` 来自 ``ctx.ai.params()``（设置页「🧠 AI 总配置」实时快照），
+    mode 决定调用哪套后端：
+    - cloud → base_url / api_key / model（OpenAI 兼容 API）
+    - local → 宿主本地 llama-server（127.0.0.1:{local_port}/v1，模型名固定
+      "local"——llama-server 忽略该字段；就绪与否由 params["local_ready"]
+      把关，调用方在发请求前拦截）
     """
-    if cfg.get("backend_mode") == "local":
+    params = params if isinstance(params, dict) else {}
+    if params.get("mode") == "local":
         try:
-            port = int(cfg.get("local_port") or 8093)
+            port = int(params.get("local_port") or 8095)
         except (TypeError, ValueError):
-            port = 8093
+            port = 8095
         base = f"http://127.0.0.1:{port}/v1"
         model = "local"
         key = ""
     else:
-        base = str(cfg.get("cloud_base_url") or "").strip().rstrip("/")
-        model = str(cfg.get("cloud_model") or "").strip()
-        key = str(cfg.get("cloud_api_key") or "").strip()
+        base = str(params.get("base_url") or "").strip().rstrip("/")
+        model = str(params.get("model") or "").strip()
+        key = str(params.get("api_key") or "").strip()
         if not base:
-            return None, None, "云端地址为空：点「⚙ 后端设置」填写云端地址"
+            return None, None, "后端地址为空：到 设置 → 🧠 AI 总配置 填写"
         if not model:
-            return None, None, "模型名为空：点「⚙ 后端设置」填写模型名"
+            return None, None, "模型名为空：到 设置 → 🧠 AI 总配置 填写"
     if not (base.startswith("http://") or base.startswith("https://")):
         return None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
     url = f"{base}/chat/completions"
@@ -666,15 +568,15 @@ def parse_reply(result: dict):
         detail = (result.get("body") or "").strip()[:200]
         hint = ""
         if "HTTP 401" in err or "HTTP 403" in err:
-            hint = ("（key 缺失或无效？本地服务若要求认证，可在其配置里关闭；"
-                    "更简单的做法：用下方「本地推理」自己拉起一个无认证服务）")
+            hint = "（key 缺失或无效？到 设置 → 🧠 AI 总配置 检查）"
         elif "HTTP 404" in err:
-            hint = ("（云端地址或模型名不对？确认端口上跑的确实是 OpenAI "
-                    "兼容服务——llama-server 应以 .../v1 结尾）")
+            hint = ("（地址或模型名不对？地址应以 /v1 结尾，"
+                    "端口上跑的须是 OpenAI 兼容服务）")
         elif "timed out" in err.lower() or "timeout" in err.lower():
-            hint = "（本地模型首次加载较慢，可重试一次）"
+            hint = "（模型首次加载较慢，可重试一次）"
         elif "refused" in err.lower():
-            hint = "（端口没有服务在听——服务没启动，或端口号填错了）"
+            hint = ("（端口没有服务在听——本地服务没启动？"
+                    "到 设置 → 🧠 AI 总配置 启动）")
         return None, f"请求失败：{err}{hint}" + (f"\n{detail}" if detail else "")
     try:
         data = json.loads(result.get("body") or "")
@@ -682,166 +584,6 @@ def parse_reply(result: dict):
         return str(reply).strip(), None
     except (ValueError, KeyError, IndexError, TypeError) as exc:
         return None, f"响应格式不符合 OpenAI 协议：{exc!r}"
-
-
-# ====================================================================
-# 本地 llama-server 生命周期（模块级单例：页面重建不丢服务状态）
-# ====================================================================
-class LocalServerManager:
-    """QProcess 拉起 llama-server + 探活 + JobObject 防孤儿。
-
-    状态机：stopped → starting →（探活通过）ready /（退出或失败）stopped·error
-    状态变化回调所有订阅者（页面据此刷新状态行与按钮可用性）。
-    探活走宿主网络桥（POST 1-token 请求），与对话同一条受控通道。
-    """
-
-    def __init__(self):
-        self._proc = None            # QProcess（模块级持有，页面无关）
-        self._ctx = None             # 探活用的 PluginContext
-        self._timer = None           # 探活 QTimer
-        self._deadline = 0.0         # 探活总超时（time.monotonic 秒）
-        self._busy_probe = False     # 上一次探活未返回
-        self.port = 0
-        self.status = "stopped"      # stopped / starting / ready / error
-        self.detail = ""
-        self._listeners = []         # callable(status, detail)
-
-    # ---- 订阅 ----
-    def add_listener(self, fn):
-        self._listeners.append(fn)
-        fn(self.status, self.detail)          # 立即同步一次当前状态
-
-    def remove_listener(self, fn):
-        """页面销毁时退订（rescan 重建页面会反复构造 AiChatPage）"""
-        try:
-            self._listeners.remove(fn)
-        except ValueError:
-            pass
-
-    def _emit(self, status: str, detail: str = ""):
-        self.status, self.detail = status, detail
-        for fn in list(self._listeners):
-            try:
-                fn(status, detail)
-            except Exception:                 # noqa: BLE001 - 回调异常不反噬
-                pass
-
-    # ---- 启动 ----
-    def start(self, ctx, exe: str, gguf: str, port: int):
-        if self._proc is not None:
-            self._emit("starting", "服务已在启动/运行中")
-            return
-        exe, gguf = exe.strip().strip('"'), gguf.strip().strip('"')
-        if not os.path.isfile(exe):
-            self._emit("error", f"llama-server 程序不存在：{exe}")
-            return
-        if not os.path.isfile(gguf):
-            self._emit("error", f"模型文件不存在：{gguf}")
-            return
-        self._ctx = ctx
-        self.port = int(port)
-
-        proc = QProcess()
-        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        proc.readyRead.connect(self._drain_output)     # 防管道积压卡死
-        proc.started.connect(lambda: assign_to_job(proc.processId()))
-        proc.finished.connect(self._on_finished)
-        proc.errorOccurred.connect(
-            lambda err: self._emit("error", f"进程错误：{err}"))
-        proc.start(exe, ["-m", gguf, "--host", "127.0.0.1",
-                         "--port", str(self.port),
-                         "-ngl", "99", "-c", "8192"])
-        self._proc = proc
-        self._emit("starting",
-                   f"启动中…（首次加载模型可能需要几十秒）端口 {self.port}")
-
-        # 探活循环
-        import time
-        self._deadline = time.monotonic() + PROBE_TIMEOUT_S
-        self._timer = QTimer()
-        self._timer.setInterval(PROBE_INTERVAL_MS)
-        self._timer.timeout.connect(self._probe_once)
-        self._timer.start()
-        QTimer.singleShot(0, self._probe_once)          # 先立刻探一次
-
-    # ---- 探活 ----
-    def _probe_once(self):
-        import time
-        if self.status == "ready" or self._proc is None:
-            self._stop_probe()
-            return
-        if time.monotonic() > self._deadline:
-            self._stop_probe()
-            self._emit("error",
-                       f"启动超时（{PROBE_TIMEOUT_S}s 内未就绪）。"
-                       f"可在插件目录 logs 里查 llama-server 输出。")
-            return
-        if self._busy_probe or self._ctx is None:
-            return
-        url = f"http://127.0.0.1:{self.port}/v1/chat/completions"
-        body = {"model": "local", "max_tokens": 1, "temperature": 0,
-                "messages": [{"role": "user", "content": "ping"}]}
-        self._busy_probe = True
-
-        def on_done(_result):
-            self._busy_probe = False
-            if self._proc is None:
-                return
-            if _result.get("ok"):
-                self._stop_probe()
-                self._emit("ready", f"本地服务就绪（127.0.0.1:{self.port}）")
-            # 未就绪（连接拒绝=模型加载中）→ 等下一轮
-
-        try:
-            self._ctx.http_post_json_async(url, {}, body, 8.0, on_done)
-        except Exception:         # noqa: BLE001
-            self._busy_probe = False
-
-    def _stop_probe(self):
-        if self._timer is not None:
-            self._timer.stop()
-            self._timer.deleteLater()
-            self._timer = None
-
-    # ---- 输出与退出 ----
-    def _drain_output(self):
-        """必须持续读走输出：llama-server 刷日志，PIPE 积满会卡死进程"""
-        if self._proc is not None:
-            self._proc.readAll()          # 诊断暂不落盘，仅防积压
-
-    def _on_finished(self, code, _status):
-        self._stop_probe()
-        was = self._proc
-        self._proc = None
-        if self.status == "ready":
-            self._emit("stopped", "本地服务已停止")
-        elif code == 0:
-            self._emit("stopped", "本地服务已退出")
-        else:
-            self._emit("error", f"本地服务异常退出（code={code}）"
-                                f"——常见原因：显存不足 / 端口被占 / gguf 损坏")
-        del was
-
-    # ---- 停止 ----
-    def stop(self):
-        if self._proc is None:
-            self._emit("stopped", "本地服务未在运行")
-            return
-        self._proc.terminate()
-        QTimer.singleShot(3000, self._kill_if_alive)    # 3s 不退才强杀
-
-    def _kill_if_alive(self):
-        if self._proc is not None and self._proc.state() != \
-                QProcess.ProcessState.NotRunning:
-            self._proc.kill()
-
-    @property
-    def running(self) -> bool:
-        return self._proc is not None
-
-
-# 模块级单例：页面因「重新扫描」重建时服务与状态不丢
-LOCAL_SERVER = LocalServerManager()
 
 
 # ====================================================================
@@ -894,7 +636,10 @@ class BubbleLabel(QLabel):
 # 主页面（嵌入主窗口导航；create_page 返回它）
 # ====================================================================
 class AiChatPage(QWidget):
-    """聊天页：设置卡（收起）+ 消息流 + 快捷指令 + 输入区 + 状态行"""
+    """聊天页：规则库卡（收起）+ 消息流 + 快捷指令 + 输入区 + 状态行
+
+    AI 后端参数实时来自设置页「🧠 AI 总配置」（ctx.ai），本页零后端配置。
+    """
 
     def __init__(self, ctx):
         super().__init__()
@@ -903,11 +648,6 @@ class AiChatPage(QWidget):
         self._history = []          # 成功轮次 [{"role","content"}, ...]
         self._pending_user = ""     # 在途请求的用户消息（成功后落进历史）
         self._busy = False
-        # 云端后端是否可用（2026-09-28 用户要求「断开连接」控制）。
-        # True=可发；「断开连接」置 False → 非本地请求被拦下并提示。
-        # 本地 llama-server 不受它影响（本地有独立的启停状态机）；
-        # 探活成功（保存并测试 / 本地 ready 自动接管）都会把它置回 True。
-        self._cloud_active = True
         # 思考动画（2026-09-28 用户要求）：请求在途时消息流里挂一张
         # 「打字中」气泡，三点做往返波；回复到达（或失败）即拆掉。
         # QSS：chatBubbleThinking / chatThinkingDots（theme.py）
@@ -926,122 +666,6 @@ class AiChatPage(QWidget):
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
-
-        # ---- 后端设置卡（默认收起；内容超高时卡内纵向滚动，不挤爆页面）----
-        # 内容体放在 QScrollArea 里：本卡两个区块共 9 行输入 + 2 行按钮，
-        # 自然高度 ~530px，主窗口偏矮时（最小 920×620）布局会把卡片压瘪、
-        # 把消息流挤没，底部按钮被裁掉（2026-09-27 用户反馈）。
-        # 卡片最高 430px，超出部分卡内滚动；QSS 已有 QScrollArea 视口
-        # 透明规则，玻璃卡底色不受影响。
-        self._settings_card = QFrame(self)
-        self._settings_card.setObjectName("glassCard")
-        card_lay = QVBoxLayout(self._settings_card)
-        card_lay.setContentsMargins(16, 14, 16, 14)
-        card_lay.setSpacing(0)
-
-        _settings_body = QWidget()          # 卡内滚动内容体
-        form = QVBoxLayout(_settings_body)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(8)
-
-        # 区块 A：云端 API（与本地推理两套配置独立保存，互不覆盖）
-        cap_a = QLabel("云端 API")
-        cap_a.setObjectName("sectionLabel")
-        form.addWidget(cap_a)
-        preset_row = QHBoxLayout()
-        preset_lab = QLabel("预设")
-        preset_lab.setObjectName("fieldLabel")
-        preset_row.addWidget(preset_lab)
-        self._preset = QComboBox()
-        for name, _url, _model, _tip in BACKEND_PRESETS:
-            self._preset.addItem(name)
-        self._preset.addItem("自定义")
-        self._preset.currentIndexChanged.connect(self._apply_preset)
-        preset_row.addWidget(self._preset, 1)
-        form.addLayout(preset_row)
-
-        self._url_edit = QLineEdit(str(self._cfg.get("cloud_base_url") or ""))
-        self._url_edit.setPlaceholderText("https://api.deepseek.com/v1")
-        self._key_edit = QLineEdit(str(self._cfg.get("cloud_api_key") or ""))
-        self._key_edit.setPlaceholderText("API key")
-        self._key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._model_edit = QLineEdit(str(self._cfg.get("cloud_model") or ""))
-        self._model_edit.setPlaceholderText("模型名，如 deepseek-chat")
-        for label, widget in (("地址", self._url_edit),
-                              ("Key", self._key_edit),
-                              ("模型", self._model_edit)):
-            form.addLayout(self._field_row(label, widget))
-
-        from src.plugin_ui import make_separator
-        form.addWidget(make_separator())
-
-        # 区块 B：本地推理（浏览 gguf，插件自己拉起 llama-server）
-        cap_b = QLabel("本地推理（自带服务，无需 key）")
-        cap_b.setObjectName("sectionLabel")
-        form.addWidget(cap_b)
-        form.addWidget(make_hint_label(
-            "选择 llama.cpp 的 llama-server.exe 与 .gguf 模型文件，"
-            "点「启动」由本插件拉起本地服务（默认端口 8093，"
-            "退出 FloatPulse 时自动结束）。"))
-
-        self._exe_edit = QLineEdit(str(self._cfg.get("local_server_exe") or ""))
-        self._exe_edit.setPlaceholderText("llama-server.exe 路径（可浏览选择）")
-        self._gguf_edit = QLineEdit(str(self._cfg.get("local_gguf") or ""))
-        self._gguf_edit.setPlaceholderText("模型文件路径（.gguf）")
-        self._port_edit = QLineEdit(str(self._cfg.get("local_port") or 8093))
-        self._port_edit.setFixedWidth(72)
-        form.addLayout(self._field_row(
-            "程序", self._exe_edit,
-            ("浏览…", lambda: self._browse_file(self._exe_edit, "程序 (*.exe)"))))
-        form.addLayout(self._field_row(
-            "模型", self._gguf_edit,
-            ("浏览…", lambda: self._browse_file(
-                self._gguf_edit, "GGUF 模型 (*.gguf)"))))
-        port_row = self._field_row("端口", self._port_edit, stretch=False)
-        form.addLayout(port_row)
-
-        local_btn_row = QHBoxLayout()
-        self._local_btn = QPushButton("启动本地服务")
-        self._local_btn.setObjectName("primaryBtn")
-        self._local_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._local_btn.clicked.connect(self._toggle_local_server)
-        local_btn_row.addWidget(self._local_btn)
-        self._local_status = make_hint_label("本地服务未运行")
-        local_btn_row.addWidget(self._local_status, 1)
-        form.addLayout(local_btn_row)
-
-        # 保存并测试 + 断开连接（2026-09-28 用户要求：云端要有启动/暂停式控制）
-        save_row = QHBoxLayout()
-        self._save_btn = QPushButton("保存并测试连接")
-        self._save_btn.setObjectName("primaryBtn")
-        self._save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._save_btn.clicked.connect(self._save_and_test)
-        save_row.addWidget(self._save_btn)
-        # 「断开」= 停止用该云端后端发请求（配置保留，不丢用户填的 key）；
-        # 重新点「保存并测试连接」探活成功即恢复。本地服务不受影响。
-        self._disconnect_btn = QPushButton("断开连接")
-        self._disconnect_btn.setObjectName("secondaryBtn")
-        self._disconnect_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._disconnect_btn.setToolTip(
-            "停用当前云端后端（配置保留）；对话将提示后端不可用，"
-            "点「保存并测试连接」可重新接上")
-        self._disconnect_btn.clicked.connect(self._disconnect_cloud)
-        save_row.addWidget(self._disconnect_btn)
-        save_row.addStretch()
-        form.addLayout(save_row)
-
-        # 滚动包装：内容体 → 卡片（纵向滚动兜底）
-        _settings_scroll = QScrollArea(self._settings_card)
-        _settings_scroll.setWidgetResizable(True)
-        _settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        _settings_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        _settings_scroll.setWidget(_settings_body)
-        card_lay.addWidget(_settings_scroll)
-        self._settings_card.setMaximumHeight(430)
-
-        root.addWidget(self._settings_card)
-        self._settings_card.setVisible(False)
 
         # ---- 规则库卡（2026-09-28 用户要求：入口让用户自己编辑，不写死）----
         # 与后端设置卡同款结构：glassCard + 内容超高卡内滚动。规则条目
@@ -1136,33 +760,11 @@ class AiChatPage(QWidget):
         self._stop_model_btn.setObjectName("secondaryBtn")
         self._stop_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_model_btn.setToolTip(
-            "结束 llama-server 进程并释放显存；需要时再到后端设置里重新启动")
-        self._stop_model_btn.clicked.connect(LOCAL_SERVER.stop)
+            "结束宿主本地 llama-server 进程并释放显存；"
+            "需要时到 设置 → 🧠 AI 总配置 重新启动")
+        self._stop_model_btn.clicked.connect(self._stop_host_server)
         self._stop_model_btn.setVisible(False)   # ready/starting 才显示
         quick_row.addWidget(self._stop_model_btn)
-        # 后端选择入口（2026-09-28 用户建议）：云端 / 本地一键切换，
-        # 当前模式高亮；两套配置独立保存，切换不丢任何一方。
-        # objectName=modeBtn 复用 theme.py 既有的 checked 样式（主色填充）
-        self._mode_cloud_btn = QPushButton("云端", self)
-        self._mode_local_btn = QPushButton("本地", self)
-        for _b in (self._mode_cloud_btn, self._mode_local_btn):
-            _b.setObjectName("modeBtn")
-            _b.setCheckable(True)
-            _b.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_cloud_btn.setToolTip(
-            "对话走云端 API（地址 / 模型在 ⚙ 后端设置里配置）")
-        self._mode_local_btn.setToolTip(
-            "对话走本机 llama-server（未启动时点它会带你去启动）")
-        self._mode_cloud_btn.clicked.connect(lambda: self._switch_mode("cloud"))
-        self._mode_local_btn.clicked.connect(lambda: self._switch_mode("local"))
-        quick_row.addWidget(self._mode_cloud_btn)
-        quick_row.addWidget(self._mode_local_btn)
-        self._apply_mode_ui()            # 初始高亮当前模式
-        self._toggle_btn = QPushButton("⚙ 后端设置", self)
-        self._toggle_btn.setObjectName("secondaryBtn")
-        self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._toggle_btn.clicked.connect(self._toggle_settings)
-        quick_row.addWidget(self._toggle_btn)
         # 规则库入口（与 ⚙ 后端设置并排）：展开/收起规则编辑卡
         self._rules_btn = QPushButton("📐 规则库", self)
         self._rules_btn.setObjectName("secondaryBtn")
@@ -1194,43 +796,17 @@ class AiChatPage(QWidget):
 
         self.add_bubble(
             "AI", "我在。点快捷指令让我读应用内数据做总结，或直接输入问题。\n"
-                  "首次使用：点右下角「⚙ 后端设置」选好后端，"
-                  "或用「本地推理」选 gguf 一键启动；「📐 规则库」"
-                  "可写入你的长期偏好，我每次对话都会遵守。")
+                  "AI 后端在 设置 → 🧠 AI 总配置 管理（云端 / 本地一次配置，"
+                  "所有 AI 插件共用）；「📐 规则库」可写入你的长期偏好，"
+                  "我每次对话都会遵守。")
 
-        # 本地服务状态跟随（模块级单例：页面重建后状态不丢；
+        # 宿主本地服务状态跟随（ctx.ai 订阅 AI_SERVER 广播；UI 线程回调；
         # add_listener 内部会立即回放当前状态，新页面按钮/显隐自动对齐）
-        LOCAL_SERVER.add_listener(self._on_local_status)
+        self._ctx.ai.add_listener(self._on_local_status)
         # 页面销毁时退订，避免 _listeners 里累积已销毁页面的死引用
         self.destroyed.connect(
-            lambda: LOCAL_SERVER.remove_listener(self._on_local_status))
+            lambda: self._ctx.ai.remove_listener(self._on_local_status))
 
-    # ---------------- 小工具 ----------------
-    @staticmethod
-    def _field_row(label_text, widget, browse=None, stretch=True) -> QHBoxLayout:
-        row = QHBoxLayout()
-        lab = QLabel(label_text)
-        lab.setObjectName("fieldLabel")
-        lab.setFixedWidth(36)
-        row.addWidget(lab)
-        row.addWidget(widget, 1 if stretch else 0)
-        if browse is not None:
-            text, slot = browse
-            btn = QPushButton(text)
-            btn.setObjectName("secondaryBtn")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(slot)
-            row.addWidget(btn)
-        elif not stretch:
-            row.addStretch(1)     # 定宽控件不带 stretch：label 贴左、右留白
-        return row
-
-    def _browse_file(self, line_edit: QLineEdit, name_filter: str):
-        path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", name_filter)
-        if path:
-            line_edit.setText(path)
-
-    # ---------------- 气泡 ----------------
     def add_bubble(self, role: str, text: str):
         """往消息流追加一张左右气泡（2026-09-28 用户要求：一左一右对话式）。
 
@@ -1241,6 +817,9 @@ class AiChatPage(QWidget):
         - 「存为笔记」改为**右键菜单**（2026-09-28 用户要求：不再常驻
           对话框）：仅 AI 气泡挂 CustomContextMenu，需 manifest 声明
           ``capabilities: ["write"]``；未声明就不挂，避免假菜单项
+
+        （2026-09-29 修复：AI 总配置迁移删私有设置卡时被连带误删，恢复自
+        c0783f2 —— 本方法被 12 处调用，缺失会导致页面注入失败、入口消失）
         """
         user = (role == "你")
         card = QFrame(self._stream_host)
@@ -1613,6 +1192,23 @@ class AiChatPage(QWidget):
                                 int(self._cfg.get("max_data_chars") or 6000))
         self._dispatch(prompt, data, prompt)
 
+    # ---------------- AI 总配置接入（2026-09-29） ----------------
+    def _attached_params(self):
+        """AI 后端参数（唯一来源：设置页「🧠 AI 总配置」）→ 未接入返回 None
+
+        每次发请求前都重查（is_attached / params 都是实时读宿主配置），
+        设置页改完 / 勾选或取消勾选，下一发请求即生效。
+        未声明 ai 能力（老宿主）或宿主未注入通道时安全返回 None。
+        """
+        try:
+            if self._ctx.has_capability("ai") and self._ctx.ai.is_attached():
+                params = self._ctx.ai.params()
+                if params:
+                    return params
+        except Exception:                 # noqa: BLE001 - 读取失败按未接入
+            pass
+        return None
+
     def _dispatch(self, display_text: str, data_block, prompt: str):
         """统一发送入口；data_block 非空 = 快捷指令（附加数据）"""
         user_content = prompt
@@ -1624,27 +1220,21 @@ class AiChatPage(QWidget):
                           can_manage=self._can_manage())}]
                     + self._history
                     + [{"role": "user", "content": user_content}])
-        # 本地模式但服务未就绪：明确引导，不发注定 refused 的请求
-        if self._cfg.get("backend_mode") == "local" \
-                and LOCAL_SERVER.status != "ready":
+        # 后端唯一来源：设置页「AI 总配置」。未接入 / 本地未就绪都只引导，
+        # 绝不发出注定失败的请求（宿主服务的启停入口在设置页）。
+        params = self._attached_params()
+        if params is None:
             self.add_bubble(
-                "提示", "本地服务未运行：点「⚙ 后端设置 → 启动本地服务」，"
-                        "或点上方「云端」切回云端后端。")
-            self._settings_card.setVisible(True)
+                "提示", "尚未接入 AI：到 设置 → 🧠 AI 总配置 配好云端或本地"
+                        "后端，并在「接入插件」里勾选本插件。")
             return
-        url, headers, body = build_request(self._cfg, messages)
+        if params.get("mode") == "local" and not params.get("local_ready"):
+            self.add_bubble(
+                "提示", "宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动。")
+            return
+        url, headers, body = build_request(params, messages)
         if url is None:
             self.add_bubble("提示", body)      # body 在此路径是错误文案
-            self._settings_card.setVisible(True)
-            return
-        # 断开闸门：只拦云端（本地服务有自己的启停状态机，不走这里）
-        if not self._cloud_active and not self._is_local_url(url):
-            self.add_bubble(
-                "提示", "云端后端已断开连接，请求未发送。\n"
-                        "点「⚙ 后端设置 → 保存并测试连接」可重新接上；"
-                        "或用「本地推理」启动本地服务。")
-            self._status.setText("云端后端已断开，请求未发送")
-            self._settings_card.setVisible(True)
             return
 
         self.add_bubble("你", display_text)
@@ -1689,11 +1279,7 @@ class AiChatPage(QWidget):
         if actions:
             self._handle_actions(actions)
 
-    # ---------------- 设置卡 ----------------
-    def _toggle_settings(self):
-        self._settings_card.setVisible(not self._settings_card.isVisible())
 
-    # ---------------- 规则库（用户自编辑，非写死） ----------------
     def _toggle_rules(self):
         """展开/收起规则库卡；每次展开都从配置重建行（未保存的编辑即弃）。"""
         if not self._rules_card.isVisible():
@@ -1796,159 +1382,25 @@ class AiChatPage(QWidget):
         else:
             self._status.setText("规则保存失败（详见 app.log）")
 
-    def _apply_preset(self, index: int):
-        """选预设 → 自动填地址与模型（自定义 = 不动现有值）"""
-        if index < 0 or index >= len(BACKEND_PRESETS):
-            return
-        _name, url, model, _tip = BACKEND_PRESETS[index]
-        self._url_edit.setText(url)
-        if model:
-            self._model_edit.setText(model)
-
-    def _collect_settings(self) -> bool:
-        """读设置卡 → 配置；有变化则落盘。返回是否有变化"""
-        try:
-            port = int(self._port_edit.text().strip() or 8093)
-            if not (1024 <= port <= 65535):
-                port = 8093
-        except ValueError:
-            port = 8093
-        new = {
-            "backend_mode": self._cfg.get("backend_mode", "cloud"),
-            "cloud_base_url": self._url_edit.text().strip(),
-            "cloud_api_key": self._key_edit.text().strip(),
-            "cloud_model": self._model_edit.text().strip(),
-            "max_data_chars": self._cfg.get("max_data_chars", 6000),
-            # 规则库字段原样携带：这里只收集后端设置，冲掉用户的规则就是事故
-            "custom_rules": self._cfg.get("custom_rules", []),
-            "local_server_exe": self._exe_edit.text().strip(),
-            "local_gguf": self._gguf_edit.text().strip(),
-            "local_port": port,
-        }
-        if new == self._cfg:
-            return False
-        self._cfg = new
-        return save_config(self._ctx, new)
-
-    def _save_and_test(self):
-        """保存全部配置 + 发一个 1-token 探活请求，给用户明确反馈
-
-        探活对象恒为云端（「测试连接」测的是云端 API 配置）；
-        本地服务的可用性由它自己的探活状态机负责。
-        """
-        changed = self._collect_settings()
-        self._status.setText("配置已保存" if changed else "配置未变化")
-        probe_cfg = {**self._cfg, "backend_mode": "cloud"}
-        url, headers, body = build_request(
-            probe_cfg, [{"role": "user", "content": "ping"}], max_tokens=1)
-        if url is None:
-            self._status.setText(f"⚠ {body}")     # body 在此路径是错误文案
-            return
-        self._save_btn.setEnabled(False)
-        old_text = self._save_btn.text()
-        self._save_btn.setText("测试中…")
-
-        def on_done(result):
-            self._save_btn.setEnabled(True)
-            self._save_btn.setText(old_text)
-            if result.get("ok"):
-                # 探活成功 = 后端可用，恢复云端闸门（覆盖「断开」后的重连）
-                self._cloud_active = True
-                self._status.setText(
-                    f"✓ 连接成功（{self._cfg.get('model')}），可以开始对话")
-            else:
-                _, err = parse_reply(result)
-                self._status.setText(f"✗ {err or '连接失败'}")
-
-        self._ctx.http_post_json_async(url, headers, body, 20.0, on_done)
-
-    # ---------------- 云端断开（2026-09-28 用户要求） ----------------
-    @staticmethod
-    def _is_local_url(url: str) -> bool:
-        """是否指向本机的服务（断开闸门只拦云端，本地服务不受影响）"""
-        u = (url or "").lower()
-        return "://127.0.0.1" in u or "://localhost" in u
-
-    def _disconnect_cloud(self):
-        """断开云端后端：停发请求，配置与 key 原样保留（用户不用重填）"""
-        if not self._cloud_active:
-            self._status.setText("云端后端本来就是断开状态")
-            return
-        self._cloud_active = False
-        self._status.setText(
-            "已断开云端连接（配置保留）；重新接上请点「保存并测试连接」")
-
-    # ---------------- 后端模式切换（2026-09-28 用户建议） ----------------
-    def _apply_mode_ui(self):
-        """把当前 backend_mode 反映到选择按钮（checked 高亮）"""
-        local = self._cfg.get("backend_mode") == "local"
-        self._mode_local_btn.setChecked(local)
-        self._mode_cloud_btn.setChecked(not local)
-
-    def _switch_mode(self, mode: str):
-        """云端/本地一键切换（配置即时落盘）。
-
-        目标侧不可用时仍切模式（尊重用户选择），但展开设置卡引导：
-        本地未就绪 → 引导启动服务；云端没配地址 → 引导填写。
-        """
-        if self._cfg.get("backend_mode") != mode:
-            self._cfg = {**self._cfg, "backend_mode": mode}
-            save_config(self._ctx, self._cfg)
-        self._apply_mode_ui()
-        if mode == "local" and LOCAL_SERVER.status != "ready":
-            self._settings_card.setVisible(True)
-            self._status.setText("已选本地后端：先在「本地推理」里启动服务")
-            return
-        if mode == "cloud" \
-                and not str(self._cfg.get("cloud_base_url") or "").strip():
-            self._settings_card.setVisible(True)
-            self._status.setText(
-                "已选云端后端：请填写地址与 key 后「保存并测试连接」")
-            return
-        self._status.setText("当前后端：本机 llama-server" if mode == "local"
-                             else "当前后端：云端 API")
-
-    # ---------------- 本地推理 ----------------
-    def _toggle_local_server(self):
-        if LOCAL_SERVER.running:
-            LOCAL_SERVER.stop()
-            return
-        # 先把设置卡里的路径/端口落盘，再启动
-        self._collect_settings()
-        LOCAL_SERVER.start(self._ctx,
-                           self._cfg.get("local_server_exe", ""),
-                           self._cfg.get("local_gguf", ""),
-                           int(self._cfg.get("local_port") or 8093))
-
     def _on_local_status(self, status: str, detail: str):
-        """本地服务状态 → 状态行 + 按钮文案；就绪自动接管后端
+        """宿主本地服务状态广播（ctx.ai 订阅）→ ⏹ 按钮显隐 + 状态行
 
-        - ready → backend_mode 切 local（双后端配置独立，云端字段不动）
-        - stopped/error → 正用本地时自动回落云端（云端没配则留本地）
-        停止按钮显隐：ready/starting（运行或拉起中）显示，其余隐藏——
-        停止入口常驻聊天界面，用完一键释放显存（2026-09-27 用户反馈）。
+        - ready/starting 显示「⏹ 停止模型服务」——停止入口常驻聊天界面，
+          用完一键释放显存（2026-09-27 用户反馈）
+        - ready 就绪提示；error 带原因展示（服务启停的真正入口在设置页）
         """
-        self._local_status.setText(detail or status)
         self._stop_model_btn.setVisible(status in ("ready", "starting"))
         if status == "ready":
-            self._local_btn.setText("停止本地服务")
-            if self._cfg.get("backend_mode") != "local":
-                self._cfg = {**self._cfg, "backend_mode": "local"}
-                save_config(self._ctx, self._cfg)
-                self._apply_mode_ui()
-            self._cloud_active = True   # 本地接管后端，云端断开闸门复位
-            self._status.setText("✓ 本地服务就绪，已切换到本地后端")
-        elif status == "starting":
-            self._local_btn.setText("取消 / 停止")
-        else:
-            self._local_btn.setText("启动本地服务")
-            if status in ("stopped", "error") \
-                    and self._cfg.get("backend_mode") == "local":
-                if str(self._cfg.get("cloud_base_url") or "").strip():
-                    self._cfg = {**self._cfg, "backend_mode": "cloud"}
-                    save_config(self._ctx, self._cfg)
-                    self._apply_mode_ui()
-                    self._status.setText("本地服务已停止，已切回云端后端")
+            self._status.setText("✓ 宿主本地服务就绪，接入的插件即刻可用")
+        elif status == "error" and detail:
+            self._status.setText(f"⚠ {detail}")
+
+    def _stop_host_server(self):
+        """⏹ 停止宿主本地服务（经 ctx.ai 门面；未授权时安全拒绝）"""
+        try:
+            self._ctx.ai.stop_local()
+        except Exception:                 # noqa: BLE001 - 停止失败不反噬页面
+            self._status.setText("停止宿主本地服务失败（详见 app.log）")
 
     # ---------------- 杂项 ----------------
     def _set_busy(self, busy: bool, text: str = ""):
@@ -1991,7 +1443,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.4.0"
+    version = "1.8.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]

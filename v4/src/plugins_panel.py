@@ -508,12 +508,12 @@ class PluginsPanel(QWidget):
             bottom.addWidget(req)
         caps = list(manifest.get("capabilities", []) or [])
         if caps:
-            # 能力声明可视化（2026-09-27 权限模型）：network / write / manage。
-            # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据」，
-            # 是声明式权限的最小可见性。
+            # 能力声明可视化（2026-09-27 权限模型）：network / write / manage / ai。
+            # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据 /
+            # 可接入 AI 总配置」，是声明式权限的最小可见性。
             cap_labels = {
                 "network": "🌐 网络访问", "write": "✍ 写入数据",
-                "manage": "🛠 改删数据"}
+                "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
             cap_tips = {
                 "network": "该插件在 manifest 里声明了 network 能力，"
                            "可经宿主网络桥发起联网请求（app.log 可审计）",
@@ -524,6 +524,9 @@ class PluginsPanel(QWidget):
                           "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
                           "笔记（同时具备 write 的只增权限）；删除可由插件"
                           "侧发起撤销，每次操作记入 app.log",
+                "ai": "该插件在 manifest 里声明了 ai 能力，可接入设置页"
+                      "「AI 总配置」共用云端 / 本地后端——是否接入由你在"
+                      "设置页下拉框勾选决定（勾选 = 授权）",
             }
             cap = QLabel("能力: " + "、".join(
                 cap_labels.get(c, c) for c in caps))
@@ -632,7 +635,7 @@ class PluginsPanel(QWidget):
         if caps:
             cap_labels = {
                 "network": "🌐 网络访问", "write": "✍ 写入数据",
-                "manage": "🛠 改删数据"}
+                "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
             meta_parts.append("能力: " + "、".join(
                 cap_labels.get(c, c) for c in caps))
         if fname:

@@ -6,7 +6,7 @@ title FloatPulse 启动器
 
 echo ============================================================
 echo   FloatPulse 启动器
-echo   v4 = 开发主线（默认）      quiet = 后台无控制台启动
+echo   v4 = 开发主线（默认，实时日志）   quiet = 后台无控制台启动
 echo ============================================================
 echo.
 
@@ -89,7 +89,7 @@ echo.
 echo.
 echo ------------------------------------------------------------
 echo 程序已退出（退出码 %ERRORLEVEL%）。
-echo 若为异常退出，日志见：data\app.log
+echo 若为异常退出，日志见：float_data\app.log
 echo.
 pause
 exit /b 0
@@ -101,7 +101,7 @@ if not exist "%PYW%" set "PYW=%PYEXE%"
 start "" "%PYW%" "%APPDIR%\%SCRIPT%"
 echo.
 echo        已启动。退出方式：右键悬浮球 - 退出程序，或按 Esc
-echo        排查异常：查看 data\app.log
+echo        排查异常：查看 float_data\app.log
 echo.
 exit /b 0
 
