@@ -27,7 +27,7 @@ from PyQt6.QtCore import (  # noqa: E402
 from PyQt6.QtGui import QMouseEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from src.config import ConfigManager  # noqa: E402
+from src.config import ConfigManager, DEFAULT_NAV_ORDER  # noqa: E402
 from src.docx_manager import DocxManager  # noqa: E402
 from src.task_manager import TaskManager  # noqa: E402
 from src.note_manager import NoteManager  # noqa: E402
@@ -99,8 +99,8 @@ def main() -> int:
     app.processEvents()
 
     default_order = list(win._nav_order)
-    assert default_order == ["fragments", "tasks", "notes", "knowledge",
-                             "assets", "apps", "nav"], default_order
+    # 2026-09-27 起 DEFAULT_NAV_ORDER 含 "plugins"（8 键）；字面量会再过期
+    assert default_order == list(DEFAULT_NAV_ORDER), default_order
     ok(f"初始 _nav_order 正确: {default_order}")
 
     # ---- 场景 1：把末尾的 "apps" 拖到最前 ----
