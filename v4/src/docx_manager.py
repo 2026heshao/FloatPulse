@@ -72,8 +72,12 @@ class DocxManager:
       - update_paragraph_text()   修改段落文本
       - delete_paragraph()        删除段落
       - insert_paragraph_after()  在某段后插入
+      - insert_paragraph_before() 在某段前插入
       - append_paragraph()        末尾追加
       - save()                    保存到 docx + 更新 meta
+
+    寻址口径：**所有 index 都是「过滤后位置」**（跳过空段与过短段之后的
+    序号，从 0 开始），与知识库面板展示的「编号」相差 1（编号 = index+1）。
     """
 
     # 段落最小有效长度（沿用原 load_knowledge_base 规则）
@@ -185,14 +189,22 @@ class DocxManager:
 
         self._paragraphs = []
         self._raw_paragraphs = []
-        for idx, para in enumerate(self._doc.paragraphs):
+        for para in self._doc.paragraphs:
             text = para.text.strip()
             if not text:
                 continue
             if len(text) < self.MIN_PARAGRAPH_LENGTH:
                 continue
             info = ParagraphInfo(
-                index=idx,
+                # ★index 必须是**过滤后位置**，不是 docx 里的原始下标。
+                # 本类对外所有寻址 API（get_paragraph_text /
+                # update_paragraph_text / delete_paragraph /
+                # insert_paragraph_after / insert_paragraph_before）用的都是
+                # 过滤后位置，delete/insert 内部也把 index 归一为过滤后位置。
+                # 此前这里存的是 enumerate 的原始下标：文档里只要存在空行或
+                # 过短段落（Word 里很常见），两者就错位，面板「编号 N」会改到
+                # 别的段落上。2026-09-28 修正。
+                index=len(self._paragraphs),
                 text=text,
                 hash_value=self._hash_text(text),
                 preview=self._make_preview(text),
@@ -352,6 +364,40 @@ class DocxManager:
             for i in range(insert_pos, len(self._paragraphs)):
                 self._paragraphs[i].index = i
             return insert_pos
+        except Exception:
+            return -1
+
+    def insert_paragraph_before(self, index: int, text: str) -> int:
+        """
+        在指定段落**之前**插入新段落（insert_paragraph_after 的对称操作）。
+        返回新段落的索引；失败返回 -1。
+
+        用途：删除后撤销时把段落放回原位——只追加到末尾会让结构化文档错位。
+        """
+        para = self._get_raw_paragraph(index)
+        if para is None:
+            return -1
+        text = text.strip()
+        if not text or len(text) < self.MIN_PARAGRAPH_LENGTH:
+            return -1
+        try:
+            new_p = para._element.makeelement(qn('w:p'), {})
+            para._element.addprevious(new_p)
+            new_para = Paragraph(new_p, para._parent)
+            new_para.add_run(text)
+            # 同步内存模型：插在原 index 之前，即位置 index
+            new_info = ParagraphInfo(
+                index=index,
+                text=text,
+                hash_value=self._hash_text(text),
+                preview=self._make_preview(text),
+            )
+            self._paragraphs.insert(index, new_info)
+            self._raw_paragraphs.insert(index, new_para)
+            # 重建后续索引
+            for i in range(index, len(self._paragraphs)):
+                self._paragraphs[i].index = i
+            return index
         except Exception:
             return -1
 
