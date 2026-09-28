@@ -571,25 +571,47 @@ QLabel#pluginStoreBadge {
 }
 
 /* ---- AI 助手页面：左右对话气泡 ---- */
-/* 用户气泡靠右主色底——主色上的文字必须 $on_primary（对比度铁律）；
-   AI 气泡靠左中性底；提示气泡弱化为警示边框样式 */
+/* 用户气泡靠右主色底——主色上的文字必须 $on_primary（对比度铁律）。
+   AI / 提示气泡浮在主窗口内容之上，底色必须近乎不透明（$menu_bg 94%
+   实底）——2026-09-28 用户反馈：原先半透明 panel_fill（10%）把底下
+   滚过的文字透出来，整条回复糊成一片没法读。
+   尾角收小指向说话人（用户右下 / AI 左下），对话感更强 */
 QFrame#chatBubbleUser {
     background-color: $primary;
-    border-radius: 12px;
+    border-radius: 14px;
+    border-bottom-right-radius: 4px;
 }
 QLabel#chatBubbleText {
     color: $on_primary;
     font-size: 13px;
 }
+QLabel#chatBubbleAiText {
+    color: $text;
+    font-size: 13px;
+}
 QFrame#chatBubbleAI {
-    background-color: $panel_fill;
+    background-color: $menu_bg;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: 14px;
+    border-bottom-left-radius: 4px;
 }
 QFrame#chatBubbleHint {
-    background-color: $warn_alpha;
+    background-color: $menu_bg;
     border: 1px solid $warn_border;
-    border-radius: 12px;
+    border-radius: 14px;
+}
+/* 思考动画气泡：AI 回复在途时的「打字中」三点波（主色，造型随 AI 气泡）*/
+QFrame#chatBubbleThinking {
+    background-color: $menu_bg;
+    border: 1px solid $panel_edge;
+    border-radius: 14px;
+    border-bottom-left-radius: 4px;
+}
+QLabel#chatThinkingDots {
+    color: $primary;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 4px;
 }
 QLabel#fieldLabel {
     color: $text_secondary;

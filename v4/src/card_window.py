@@ -51,8 +51,8 @@ from PyQt6.QtCore import QUrl
 
 from src.glass_dialog import make_dialog_buttons
 from src.task_manager import (
-    TaskManager, task_state, format_relative_deadline, group_title,
-    KIND_ROW, KIND_HEADER,
+    TaskManager, task_state, format_relative_deadline, format_completed_date,
+    group_title, KIND_ROW, KIND_HEADER,
 )
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
@@ -1678,8 +1678,10 @@ class CardWindow(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, t.task_id)
                 item.setData(KIND_ROLE, KIND_ROW)
                 item.setData(ROLE_TITLE, t.title)
+                # 已完成 → 行尾显示完成日期（不显示逾期等截止状态）
                 item.setData(ROLE_REL,
-                              format_relative_deadline(t.deadline, today))
+                              format_completed_date(t.completed_at) if t.done
+                              else format_relative_deadline(t.deadline, today))
                 item.setData(ROLE_STATE, state)
                 item.setData(ROLE_DONE, bool(t.done))
                 self._task_list.addItem(item)
