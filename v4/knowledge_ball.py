@@ -2652,6 +2652,151 @@ def main():
         return {"fragment": _add_fragment, "task": _add_task,
                 "note": _add_note}
 
+    def _make_manage_providers():
+        """插件管理入口的宿主实现（2026-09-28 数据管理能力）。
+
+        改 / 删都包一层「改库 + 刷新 UI」；删除前抓整条快照进撤销栈，
+        插件拿到的是**撤销令牌**（>0 = 成功），可经 ``undo_delete`` 恢复。
+
+        撤销走"重新插入"路径（宿主 add_* 是唯一入口，不去碰内部 id 分配），
+        恢复后编号可能是新的，但内容与关键状态（完成态 / 专注次数）原样还原。
+        安全三层：能力声明（manage）→ 插件侧分级确认（改删需用户点确认）
+        → 这里的内容护栏 + 撤销栈 + 每次操作进审计日志。
+        """
+        undo_stack = []          # [{"token","kind","payload","used"}]
+        undo_seq = [1]           # 单调递增的令牌序号
+
+        def _push_undo(kind, payload):
+            token = undo_seq[0]
+            undo_seq[0] += 1
+            undo_stack.append({"token": token, "kind": kind,
+                               "payload": payload, "used": False})
+            if len(undo_stack) > 50:      # 容量上限：只留最近 50 次删除
+                undo_stack.pop(0)
+            return token
+
+        def _take_undo(token):
+            """取出未用过的令牌记录并标记已用（一令牌只能用一次）"""
+            for rec in undo_stack:
+                if rec["token"] == token and not rec["used"]:
+                    rec["used"] = True
+                    return rec
+            return None
+
+        # ---------- 任务 ----------
+        def _update_task(tid, title, note, deadline):
+            task = task_manager.get_task(tid)
+            if task is None:
+                return False
+            cur = task.to_dict()          # 部分更新：None = 保留原值
+            ok = task_manager.update_task(
+                tid,
+                cur["title"] if title is None else title,
+                cur["note"] if note is None else note,
+                cur["deadline"] if deadline is None else deadline)
+            if ok:
+                main_window.refresh_tasks()
+            return bool(ok)
+
+        def _set_task_done(tid, done):
+            ok = task_manager.set_done(tid, done)
+            if ok:
+                main_window.refresh_tasks()
+                ball.refresh_badge()
+            return bool(ok)
+
+        def _delete_task(tid):
+            task = task_manager.get_task(tid)
+            if task is None:
+                return 0
+            payload = task.to_dict()
+            if not task_manager.delete_task(tid):
+                return 0
+            main_window.refresh_tasks()
+            ball.refresh_badge()
+            return _push_undo("task", payload)
+
+        # ---------- 碎片 ----------
+        def _update_fragment(fid, content, source):
+            ok = fragment_manager.update_fragment(fid, content=content,
+                                                 source=source)
+            if ok:
+                main_window.refresh_fragments()
+            return bool(ok)
+
+        def _delete_fragment(fid):
+            frag = fragment_manager.get_fragment(fid)
+            if frag is None:
+                return 0
+            payload = frag.to_dict()
+            if not fragment_manager.delete_fragment(fid):
+                return 0
+            main_window.refresh_fragments()
+            return _push_undo("fragment", payload)
+
+        # ---------- 笔记 ----------
+        def _update_note(nid, title, content):
+            cur = note_manager.get_note(nid)
+            if cur is None:
+                return False
+            ok = note_manager.update_note(
+                nid, cur.content if content is None else content, title=title)
+            if ok:
+                main_window.refresh_notes()
+            return bool(ok)
+
+        def _delete_note(nid):
+            cur = note_manager.get_note(nid)
+            if cur is None:
+                return 0
+            payload = cur.to_dict()
+            if not note_manager.delete_note(nid):
+                return 0
+            main_window.refresh_notes()
+            return _push_undo("note", payload)
+
+        # ---------- 撤销 ----------
+        def _undo_delete(token):
+            rec = _take_undo(token)
+            if rec is None:
+                return False
+            kind, p = rec["kind"], rec["payload"]
+            if kind == "task":
+                new_id = task_manager.add_task(
+                    p.get("title") or "", p.get("note") or "",
+                    p.get("deadline") or "")
+                if not new_id:
+                    return False
+                if p.get("done"):
+                    task_manager.set_done(new_id, True)
+                for _ in range(int(p.get("focus_sessions") or 0)):
+                    task_manager.add_focus_session(new_id, 1)
+                main_window.refresh_tasks()
+                ball.refresh_badge()
+            elif kind == "fragment":
+                new_id = fragment_manager.add_fragment(
+                    p.get("type") or TYPE_CLIPBOARD_TEXT,
+                    p.get("content") or "", p.get("source") or "撤销恢复")
+                if not new_id:
+                    return False
+                main_window.refresh_fragments()
+            else:                             # note
+                new_id = note_manager.add_note(p.get("content") or "",
+                                               p.get("title") or "")
+                if not new_id:
+                    return False
+                main_window.refresh_notes()
+            return True
+
+        return {
+            "update_task": _update_task, "set_task_done": _set_task_done,
+            "delete_task": _delete_task,
+            "update_fragment": _update_fragment,
+            "delete_fragment": _delete_fragment,
+            "update_note": _update_note, "delete_note": _delete_note,
+            "undo_delete": _undo_delete,
+        }
+
     plugin_ctx = PluginContext(
         logger=get_logger(),
         config=config_manager.as_dict(),        # 只读快照，插件改不了宿主配置
@@ -2671,6 +2816,10 @@ def main():
         # 才能经 ctx.write 新增碎片/任务/笔记。只增不改删，内容有长度护栏，
         # 写成功后刷新对应面板（与卡片数据变更走同一条链路）。
         write_providers=_make_write_providers(),
+        # 数据管理入口（2026-09-28）：只有声明 capabilities=["manage"] 的插件
+        # 才能经 ctx.manage 改/删既有任务、碎片、笔记。删除返回撤销令牌，
+        # undo_delete 可恢复；每次操作进审计日志（app.log 的 [插件管理]）。
+        manage_providers=_make_manage_providers(),
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
