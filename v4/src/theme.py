@@ -231,6 +231,17 @@ QWidget#sideBar {
     background-color: transparent;
     border-right: 1px solid $hair;
 }
+/* 侧栏右侧分割手柄：平时隐形（不占地观感），悬停显一条细线提示可拖，
+   拖动中主色高亮；dragging 是 _NavSplitHandle 设的动态属性 */
+QWidget#navSplitHandle {
+    background-color: transparent;
+}
+QWidget#navSplitHandle:hover {
+    background-color: $hair;
+}
+QWidget#navSplitHandle[dragging="true"] {
+    background-color: $primary_a30;
+}
 QLabel#sideBarTitle {
     color: $text_placeholder;
     font-size: 11px;
