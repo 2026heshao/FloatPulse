@@ -25,8 +25,9 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPixmap,
+    QPolygonF,
 )
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QPushButton, QWidget
 
 from src.constants import DEFAULT_THEME
 
@@ -313,3 +314,115 @@ class NavIndicator(QWidget):
         painter.setBrush(QBrush(self._color))
         painter.drawPath(path)
         painter.end()
+
+
+class NavArrow(QWidget):
+    """侧栏组标题左侧的折叠箭头：自绘三角 + **旋转动画**（0° 指向右 → 90° 指向下）。
+
+    为什么自绘而不放字符（2026-09-29 实测）：
+      · 几何符号 ▼/▶ 在中文字体（msyh）里**部分缺字形** —— 实测
+        QRawFont.supportsCharacter('▶') 为 False，只能靠系统字体回退，
+        回退不到就是长期挂在侧栏上的"豆腐块"方框；
+      · 字符宽度随字体/字号变化，折叠与展开之间切换会让组标题行的
+        sizeHint 抖动；自绘固定 8×8，完全不参与字体度量；
+      · 真正想要的是"箭头转下去"这个动作 —— 字符做不到。
+    """
+
+    SIZE = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._angle = 0.0
+        self._color = QColor(140, 148, 166)
+        self._color_normal = QColor(140, 148, 166)
+        self._color_hover = QColor(140, 148, 166)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._anim = QVariantAnimation(self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutQuint)
+        self._anim.valueChanged.connect(self._on_value)
+
+    def _on_value(self, value):
+        self._angle = float(value)
+        self.update()
+
+    def set_color(self, color):
+        self._color = QColor(color)
+        self.update()
+
+    @property
+    def angle(self) -> float:
+        return self._angle
+
+    def set_angle(self, angle: float, animate: bool = True, duration: int = 240):
+        """转到指定角度（度）。animate=False 或时长 ≤0 时直接落位。"""
+        self._anim.stop()
+        if not animate or duration <= 0:
+            self._angle = float(angle)
+            self.update()
+            return
+        self._anim.setDuration(int(duration))
+        self._anim.setStartValue(float(self._angle))
+        self._anim.setEndValue(float(angle))
+        self._anim.start()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        painter.rotate(self._angle)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._color))
+        # 指向右的三角，绕中心旋转
+        painter.drawPolygon(QPolygonF([
+            QPointF(-2.2, -3.4), QPointF(3.2, 0.0), QPointF(-2.2, 3.4),
+        ]))
+        painter.end()
+
+
+class NavGroupHeader(QPushButton):
+    """侧栏分组标题按钮：左侧自绘箭头 + 标题文案（点击切换该组展开/折叠）。
+
+    箭头是**子控件**而非文本里的字符，所以标题文案里不再带 ▼/▶；
+    文本左侧的留白由 QSS 的 ``padding-left`` 提供（见 theme.py）。
+    """
+
+    ARROW_X = 10          # 箭头左边缘（与 QSS padding-left 对齐）
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.arrow = NavArrow(self)
+        self._expanded = False
+        self._expanded_angle = 90.0
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # QSS 的上下 margin 对称（4px），所以几何中心即视觉中心
+        self.arrow.move(self.ARROW_X,
+                        (self.height() - self.arrow.height()) // 2)
+
+    def set_arrow_color(self, color, hover_color=None):
+        """箭头配色（主题切换时同步）；hover_color 为空则鼠标悬停不换色"""
+        self.arrow.set_color(color)
+        self.arrow._color_normal = QColor(color)
+        self.arrow._color_hover = (QColor(hover_color)
+                                   if hover_color is not None else QColor(color))
+
+    def enterEvent(self, event):
+        self.arrow.set_color(self.arrow._color_hover)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.arrow.set_color(self.arrow._color_normal)
+        super().leaveEvent(event)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool, animate: bool = True,
+                     duration: int = 240):
+        self._expanded = bool(expanded)
+        self.arrow.set_angle(self._expanded_angle if self._expanded else 0.0,
+                             animate=animate, duration=duration)

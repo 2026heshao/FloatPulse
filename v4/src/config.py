@@ -98,6 +98,10 @@ DEFAULT_CONFIG = {
     "fragment_preview_visible": True,     # 碎片工作台右侧预览面板是否显示
     "clipboard_capture_images": True,     # 剪贴板图片自动存入临时素材池
     "nav_order":            [],           # 左栏功能页显示顺序（空 = 从未自定义，用默认顺序）
+    # 左栏当前**已展开**的分组集合（多组可同时展开；空列表 = 全部折叠）
+    # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
+    "nav_expanded_groups":  ["workbench"],
+    # 插件声明 capabilities=["ai"] 且被用户在设置页下拉框勾选接入后，
 }
 
 # 配置项类型映射（用于校验）
@@ -143,6 +147,7 @@ _CONFIG_TYPES = {
     "fragment_preview_visible": bool,
     "clipboard_capture_images": bool,
     "nav_order":            list,
+    "nav_expanded_groups":  list,
 }
 
 # 主窗口「最后浏览页面」允许的最大物理索引。

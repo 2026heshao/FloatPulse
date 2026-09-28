@@ -113,15 +113,28 @@ def main() -> int:
     pump(app, 120)
 
     default_order = list(win._nav_order)
-    step = win._nav_btns[default_order[1]].y() - win._nav_btns[default_order[0]].y()
+    # ★ 2026-09-29 侧栏改为「四组 + 手风琴」后，**可拖槽位 = 展开组内的条目**，
+    #   不再是整条 nav_order（其余组此刻收起，既不可见也不可拖）。
+    #   nav_order 仍是记录顺序的真相源；位置/槽位类断言一律改用组内顺序。
+    group_order = list(win._nav_item_group_order())
+    assert len(group_order) >= 4, f"展开组可拖条目过少：{group_order}"
+    assert group_order == default_order[:len(group_order)], \
+        f"展开组顺序应取 nav_order 的前缀：{group_order} vs {default_order}"
+    step = (win._nav_btns[group_order[1]].y()
+            - win._nav_btns[group_order[0]].y())
     assert step > 0, "槽位间距异常"
 
     # 记录槽位几何（后续所有位置断言都以此为准）
-    base_y = win._nav_btns[default_order[0]].y()
+    base_y = win._nav_btns[group_order[0]].y()
+
+    def _gorder():
+        """当前展开组的条目顺序（按 nav_order 排；槽位集合恒定，顺序会变）"""
+        pool = set(group_order)
+        return [k for k in win._nav_order if k in pool]
 
     # ---------------- A/B/C：拖动中实时让位 ----------------
-    dragged = win._nav_btns[default_order[2]]        # 拖第 3 个（notes）
-    neighbor = win._nav_btns[default_order[3]]       # 它的下一个邻居（knowledge）
+    dragged = win._nav_btns[group_order[2]]          # 拖第 3 个（notes）
+    neighbor = win._nav_btns[group_order[3]]         # 它的下一个邻居（knowledge）
     anchor = dragged.mapToGlobal(dragged.rect().center())
     press(dragged)
     move_to(dragged, anchor + QPoint(0, 20))         # 越过阈值进入拖拽
@@ -132,11 +145,11 @@ def main() -> int:
     move_to(dragged, anchor + QPoint(0, int(step * 1.2)))
     pump(app, 220)                                   # 等让位动画播完
     live_order = list(win._nav_drag_order)
-    assert live_order != default_order, f"A. 拖动中顺序未实时变化: {live_order}"
+    assert live_order != group_order, f"A. 拖动中顺序未实时变化: {live_order}"
     assert live_order.index(dragged.nav_key) == 3, \
         f"A. 让位后槽位不对: {live_order.index(dragged.nav_key)}"
     # 邻居应已滑到新槽位（上层索引 2）
-    slot_y = win._nav_btns[default_order[0]].y() + 2 * step
+    slot_y = win._nav_btns[group_order[0]].y() + 2 * step
     assert neighbor.y() == slot_y, f"A. 邻居未让位到位: {neighbor.y()} != {slot_y}"
     ok(f"A. 拖动中实时让位：{dragged.nav_key} → 槽位 "
        f"{live_order.index(dragged.nav_key)}，邻居 {neighbor.nav_key} 已滑开")
@@ -149,15 +162,20 @@ def main() -> int:
         f"A. 第二次让位失败: {win._nav_drag_order}"
     ok("A. 连续越过两个邻居：让位持续生效（空档跟着鼠标走）")
 
-    # B. 跟手：按钮应贴着光标（误差 ≤ 2px），不是滞后一个阈值
+    # B. 跟手：按钮应贴着光标（误差 ≤ 2px），不是滞后一个阈值。
+    #    ⚠ 分组后展开组只有 5 个槽位（旧实现是 8 项平铺），向下拖 2.2 格会先
+    #    撞到末槽位被**钳制** —— 期望值必须按钳制后的位置算，否则量到的是
+    #    钳制量（这就是本脚本第一版在分组后报 185 vs 195 的原因）。
     g = anchor + QPoint(0, int(step * 2.2))
-    expect_y = win._nav_area.mapFromGlobal(g).y() - (dragged.height() // 2)
+    raw = win._nav_area.mapFromGlobal(g).y() - win._nav_drag_grab_dy
+    ys = win._nav_slot_ys
+    expect_y = max(ys[0], min(raw, ys[-1]))
     assert abs(dragged.y() - expect_y) <= 2, \
-        f"B. 跟手偏差过大: {dragged.y()} vs {expect_y}"
-    ok("B. 被拖按钮严格跟手（无阈值滞后）")
+        f"B. 跟手偏差过大: {dragged.y()} vs {expect_y}（raw={raw}）"
+    ok("B. 被拖按钮严格跟手（无阈值滞后；越界部分按槽位钳制）")
 
     # B. 钳制：拖出列表底部 → 停在最后一个槽位
-    last_y = win._nav_btns[default_order[0]].y() + (len(default_order) - 1) * step
+    last_y = win._nav_btns[group_order[0]].y() + (len(group_order) - 1) * step
     move_to(dragged, anchor + QPoint(0, int(step * 12)))
     pump(app, 200)
     assert dragged.y() == last_y, f"B. 未钳制到末尾槽位: {dragged.y()} != {last_y}"
@@ -179,12 +197,14 @@ def main() -> int:
     assert anims or drop is not None, "D. 松手位置偏离槽位 → 应有滑入动画"
     shot(win, "letway_2_settling.png")
     pump(app, 600)
-    final_ys = [b.y() for b in win._nav_btns.values()]
+    # 终态位置只看**当前展开组**的条目（其余组收起，几何是陈旧值）
+    final_ys = [win._nav_btns[k].y() for k in group_order]
     order = list(win._nav_order)
-    expected = [win._nav_btns[k].y() for k in order]
-    assert len(set(expected)) == len(order), "D. 终态槽位重叠"
+    expected = [win._nav_btns[k].y() for k in group_order]
+    assert len(set(expected)) == len(group_order), "D. 终态槽位重叠"
     assert sorted(final_ys) == sorted(
-        [base_y + i * step for i in range(len(order))]), f"D. 终态未落位: {final_ys}"
+        [base_y + i * step for i in range(len(group_order))]), \
+        f"D. 终态未落位: {final_ys}"
     cfg2 = ConfigManager(config_path)
     assert cfg2.get("nav_order") == order, "D. config 未落盘"
     ok(f"D. 落定滑入后精确落位并落盘: {order}")
@@ -212,25 +232,27 @@ def main() -> int:
     ok("E. 拖起又放回：顺序/config 零副作用，按钮回原位")
 
     # ---------------- F. 异常中断回滚 ----------------
-    victim = win._nav_btns[list(win._nav_order)[0]]
+    victim = win._nav_btns[group_order[0]]
     vp = victim.mapToGlobal(victim.rect().center())
     press(victim)
     move_to(victim, vp + QPoint(0, int(step * 2.2)))
     pump(app, 200)
-    assert win._nav_drag_order != list(win._nav_order), "F. 前置：拖动中顺序应已变"
+    assert win._nav_drag_order != group_order, "F. 前置：拖动中顺序应已变"
     win.event(QEvent(QEvent.Type.WindowDeactivate))
     app.processEvents()
     assert win._nav_drag_cursor_active is False, "F. 光标标志未复位"
     assert QApplication.overrideCursor() is None, "F. override 光标栈非空"
     assert win._nav_drag_btn is None and win._nav_free_spacer is None, "F. 拖拽态未复位"
     assert list(win._nav_order) == order, "F. 中断不应改动顺序"
-    for i, k in enumerate(order):
+    # 回滚目标是"拖拽开始那一刻的顺序"= D 场景拖完之后的组内顺序，
+    # 不是脚本开头记的 group_order（那是 D 之前的排列）
+    for i, k in enumerate(_gorder()):
         assert win._nav_btns[k].y() == base_y + i * step, f"F. {k} 未回原槽位"
     assert victim.graphicsEffect() is None, "F. 提起投影未清除"
     ok("F. WindowDeactivate 中断：回滚顺序 + 按钮回原槽位 + 布局交还 + 光标还原")
 
     # ---------------- G. 连续两次拖拽（动画中再次拖拽） ----------------
-    first = win._nav_btns[order[0]]
+    first = win._nav_btns[_gorder()[0]]
     fp = first.mapToGlobal(first.rect().center())
     press(first)
     move_to(first, fp + QPoint(0, int(step * 1.2)))
@@ -239,7 +261,7 @@ def main() -> int:
     app.processEvents()                                # 只推一轮：动画仍在跑
     assert win._nav_settle_animations or win._nav_drop_anim is not None, \
         "G. 前置：第一次落定动画应仍在进行"
-    mid_order = list(win._nav_order)
+    mid_order = _gorder()
     second = win._nav_btns[mid_order[-1]]
     start_idx = mid_order.index(second.nav_key)
     sp = second.mapToGlobal(second.rect().center())
@@ -248,7 +270,7 @@ def main() -> int:
     move_to(second, sp + QPoint(0, -int(step * 3.2)))
     release(second, sp + QPoint(0, -int(step * 3.2)))
     pump(app, 700)
-    new_order = list(win._nav_order)
+    new_order = _gorder()
     # 上移 3.2 个槽位 → 索引 = 起点 - round(3.2) = 起点 - 3（下限 0）
     expect_idx = max(0, start_idx - 3)
     assert new_order.index(second.nav_key) == expect_idx, \
@@ -261,11 +283,14 @@ def main() -> int:
 
     # ---------------- H. 无残留 ----------------
     assert win._nav_shift_anims == {}, "H. 让位动画引用未清空"
-    for i, k in enumerate(win._nav_order):
+    for i, k in enumerate(_gorder()):
         b = win._nav_btns[k]
         assert b.graphicsEffect() is None, f"H. {k} 残留 graphicsEffect"
         assert win._nav_btns_layout.indexOf(b) >= 0, f"H. {k} 未回到布局"
         assert b.y() == base_y + i * step, f"H. {k} 位置异常 {b.y()}"
+    for k in win._nav_order:
+        assert win._nav_btns_layout.indexOf(win._nav_btns[k]) >= 0, \
+            f"H. {k} 被移出了布局（折叠 ≠ 移出布局）"
     assert win._nav_btns_layout.indexOf(win._settings_btn) >= 0, "H. 设置按钮不在布局"
     ok("H. 无残留：布局完整、按钮归位、无 effect/动画引用")
 
