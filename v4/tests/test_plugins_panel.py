@@ -138,8 +138,8 @@ def _make_loaded_plugin(tmp_path, description="", doc=None,
 def _plugin_cards(panel):
     """_cards_layout 里的「已装插件卡片」列表。
 
-    布局结构为 [store_box, 已装卡片..., stretch]（store_box 是插件商店
-    区块，插件数为 0 时只是隐藏、始终占位），因此不能再用固定下标取卡片，
+    布局结构为 [已装卡片..., stretch]（2026-09-28 起商店区已拆入
+    PluginStoreDialog 独立弹窗），不能再用固定下标取卡片，
     必须按 objectName == "pluginCard" 过滤。
     """
     cards = []
@@ -148,6 +148,26 @@ def _plugin_cards(panel):
         if w is not None and w.objectName() == "pluginCard":
             cards.append(w)
     return cards
+
+
+def _store_cards(dialog):
+    """商店弹窗 _list_layout 里的商店卡片（按 objectName 过滤，同上理）"""
+    cards = []
+    for i in range(dialog._list_layout.count()):
+        w = dialog._list_layout.itemAt(i).widget()
+        if w is not None and w.objectName() == "pluginStoreCard":
+            cards.append(w)
+    return cards
+
+
+def _make_store_entry(tmp_path, plugin_id="demo", installed=False,
+                      usable=True, error=""):
+    """构造 StoreEntry 形状的替身（面板/弹窗只读这些公开字段）"""
+    return types.SimpleNamespace(
+        plugin_id=plugin_id, name="演示插件", version="1.0.0",
+        description="测试商店条目", usable=usable, installed=installed,
+        error=error, filename=f"{plugin_id}.fpplug",
+        path=str(tmp_path / f"{plugin_id}.fpplug"), manifest={})
 
 
 class _FakeLoader:
@@ -526,5 +546,139 @@ class TestUsageViewer:
             assert len(btns) == 1
             btns[0].click()
             assert opened == [str(p)]
+        finally:
+            dlg.deleteLater()
+
+
+class _StoreFakeLoader(_FakeLoader):
+    """带商店能力的 loader 替身：scan_store / install_from_store / rescan"""
+
+    def __init__(self, plugins, entries):
+        super().__init__(plugins)
+        self._entries = entries
+        self.install_calls = []
+
+    def scan_store(self):
+        return list(self._entries)
+
+    def install_from_store(self, plugin_id):
+        self.install_calls.append(plugin_id)
+        for e in self._entries:
+            if getattr(e, "plugin_id", "") == plugin_id:
+                e.installed = True
+        return True, f"已安装 {plugin_id}"
+
+    def rescan(self):
+        return list(self._plugins)
+
+
+class TestStoreDialog:
+    """插件商店独立弹窗（2026-09-28 拆出，取代页面内嵌商店区）"""
+
+    def test_panel_has_no_inline_store(self, qapp, tmp_path):
+        # 回归钉子：商店区必须离开插件中心页
+        from src.plugins_panel import PluginsPanel
+        panel = PluginsPanel(_FakeHost(loader=_FakeLoader([])))
+        names = [panel._cards_layout.itemAt(i).widget().objectName()
+                 for i in range(panel._cards_layout.count())
+                 if panel._cards_layout.itemAt(i).widget() is not None]
+        assert "pluginStoreBox" not in names
+
+    def test_dialog_renders_cards_and_states(self, qapp, tmp_path):
+        from PyQt6.QtWidgets import QLabel, QPushButton
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [
+            _make_store_entry(tmp_path, "demo-a", installed=False),
+            _make_store_entry(tmp_path, "demo-b", installed=True),
+        ]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            # 已安装的包不重复列出（页面本体已有同款插件卡片），只列未安装
+            cards = _store_cards(dlg)
+            assert len(cards) == 1
+            btns_a = [b for b in cards[0].findChildren(QPushButton)
+                      if b.text() == "⬇ 安装"]
+            assert len(btns_a) == 1 and btns_a[0].isEnabled()
+            # 已装数量压缩成一行提示
+            hint = dlg._installed_hint.text()
+            assert "1 个插件包已安装" in hint
+            assert dlg._installed_hint.isVisibleTo(dlg)
+            assert not dlg._empty_label.isVisibleTo(dlg)
+            # 弹窗里没有已安装条目的卡片形态（「✓ 已安装」按钮不该存在）
+            assert not [b for c in _store_cards(dlg)
+                        for b in c.findChildren(QPushButton)
+                        if "已安装" in b.text()]
+        finally:
+            dlg.deleteLater()
+
+    def test_dialog_empty_store_shows_hint(self, qapp, tmp_path):
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], [])))
+        dlg = PluginStoreDialog(panel)
+        try:
+            assert _store_cards(dlg) == []
+            assert dlg._empty_label.isVisibleTo(dlg)
+            assert "还没有可安装的插件包" in dlg._empty_label.text()
+            assert not dlg._installed_hint.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
+    def test_dialog_all_installed_shows_fallback_hint(self, qapp, tmp_path):
+        """商店里的包全装过了：不列卡片，空态文案换成「卸载后可重装」"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "demo-b", installed=True)]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            assert _store_cards(dlg) == []
+            assert dlg._empty_label.isVisibleTo(dlg)
+            assert "都已安装" in dlg._empty_label.text()
+            assert "重装" in dlg._empty_label.text()
+        finally:
+            dlg.deleteLater()
+
+    def test_dialog_bad_package_shows_error(self, qapp, tmp_path):
+        from PyQt6.QtWidgets import QLabel, QPushButton
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "bad", usable=False,
+                                     error="manifest 不合法")]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            cards = _store_cards(dlg)
+            assert len(cards) == 1
+            joined = " ".join(l.text() for l in cards[0].findChildren(QLabel))
+            assert "manifest 不合法" in joined
+            # 坏包不给可点的安装按钮（文案是「⊘ 无法安装」且禁用）
+            assert [b for b in cards[0].findChildren(QPushButton)
+                    if b.text() == "⬇ 安装"] == []
+        finally:
+            dlg.deleteLater()
+
+    def test_install_updates_dialog(self, qapp, tmp_path, monkeypatch):
+        """点安装 → loader 装包 → 弹窗卡片即时翻到「✓ 已安装」"""
+        from PyQt6.QtWidgets import QPushButton
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "demo-a", installed=False)]
+        loader = _StoreFakeLoader([], entries)
+        panel = PluginsPanel(_FakeHost(loader=loader))
+        dlg = PluginStoreDialog(panel)
+        # 真实流程里 _on_open_store_dialog 会登记弹窗引用，这里对齐它
+        panel._store_dialog = dlg
+        try:
+            # 安装成功路径会弹提示框，替身拦下避免测试阻塞
+            monkeypatch.setattr(
+                "src.plugins_panel.QMessageBox.information",
+                lambda *a, **k: None)
+            card = _store_cards(dlg)[0]
+            btn = [b for b in card.findChildren(QPushButton)
+                   if b.text() == "⬇ 安装"][0]
+            btn.click()
+            assert loader.install_calls == ["demo-a"]
+            # reload 后：该包已安装 → 不再列卡片，回落为已装数量提示
+            assert _store_cards(dlg) == []
+            assert "1 个插件包已安装" in dlg._installed_hint.text()
+            assert "都已安装" in dlg._empty_label.text()
         finally:
             dlg.deleteLater()
