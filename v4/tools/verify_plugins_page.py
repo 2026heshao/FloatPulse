@@ -48,7 +48,14 @@ class _FakeLoader:
     def loaded_plugins(self):
         return list(self._plugins)
 
+    # ⚠ 面板按属性读取（loader.plugins_dir），必须是 @property——
+    #   普通方法会让 setToolTip 收到 bound method 直接 TypeError
+    @property
     def plugins_dir(self):
+        return self._dir
+
+    @property
+    def store_dir(self):
         return self._dir
 
 
