@@ -1,0 +1,24 @@
+{
+  "id": "kb-search",
+  "name": "站内搜索",
+  "version": "1.0.0",
+  "entry": "plugin.py",
+  "requires": [
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets"
+  ],
+  "capabilities": [],
+  "description": "在知识库 / 笔记 / 碎片 / 任务里做全文检索：自研中文分词 + 倒排索引 + BM25 排序，命中片段带高亮。纯站内检索，不碰文件系统",
+  "page": {
+    "title": "🔍 站内搜索"
+  },
+  "actions": [
+    {
+      "id": "kb-search.open",
+      "title": "🔍 站内搜索",
+      "hotkey": "Ctrl+Alt+F",
+      "menu": true
+    }
+  ]
+}
