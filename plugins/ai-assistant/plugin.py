@@ -92,13 +92,16 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_system_prompt(custom_rules) -> str:
-    """基础系统提示词 + 规则库中已启用的用户规则。
+def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
+    """基础系统提示词 + 规则库中已启用的用户规则（+ 动作协议）。
 
     规则库是用户在页面上自己编辑的（config.json 的 custom_rules），
     插件不预置任何条目。脏数据（非 dict / 空文本 / 缺键）一律宽容
     处理：空文本与停用条目跳过，纯字符串条目按启用处理（兼容手改
     配置）。无生效规则 → 返回基础 SYSTEM_PROMPT，行为与旧版一致。
+
+    ``can_manage``：插件是否被授权改删数据（manifest 声明 manage）。
+    未授权时**不下发动作协议**——否则模型会承诺一堆做不到的操作。
     """
     rules = []
     for r in custom_rules or []:
@@ -110,10 +113,13 @@ def build_system_prompt(custom_rules) -> str:
             text = str(r or "").strip()
         if text:
             rules.append(text)
+    prompt = SYSTEM_PROMPT
+    if can_manage:
+        prompt += ACTION_PROTOCOL
     if not rules:
-        return SYSTEM_PROMPT
+        return prompt
     joined = "\n".join(f"{i}. {t}" for i, t in enumerate(rules, 1))
-    return (SYSTEM_PROMPT
+    return (prompt
             + "\n\n以下是用户在「规则库」里自定义的规则，每次回答都必须遵守：\n"
             + joined)
 
@@ -317,6 +323,214 @@ QUICK_COMMANDS = (
      "请根据下面的任务、碎片、笔记数据，写一段本周工作小结"
      "（分「做了什么 / 进行中 / 建议」三节）。"),
 )
+
+
+# ====================================================================
+# 动作协议（2026-09-28 用户要求：AI 能按指令操控应用内数据）
+# ====================================================================
+# 设计：AI 不直接动手。它在回复末尾输出一个 ```actions 块，插件解析 →
+# 校验 → 分级处理（新增类直接执行；改删类弹「待确认卡」，用户点执行才落库）。
+#
+# 为什么不用原生 function calling：本地 Qwen3-4B 量化版对 JSON schema 的
+# 遵循度不稳，云端 DeepSeek 支持好——用提示词约定的动作块两端通吃。
+# 代价是小模型偶尔输出格式错误：那种情况**宁可整块不执行**并如实提示，
+# 也不去猜它的意图（猜错就是改了用户的数据）。
+ACTION_OPS = {
+    "add_task": "write", "add_fragment": "write", "add_note": "write",
+    "complete_task": "manage", "reopen_task": "manage",
+    "update_task": "manage", "delete_task": "manage",
+    "update_fragment": "manage", "delete_fragment": "manage",
+    "update_note": "manage", "delete_note": "manage",
+}
+MAX_ACTIONS = 10          # 单轮动作数上限：防模型刷屏式输出
+
+# 动作 → 目标数据源（用于把 id 校验到快照里的真实记录）
+_OP_TARGET = {
+    "complete_task": ("tasks", "task_id", "任务"),
+    "reopen_task": ("tasks", "task_id", "任务"),
+    "update_task": ("tasks", "task_id", "任务"),
+    "delete_task": ("tasks", "task_id", "任务"),
+    "update_fragment": ("fragments", "fragment_id", "碎片"),
+    "delete_fragment": ("fragments", "fragment_id", "碎片"),
+    "update_note": ("notes", "note_id", "笔记"),
+    "delete_note": ("notes", "note_id", "笔记"),
+}
+
+ACTION_PROTOCOL = (
+    "\n\n== 你可以执行的应用操作 ==\n"
+    "当用户**明确要求**修改应用内数据时，除文字回答外，还要在回复**最后**"
+    "输出一个动作块（普通问答不要输出）：\n"
+    "```actions\n"
+    '{"actions":[{"op":"complete_task","id":3,"why":"用户要求标记完成"}]}\n'
+    "```\n"
+    "可用 op（需要 id 的，id 只能取自上面数据里的真实编号，**禁止编造**）：\n"
+    "- add_task{title,note?,deadline?} / add_fragment{content} / "
+    "add_note{title,content}\n"
+    "- complete_task{id} / reopen_task{id} —— 标记完成 / 取消完成\n"
+    "- update_task{id,title?,note?,deadline?} / delete_task{id}\n"
+    "- update_fragment{id,content?,source?} / delete_fragment{id}\n"
+    "- update_note{id,title?,content?} / delete_note{id}\n"
+    "规则：①只在用户明确要求改动时输出动作；②不确定是哪条记录就先问，"
+    "不要猜；③一次最多 10 条；④动作块之外照常用文字说明你做了什么。"
+)
+
+
+def describe_action(op: str, args: dict, snapshot: dict | None) -> str:
+    """动作 → 人类可读描述（确认卡与结果气泡共用）"""
+    snap = snapshot or {}
+
+    def _label(kind_key) -> str:
+        if kind_key is None:
+            return ""
+        src, id_key, name = kind_key
+        rid = args.get("id")
+        for item in snap.get(src) or []:
+            if item.get(id_key) == rid:
+                head = str(item.get("title") or "").strip()
+                if not head:
+                    head = " ".join(str(item.get("content") or "").split())[:24]
+                return f"{name} #{rid}「{head}」" if head else f"{name} #{rid}"
+        return f"{name} #{rid}"
+
+    if op == "add_task":
+        return f"新增任务「{str(args.get('title') or '').strip()}」"
+    if op == "add_fragment":
+        head = " ".join(str(args.get("content") or "").split())[:24]
+        return f"记一条碎片「{head}」"
+    if op == "add_note":
+        return f"新增笔记「{str(args.get('title') or '').strip()}」"
+    if op == "complete_task":
+        return f"把{_label(_OP_TARGET[op])}标记为已完成"
+    if op == "reopen_task":
+        return f"把{_label(_OP_TARGET[op])}恢复为未完成"
+    if op in ("update_task", "update_fragment", "update_note"):
+        fields = [k for k in ("title", "note", "deadline", "content", "source")
+                  if args.get(k) is not None]
+        return f"修改{_label(_OP_TARGET[op])}（{'、'.join(fields) or '字段'}）"
+    if op in ("delete_task", "delete_fragment", "delete_note"):
+        # 用【】而不是 Markdown 的 **：描述会进 QLabel，星号不会被渲染
+        return f"【删除】{_label(_OP_TARGET[op])}"
+    return f"{op} {args}"
+
+
+def _looks_like_actions(raw: str) -> bool:
+    """这段 JSON 是否「长得像动作块」（dict 且含 actions 数组）
+
+    用于兜底识别路径的准入判断：普通问答里出现的 JSON 示例（用户贴一段
+    配置问「这是什么」）不能因为我们认得出 JSON 就从正文里删掉。
+    """
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("actions"), list)
+
+
+def _extract_action_json(text: str) -> str:
+    """从回复里取出动作块的 JSON 文本；``""`` = 没有动作块
+
+    识别顺序（从明确到宽松）：
+      ① ```` ```actions ```` 围栏 —— 协议约定的标准写法，见到即认：**整段**
+         内容都当作动作块（哪怕不是对象、哪怕 JSON 坏了），交给调用方报错，
+         而不是当正文显示给用户
+      ② ```` ```json ```` 围栏 —— 取最后一个「像动作块」的
+      ③ 裸 JSON —— 取最后一个「像动作块」的
+    只取最后一个：容忍模型在结论后再补一段动作块。
+    """
+    import re
+    fenced = re.findall(r"```actions\s*(.*?)\s*```", text, re.S)
+    if fenced:
+        return fenced[-1]
+    for cand in re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)[::-1]:
+        if _looks_like_actions(cand):
+            return cand
+    left, right = text.rfind("{"), text.rfind("}")
+    if 0 <= left < right:
+        cand = text[left:right + 1]
+        if _looks_like_actions(cand):
+            return cand
+    return ""
+
+
+def parse_actions(text: str, snapshot: dict | None = None):
+    """回复文本 → (干净正文, [动作], [未执行原因])
+
+    每个动作是 ``{"op","args","level","desc"}``；``level`` 决定处理方式
+    （write = 直接执行，manage = 需用户确认）。
+
+    容错策略（本地小模型输出不稳）：JSON 坏 / 结构不对 → 整块不产出动作
+    并给出原因；单条不合格（未知 op / id 编造 / 参数类型错 / 超额）→ 只丢
+    那一条。**任何情况下都不猜**——少做比做错好。
+
+    正文语义：没找到动作块 → 原样返回；找到动作块 → 返回**剥掉动作块后的
+    正文（可能是空串）**。空串表示"这条回复除了动作什么都没有"，调用方
+    应据此不渲染空气泡，而不是把 JSON 当正文显示出来。
+    """
+    snap = snapshot or {}
+    text = text or ""
+    raw = _extract_action_json(text)
+    if not raw.strip():
+        return text, [], []
+    # 正文去掉动作块（用户看的是结论，不是 JSON）
+    clean = text.replace(raw, "").strip()
+    clean = clean.replace("```actions", "").replace("```json", "")
+    clean = clean.replace("```", "").strip()
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        return clean, [], [f"动作块不是合法 JSON（{exc}），未执行"]
+    if not isinstance(data, dict):
+        return clean, [], ["动作块必须是 JSON 对象，未执行"]
+    items = data.get("actions")
+    if not isinstance(items, list):
+        return clean, [], ["动作块缺少 actions 数组，未执行"]
+
+    actions, errors = [], []
+    if len(items) > MAX_ACTIONS:
+        errors.append(f"动作条数 {len(items)} 超过上限 {MAX_ACTIONS}，"
+                      f"只取前 {MAX_ACTIONS} 条")
+        items = items[:MAX_ACTIONS]
+    for item in items:
+        if not isinstance(item, dict):
+            errors.append(f"动作必须是对象，跳过：{item!r}")
+            continue
+        op = str(item.get("op") or "").strip()
+        if op not in ACTION_OPS:
+            errors.append(f"未知动作「{op}」，跳过")
+            continue
+        args = {"id": item.get("id")} if "id" in item else {}
+        for key in ("title", "note", "deadline", "content", "source"):
+            if key in item:
+                args[key] = item[key]
+        if op in _OP_TARGET:
+            rid = args.get("id")
+            if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+                errors.append(f"{op} 的 id 不是正整数，跳过：{rid!r}")
+                continue
+            src, id_key, _name = _OP_TARGET[op]
+            ids = {it.get(id_key) for it in (snap.get(src) or [])}
+            if rid not in ids:
+                errors.append(f"{op} 的目标 #{rid} 不在当前数据里"
+                              "（可能已删除或编号编造），跳过")
+                continue
+        else:
+            args.pop("id", None)
+            need = "title" if op in ("add_task", "add_note") else "content"
+            val = args.get(need)
+            if not isinstance(val, str) or not val.strip():
+                errors.append(f"{op} 缺少有效的 {need}，跳过")
+                continue
+        for key, val in list(args.items()):
+            if key != "id" and val is not None and not isinstance(val, str):
+                errors.append(f"{op} 的 {key} 必须是字符串，跳过该条")
+                args = None
+                break
+        if args is None:
+            continue
+        actions.append({"op": op, "args": args,
+                        "level": ACTION_OPS[op],
+                        "desc": describe_action(op, args, snap)})
+    return clean, actions, errors
 
 
 # ====================================================================
@@ -619,6 +833,8 @@ class AiChatPage(QWidget):
         self._think_phase = 0
         # 已存为笔记的回复文本（气泡右键菜单据此显示「已存为笔记」并禁用）
         self._noted_texts = set()
+        # 最近一张待确认卡（改删动作等用户点「执行」；测试与调试用引用）
+        self._pending_confirm = None
 
         root = QVBoxLayout(self)
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
@@ -975,13 +1191,19 @@ class AiChatPage(QWidget):
                 lambda pos, c=card, t=text: self._bubble_menu(c, t, pos))
 
         # 对齐行容器：不用 insertWidget 的 alignment——QLayoutItem 走对齐时
-        # 布局只按 sizeHint 定高、不吃 heightForWidth（长回复末行被裁，实测）。
-        # 套一层 [stretch, card] / [card, stretch] 行，高度交由布局按
-        # heightForWidth 正常计算；卡片仍不被拉伸（stretch 吃掉剩余空间）
+        # 布局只按 sizeHint 定高、不吃 heightForWidth（长回复末行被裁，实测）
+        self._add_row(card, right=user)
+
+    def _add_row(self, card, right: bool = False):
+        """把卡片按左右对齐插进消息流（行容器：[stretch, card] 或 [card, stretch]）
+
+        高度交由布局按 heightForWidth 正常计算；卡片不被拉伸（stretch
+        吃掉剩余空间）。气泡 / 确认卡 / 结果卡共用这一条插入路径。
+        """
         row_host = QWidget(self._stream_host)
         rl = QHBoxLayout(row_host)
         rl.setContentsMargins(0, 0, 0, 0)
-        if user:
+        if right:
             rl.addStretch(1)
             rl.addWidget(card)
         else:
@@ -1003,10 +1225,198 @@ class AiChatPage(QWidget):
         act.triggered.connect(lambda: self._save_as_note(text))
         return menu
 
+    # ---------------- 动作执行（2026-09-28 数据操控） ----------------
+    # 链路：AI 输出动作块 → parse_actions 校验（op 白名单 + id 必须真实存在）
+    # → 分级处理：新增类直接执行；改删类弹确认卡，用户点「执行」才落库。
+    # AI 永远拿不到管理器本体，只能经 ctx.write / ctx.manage 白名单方法。
+    def _snapshot(self) -> dict:
+        """当前数据快照（动作校验用：id 必须是真实存在的记录）"""
+        try:
+            return {"tasks": self._ctx.data.tasks(),
+                    "fragments": self._ctx.data.fragments(),
+                    "notes": self._ctx.data.notes()}
+        except Exception:                       # noqa: BLE001 - 校验降级为无数据
+            return {}
+
+    def _handle_actions(self, actions):
+        """分级处理动作：新增直接做，改删先要用户确认。
+
+        授权前置守卫：协议只在授权时才下发，但模型仍可能硬输出动作块
+        （尤其本地小模型）。此时**不要**把注定被宿主拒绝的动作渲染成
+        确认卡（用户点了「执行」只会看到一排失败），而应如实说明未执行。
+        """
+        if not self._can_write():
+            self.add_bubble("提示", "当前未授权修改数据（插件未声明 "
+                                    "write/manage 能力），以下动作未执行：\n- "
+                            + "\n- ".join(a["desc"] for a in actions))
+            return
+        direct = [a for a in actions if a["level"] == "write"]
+        risky = [a for a in actions if a["level"] == "manage"]
+        if risky and not self._can_manage():
+            self.add_bubble("提示", "当前未授权改删数据（插件未声明 "
+                                    "manage 能力），以下动作未执行：\n- "
+                            + "\n- ".join(a["desc"] for a in risky))
+            risky = []
+        if direct:
+            self._execute_and_report(direct)
+        if risky:
+            self._add_confirm_card(risky)
+
+    def _run_action(self, act):
+        """执行一个已校验的动作 → (成功, 描述, 撤销令牌)
+
+        能力未声明时宿主侧会安全拒绝（返回 0 / False），这里如实报告失败，
+        不吞错也不重试——重试可能造成重复写入。
+        """
+        op, a = act["op"], act["args"]
+        desc = act.get("desc") or op
+        w, m = self._ctx.write, self._ctx.manage
+        try:
+            if op == "add_task":
+                rid = w.add_task(a.get("title") or "", a.get("note") or "",
+                                 a.get("deadline") or "")
+                return rid > 0, (f"已新增任务 #{rid}" if rid else "新增任务失败"), 0
+            if op == "add_fragment":
+                rid = w.add_fragment(a.get("content") or "")
+                return rid > 0, (f"已记入碎片 #{rid}" if rid else "记碎片失败"), 0
+            if op == "add_note":
+                rid = w.add_note(a.get("title") or "", a.get("content") or "")
+                return rid > 0, (f"已新增笔记 #{rid}" if rid else "新增笔记失败"), 0
+            if op == "complete_task":
+                ok = m.set_task_done(a["id"], True)
+                return ok, (f"已完成 {desc}" if ok else f"操作失败：{desc}"), 0
+            if op == "reopen_task":
+                ok = m.set_task_done(a["id"], False)
+                return ok, (f"已恢复 {desc}" if ok else f"操作失败：{desc}"), 0
+            if op == "update_task":
+                ok = m.update_task(a["id"], title=a.get("title"),
+                                   note=a.get("note"),
+                                   deadline=a.get("deadline"))
+                return ok, (f"已修改 {desc}" if ok else
+                            f"未生效（可能无变化或失败）：{desc}"), 0
+            if op == "update_fragment":
+                ok = m.update_fragment(a["id"], content=a.get("content"),
+                                       source=a.get("source"))
+                return ok, (f"已修改 {desc}" if ok else
+                            f"未生效（可能无变化或失败）：{desc}"), 0
+            if op == "update_note":
+                ok = m.update_note(a["id"], title=a.get("title"),
+                                   content=a.get("content"))
+                return ok, (f"已修改 {desc}" if ok else
+                            f"未生效（可能无变化或失败）：{desc}"), 0
+            if op in ("delete_task", "delete_fragment", "delete_note"):
+                fn = {"delete_task": m.delete_task,
+                      "delete_fragment": m.delete_fragment,
+                      "delete_note": m.delete_note}[op]
+                token = fn(a["id"])
+                if token > 0:
+                    return True, f"已删除 {desc}", token
+                return False, f"删除失败：{desc}", 0
+        except Exception as exc:               # noqa: BLE001 - 单条失败不影响其余
+            return False, f"{op} 执行异常：{exc!r}", 0
+        return False, f"未知动作：{op}", 0
+
+    def _execute_and_report(self, actions):
+        """执行一批动作 → 结果卡（删除成功的带「↩ 撤销」）"""
+        lines, tokens = [], []
+        for act in actions:
+            ok, msg, token = self._run_action(act)
+            lines.append(("✅ " if ok else "✗ ") + msg)
+            if token:
+                tokens.append(token)
+        self._add_result_card(lines, tokens)
+
+    def _add_result_card(self, lines, tokens):
+        """执行结果卡（靠左；有删除成功则带撤销按钮）"""
+        card = QFrame(self._stream_host)
+        card.setObjectName("chatBubbleHint")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 8, 12, 8)
+        box.setSpacing(6)
+        lab = BubbleLabel("\n".join(lines))
+        lab.setObjectName("chatBubbleAiText")
+        box.addWidget(lab)
+        if tokens:
+            row = QHBoxLayout()
+            undo_btn = QPushButton("↩ 撤销删除")
+            undo_btn.setObjectName("secondaryBtn")
+            undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            undo_btn.setToolTip("把刚删掉的内容恢复回来（编号可能变成新的）")
+            undo_btn.clicked.connect(
+                lambda _=False, t=list(tokens), b=undo_btn:
+                self._undo_deletes(t, b))
+            row.addWidget(undo_btn)
+            row.addStretch()
+            box.addLayout(row)
+        self._add_row(card)
+        return card
+
+    def _undo_deletes(self, tokens, btn):
+        """恢复删除（逐令牌撤销，结果写回按钮）"""
+        done = sum(1 for t in tokens if self._ctx.manage.undo_delete(t))
+        btn.setEnabled(False)
+        if done == len(tokens):
+            btn.setText(f"✅ 已恢复 {done} 条")
+            self._status.setText(f"已恢复 {done} 条内容（编号可能变为新的）")
+        else:
+            btn.setText(f"部分恢复 {done}/{len(tokens)}")
+            self._status.setText("部分内容恢复失败，详见 app.log")
+
+    def _add_confirm_card(self, actions):
+        """改删类动作的确认卡：列出将执行的操作，点「执行」才落库"""
+        card = QFrame(self._stream_host)
+        card.setObjectName("chatBubbleHint")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(12, 8, 12, 8)
+        box.setSpacing(6)
+        head = QLabel(f"⚠ 待确认：将执行 {len(actions)} 个操作")
+        head.setObjectName("fieldLabel")
+        box.addWidget(head)
+        body = BubbleLabel("\n".join(f"- {a['desc']}" for a in actions))
+        body.setObjectName("chatBubbleAiText")
+        box.addWidget(body)
+
+        row = QHBoxLayout()
+        yes = QPushButton("执行")
+        yes.setObjectName("primaryBtn")
+        yes.setCursor(Qt.CursorShape.PointingHandCursor)
+        no = QPushButton("取消")
+        no.setObjectName("secondaryBtn")
+        no.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def on_yes():
+            yes.setEnabled(False)
+            no.setEnabled(False)
+            head.setText(f"已确认，执行 {len(actions)} 个操作")
+            self._execute_and_report(actions)
+
+        def on_no():
+            yes.setEnabled(False)
+            no.setEnabled(False)
+            head.setText("已取消（未执行任何操作）")
+
+        yes.clicked.connect(on_yes)
+        no.clicked.connect(on_no)
+        row.addWidget(yes)
+        row.addWidget(no)
+        row.addStretch()
+        box.addLayout(row)
+        self._add_row(card)
+        self._pending_confirm = {"card": card, "actions": list(actions),
+                                 "yes": yes, "no": no}
+        return card
+
     def _can_write(self) -> bool:
         """本插件是否被授权写入（manifest 声明了 write 能力）"""
         try:
             return bool(self._ctx.has_capability("write"))
+        except Exception:                            # noqa: BLE001
+            return False
+
+    def _can_manage(self) -> bool:
+        """本插件是否被授权改删数据（manifest 声明 manage；否则不下发协议）"""
+        try:
+            return bool(self._ctx.manage.can_manage())
         except Exception:                            # noqa: BLE001
             return False
 
@@ -1099,7 +1509,8 @@ class AiChatPage(QWidget):
             user_content = f"{prompt}\n\n{data_block}"
         messages = ([{"role": "system",
                       "content": build_system_prompt(
-                          self._cfg.get("custom_rules"))}]
+                          self._cfg.get("custom_rules"),
+                          can_manage=self._can_manage())}]
                     + self._history
                     + [{"role": "user", "content": user_content}])
         # 本地模式但服务未就绪：明确引导，不发注定 refused 的请求
@@ -1143,14 +1554,29 @@ class AiChatPage(QWidget):
         if err:
             self.add_bubble("提示", err)
             return
-        self.add_bubble("AI", reply)
-        # 成功轮次才进历史；超限丢最旧的（保留偶数条，问答成对）
-        self._history.append({"role": "user",
-                              "content": self._pending_user})
-        self._history.append({"role": "assistant", "content": reply})
+        # 动作块：AI 可能既给结论又给动作。正文被剥空（纯动作回复）时
+        # **不要**渲染空气泡、更不要把 JSON 当正文显示——结论由下面
+        # 的结果卡 / 确认卡承担。
+        clean, actions, action_errs = parse_actions(reply, self._snapshot())
+        body = clean.strip()
+        if body:
+            self.add_bubble("AI", body)
+        elif not (actions or action_errs):
+            self.add_bubble("AI", reply)       # 异常兜底：别吞掉模型的话
+            body = reply
+        # 成功轮次才进历史；超限丢最旧的（保留偶数条，问答成对）。
+        # 历史里不放动作块 JSON，避免模型下一轮照抄格式刷动作。
+        self._history.append({"role": "user", "content": self._pending_user})
+        self._history.append({"role": "assistant",
+                              "content": body or "（已按要求操作应用数据）"})
         if len(self._history) > MAX_HISTORY:
             self._history = self._history[-MAX_HISTORY:]
         self._pending_user = ""
+        if action_errs:
+            self.add_bubble("提示", "以下动作未被执行：\n- "
+                                    + "\n- ".join(action_errs))
+        if actions:
+            self._handle_actions(actions)
 
     # ---------------- 设置卡 ----------------
     def _toggle_settings(self):
