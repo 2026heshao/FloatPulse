@@ -50,6 +50,7 @@ from src.task_manager import (  # noqa: E402
     TaskManager,
     task_state,
     format_relative_deadline,
+    format_completed_date,
     group_title,
     current_week_end,
     STATE_OVERDUE,
@@ -553,6 +554,29 @@ class TestFormatRelativeDeadline:
         assert group_title(GROUP_WEEK, self.TODAY) == "本周（至 9 月 27 日）"
         # 非本周组标题不含日期
         assert group_title(GROUP_OVERDUE, self.TODAY) == "逾期"
+
+
+# ====================================================================
+# task_manager：format_completed_date 已完成任务行尾文案
+# ====================================================================
+class TestFormatCompletedDate:
+
+    def test_full_datetime(self):
+        # 2026-09-26 是周六：完整 "YYYY-MM-DD HH:MM" 只取日期部分
+        assert format_completed_date("2026-09-26 14:30") == "9月26日（周六）"
+
+    def test_date_only(self):
+        # 旧数据可能只存日期
+        assert format_completed_date("2026-09-20") == "9月20日（周日）"
+
+    def test_empty_returns_blank(self):
+        assert format_completed_date("") == ""
+        assert format_completed_date(None) == ""
+        assert format_completed_date("   ") == ""
+
+    def test_dirty_returns_blank(self):
+        assert format_completed_date("dirty") == ""
+        assert format_completed_date("2026-13-40 09:00") == ""
 
 
 # ====================================================================

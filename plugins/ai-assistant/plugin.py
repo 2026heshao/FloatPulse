@@ -37,9 +37,11 @@ import os
 import sys
 
 from PyQt6.QtCore import QProcess, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 from src.plugin_api import BallAction, BallPlugin, PluginContext
@@ -59,6 +61,10 @@ DEFAULT_CONFIG = {
     "cloud_api_key": "",
     "cloud_model": "deepseek-chat",
     "max_data_chars": 6000,       # 单块数据塞进提示词的最大字符数
+    # 规则库（2026-09-28 用户要求「入口让用户自己编辑，不写死」）：
+    # [{"text": 规则文本, "enabled": 是否启用}, ...]，随 config.json 落盘，
+    # 已启用规则由 build_system_prompt 追加到系统提示词末尾（双后端共用）
+    "custom_rules": [],
     # 本地自带推理（浏览 gguf + llama-server.exe，插件自己拉起服务）
     "local_server_exe": "",
     "local_gguf": "",
@@ -84,6 +90,32 @@ SYSTEM_PROMPT = (
     "2. 只依据用户给出的数据回答，绝不虚构不存在的任务或笔记；\n"
     "3. 数据为空时直说「数据为空」，不要编造。"
 )
+
+
+def build_system_prompt(custom_rules) -> str:
+    """基础系统提示词 + 规则库中已启用的用户规则。
+
+    规则库是用户在页面上自己编辑的（config.json 的 custom_rules），
+    插件不预置任何条目。脏数据（非 dict / 空文本 / 缺键）一律宽容
+    处理：空文本与停用条目跳过，纯字符串条目按启用处理（兼容手改
+    配置）。无生效规则 → 返回基础 SYSTEM_PROMPT，行为与旧版一致。
+    """
+    rules = []
+    for r in custom_rules or []:
+        if isinstance(r, dict):
+            if not r.get("enabled", True):
+                continue
+            text = str(r.get("text") or "").strip()
+        else:
+            text = str(r or "").strip()
+        if text:
+            rules.append(text)
+    if not rules:
+        return SYSTEM_PROMPT
+    joined = "\n".join(f"{i}. {t}" for i, t in enumerate(rules, 1))
+    return (SYSTEM_PROMPT
+            + "\n\n以下是用户在「规则库」里自定义的规则，每次回答都必须遵守：\n"
+            + joined)
 
 # 上下文历史最多保留的条数（role 消息条数，防 token 无限膨胀）
 MAX_HISTORY = 12
@@ -529,6 +561,35 @@ class ChatInput(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+class BubbleLabel(QLabel):
+    """气泡正文标签：宽度贴合内容、高度随换行自适应。
+
+    两个实测坑（2026-09-28 用户反馈「气泡不协调」）：
+    ① wordWrap 的 QLabel 在布局里 sizeHint 偏好极窄宽度 → 气泡塌成
+       窄条、文字挤成两三字一行；故调用方按字体度量算出「内容自然
+       宽度」作下限（见 add_bubble），短消息紧凑、长消息到上限换行。
+    ② 卡片走 alignment（不拉伸）时布局只按 sizeHint 定高、不吃
+       heightForWidth → 长文案被截断（欢迎语 7 行只出 2 行）；故宽度
+       落定/变化时按实际宽度回算高度下限，resize 后自动纠偏。
+    """
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_height()
+
+    def _fit_height(self):
+        w = self.width()
+        if w <= 0:
+            return
+        need = self.heightForWidth(w)
+        if need > 0 and need != self.minimumHeight():
+            self.setMinimumHeight(need)
+
+
 # ====================================================================
 # 主页面（嵌入主窗口导航；create_page 返回它）
 # ====================================================================
@@ -547,6 +608,17 @@ class AiChatPage(QWidget):
         # 本地 llama-server 不受它影响（本地有独立的启停状态机）；
         # 探活成功（保存并测试 / 本地 ready 自动接管）都会把它置回 True。
         self._cloud_active = True
+        # 思考动画（2026-09-28 用户要求）：请求在途时消息流里挂一张
+        # 「打字中」气泡，三点做往返波；回复到达（或失败）即拆掉。
+        # QSS：chatBubbleThinking / chatThinkingDots（theme.py）
+        self._think_timer = QTimer(self)
+        self._think_timer.setInterval(180)
+        self._think_timer.timeout.connect(self._tick_thinking)
+        self._think_bubble = None       # 在途气泡 QFrame（无在途时为 None）
+        self._think_label = None        # 三点 QLabel（动画帧写给它）
+        self._think_phase = 0
+        # 已存为笔记的回复文本（气泡右键菜单据此显示「已存为笔记」并禁用）
+        self._noted_texts = set()
 
         root = QVBoxLayout(self)
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
@@ -669,6 +741,70 @@ class AiChatPage(QWidget):
         root.addWidget(self._settings_card)
         self._settings_card.setVisible(False)
 
+        # ---- 规则库卡（2026-09-28 用户要求：入口让用户自己编辑，不写死）----
+        # 与后端设置卡同款结构：glassCard + 内容超高卡内滚动。规则条目
+        # 存 config.json 的 custom_rules，随「💾 保存规则」落盘；已启用
+        # 条目由 build_system_prompt 在每次对话时追加到系统提示词。
+        self._rules_rows = []           # [{"wrap","check","edit"}, ...]
+        self._rules_card = QFrame(self)
+        self._rules_card.setObjectName("glassCard")
+        rc_lay = QVBoxLayout(self._rules_card)
+        rc_lay.setContentsMargins(16, 14, 16, 14)
+        rc_lay.setSpacing(0)
+
+        _rules_body = QWidget()          # 卡内滚动内容体
+        rules_outer = QVBoxLayout(_rules_body)
+        rules_outer.setContentsMargins(0, 0, 0, 0)
+        rules_outer.setSpacing(8)
+
+        cap_r = QLabel("规则库")
+        cap_r.setObjectName("sectionLabel")
+        rules_outer.addWidget(cap_r)
+        # hint 必须开自动换行：QLabel 默认单行 sizeHint 会把内容体撑得
+        # 比滚动视口宽，右侧「🗑」按钮和文案会被横向裁掉（离屏实测）
+        _rules_hint = make_hint_label(
+            "自定义规则会追加到每次对话的系统提示词末尾（云端 / 本地后端"
+            "共用），用来固定你的长期偏好。每条一行；勾选＝生效，取消勾选"
+            "＝暂停不删除。")
+        _rules_hint.setWordWrap(True)
+        rules_outer.addWidget(_rules_hint)
+
+        self._rules_form = QVBoxLayout()
+        self._rules_form.setSpacing(6)
+        rules_outer.addLayout(self._rules_form)
+
+        rules_btn_row = QHBoxLayout()
+        self._rule_add_btn = QPushButton("＋ 添加规则", self)
+        self._rule_add_btn.setObjectName("secondaryBtn")
+        self._rule_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # clicked 会把 checked=False 当首个位置参数传入 → 用 lambda 挡住，
+        # 否则 _add_rule_row 的 text 形参吃进 False，凭空多出一行 "False"
+        self._rule_add_btn.clicked.connect(
+            lambda _checked=False: self._add_rule_row())
+        rules_btn_row.addWidget(self._rule_add_btn)
+        rules_btn_row.addStretch()
+        self._rule_save_btn = QPushButton("💾 保存规则", self)
+        self._rule_save_btn.setObjectName("primaryBtn")
+        self._rule_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rule_save_btn.clicked.connect(self._save_rules)
+        rules_btn_row.addWidget(self._rule_save_btn)
+        rules_outer.addLayout(rules_btn_row)
+
+        self._rules_scroll = QScrollArea(self._rules_card)
+        self._rules_scroll.setWidgetResizable(True)
+        self._rules_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._rules_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._rules_scroll.setWidget(_rules_body)
+        rc_lay.addWidget(self._rules_scroll)
+        # 高度上限：内容超 360 卡内纵向滚动（与后端设置卡同策略）；下限
+        # （随内容自适应）由 _sync_rules_height 设定——QScrollArea 自身
+        # sizeHint 在本卡会算出 ~72px 的瘪高度，不能只靠它（离屏实测）。
+        self._rules_card.setMaximumHeight(360)
+
+        root.addWidget(self._rules_card)
+        self._rules_card.setVisible(False)
+
         # ---- 消息流（滚动区）----
         self._stream_host = QWidget(self)
         self._stream = QVBoxLayout(self._stream_host)
@@ -725,6 +861,14 @@ class AiChatPage(QWidget):
         self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._toggle_btn.clicked.connect(self._toggle_settings)
         quick_row.addWidget(self._toggle_btn)
+        # 规则库入口（与 ⚙ 后端设置并排）：展开/收起规则编辑卡
+        self._rules_btn = QPushButton("📐 规则库", self)
+        self._rules_btn.setObjectName("secondaryBtn")
+        self._rules_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rules_btn.setToolTip(
+            "自定义规则：每次对话都会追加到系统提示词；勾选生效、取消暂停")
+        self._rules_btn.clicked.connect(self._toggle_rules)
+        quick_row.addWidget(self._rules_btn)
         root.addLayout(quick_row)
 
         # ---- 输入区（Enter 发送 / Shift+Enter 换行）----
@@ -749,7 +893,8 @@ class AiChatPage(QWidget):
         self.add_bubble(
             "AI", "我在。点快捷指令让我读应用内数据做总结，或直接输入问题。\n"
                   "首次使用：点右下角「⚙ 后端设置」选好后端，"
-                  "或用「本地推理」选 gguf 一键启动。")
+                  "或用「本地推理」选 gguf 一键启动；「📐 规则库」"
+                  "可写入你的长期偏好，我每次对话都会遵守。")
 
         # 本地服务状态跟随（模块级单例：页面重建后状态不丢；
         # add_listener 内部会立即回放当前状态，新页面按钮/显隐自动对齐）
@@ -789,46 +934,74 @@ class AiChatPage(QWidget):
 
         - 「你」→ 窄卡**靠右** + 主色底（chatBubbleUser，文字用 on_primary
           保证主色上的对比度）；AI / 提示 → 窄卡**靠左** + 中性底
-        - 气泡最大宽度取可视区 ~78%，长文本自动换行不撑满整行
-        - AI 回复带「📥 存为笔记」按钮——插件受限写能力（``ctx.write``，
-          需 manifest 声明 ``capabilities: ["write"]``）的实际用途：把整理
-          结果一键落进笔记。未声明能力时不显示，避免给用户假按钮。
+        - 宽度贴合内容：按字体度量算自然宽度作下限（长文本到上限换行），
+          高度由 BubbleLabel 在 resize 后按实际宽度回算，不裁字
+        - 「存为笔记」改为**右键菜单**（2026-09-28 用户要求：不再常驻
+          对话框）：仅 AI 气泡挂 CustomContextMenu，需 manifest 声明
+          ``capabilities: ["write"]``；未声明就不挂，避免假菜单项
         """
         user = (role == "你")
         card = QFrame(self._stream_host)
         card.setObjectName("chatBubbleUser" if user else
                            "chatBubbleAI" if role == "AI" else "chatBubbleHint")
         box = QVBoxLayout(card)
-        box.setContentsMargins(12, 8, 12, 8)
-        box.setSpacing(4)
-        body_label = QLabel(text)
-        body_label.setObjectName("chatBubbleText" if user else "")
-        body_label.setWordWrap(True)
+        box.setContentsMargins(14, 10, 14, 10)
+        box.setSpacing(6)
+        body_label = BubbleLabel(text)
+        body_label.setObjectName("chatBubbleText" if user else "chatBubbleAiText")
         body_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(body_label)
 
-        if role == "AI" and text.strip() and self._can_write():
-            row = QHBoxLayout()
-            save_btn = QPushButton("📥 存为笔记")
-            save_btn.setObjectName("secondaryBtn")
-            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            save_btn.setToolTip("把这条回复存成一条笔记（标题自动取自首行）")
-            save_btn.clicked.connect(
-                lambda _checked=False, t=text, b=save_btn: self._save_as_note(t, b))
-            row.addWidget(save_btn)
-            box.addLayout(row)
-
-        # 窄卡：可视区 78%（构造早期宽度未知时退 640），长句换行不撑满整行
+        # 窄卡：可视区 78%（构造早期宽度未知时退 640），上限 900 防大屏一行过长
         vis_w = self._scroll.viewport().width() if self._scroll else 0
-        card.setMaximumWidth(max(360, int(vis_w * 0.78)) if vis_w else 640)
+        max_card = int(vis_w * 0.78) if vis_w >= 480 else 640
+        max_card = max(280, min(max_card, 900))
+        card.setMaximumWidth(max_card)
+        # 宽度下限 = 内容**不换行**时最宽一行（QLabel wordWrap 的 sizeHint
+        # 是窄启发值，用它会让气泡塌成窄条——2026-09-28 实测 fm.boundingRect
+        # 的 TextWordWrap 也不吃 rect 宽度，只能用 horizontalAdvance 逐行量）
+        inner_max = max_card - 28
+        body_label.ensurePolished()
+        fm = QFontMetrics(body_label.font())
+        natural = max((fm.horizontalAdvance(ln) for ln in
+                       (text or " ").splitlines()), default=0)
+        body_label.setMinimumWidth(min(max(natural, 40), inner_max))
 
-        # 靠右（用户）/ 靠左（AI 与提示）——alignment 不拉伸时卡片收缩为内容宽；
-        # 仍插到末尾 stretch 之前，保证消息从顶部排布
-        self._stream.insertWidget(
-            self._stream.count() - 1, card, 0,
-            Qt.AlignmentFlag.AlignRight if user else Qt.AlignmentFlag.AlignLeft)
+        if role == "AI" and text.strip() and self._can_write():
+            card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            card.setToolTip("右键可把这条回复存为笔记")
+            card.customContextMenuRequested.connect(
+                lambda pos, c=card, t=text: self._bubble_menu(c, t, pos))
+
+        # 对齐行容器：不用 insertWidget 的 alignment——QLayoutItem 走对齐时
+        # 布局只按 sizeHint 定高、不吃 heightForWidth（长回复末行被裁，实测）。
+        # 套一层 [stretch, card] / [card, stretch] 行，高度交由布局按
+        # heightForWidth 正常计算；卡片仍不被拉伸（stretch 吃掉剩余空间）
+        row_host = QWidget(self._stream_host)
+        rl = QHBoxLayout(row_host)
+        rl.setContentsMargins(0, 0, 0, 0)
+        if user:
+            rl.addStretch(1)
+            rl.addWidget(card)
+        else:
+            rl.addWidget(card)
+            rl.addStretch(1)
+        self._stream.insertWidget(self._stream.count() - 1, row_host)
         self._scroll_to_bottom()
+
+    def _bubble_menu(self, card, text: str, pos):
+        """AI 气泡右键菜单（2026-09-28 用户要求：存为笔记不常驻对话框）"""
+        self._build_bubble_menu(text).exec(card.mapToGlobal(pos))
+
+    def _build_bubble_menu(self, text: str) -> QMenu:
+        """构造气泡右键菜单（拆出来便于离屏断言，exec 会阻塞测试）"""
+        menu = QMenu(self)
+        done = text in self._noted_texts
+        act = menu.addAction("✅ 已存为笔记" if done else "📥 存为笔记")
+        act.setEnabled(not done)
+        act.triggered.connect(lambda: self._save_as_note(text))
+        return menu
 
     def _can_write(self) -> bool:
         """本插件是否被授权写入（manifest 声明了 write 能力）"""
@@ -837,17 +1010,19 @@ class AiChatPage(QWidget):
         except Exception:                            # noqa: BLE001
             return False
 
-    def _save_as_note(self, text: str, btn=None):
-        """把 AI 回复存成一条笔记（标题取首行，截断到 40 字）"""
+    def _save_as_note(self, text: str):
+        """把 AI 回复存成一条笔记（标题取首行，截断到 40 字）
+
+        经右键菜单触发（不再常驻按钮）；存过的文本记进 _noted_texts，
+        菜单项随即变为「✅ 已存为笔记」并禁用，防重复存。
+        """
         lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
         head = lines[0] if lines else "AI 助手回复"
         title = head[:40] + ("…" if len(head) > 40 else "")
         nid = self._ctx.write.add_note(title, text)
         if nid:
+            self._noted_texts.add(text)
             self._status.setText(f"已存为笔记：{title}")
-            if btn is not None:
-                btn.setEnabled(False)
-                btn.setText("✅ 已存为笔记")
             self._ctx.show_toast("已存为笔记（可在笔记页查看）")
         else:
             self._status.setText("存入笔记失败（详见 app.log）")
@@ -855,6 +1030,46 @@ class AiChatPage(QWidget):
     def _scroll_to_bottom(self):
         bar = self._scroll.verticalScrollBar()
         QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+
+    # ---------------- 思考动画（2026-09-28 用户要求） ----------------
+    # 三点往返波（亮点位 L→R 再 R→L，无生硬跳变）；纯文本帧不写死颜色，
+    # 颜色由 QSS 的 chatThinkingDots 出（主色，随主题走）
+    _THINK_FRAMES = ("●  ○  ○", "○  ●  ○", "○  ○  ●", "○  ●  ○")
+
+    def _show_thinking(self):
+        """消息流里挂一张「打字中」气泡（AI 侧靠左；重复调用幂等）"""
+        if self._think_bubble is not None:
+            return
+        card = QFrame(self._stream_host)
+        card.setObjectName("chatBubbleThinking")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 10, 14, 10)
+        self._think_label = QLabel(self._THINK_FRAMES[0])
+        self._think_label.setObjectName("chatThinkingDots")
+        lay.addWidget(self._think_label)
+        self._think_bubble = card
+        self._think_phase = 0
+        self._think_timer.start()
+        # 与 add_bubble 同款：插到末尾 stretch 之前，保证贴在最底部
+        self._stream.insertWidget(
+            self._stream.count() - 1, card, 0, Qt.AlignmentFlag.AlignLeft)
+        self._scroll_to_bottom()
+
+    def _tick_thinking(self):
+        """动画帧推进（180ms/帧，_THINK_FRAMES 循环）"""
+        if self._think_label is not None:
+            self._think_phase = (self._think_phase + 1) % len(self._THINK_FRAMES)
+            self._think_label.setText(self._THINK_FRAMES[self._think_phase])
+
+    def _hide_thinking(self):
+        """拆掉思考气泡（计时器停 + 先摘出布局再销毁，消息流计数立即回落）"""
+        self._think_timer.stop()
+        card, self._think_bubble, self._think_label = (
+            self._think_bubble, None, None)
+        if card is not None:
+            self._stream.removeWidget(card)
+            card.setParent(None)   # 立即摘出视觉树（removeWidget 只动布局不动父级）
+            card.deleteLater()
 
     # ---------------- 发送 ----------------
     def _on_send_clicked(self):
@@ -882,7 +1097,9 @@ class AiChatPage(QWidget):
         user_content = prompt
         if data_block:
             user_content = f"{prompt}\n\n{data_block}"
-        messages = ([{"role": "system", "content": SYSTEM_PROMPT}]
+        messages = ([{"role": "system",
+                      "content": build_system_prompt(
+                          self._cfg.get("custom_rules"))}]
                     + self._history
                     + [{"role": "user", "content": user_content}])
         # 本地模式但服务未就绪：明确引导，不发注定 refused 的请求
@@ -910,14 +1127,17 @@ class AiChatPage(QWidget):
 
         self.add_bubble("你", display_text)
         self._set_busy(True, "思考中…")
+        self._show_thinking()
         self._pending_user = user_content
         ok = self._ctx.http_post_json_async(
             url, headers, body, timeout=120.0, on_done=self._on_reply)
         if not ok:
             # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复状态
+            self._hide_thinking()
             self._set_busy(False)
 
     def _on_reply(self, result: dict):
+        self._hide_thinking()
         self._set_busy(False)
         reply, err = parse_reply(result)
         if err:
@@ -935,6 +1155,109 @@ class AiChatPage(QWidget):
     # ---------------- 设置卡 ----------------
     def _toggle_settings(self):
         self._settings_card.setVisible(not self._settings_card.isVisible())
+
+    # ---------------- 规则库（用户自编辑，非写死） ----------------
+    def _toggle_rules(self):
+        """展开/收起规则库卡；每次展开都从配置重建行（未保存的编辑即弃）。"""
+        if not self._rules_card.isVisible():
+            self._rebuild_rule_rows()
+        self._rules_card.setVisible(not self._rules_card.isVisible())
+        if self._rules_card.isVisible():
+            # 等布局给出真实视口宽再算高度（提示换行行数才准）
+            QTimer.singleShot(0, self._sync_rules_height)
+
+    def _sync_rules_height(self):
+        """规则卡高度跟随内容（滚动区下限 ≤330，超出交给卡内滚动）。
+
+        QScrollArea 自身 sizeHint 在本卡会算出 ~72px 的瘪高度；显式按
+        内容体 heightForWidth 设滚动区下限，行数增减与提示换行都自适应，
+        避免「💾 保存规则」按钮被卡片下边缘截断（离屏实测）。
+        """
+        body = self._rules_scroll.widget()
+        lay = body.layout() if body is not None else None
+        if lay is None:
+            return
+        w = max(360, self._rules_scroll.viewport().width())
+        h = lay.heightForWidth(w) if lay.hasHeightForWidth() \
+            else body.sizeHint().height()
+        self._rules_scroll.setMinimumHeight(min(h + 2, 330))
+
+    def _rebuild_rule_rows(self):
+        """清空现有行 → 按 cfg 重建；零规则时给一行空行降低上手门槛。"""
+        for row in self._rules_rows:
+            self._rules_form.removeWidget(row["wrap"])
+            row["wrap"].deleteLater()
+        self._rules_rows = []
+        rules = self._cfg.get("custom_rules") or []
+        if not rules:
+            self._add_rule_row()
+            return
+        for r in rules:
+            if isinstance(r, dict):
+                self._add_rule_row(str(r.get("text") or ""),
+                                   bool(r.get("enabled", True)))
+            else:
+                self._add_rule_row(str(r or ""))
+
+    def _add_rule_row(self, text: str = "", enabled: bool = True):
+        """追加一条规则行：勾选（启用）+ 单行文本 + 🗑 删除。
+
+        文本框内回车 = 直接保存（单行规则，改完顺手落盘最顺手）。
+        """
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        chk = QCheckBox()
+        chk.setChecked(bool(enabled))
+        chk.setToolTip("取消勾选＝暂停这条规则（不删除）")
+        edit = QLineEdit(str(text))
+        edit.setPlaceholderText("输入一条规则，如：回答保持简洁，不超过 200 字")
+        edit.returnPressed.connect(self._save_rules)
+        del_btn = QPushButton("🗑", wrap)
+        del_btn.setObjectName("secondaryBtn")
+        del_btn.setFixedWidth(40)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setToolTip("删除这条规则")
+        del_btn.clicked.connect(
+            lambda _checked=False, w=wrap: self._remove_rule_row(w))
+        row.addWidget(chk)
+        row.addWidget(edit, 1)
+        row.addWidget(del_btn)
+        self._rules_form.addWidget(wrap)
+        self._rules_rows.append({"wrap": wrap, "check": chk, "edit": edit})
+        self._sync_rules_height()
+
+    def _remove_rule_row(self, wrap: QWidget):
+        """删除一条规则行（仅动 UI；点「💾 保存规则」才落盘）。"""
+        for row in self._rules_rows:
+            if row["wrap"] is wrap:
+                self._rules_form.removeWidget(wrap)
+                wrap.deleteLater()
+                self._rules_rows.remove(row)
+                self._sync_rules_height()
+                return
+
+    def _collect_rules(self) -> list:
+        """读所有规则行 → [{text, enabled}]；空文本行丢弃。"""
+        rules = []
+        for row in self._rules_rows:
+            text = row["edit"].text().strip()
+            if not text:
+                continue
+            rules.append({"text": text, "enabled": row["check"].isChecked()})
+        return rules
+
+    def _save_rules(self):
+        """收集规则行 → 落盘 config.json，状态行反馈生效条数。"""
+        rules = self._collect_rules()
+        self._cfg = {**self._cfg, "custom_rules": rules}
+        if save_config(self._ctx, self._cfg):
+            n_on = sum(1 for r in rules if r.get("enabled"))
+            self._status.setText(
+                f"规则已保存（生效 {n_on} / 共 {len(rules)} 条）")
+        else:
+            self._status.setText("规则保存失败（详见 app.log）")
 
     def _apply_preset(self, index: int):
         """选预设 → 自动填地址与模型（自定义 = 不动现有值）"""
@@ -959,6 +1282,8 @@ class AiChatPage(QWidget):
             "cloud_api_key": self._key_edit.text().strip(),
             "cloud_model": self._model_edit.text().strip(),
             "max_data_chars": self._cfg.get("max_data_chars", 6000),
+            # 规则库字段原样携带：这里只收集后端设置，冲掉用户的规则就是事故
+            "custom_rules": self._cfg.get("custom_rules", []),
             "local_server_exe": self._exe_edit.text().strip(),
             "local_gguf": self._gguf_edit.text().strip(),
             "local_port": port,
@@ -1097,6 +1422,7 @@ class AiChatPage(QWidget):
     def _clear_chat(self):
         self._history = []
         self._pending_user = ""
+        self._hide_thinking()                   # 在途气泡也得一起拆
         while self._stream.count() > 1:          # 留着末尾 stretch
             item = self._stream.takeAt(0)
             w = item.widget()
@@ -1128,7 +1454,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.1.0"
+    version = "1.4.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]
