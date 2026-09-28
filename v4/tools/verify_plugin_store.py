@@ -26,6 +26,7 @@ sys.path.insert(0, r"D:\桌面\AI Port\FloatPulse\v4")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt                                    # noqa: E402
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -314,47 +315,69 @@ panel = PluginsPanel(FakeHost(_loader))
 app.processEvents()
 
 btns = [b.text() for b in panel.findChildren(QPushButton)]
-check("G1. 工具栏含「打开插件商店」按钮",
-      any("打开插件商店" in t for t in btns),
+check("G1. 工具栏含「🏪 插件商店」按钮（商店已拆成独立弹窗）",
+      any("插件商店" in t for t in btns),
       f"btns={btns}")
 
-check("G2. 商店区容器存在，且商店有包时可见",
-      panel._store_box is not None and not panel._store_box.isHidden(),
-      f"hidden={getattr(panel._store_box, 'isHidden', lambda: '?')()}")
-
-check("G3. 商店目录绝对路径已写在面板上（用户可核对）",
+check("G2. 商店目录绝对路径已写在面板上（用户可核对）",
       _store in panel._store_dir_label.text(),
       panel._store_dir_label.text())
 
-check("G4. 安装目录绝对路径同样写出（两个目录不混淆）",
+check("G3. 安装目录绝对路径同样写出（两个目录不混淆）",
       _plugins in panel._dir_label.text(),
       panel._dir_label.text())
 
-check("G5. 计数标签含「商店可安装 N 个」",
-      "商店可安装" in panel._count_label.text(),
-      panel._count_label.text())
+check("G4. 面板已无内嵌商店区（_store_box 移除，弹窗引用懒创建）",
+      not hasattr(panel, "_store_box")
+      and hasattr(panel, "_store_dialog"),
+      f"has_store_box={hasattr(panel, '_store_box')} "
+      f"dialog_attr={hasattr(panel, '_store_dialog')}")
 
-store_texts = "\n".join(w.text() for w in panel._store_box.findChildren(QLabel))
-check("G6. 商店卡片展示「未安装」「已安装」「包不合法」三种状态",
-      "未安装" in store_texts and "已安装" in store_texts
-      and "包不合法" in store_texts,
-      f"has 未安装={'未安装' in store_texts} "
-      f"已安装={'已安装' in store_texts} "
-      f"不合法={'包不合法' in store_texts}")
+# ---- 直接构造弹窗（不走 _on_open_store_dialog——它 exec() 会阻塞脚本）----
+from src.plugins_panel import PluginStoreDialog                # noqa: E402
 
-_install_btns = [b for b in panel._store_box.findChildren(QPushButton)
+dlg = PluginStoreDialog(panel)
+panel._store_dialog = dlg     # 复刻 _on_open_store_dialog 的懒创建赋值
+panel.show()                      # 真实场景面板可见；否则可见链断、isVisible 恒 False
+dlg.show()
+app.processEvents()
+
+dlg_texts = "\n".join(w.text() for w in dlg.findChildren(QLabel))
+check("G5. 弹窗展示商店目录绝对路径",
+      _store in dlg._dir_label.text(),
+      dlg._dir_label.text())
+
+check("G6. 已安装的包不重复列出，压缩成「另有 N 个已安装」提示",
+      "已安装——卸载插件后可回到此处重装" in dlg_texts
+      or "另有" in dlg._installed_hint.text(),
+      f"hint={dlg._installed_hint.text()!r}")
+
+_install_btns = [b for b in dlg.findChildren(QPushButton)
                  if "安装" in b.text()]
 _enabled = [b.text() for b in _install_btns if b.isEnabled()]
 _disabled = [b.text() for b in _install_btns if not b.isEnabled()]
-check("G7. 未安装的包有可点「⬇ 安装」；已安装 →「✓ 已安装」，坏包 →「⊘ 无法安装」，二者均禁用",
-      _enabled == ["⬇ 安装"]
-      and sorted(_disabled) == ["⊘ 无法安装", "✓ 已安装", "✓ 已安装"],
-      f"enabled={_enabled} disabled={sorted(_disabled)}")
+check("G7. 弹窗内：未安装包有可点「⬇ 安装」，坏包「⊘ 无法安装」禁用",
+      "⬇ 安装" in _enabled and "⊘ 无法安装" in _disabled,
+      f"enabled={_enabled} disabled={_disabled}")
 
-check("G8. 面板任何 QLabel 都不再出现旧文案「plugins/ 文件夹」式误导",
-      "放进 plugins/ 目录" not in "\n".join(
-          w.text() for w in panel.findChildren(QLabel)),
-      "已改为商店目录引导")
+_bad_texts = "\n".join(w.text() for w in dlg.findChildren(QLabel))
+check("G8. 坏包在弹窗里给出错误原因（不消失）",
+      "zip" in _bad_texts,
+      f"has_zip_err={'zip' in _bad_texts}")
+
+check("G9. ★GlassDialog 不带 WindowStaysOnTopHint（弹窗可被外部窗口覆盖，"
+      "消息框不会被它盖死）",
+      not bool(dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint),
+      f"flags={dlg.windowFlags()}")
+
+check("G10. _active_dialog_or_self：弹窗可见时消息框挂弹窗（z 序可控，"
+      "杜绝 ApplicationModal 消息框被盖死 → 全应用锁死）",
+      panel._active_dialog_or_self() is dlg,
+      f"returns={type(panel._active_dialog_or_self()).__name__} "
+      f"dlg_visible={dlg.isVisible()}")
+
+dlg.accept()
+dlg.deleteLater()
 
 
 # ====================================================================
@@ -377,8 +400,8 @@ try:
     err_i = ""
 except Exception as exc:                                   # noqa: BLE001
     ok_i, err_i = False, f"{type(exc).__name__}: {exc}"
-check("I1. 无 loader 时面板不崩、计数 0、商店区隐藏",
-      ok_i and p_none._store_box.isHidden(),
+check("I1. 无 loader 时面板不崩、计数 0、弹窗未创建",
+      ok_i and getattr(p_none, "_store_dialog", "missing") is None,
       err_i or p_none._count_label.text())
 
 
