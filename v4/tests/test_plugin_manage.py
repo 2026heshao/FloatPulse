@@ -116,7 +116,9 @@ def test_manage_implies_write():
 
 
 def test_unknown_capability_still_rejected():
-    assert KNOWN_CAPABILITIES == frozenset({"network", "write", "manage"})
+    # 2026-09-29 起 + ai（设置页「AI 总配置」，授权在设置页下拉框勾选）
+    assert KNOWN_CAPABILITIES == frozenset(
+        {"network", "write", "manage", "ai"})
     base = {"id": "x", "name": "X", "version": "1.0.0", "entry": "p.py"}
     m, err = validate_manifest({**base, "capabilities": ["manage"]})
     assert m is not None and err == ""

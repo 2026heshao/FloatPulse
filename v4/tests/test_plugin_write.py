@@ -207,7 +207,9 @@ def test_manifest_still_rejects_unknown_capability():
 
 
 def test_known_capabilities_set():
-    assert KNOWN_CAPABILITIES == frozenset({"network", "write", "manage"})
+    # 2026-09-29 起 + ai（设置页「AI 总配置」，授权在设置页下拉框勾选）
+    assert KNOWN_CAPABILITIES == frozenset(
+        {"network", "write", "manage", "ai"})
 
 
 # ---------------- G：loader 集成 ----------------

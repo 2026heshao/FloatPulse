@@ -75,7 +75,8 @@ _DENIED_REQUIRES = frozenset({
 #   network —— 经宿主桥联网
 #   write   —— 新增数据（只增）
 #   manage  —— 修改 / 删除既有数据（比 write 危险一档，声明即含 write）
-KNOWN_CAPABILITIES = frozenset({"network", "write", "manage"})
+#   ai      —— 读写设置页「AI 总配置」（授权在设置页下拉框勾选，用户可控）
+KNOWN_CAPABILITIES = frozenset({"network", "write", "manage", "ai"})
 
 
 def is_allowed_requirement(name: str) -> bool:
@@ -616,6 +617,145 @@ class PluginWriter:
             self._logger.warning(f"[插件] {msg}")
 
 
+class AiBackendFacade:
+    """AI 总配置门面（需声明 ``capabilities: ["ai"]``）。
+
+    宿主在设置页「🧠 AI 总配置」维护唯一的 AI 后端配置（云端 / 本地 +
+    接入插件列表），插件经本门面**实时**读取：设置页改完即生效，插件
+    不必重建页面，更不必各自维护一份后端配置 UI。
+
+    providers（宿主注入，与 write / manage 同构）：
+      is_attached(fn(plugin_id) -> bool)      本插件是否被用户接入总配置
+      params(fn() -> dict)                    当前后端参数（每次调用实时读）
+      add_listener(fn) / remove_listener(fn)  本地服务状态订阅
+
+    ``params()`` 返回字段（宿主保证字段齐全，值可能为空串）：
+      mode          "cloud" | "local"
+      base_url      云端地址（local 模式下请求应走 local_port，见下）
+      api_key       云端 key（地址是回环时插件应忽略它）
+      model         云端模型名（local 模式下模型名固定用 "local"）
+      local_port    本地 llama-server 端口（宿主 AI 服务，默认 8095）
+      local_ready   本地服务是否就绪（bool）
+      local_status  stopped / starting / ready / error
+      local_detail  状态说明文案（可直接展示）
+
+    未声明 ``ai`` 能力：``is_attached()`` → False、``params()`` → {}、
+    订阅返回 False，记 warning 不抛异常；宿主未注入 provider 时同样
+    安全降级。授权由用户在设置页下拉框里勾选（勾选 = 接入），插件侧
+    每次发请求前重查 ``is_attached``，设置页改完下一发请求即生效。
+    """
+
+    def __init__(self, logger=None, providers=None, plugin_id="",
+                 capabilities=()):
+        self._logger = logger if logger is not None else _NULL_LOGGER
+        # 只留下 callable，挡掉误注入的数据本体
+        self._providers = {name: fn for name, fn in dict(providers or {}).items()
+                           if callable(fn)}
+        self._plugin_id = str(plugin_id or "")
+        self._capabilities = frozenset(
+            c for c in (capabilities or ()) if isinstance(c, str))
+
+    # ---------------- 门禁与自省 ----------------
+    def enabled(self) -> bool:
+        """本插件是否声明了 ai 能力（manifest ``capabilities: ["ai"]``）"""
+        return "ai" in self._capabilities
+
+    def sources(self) -> tuple:
+        """当前可用的通道名（插件可据此降级）"""
+        return tuple(sorted(self._providers))
+
+    def _deny(self, reason: str):
+        self._warn(f"AI 总配置访问被拒绝：{reason}")
+
+    # ---------------- 读取通道 ----------------
+    def is_attached(self) -> bool:
+        """本插件是否已被用户接入 AI 总配置（设置页下拉框勾选）"""
+        if not self.enabled():
+            self._deny("插件未在 manifest 声明 capabilities=[\"ai\"]")
+            return False
+        fn = self._providers.get("is_attached")
+        if fn is None:
+            self._warn("宿主未注入 ai.is_attached 通道")
+            return False
+        try:
+            return bool(fn(self._plugin_id))
+        except Exception as exc:          # noqa: BLE001 - provider 异常要隔离
+            self._warn(f"is_attached 读取失败：{exc!r}")
+            return False
+
+    def params(self) -> dict:
+        """当前 AI 后端参数（实时快照；未授权 / 读取失败返回 ``{}``）
+
+        插件拿到的是宿主配置的**纯数据副本**，改它碰不到宿主配置；
+        字段契约见类 docstring。
+        """
+        if not self.enabled():
+            self._deny("插件未在 manifest 声明 capabilities=[\"ai\"]")
+            return {}
+        fn = self._providers.get("params")
+        if fn is None:
+            self._warn("宿主未注入 ai.params 通道")
+            return {}
+        try:
+            data = fn()
+        except Exception as exc:          # noqa: BLE001
+            self._warn(f"params 读取失败：{exc!r}")
+            return {}
+        return dict(data) if isinstance(data, dict) else {}
+
+    def add_listener(self, fn) -> bool:
+        """订阅本地服务状态变化（fn(status, detail)，UI 线程回调）"""
+        if not self.enabled():
+            self._deny("插件未在 manifest 声明 capabilities=[\"ai\"]")
+            return False
+        callback = self._providers.get("add_listener")
+        if callback is None:
+            self._warn("宿主未注入 ai.add_listener 通道")
+            return False
+        try:
+            return bool(callback(fn))
+        except Exception as exc:          # noqa: BLE001
+            self._warn(f"add_listener 调用失败：{exc!r}")
+            return False
+
+    def remove_listener(self, fn) -> bool:
+        """退订本地服务状态（页面销毁时必须调，防死引用累积）"""
+        if not self.enabled():
+            return False
+        callback = self._providers.get("remove_listener")
+        if callback is None:
+            return False
+        try:
+            return bool(callback(fn))
+        except Exception as exc:          # noqa: BLE001
+            self._warn(f"remove_listener 调用失败：{exc!r}")
+            return False
+
+    def stop_local(self) -> bool:
+        """请求宿主停止本地 AI 服务（宿主设置页有对应的启动入口）
+
+        插件侧只提供快捷停止（如聊天页「⏹ 停止模型服务」按钮）；
+        启动只在设置页做，避免多处拉起服务互相打架。
+        """
+        if not self.enabled():
+            self._deny("插件未在 manifest 声明 capabilities=[\"ai\"]")
+            return False
+        callback = self._providers.get("stop_local")
+        if callback is None:
+            self._warn("宿主未注入 ai.stop_local 通道")
+            return False
+        try:
+            return bool(callback())
+        except Exception as exc:          # noqa: BLE001
+            self._warn(f"stop_local 调用失败：{exc!r}")
+            return False
+
+    # ---------------- 内部 ----------------
+    def _warn(self, msg: str):
+        if self._logger is not None:
+            self._logger.warning(f"[插件] {msg}")
+
+
 class PluginContext:
     """插件可见的宿主能力（白名单）。
 
@@ -636,7 +776,8 @@ class PluginContext:
                  data=None, data_dir_base="", parent_window=None,
                  plugin_id="", plugin_dir="",
                  capabilities=(), http_post_async=None,
-                 write_providers=None, manage_providers=None):
+                 write_providers=None, manage_providers=None,
+                 ai_providers=None):
         # logger=None → 退化为 NullHandler 日志器：插件可以无条件调用
         # ctx.logger.info(...)，不必自己判空
         self._logger = logger if logger is not None else _NULL_LOGGER
@@ -662,6 +803,10 @@ class PluginContext:
         # 宿主注入的管理 provider（改删）：{"update_task"|...|"undo_delete"}。
         # 与只增通道分开，权限也分开（manage 是一档更危险的能力）。
         self._manage_providers = dict(manage_providers or {})
+        # 宿主注入的 AI 总配置 provider（2026-09-29 设置页 AI 总指挥）：
+        # {"is_attached"|"params"|"add_listener"|"remove_listener": callable}。
+        # params 每次调用**实时**读宿主配置——设置页改完即生效，插件无需重建。
+        self._ai_providers = dict(ai_providers or {})
         # 数据入口门面：每次实例化都重新判权限（capabilities 是逐实例的）。
         # write 与 manage 指向同一对象——门禁在方法级按能力名判定，
         # 插件按语义选名字用（ctx.write.add_note / ctx.manage.delete_task）。
@@ -670,6 +815,11 @@ class PluginContext:
             plugin_id=self._plugin_id, capabilities=self._capabilities,
             manage_providers=self._manage_providers)
         self._write = self._data_gateway
+        # AI 总配置门面：每次实例化都重新判权限（capabilities 是逐实例的），
+        # 未声明 ai 能力的插件拿到的是安全降级实例（读什么都是空值）。
+        self._ai = AiBackendFacade(
+            logger=self._logger, providers=self._ai_providers,
+            plugin_id=self._plugin_id, capabilities=self._capabilities)
 
     # ---------------- 身份与目录 ----------------
     @property
@@ -746,6 +896,7 @@ class PluginContext:
             http_post_async=self._http_post_async,
             write_providers=dict(self._write_providers),
             manage_providers=dict(self._manage_providers),
+            ai_providers=dict(self._ai_providers),
         )
 
     # ---------------- 白名单能力 ----------------
@@ -787,6 +938,20 @@ class PluginContext:
         删除类方法返回**撤销令牌**，可用于 ``undo_delete`` 恢复。
         """
         return self._data_gateway
+
+    @property
+    def ai(self) -> "AiBackendFacade":
+        """**AI 总配置门面**（需声明 ``capabilities: ["ai"]``）。
+
+        读取设置页「🧠 AI 总配置」的唯一真相源：``is_attached()`` 查本
+        插件是否被用户接入（设置页下拉框勾选 = 授权），``params()`` 实时
+        返回后端参数（mode / base_url / api_key / model / local_port /
+        local_ready ...），``add_listener`` 订阅宿主本地服务状态。
+
+        未声明 ai 能力：读什么都是空值 + warning，不抛异常。
+        接入与否由用户在设置页勾选决定，插件每次发请求前应重查。
+        """
+        return self._ai
 
     def show_toast(self, text: str, ms: int = 2800) -> bool:
         """弹主窗口轻提示；宿主未提供该能力时返回 False"""
