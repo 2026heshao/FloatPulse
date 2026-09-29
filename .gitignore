@@ -7,10 +7,9 @@ __pycache__/
 *.egg-info/
 
 # ---- 打包产物（PyInstaller，75MB，禁止入库）----
-dist2/
-build2/
-dist/
-build/
+# 通配覆盖全部 distpath 命名（dist/ dist2/ dist_smoke/ ...），换目录名无需再补规则
+dist*/
+build*/
 *.manifest
 
 # ---- 宣传页内的打包分发副本（31.5MB 构建产物，改走 GitHub Release 附件）----
