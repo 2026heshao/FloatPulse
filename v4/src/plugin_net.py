@@ -10,7 +10,8 @@
          --on_done(result)--> 插件（回调回 UI 线程）
 
 设计要点：
-  - 同步核心 ``http_post_json()`` 纯 stdlib（urllib），可无 GUI 测试；
+  - 同步核心 ``http_post_json()`` / ``http_get_json()`` 纯 stdlib
+    （urllib），可无 GUI 测试；
   - 异步包装用 QThread，结果经**主线程 Relay** 转发 —— PyQt 对无
     QObject 接收者的 lambda 走 DirectConnection（在工作线程里调），
     直接把 on_done 连到 worker 信号会在线程外回调控件 → 崩溃。
@@ -38,22 +39,19 @@ DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 
 
 # ---------------- 同步核心（纯 stdlib，可无 GUI 测试） ----------------
-def http_post_json(url, headers=None, body=None, timeout=30.0,
-                   max_bytes=DEFAULT_MAX_BYTES):
-    """同步 POST JSON。返回结果 dict（字段见 plugin_api 桥方法注释）。
+def _http_request(url, headers, timeout, max_bytes, make_request):
+    """同步请求公共骨架：永不抛异常，失败归一成 ``ok=False`` 结果 dict。
 
-    本函数**永不抛异常**：任何失败（网络/编码/超限）都归一成
-    ``{"ok": False, ..., "error": ...}``，调用方只看 ok 字段。
+    POST 与 GET 共用「发请求 → 读响应（限 max_bytes）→ 4xx/5xx 保留
+    错误说明体」的路径，差异只在 Request 的构造（由 make_request 提供）。
     """
     result = {"ok": False, "status": 0, "body": "", "error": "",
               "url": str(url or "")}
     try:
-        payload = json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        result["error"] = f"body 无法 JSON 序列化：{exc!r}"
+        req = make_request()
+    except Exception as exc:              # noqa: BLE001 - 构造失败（如 body 序列化）
+        result["error"] = repr(exc)
         return result
-    req = urllib.request.Request(str(url), data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
     for key, val in dict(headers or {}).items():
         try:
             req.add_header(str(key), str(val))
@@ -69,7 +67,7 @@ def http_post_json(url, headers=None, body=None, timeout=30.0,
                           body=raw.decode("utf-8", "replace"))
             return result
     except urllib.error.HTTPError as exc:
-        # 4xx/5xx 也读一下 body：LLM API 的错误说明就在里面
+        # 4xx/5xx 也读一下 body：LLM API / GitHub API 的错误说明就在里面
         try:
             detail = exc.read(max_bytes + 1).decode("utf-8", "replace")
             if len(detail) > max_bytes:
@@ -84,6 +82,40 @@ def http_post_json(url, headers=None, body=None, timeout=30.0,
         return result
 
 
+def http_post_json(url, headers=None, body=None, timeout=30.0,
+                   max_bytes=DEFAULT_MAX_BYTES):
+    """同步 POST JSON。返回结果 dict（字段见 plugin_api 桥方法注释）。
+
+    本函数**永不抛异常**：任何失败（网络/编码/超限）都归一成
+    ``{"ok": False, ..., "error": ...}``，调用方只看 ok 字段。
+    """
+    try:
+        payload = json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        return {"ok": False, "status": 0, "body": "", "error":
+                f"body 无法 JSON 序列化：{exc!r}", "url": str(url or "")}
+
+    def make_request():
+        req = urllib.request.Request(str(url), data=payload, method="POST")
+        req.add_header("Content-Type", "application/json")
+        return req
+
+    return _http_request(url, headers, timeout, max_bytes, make_request)
+
+
+def http_get_json(url, headers=None, timeout=30.0,
+                  max_bytes=DEFAULT_MAX_BYTES):
+    """同步 GET（2026-09-29 起：应用内「检查更新」拉 GitHub Releases API）。
+
+    与 ``http_post_json`` 同一套永不抛异常契约；不发 body、不设
+    Content-Type。调用方自行带 User-Agent（GitHub API 强制要求）。
+    """
+    def make_request():
+        return urllib.request.Request(str(url), method="GET")
+
+    return _http_request(url, headers, timeout, max_bytes, make_request)
+
+
 # ---------------- 异步包装（QThread + 主线程 Relay） ----------------
 class _Relay(QObject):
     """活在主线程的转发器：跨线程信号经它排队回 UI 线程"""
@@ -91,7 +123,7 @@ class _Relay(QObject):
 
 
 class _HttpPostWorker(QThread):
-    """后台线程：执行同步请求，emit 结果"""
+    """后台线程：执行同步 POST，emit 结果"""
     done = pyqtSignal(object)
 
     def __init__(self, url, headers, body, timeout, parent=None):
@@ -106,19 +138,27 @@ class _HttpPostWorker(QThread):
                                       self._body, self._timeout))
 
 
+class _HttpGetWorker(QThread):
+    """后台线程：执行同步 GET，emit 结果"""
+    done = pyqtSignal(object)
+
+    def __init__(self, url, headers, timeout, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._headers = headers
+        self._timeout = timeout
+
+    def run(self):
+        self.done.emit(http_get_json(self._url, self._headers,
+                                     self._timeout))
+
+
 # 存活的 worker 集合（防 GC；QThread 对象被回收会直接崩溃进程）
 _ACTIVE_WORKERS = set()
 
 
-def make_async_poster(logger=None):
-    """构造注入 PluginContext 的异步桥函数。
-
-    返回 ``post(url, headers, body, timeout, on_done) -> bool``：
-      - 在后台线程发请求，``on_done(result)`` 保证在 UI 线程回调；
-      - 返回 False = 没能发起（回调 ok=False 的结果）。
-    宿主在**主线程**调用一次 make_async_poster，把返回值塞进
-    PluginContext(http_post_async=...)。闭包持有日志器，
-    生命周期即应用生命周期，无需手动清理。
+def _spawn_async(logger, method_label, worker, on_done, timeout, url):
+    """POST / GET 共用的异步管道，行为逐字对齐 make_async_poster 原实现。
 
     线程模型（2026-09-27 修）：relay **每请求独立**——worker 在后台
     线程 emit ``done``，本请求自己的 relay（主线程创建的 QObject）把
@@ -126,40 +166,68 @@ def make_async_poster(logger=None):
     ``relay.got.connect(_finish)`` 从不移除，第 N 个响应会把**全部**
     历史请求的回调广播一遍（实测：多点几次「保存并测试」后，对话
     回调收到探活的响应，气泡重复出现；日志同一秒爆出 N 条完成行）。
+
+    返回 False = 没能发起（不回调）；True = 已启动，结果经 on_done 回 UI 线程。
+    """
+    if not callable(on_done):
+        if logger is not None:
+            logger.warning(f"[插件网络] {method_label} 被拒：on_done 不是可调用对象")
+        return False
+
+    relay = _Relay()      # 每请求一个：响应只送达自己的回调（见 docstring）
+    started = time.monotonic()
+
+    def _finish(res):
+        took = time.monotonic() - started
+        if logger is not None:
+            logger.info(f"[插件网络] {method_label} {url} -> "
+                        f"{'HTTP ' + str(res.get('status', 0)) if res.get('ok') else res.get('error', '?')}"
+                        f"（{took:.1f}s）")
+        try:
+            on_done(dict(res))
+        except Exception as exc:      # noqa: BLE001 - 插件回调异常不反噬
+            if logger is not None:
+                logger.warning(f"[插件网络] on_done 回调异常：{exc!r}")
+
+    # worker 线程 emit → relay（主线程）排队 → _finish 回 UI 线程
+    worker.done.connect(lambda res: relay.got.emit(res))
+    relay.got.connect(_finish)
+    worker.finished.connect(lambda: _ACTIVE_WORKERS.discard(worker))
+    _ACTIVE_WORKERS.add(worker)
+    if logger is not None:
+        logger.info(f"[插件网络] {method_label} {url} 发起（timeout={timeout}s）")
+    worker.start()
+    return True
+
+
+def make_async_poster(logger=None):
+    """构造注入 PluginContext 的异步 POST 桥函数。
+
+    返回 ``post(url, headers, body, timeout, on_done) -> bool``：
+      - 在后台线程发请求，``on_done(result)`` 保证在 UI 线程回调；
+      - 返回 False = 没能发起（回调 ok=False 的结果）。
+    宿主在**主线程**调用一次 make_async_poster，把返回值塞进
+    PluginContext(http_post_async=...)。闭包持有日志器，
+    生命周期即应用生命周期，无需手动清理。
     """
 
     def post(url, headers=None, body=None, timeout=30.0, on_done=None):
-        result = {"ok": False, "status": 0, "body": "",
-                  "error": "", "url": str(url or "")}
-        if not callable(on_done):
-            if logger is not None:
-                logger.warning("[插件网络] POST 被拒：on_done 不是可调用对象")
-            return False
-
-        relay = _Relay()      # 每请求一个：响应只送达自己的回调（见 docstring）
         worker = _HttpPostWorker(url, dict(headers or {}), body, timeout)
-        started = time.monotonic()
-
-        def _finish(res):
-            took = time.monotonic() - started
-            if logger is not None:
-                logger.info(f"[插件网络] POST {url} -> "
-                            f"{'HTTP ' + str(res.get('status', 0)) if res.get('ok') else res.get('error', '?')}"
-                            f"（{took:.1f}s）")
-            try:
-                on_done(dict(res))
-            except Exception as exc:      # noqa: BLE001 - 插件回调异常不反噬
-                if logger is not None:
-                    logger.warning(f"[插件网络] on_done 回调异常：{exc!r}")
-
-        # worker 线程 emit → relay（主线程）排队 → _finish 回 UI 线程
-        worker.done.connect(lambda res: relay.got.emit(res))
-        relay.got.connect(_finish)
-        worker.finished.connect(lambda: _ACTIVE_WORKERS.discard(worker))
-        _ACTIVE_WORKERS.add(worker)
-        if logger is not None:
-            logger.info(f"[插件网络] POST {url} 发起（timeout={timeout}s）")
-        worker.start()
-        return True
+        return _spawn_async(logger, "POST", worker, on_done, timeout, url)
 
     return post
+
+
+def make_async_getter(logger=None):
+    """构造异步 GET 桥（2026-09-29 起：设置页「检查更新」用）。
+
+    返回 ``get(url, headers=None, timeout=30.0, on_done=None) -> bool``，
+    与 POST 桥同一条管道（每请求独立 relay / 存活集防 GC / UI 线程回调），
+    只是不发 body、不设 Content-Type；调用方自带 User-Agent。
+    """
+
+    def get(url, headers=None, timeout=30.0, on_done=None):
+        worker = _HttpGetWorker(url, dict(headers or {}), timeout)
+        return _spawn_async(logger, "GET", worker, on_done, timeout, url)
+
+    return get

@@ -25,7 +25,8 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
 
-from src.plugin_net import http_post_json, make_async_poster  # noqa: E402
+from src.plugin_net import (http_get_json, http_post_json,   # noqa: E402
+                             make_async_getter, make_async_poster)
 
 
 # ---------------- 本地测试服务器 ----------------
@@ -52,6 +53,24 @@ class _EchoHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
         body = b'{"error": "no such endpoint"}'
+        self.send_response(404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/latest":
+            payload = json.dumps({
+                "tag_name": "v9.9.9",
+                "ua": self.headers.get("User-Agent") or "",
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        body = b'{"message": "Not Found"}'
         self.send_response(404)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -188,3 +207,58 @@ def test_async_poster_no_cross_delivery(server, qapp):
 def qapp():
     from PyQt6.QtWidgets import QApplication
     return QApplication.instance() or QApplication([])
+
+
+# ---------------- E：GET 通道（2026-09-29 检查更新用） ----------------
+def test_get_ok_roundtrip(server):
+    res = http_get_json(server + "/latest", timeout=5.0)
+    assert res["ok"] is True and res["status"] == 200
+    assert json.loads(res["body"])["tag_name"] == "v9.9.9"
+
+
+def test_get_sends_user_agent(server):
+    """GitHub API 强制 User-Agent：自定义头必须真的发出去"""
+    res = http_get_json(server + "/latest",
+                        headers={"User-Agent": "FloatPulse/4.7.0"},
+                        timeout=5.0)
+    assert res["ok"] is True
+    assert "FloatPulse/" in json.loads(res["body"])["ua"]
+
+
+def test_get_404_normalized(server):
+    res = http_get_json(server + "/no-such", timeout=5.0)
+    assert res["ok"] is False and res["status"] == 404
+    assert "HTTP 404" in res["error"]
+
+
+def test_get_connection_refused_is_safe():
+    res = http_get_json("http://127.0.0.1:1/nope", timeout=2.0)
+    assert res["ok"] is False and res["status"] == 0
+
+
+def test_async_getter_calls_back_on_main_thread(server, qapp):
+    """GET 桥与 POST 桥同一条管道：回调必然在 UI 线程"""
+    from PyQt6.QtCore import QCoreApplication, QThread
+
+    main_thread = QThread.currentThread()
+    getter = make_async_getter()
+    results = []
+
+    def on_done(res):
+        results.append((QThread.currentThread() is main_thread, res))
+
+    ok = getter(server + "/latest", timeout=5.0, on_done=on_done)
+    assert ok is True
+    deadline = 5000
+    while not results and deadline > 0:
+        QCoreApplication.processEvents()
+        QThread.msleep(20)
+        deadline -= 20
+    assert results, "on_done 未在超时内被回调"
+    same_thread, res = results[0]
+    assert same_thread and res["ok"] is True
+
+
+def test_async_getter_rejects_non_callable(server, qapp):
+    getter = make_async_getter()
+    assert getter(server + "/latest", on_done=None) is False
