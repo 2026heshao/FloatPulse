@@ -21,14 +21,15 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: PyInstaller 打包
-        run: python -m PyInstaller --noconfirm --clean --distpath dist --workpath build FloatPulse.spec
+        run: python -m PyInstaller --noconfirm --clean --distpath dist2 --workpath build2 FloatPulse.spec
 
-      - name: 压缩产物
-        shell: pwsh
-        run: Compress-Archive -Path dist/FloatPulse/* -DestinationPath FloatPulse-win64.zip
+      - name: 组装发布包（tools/build_release.py 白名单收集，防个人数据夹带）
+        run: python tools/build_release.py
 
       - name: 发布到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: FloatPulse-win64.zip
+          files: |
+            宣传页/FloatPulse-*-win64.zip
+            宣传页/plugin-assets/*.fpplug
           generate_release_notes: true
