@@ -170,6 +170,59 @@ class _NavButton(QPushButton):
         super().mouseReleaseEvent(event)
 
 
+class _NavSplitHandle(QWidget):
+    """导航栏右侧的分割手柄：横向拖动调宽侧栏，双击恢复默认宽度。
+
+    手柄只管手势、不管布局：按下/拖动/松手把原始全局 x 发给 MainWindow，
+    由宿主夹取范围、套用宽度并落盘（``_on_split_*`` 三件套）。
+    样式见 theme.py 的 navSplitHandle（平时隐形，悬停/拖动显线）。
+    """
+
+    split_pressed = pyqtSignal(int)     # 全局 x（按下）
+    split_moved = pyqtSignal(int)       # 全局 x（拖动中实时）
+    split_released = pyqtSignal()
+    split_double_clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dragging = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self.setProperty("dragging", True)
+            self._repolish()
+            # grabMouse：拖出细手柄后也持续收到 move，不会跟丢
+            self.grabMouse()
+            self.split_pressed.emit(int(event.globalPosition().x()))
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.split_moved.emit(int(event.globalPosition().x()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            self.setProperty("dragging", False)
+            self._repolish()
+            self.releaseMouse()
+            self.split_released.emit()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.split_double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+    def _repolish(self):
+        """dragging 动态属性变了 → 让 QSS 的 [dragging=...] 选择器重新生效"""
+        st = self.style()
+        st.unpolish(self)
+        st.polish(self)
+        self.update()
+
+
 class MainWindow(QWidget):
     """生活悬浮球大窗口主UI"""
 
@@ -182,7 +235,9 @@ class MainWindow(QWidget):
     # 默认值与最小值**解耦**：默认变大后用户仍可手动缩小，不被硬下限卡住
     MIN_WIDTH = 920
     MIN_HEIGHT = 620
-    SIDE_BAR_WIDTH = 168
+    SIDE_BAR_WIDTH = 168        # 默认宽度（可拖侧栏右侧分割手柄调整）
+    SIDE_BAR_MIN_W = 140        # 拖动下限：再窄组标题/按钮文字开始截断
+    SIDE_BAR_MAX_W = 280        # 拖动上限：再宽明显挤压内容区阅读体验
     TITLE_BAR_HEIGHT = 48
     SHADOW_MARGIN = 18           # 阴影留白边距
     WINDOW_RADIUS = 14           # 窗口圆角（与设计稿一致）
@@ -959,11 +1014,13 @@ class MainWindow(QWidget):
         # 顶部标题栏
         layout.addWidget(self._build_title_bar())
 
-        # 中部：侧栏 + 内容区
+        # 中部：侧栏 + 分割手柄（拖动调宽侧栏）+ 内容区
         center = QHBoxLayout()
         center.setContentsMargins(0, 0, 0, 0)
         center.setSpacing(0)
         center.addWidget(self._build_side_bar())
+        self._nav_split = self._build_nav_split()
+        center.addWidget(self._nav_split)
         center.addWidget(self._build_content_area(), 1)
         layout.addLayout(center, 1)
 
@@ -1063,7 +1120,9 @@ class MainWindow(QWidget):
         """
         side = QWidget()
         side.setObjectName("sideBar")
-        side.setFixedWidth(self.SIDE_BAR_WIDTH)
+        # 宽度可拖（右侧分割手柄）：读用户上一次保存的宽度，缺失/越界回退默认
+        self._side_bar = side
+        side.setFixedWidth(self._clamped_side_width())
         v = QVBoxLayout(side)
         v.setContentsMargins(12, 16, 12, 12)
         v.setSpacing(4)
@@ -1174,6 +1233,66 @@ class MainWindow(QWidget):
         self._drag_indicator.hide()
 
         return side
+
+    # ---------------- 侧栏宽度分割手柄（拖动调宽 / 双击恢复默认） ----------------
+    def _build_nav_split(self) -> QWidget:
+        """侧栏与内容区之间的可拖动分割手柄（外观走 theme.py 的 navSplitHandle）"""
+        handle = _NavSplitHandle()
+        handle.setObjectName("navSplitHandle")   # QSS 选择器靠它（漏了样式全失效）
+        handle.setFixedWidth(6)
+        handle.setCursor(Qt.CursorShape.SizeHorCursor)
+        handle.setToolTip("拖动调整导航栏宽度；双击恢复默认")
+        handle.split_pressed.connect(self._on_split_pressed)
+        handle.split_moved.connect(self._on_split_moved)
+        handle.split_released.connect(self._on_split_released)
+        handle.split_double_clicked.connect(self._on_split_reset)
+        # 拖动状态基准（press 总在 move 之前，这里是兜底初值）
+        self._split_press_x = 0
+        self._split_base_w = self.SIDE_BAR_WIDTH
+        return handle
+
+    def _clamped_side_width(self) -> int:
+        """读配置的侧栏宽度并夹取到合法区间（缺失/非法 → 默认宽度）"""
+        try:
+            w = int(self._config.get("side_bar_width", self.SIDE_BAR_WIDTH))
+        except (TypeError, ValueError):
+            w = self.SIDE_BAR_WIDTH
+        return max(self.SIDE_BAR_MIN_W, min(self.SIDE_BAR_MAX_W, w))
+
+    def _on_split_pressed(self, global_x: int):
+        self._split_press_x = global_x
+        self._split_base_w = self._side_bar.width()
+
+    def _on_split_moved(self, global_x: int):
+        """拖动中：按位移实时套用新宽度（夹取在 _apply_side_width 里）"""
+        self._apply_side_width(self._split_base_w + global_x - self._split_press_x)
+
+    def _on_split_released(self):
+        self._save_side_width()
+
+    def _on_split_reset(self):
+        """双击手柄：恢复默认宽度并落盘"""
+        self._apply_side_width(self.SIDE_BAR_WIDTH)
+        self._save_side_width()
+
+    def _apply_side_width(self, width) -> int:
+        """夹取并套用侧栏宽度（拖动实时调用）。返回夹取后的值。
+
+        指示条贴侧栏左缘、纵向位置只随条目行高变化 —— 宽度改变不影响
+        它的坐标，无需额外刷新；导航拖拽换位的槽位运算取实时几何，
+        下一次拖拽自然按新宽度计算。
+        """
+        w = max(self.SIDE_BAR_MIN_W, min(self.SIDE_BAR_MAX_W, int(width)))
+        if self._side_bar.width() != w:
+            self._side_bar.setFixedWidth(w)
+        return w
+
+    def _save_side_width(self):
+        """侧栏宽度落盘（与已存值相同则不写盘，省 I/O）"""
+        w = self._side_bar.width()
+        if self._config.get("side_bar_width", 0) != w:
+            self._config.set("side_bar_width", w)
+            self._config.save()
 
     # ---------------- 侧栏分组：展开集合 + 动画 + 组序列铺开 ----------------
     def _expanded_groups(self) -> tuple:
@@ -2625,10 +2744,17 @@ class MainWindow(QWidget):
         • <b>单实例运行</b>：重复启动会唤醒已在运行的窗口，不会开出第二个进程</p>
 
         <h3>⚙️ 设置</h3>
-        <p>• <b>主题外观</b>：浅色 / 深色一键切换<br>
-        • <b>行为配置</b>：剪贴板历史上限、悬浮球自动隐藏秒数、显示悬浮球、小卡片保持显示、临时素材上限与保留天数、素材缩略图大小、软件卡片尺寸、动画速度、悬浮球大小、开机自动启动、启动时恢复上次页面、关闭主窗口最小化到托盘、剪贴板过滤应用、自动收集剪贴板图片、任务到期提醒、全屏应用时自动隐藏悬浮球<br>
-        • <b>全局快速捕捉</b>：开关 + 自定义热键（格式如 Ctrl+Alt+K，被占用时会提示）<br>
-        • <b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</p>
+        <p>• <b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——🎨 外观 / 🔵 悬浮球 / 📋 剪贴板与碎片 / 🖼 临时素材 / ⚡ 全局工具 / 🚀 启动与系统 / 📤 导出 / 🧠 AI 配置 / ℹ️ 关于，点分类即切换<br>
+        • <b>外观</b>：浅色 / 深色主题一键切换、动画速度、软件卡片尺寸<br>
+        • <b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸<br>
+        • <b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片<br>
+        • <b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小<br>
+        • <b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）、番茄钟（开关 + 专注 / 休息时长 + 自动进入休息）<br>
+        • <b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务到期提醒<br>
+        • <b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）<br>
+        • <b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「💾 保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）<br>
+        • <b>关于</b>：版本信息与快捷键速查<br>
+        • <b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」在<b>页底常驻栏</b>（任何分类下都可见），恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</p>
 
         <h3>💡 数据与迁移</h3>
         <p>• 全部数据都在本地：程序目录的 <b>float_data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）<br>
