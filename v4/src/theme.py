@@ -242,7 +242,14 @@ QPushButton#navBtn {
     color: $text_secondary;
     border: 1px solid transparent;
     border-radius: 10px;
-    padding: 8px 12px;
+    /* 左内边距比右大一档 = 组内缩进（按钮现在嵌在分组标题下面）。
+       只动左右、不动上下 —— 上下内边距决定行高，改它会连带改 sizeHint。 */
+    padding: 8px 12px 8px 20px;
+    /* ★ 行间距放在 **margin-bottom** 而不是 layout spacing（2026-09-29）：
+       分组折叠动画是对每条目做 maximumHeight 过渡，margin 属于条目自身，
+       收起来时行高与空隙**一起**归零；若用 layout 的 spacing，收起后
+       每组会残留 (n-1)×spacing 的空档，动画末尾会"啪"地跳一下。 */
+    margin: 0 0 4px 0;
     text-align: left;
     font-size: 13px;
 }
@@ -250,7 +257,7 @@ QPushButton#navBtn:hover {
     /* hover 只做视觉反馈（背景 + 轻微右移），切页靠点击 */
     background-color: $primary_a08;
     color: $text;
-    padding-left: 14px;
+    padding-left: 22px;
 }
 QPushButton#navBtn:checked {
     background-color: $primary_a18;
@@ -276,6 +283,62 @@ QPushButton#navBtn[dragging="true"] {
 QLabel#sideBarFoot {
     color: $text_placeholder;
     font-size: 11px;
+}
+
+/* ---- 侧栏分组标题（可点击展开/折叠；箭头是自绘子控件，不在文案里）---- */
+QPushButton#navGroupHeader {
+    background-color: transparent;
+    color: $text_placeholder;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    /* 上下 margin 对称 4px：箭头按几何中心定位（见 NavGroupHeader.resizeEvent），
+       不对称的话箭头会偏离文字基线。上 4 + 上一条目的下 margin 4 = 组间 8px，
+       与组内 4px 拉开层次。 */
+    margin: 4px 0;
+    /* 左 22px = 箭头位（箭头 x=10，宽 8，右侧再留 4px 与文字分开） */
+    padding: 4px 10px 4px 22px;
+    text-align: left;
+    font-size: 11px;
+}
+QPushButton#navGroupHeader:hover {
+    color: $text_secondary;
+    background-color: $primary_a08;
+}
+
+/* ---- 侧栏滚动容器（溢出后才出现滚动条）---- */
+QScrollArea#navScroll {
+    background-color: transparent;
+    border: none;
+}
+QScrollArea#navScroll > QWidget > QWidget {
+    background-color: transparent;
+}
+/* 滚动条按需出现，宽度压到 6px：168px 宽的侧栏里，标准宽度
+   （~15px）会把条目文字挤到换行，而条目一换行就变高 → 更需要滚动，
+   形成"出现→变高→还在溢出"的抖动循环。 */
+QScrollArea#navScroll QScrollBar:vertical {
+    background: transparent;
+    width: 6px;
+    margin: 0;
+    border: none;
+}
+QScrollArea#navScroll QScrollBar::handle:vertical {
+    background: $hair;
+    border-radius: 3px;
+    min-height: 24px;
+}
+QScrollArea#navScroll QScrollBar::handle:vertical:hover {
+    background: $text_placeholder;
+}
+QScrollArea#navScroll QScrollBar::add-line:vertical,
+QScrollArea#navScroll QScrollBar::sub-line:vertical {
+    height: 0;
+    border: none;
+    background: none;
+}
+QScrollArea#navScroll QScrollBar::add-page:vertical,
+QScrollArea#navScroll QScrollBar::sub-page:vertical {
+    background: none;
 }
 
 /* ---- 内容区 ---- */

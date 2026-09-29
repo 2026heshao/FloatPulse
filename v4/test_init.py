@@ -4,6 +4,14 @@
 import sys
 import os
 
+# ★ 必须在 import PyQt6 **之前**设定离屏平台。
+#   本脚本会 show() 真实主窗口与悬浮球：若走默认 windows 平台，在开发机
+#   直接跑就会在桌面上真的创建出两个悬浮球窗口；而本脚本的退出阶段在部分
+#   环境下会挂死（已知问题），进程不退出 → 窗口一直留在桌面上，看上去像
+#   "程序没启动却多出两个球"（2026-09-29 实害，用户报障）。
+#   setdefault 语义：外部已显式指定平台时（如 run_gui_check.py 注入）不覆盖。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer
 
@@ -111,9 +119,16 @@ def main():
 
     # 500ms 后退出
     QTimer.singleShot(500, app.quit)
-    print("[OK] init test passed, will quit in 500ms")
+    print("[OK] init test passed, will quit in 500ms", flush=True)
     app.exec()
-    print("[DONE]")
+    print("[DONE]", flush=True)
+    # ★ 硬退出兜底：本脚本在部分环境下 `app.exec()` 走完、`[DONE]` 也打了，
+    #   但解释器在 Qt 收尾阶段挂住不返回（已知问题，具体阻塞点未定位）。
+    #   挂死进程会一直占着窗口与热键资源 → 桌面上残留悬浮球。
+    #   冒烟脚本不需要优雅收尾，直接结束进程，保证"跑完即消失"。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

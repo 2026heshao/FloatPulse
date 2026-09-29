@@ -45,7 +45,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QPoint, pyqtSignal, QDate, QTimer, QRect, QRectF, QSize, QEvent,
-    QPropertyAnimation, QEasingCurve,
+    QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
+    QSequentialAnimationGroup,
 )
 from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QPixmap, QShortcut, QKeySequence
 
@@ -54,7 +55,13 @@ from src.constants import DEFAULT_THEME
 from src.config import (
     sanitize_nav_order, DEFAULT_NAV_ORDER, LAST_PAGE_INDEX_MAX,
 )
-from src.glass import GlassPanel, NavIndicator
+from src.nav_layout import (
+    NAV_GROUPS, NAV_GROUP_TITLES, NAV_FIXED_ITEM_GROUP, NAV_FIXED_ITEM_ORDER,
+    NAV_DEFAULT_EXPANDED, group_of, is_plugin_key,
+    sanitize_expanded_groups, toggle_group, split_by_group,
+    reorder_within_group,
+)
+from src.glass import GlassPanel, NavIndicator, NavGroupHeader
 from src.controls import ScreenToast
 from src.app_paths import find_icon_file, get_screen_geometry
 from src.fragments_panel import FragmentsPanel
@@ -101,6 +108,13 @@ NAV_DRAG_THRESHOLD = 8
 # 左栏实时让位：邻居滑开让位动画时长 / 落定滑入动画时长（均随动画速度档位缩放）
 NAV_SHIFT_MS = 150
 NAV_DROP_MS = 180
+# 侧栏分组展开/折叠动画（2026-09-29）：条目逐条做 maximumHeight 过渡，
+# 等价于 web 的 max-height 过渡；展开比折叠略长（展开要"长出来"，
+# 折叠要"收回去"，同长时收的过程会显得拖沓）。
+NAV_GROUP_EXPAND_MS = 280      # 展开时长
+NAV_GROUP_COLLAPSE_MS = 210    # 折叠时长
+NAV_GROUP_STAGGER_MS = 18      # 逐条错峰（stagger），最多叠加 4~5 条
+NAV_ARROW_MS = 240             # 箭头旋转时长
 
 
 class _NavButton(QPushButton):
@@ -243,6 +257,10 @@ class MainWindow(QWidget):
         self._nav_shift_anims = {}             # 邻居让位动画：btn -> QPropertyAnimation
         self._nav_drop_anim = None             # 落定滑入动画（拖起又放回时也用它）
         self._nav_drag_grab_dy = 0             # 光标在按钮内的纵向偏移（以按下点为准）
+        # 本次拖拽发生在哪个组（组内拖拽只改组内相对顺序；2026-09-29 分组）
+        self._nav_drag_group = None
+        # 侧栏分组展开/折叠动画（QParallelAnimationGroup 列表，保持引用防 GC）
+        self._nav_group_anims = []
 
         # 边缘缩放状态（方向字符串，None 表示非缩放中）
         self._resizing = None
@@ -1023,6 +1041,24 @@ class MainWindow(QWidget):
     # 左侧导航栏
     # ==================================================================
     def _build_side_bar(self):
+        """构建左栏：品牌字 + 可滚动的「四组导航」+ 固定底部版本号。
+
+        ★ 2026-09-29 重构（侧栏容量问题）：从"一条平铺列表"改为
+        「四组分类 + 手风琴折叠（任何时刻恰好一组展开）+ 溢出全局滚动」。
+        动因：页面插件数量无上限，而 920×620 最小窗口下侧栏只放得下
+        约 13 项，超出的会被 Qt **静默压扁**（35px → 17px → 文字消失），
+        不报错、不隐藏、无滚动条 —— 用户看到的只是"东西不见了"。
+
+        为什么组标题与条目**同处一个扁平布局**（而非每组一个嵌套
+        QVBoxLayout）：拖拽换位用**绝对坐标 + grabMouse** 实现，坐标基准
+        必须是连续、可预测的纵向序列；嵌套布局会让"槽位 Y"取决于各子布局
+        的边界，既有验证脚本对 ``_nav_btns_layout.indexOf()`` 的断言也全部
+        失效。扁平序列 = 组标题与条目交错，两类问题一起规避。
+
+        全部条目**始终留在布局里**，靠 ``setVisible`` 控制显隐：Qt 的
+        QBoxLayout 会把隐藏项当作空项跳过（零高度），而 ``indexOf`` 仍然
+        返回真实下标 —— 冻结/交还布局的槽位运算因此不用区分"折叠"这件事。
+        """
         side = QWidget()
         side.setObjectName("sideBar")
         side.setFixedWidth(self.SIDE_BAR_WIDTH)
@@ -1039,40 +1075,86 @@ class MainWindow(QWidget):
         self._nav_indicator.set_color(QColor(get_colors(self._theme)["primary"]))
         self._nav_indicator.raise_()
 
-        group_top = QLabel("WORKBENCH")
+        # 品牌字：原为 "WORKBENCH"，与分组标题「工作台」重复读着像两件事，
+        # 改为产品名（2026-09-29）。
+        group_top = QLabel("FLOAT PULSE")
         group_top.setObjectName("sideBarTitle")
         v.addWidget(group_top)
 
-        # 按显示顺序创建 8 个功能页按钮（拖动换位只改这里的顺序，
-        # 每个按钮绑定的物理索引不变）。布局槽位约定：group_top 占 0、
-        # 功能页占 1..8，设置/说明/版本号固定在功能页之后。
-        self._nav_btns_layout = v
-        self._nav_area = side
+        # ---- 滚动容器：品牌字与版本号固定，中间四组可滚 ----
+        # widgetResizable=True → 内容宽度跟随视口（168px 侧栏里横向不滚）；
+        # 纵向是否出滚动条由内容的 sizeHint 与视口高度比较决定（按需出现）。
+        self._nav_scroll = QScrollArea()
+        self._nav_scroll.setObjectName("navScroll")
+        self._nav_scroll.setWidgetResizable(True)
+        self._nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._nav_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._nav_content = QWidget()
+        self._nav_content.setObjectName("navScrollContent")
+        self._nav_scroll.setWidget(self._nav_content)
+        v.addWidget(self._nav_scroll, 1)
+        # 滚动后选中条要跟着走（否则停在旧位置指向别的条目）
+        self._nav_scroll.verticalScrollBar().valueChanged.connect(
+            self._on_nav_scrolled)
+
+        # 内容布局 = 组标题与条目交错的扁平序列（槽位 0..N-1，末尾 stretch）
+        # ★ spacing = 0 而入每条**自带 margin**：条目间距由 QSS 的
+        #   `margin-bottom` 提供，这样"条目的高度"里就包含了它下方的空隙 ——
+        #   折叠动画把 maximumHeight 动到 0 时，行与空隙**一起**收干净。
+        #   若用 layout spacing，折叠动画结束时总会残留下 N×spacing 的空档，
+        #   收尾那一下会"啪"地跳一下（web 里 max-height 过渡不会有这问题）。
+        cv = QVBoxLayout(self._nav_content)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(0)
+
+        # ★ 对外契约：`_nav_btns_layout` 仍是"导航键所在的垂直布局"，
+        #   `_nav_area` 仍是"按钮几何的坐标基准"。两者语义未变，只是宿主
+        #   从 sideBar 换成了滚动内容 —— 拖拽仍是绝对坐标，逻辑不用改。
+        self._nav_btns_layout = cv
+        self._nav_area = self._nav_content
+
+        # ---- 组标题（多组可同时展开：点标题切换本组，不影响其它组）----
+        self._nav_group_headers = {}
+        for grp in NAV_GROUPS:
+            hd = NavGroupHeader(NAV_GROUP_TITLES[grp])
+            hd.setObjectName("navGroupHeader")
+            hd.clicked.connect(
+                lambda _checked=False, g=grp: self._on_group_toggled(g))
+            self._nav_group_headers[grp] = hd
+            cv.addWidget(hd)
+
         self._nav_btns = {}
+        self._nav_fixed_btns = {}
         self._nav_order = self._load_nav_order()
         for key in self._nav_order:
-            if key.startswith("plugin:"):
+            if is_plugin_key(key):
                 # 插件页键由 register_plugin_page 在插件装配时补建
                 # （此时插件尚未加载）；order 里保留它的记忆位置
                 continue
             btn = self._make_nav_button(NAV_PAGE_TITLES[key],
                                         NAV_PAGE_INDEX[key], key)
             self._nav_btns[key] = btn
-            v.addWidget(btn)
 
         # 设置（物理索引 6）：固定，不参与拖动换位
-        self._settings_btn = self._make_nav_button("⚙️  设置", 6)
-        v.addWidget(self._settings_btn)
+        self._settings_btn = self._make_nav_button("⚙  设置", 6)
+        self._nav_fixed_btns["settings"] = self._settings_btn
         # 软件导航按钮别名（历史引用点保留）
         self._app_launcher_btn = self._nav_btns.get("apps")
 
-        # 弹性空白：把使用说明和版本号压到底部
-        v.addStretch()
-
         # 使用说明按钮（与其它页面一致，参与页面切换，索引 8）
-        v.addWidget(self._make_nav_button("❓  使用说明", 8))
+        self._help_btn = self._make_nav_button("❓  使用说明", 8)
+        self._nav_fixed_btns["help"] = self._help_btn
 
-        # 底部版本信息
+        # 首次铺开：按分组序列落位 + 按当前展开集合显隐（首帧不做动画）
+        self._current_expanded_groups = sanitize_expanded_groups(
+            self._config.get("nav_expanded_groups", list(NAV_DEFAULT_EXPANDED)))
+        self._relayout_nav(self._nav_order)
+        cv.addStretch()
+
+        # 底部版本信息（固定在滚动区之外，始终可见）
         ver = QLabel("v2.0 · PyQt6")
         ver.setObjectName("sideBarFoot")
         ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1085,6 +1167,274 @@ class MainWindow(QWidget):
         self._drag_indicator.hide()
 
         return side
+
+    # ---------------- 侧栏分组：展开集合 + 动画 + 组序列铺开 ----------------
+    def _expanded_groups(self) -> tuple:
+        """当前展开的组集合（非法/未初始化 → 回退默认）"""
+        return sanitize_expanded_groups(
+            getattr(self, "_current_expanded_groups", NAV_DEFAULT_EXPANDED))
+
+    def _on_group_toggled(self, group: str):
+        """点击组标题：**只切换本组**（多组可同时展开）+ 落盘 + 动画。
+
+        ★ 与第一版手风琴的区别：这里不再"展开一个收其余"。全折叠也允许
+        （再点一次已展开的组即可），空集合是合法持久化状态。
+        """
+        if group not in NAV_GROUPS:
+            return
+        new_groups = toggle_group(self._expanded_groups(), group)
+        expanding = group in new_groups
+        self._current_expanded_groups = new_groups
+        try:
+            self._config.set("nav_expanded_groups", list(new_groups))
+            self._config.save()
+        except Exception:      # noqa: BLE001 - 落盘失败不影响本次交互
+            pass
+        # 先滚动再动画：滚动目标按"动画开始前"的几何算，展开的内容只会往
+        # 下长，不会把刚滚到的标题又顶出去
+        if expanding:
+            self._scroll_nav_group_into_view(group)
+        self._animate_nav_group(group, expanding)
+        # 选中页若不在展开集合里，指示条此时应隐藏（别指向看不见的条目）
+        self._sync_nav_selection()
+
+    def _scroll_nav_group_into_view(self, group: str):
+        """该组标题若不在视口内，滚到视口顶部（在视口内则不动，避免乱跳）"""
+        hd = self._nav_group_headers.get(group)
+        bar = self._nav_scroll.verticalScrollBar()
+        if hd is None or bar is None:
+            return
+        top = bar.value()
+        vp_h = self._nav_scroll.viewport().height()
+        y = hd.y()
+        if y >= top and y + hd.height() <= top + vp_h:
+            return          # 已完整可见
+        target = y - 4
+        bar.setValue(max(bar.minimum(), min(target, bar.maximum())))
+
+    # ---- 分组展开/折叠动画（web 级 max-height 过渡 + 逐条 stagger）----
+    def _nav_row_height(self) -> int:
+        """单条导航行的目标高度（= QSS 里 padding+border+文字+margin-bottom）"""
+        probe = next(iter(self._nav_btns.values()), None)
+        h = probe.sizeHint().height() if probe is not None else 0
+        if h <= 0:
+            h = self._nav_slot_h or 39
+        return max(1, int(h))
+
+    def _nav_group_item_widgets(self, group: str) -> list:
+        """某组当前**已建**的全部条目部件（可拖键 + 组内固定项）"""
+        out = [self._nav_btns[k] for k in self._nav_btns
+               if group_of(k) == group]
+        for key in NAV_FIXED_ITEM_ORDER:
+            if NAV_FIXED_ITEM_GROUP.get(key) == group:
+                btn = self._nav_fixed_btns.get(key)
+                if btn is not None:
+                    out.append(btn)
+        return out
+
+    def _stop_nav_group_anims(self):
+        """中断所有分组展开/折叠动画，并把条目钉在"该处于"的终态。
+
+        中断必须落终态：动画停在半高会让布局里留下几行"半截"的按钮，
+        而拖拽的槽位计算是拿实测几何做的 —— 半截行高算出来的槽位间距
+        是错的。所以这里统一按当前展开集合强制刷一遍显隐。
+        """
+        for anim in list(self._nav_group_anims):
+            try:
+                anim.stop()
+            except RuntimeError:
+                pass
+        self._nav_group_anims = []
+        self._apply_nav_visibility()
+
+    def _animate_nav_group(self, group: str, expand: bool):
+        """展开/折叠某组的条目：逐条 maximumHeight 过渡（等价 web 的 max-height）。
+
+        为什么逐条动画、而不是给整组套一个容器：
+        侧栏是**扁平布局**（组标题与条目交错），拖拽的槽位运算依赖
+        ``indexOf`` 直接命中条目 —— 插入嵌套容器会让整个槽位契约崩掉。
+        逐条动画在扁平布局里能得到同样的"整组长出来/收回去"的观感。
+
+        逐条还额外送了一个 web 里很常见的 **stagger**：第 i 条延迟
+        i×NAV_GROUP_STAGGER_MS 起步，收放时像"层层推开/卷起"，
+        比整块同时缩放灵动得多。
+        """
+        items = self._nav_group_item_widgets(group)
+        hd = self._nav_group_headers.get(group)
+        if hd is not None:
+            hd.set_expanded(expand, animate=True,
+                            duration=self._nav_anim_ms(NAV_ARROW_MS))
+        if not items:
+            return
+        self._stop_nav_group_anims()
+        row_h = self._nav_row_height()
+        base_ms = NAV_GROUP_EXPAND_MS if expand else NAV_GROUP_COLLAPSE_MS
+        duration = self._nav_anim_ms(base_ms)
+        stagger = self._nav_anim_ms(NAV_GROUP_STAGGER_MS)
+        if duration <= 0:
+            # 动画档位关闭：直接到终态（保持"0 动画"设置下的零延迟手感）
+            for w in items:
+                w.setMaximumHeight(16777215 if expand else 0)
+                w.setVisible(expand)
+            return
+        parallel = QParallelAnimationGroup(self)
+        for i, w in enumerate(items):
+            # 动画期间必须可见（可见性不参与动画，隐藏了就看不到"长出来"）
+            w.setVisible(True)
+            prop = QPropertyAnimation(w, b"maximumHeight", self)
+            prop.setDuration(duration)
+            prop.setEasingCurve(QEasingCurve.Type.OutQuint)
+            prop.setStartValue(0 if expand else max(row_h, w.height()))
+            prop.setEndValue(row_h if expand else 0)
+            delay = stagger * i
+            if delay > 0:
+                seq = QSequentialAnimationGroup(self)
+                seq.addPause(delay)
+                seq.addAnimation(prop)
+                parallel.addAnimation(seq)
+            else:
+                parallel.addAnimation(prop)
+        parallel.finished.connect(
+            lambda g=group, e=expand: self._on_nav_group_anim_done(g, e))
+        self._nav_group_anims.append(parallel)
+        parallel.start()
+
+    def _on_nav_group_anim_done(self, group: str, expand: bool):
+        """单组动画收尾：钉死显隐、清引用、刷新选中条。
+
+        收尾必须**先**隐藏再解除高度约束：反过来会在同一帧里露出"满高"的
+        条目，折叠动作末尾闪一下。
+        """
+        items = self._nav_group_item_widgets(group)
+        for w in items:
+            if expand:
+                w.setMaximumHeight(16777215)
+                w.setVisible(True)
+            else:
+                w.setVisible(False)
+                w.setMaximumHeight(16777215)
+        self._nav_group_anims = [a for a in self._nav_group_anims
+                                 if a is not self.sender()]
+        self._sync_nav_selection()
+
+    def _nav_item_group_order(self, order=None, group=None) -> list:
+        """指定组（默认=被拖拽/首个展开组）里**可拖键**的当前顺序。
+
+        拖拽的槽位数组与这里一一对齐。★ 传 ``group`` 时按该组取——
+        多组同时展开时，"当前展开组"不再唯一，拖拽必须明确知道自己
+        在拖哪一组（否则会取到别的组的条目，槽位全错）。
+        """
+        if group is None:
+            group = self._expanded_groups()[0] if self._expanded_groups() else None
+        if group is None:
+            return []
+        pool = [k for k in (order if order is not None else self._nav_order)
+                if k in self._nav_btns]
+        return split_by_group(pool, pool).get(group, [])
+
+    def _relayout_nav(self, order: list):
+        """按分组把「组标题 + 条目」铺进内容布局（幂等，顺序表语义不变）。
+
+        序列 = 依次四个组：标题，然后该组的可拖条目，然后该组的固定项
+        （设置/使用说明）。隐藏组只收起条目，标题始终在 —— 否则折叠后
+        用户找不到"在哪展开"。
+        """
+        cv = self._nav_btns_layout
+        # 进行中的展开/折叠动画必须先落终态：动画把条目的 maximumHeight
+        # 压在 0~row_h 之间，此时重排会按"半截高度"排布，而且动画还会
+        # 继续改几何 → 重排结果被动画覆盖
+        self._stop_nav_group_anims()
+        # 拖拽残留的占位 spacer 必须先摘掉，否则下面的下标全部偏移
+        if self._nav_free_spacer is not None:
+            cv.removeItem(self._nav_free_spacer)
+            self._nav_free_spacer = None
+        seq = self._nav_sequence(order)
+        # 先全部摘出（含上一轮序列），再按新序列插回 —— 顺序表里键的
+        # 增减都能被正确吞掉，不依赖任何"槽位约定"
+        for w in self._nav_managed_widgets():
+            cv.removeWidget(w)
+        for i, (kind, ref) in enumerate(seq):
+            cv.insertWidget(i, self._nav_widget(kind, ref))
+        self._nav_layout_seq = seq
+        self._nav_order = list(order)
+        cv.activate()
+        self._apply_nav_visibility()
+        self._nav_free_layout = False
+
+    def _nav_sequence(self, order: list) -> list:
+        """完整铺开序列 ``[(kind, ref), ...]``：``header`` / ``item``。
+
+        item 的 ref = ``_nav_btns`` 的键或 ``_nav_fixed_btns`` 的键；
+        两类键在 ``group_of`` 里都有归属（固定项由 NAV_FIXED_ITEM_GROUP
+        指定），所以这里统一按组切分，不需要分支。
+        """
+        pool = [k for k in order if k in self._nav_btns]
+        by_group = split_by_group(pool, pool)
+        seq = []
+        for grp in NAV_GROUPS:
+            seq.append(("header", grp))
+            for key in by_group.get(grp, ()):
+                seq.append(("item", key))
+            for key in NAV_FIXED_ITEM_ORDER:
+                if NAV_FIXED_ITEM_GROUP.get(key) == grp:
+                    seq.append(("item", key))
+        return seq
+
+    def _nav_managed_widgets(self) -> list:
+        """受重排管辖的全部部件（组标题 + 条目 + 组内固定项）"""
+        out = list(self._nav_group_headers.values())
+        out += list(self._nav_btns.values())
+        out += list(self._nav_fixed_btns.values())
+        return out
+
+    def _nav_widget(self, kind: str, ref):
+        """(kind, ref) → 部件：header 取组标题，item 先查可拖键再查固定项"""
+        if kind == "header":
+            return self._nav_group_headers[ref]
+        btn = self._nav_btns.get(ref)
+        return btn if btn is not None else self._nav_fixed_btns[ref]
+
+    def _apply_nav_visibility(self):
+        """按展开集合**即时**刷新显隐（无动画）——初始铺开与中断落终态用。
+
+        隐藏用 ``setVisible(False)`` 而非移出布局：QBoxLayout 把隐藏项当空项
+        跳过（不占高度），而 ``indexOf`` 仍返回真实下标 → 冻结/交还布局的
+        槽位运算不必关心"折叠"。隐藏项在 ``_move_nav_indicator`` 里被跳过，
+        选中条也不会指到看不见的条目上。
+
+        同时把 ``maximumHeight`` 解除约束 —— 动画会在动画中把它压成 0~row_h
+        之间的值，这里负责"回到自然高度"（否则下一次布局仍按被压的高度排）。
+        """
+        groups = self._expanded_groups()
+        for key, btn in getattr(self, "_nav_btns", {}).items():
+            btn.setMaximumHeight(16777215)
+            btn.setVisible(group_of(key) in groups)
+        for key, btn in getattr(self, "_nav_fixed_btns", {}).items():
+            btn.setMaximumHeight(16777215)
+            btn.setVisible(NAV_FIXED_ITEM_GROUP.get(key) in groups)
+        for grp, hd in getattr(self, "_nav_group_headers", {}).items():
+            hd.setMaximumHeight(16777215)
+            hd.set_expanded(grp in groups, animate=False)
+        cv = getattr(self, "_nav_btns_layout", None)
+        if cv is not None:
+            cv.invalidate()
+            cv.activate()
+
+    def _nav_header_index(self, group: str) -> int:
+        """组标题在内容布局中的下标（-1 = 未找到）"""
+        hd = self._nav_group_headers.get(group)
+        if hd is None:
+            return -1
+        return self._nav_btns_layout.indexOf(hd)
+
+    def _on_nav_scrolled(self, _value: int):
+        """滚动条变化 → 选中条跟随（动画在这些坐标里是噪音，直接落位）"""
+        if getattr(self, "_stack", None) is None:
+            return      # 侧栏先于内容区构建，构建期的滚动事件直接忽略
+        btn = self._nav_group.button(self._stack.currentIndex())
+        if btn is not None:
+            self._move_nav_indicator(btn, animate=False)
+
 
     def _make_nav_button(self, text: str, page_index: int,
                          nav_key=None) -> QPushButton:
@@ -1123,31 +1473,23 @@ class MainWindow(QWidget):
         重排前后记录各按钮几何，位置变化的按钮用 QPropertyAnimation
         （OutCubic，时长随全局动画速度档位缩放）从旧位置滑到新位置，
         而不是瞬间跳位。新一轮重排会先中断上一轮动画，防止叠加错乱。
+
+        ★ 2026-09-29 分组重构后：重排完全交给 ``_relayout_nav``（按分组序列
+        铺开），本方法只负责"动画 + 选中态 + 落盘"这三件事。顺序表
+        ``nav_order`` 仍是**一条一维顺序**，语义与落盘格式都没变。
         """
-        v = self._nav_btns_layout
         # 中断上一轮落定动画（动画中用户再次换位 → 直接跳到终态再重排）
         self._abort_nav_settle_animations()
-        # 记录重排前各按钮位置（父级坐标）
-        old_pos = {key: btn.pos() for key, btn in self._nav_btns.items()}
+        # 记录重排前各按钮位置（父级坐标）；隐藏项几何是陈旧值，不参与动画
+        old_pos = {key: btn.pos() for key, btn in self._nav_btns.items()
+                   if btn.isVisible()}
         # order 里可能含尚未注册的插件 key（启动时序：sidebar 先建、
-        # 插件装配在后）——**布局**只摘/插真正已建按钮的键；但顺序表与
-        # 落盘**保留完整顺序**：register_plugin_page 传进来的就是完整
-        # 列表，先注册的插件不得把后注册插件的记忆位置挤掉（2026-09-28）。
+        # 插件装配在后）——布局只铺真正已建按钮的键；但顺序表与落盘
+        # **保留完整顺序**：register_plugin_page 传进来的就是完整列表，
+        # 先注册的插件不得把后注册插件的记忆位置挤掉（2026-09-28）。
         # 拖拽落定传入的是已注册键子集（拖拽只发生在已建按钮上），
         # 未注册键随之从顺序表掉出属预期——插件恢复注册时会重新入表。
-        layout_order = [k for k in order if k in self._nav_btns]
-        # 先把参与换位的按钮全部移出布局，再按新顺序插回槽位 1..N
-        # ⚠ 只摘 layout_order 里的键：其余布局成员（spacer/设置键等）
-        #   不归换位管（2026-09-28 修复：此前按 _nav_btns.values() 全量
-        #   摘除，插件键被摘下后无人插回 → 设置键震荡 + 插件键漂浮重叠）
-        for key in layout_order:
-            v.removeWidget(self._nav_btns[key])
-        for i, key in enumerate(layout_order):
-            v.insertWidget(1 + i, self._nav_btns[key])
-        # 强制布局立即生效：Qt 布局是惰性应用的，不 activate 的话下面
-        # 读取的 btn.pos() 仍是旧几何，落定动画的起止值会算错
-        v.activate()
-        self._nav_order = list(order)
+        self._relayout_nav(order)
         self._sync_nav_selection()
         if save:
             self._save_nav_order(order)
@@ -1185,8 +1527,10 @@ class MainWindow(QWidget):
         anims = []
         for key, btn in self._nav_btns.items():
             old = old_pos.get(key)
+            if old is None or not btn.isVisible():
+                continue   # 折叠组的条目：无旧坐标 / 现在不可见，不参与动画
             new = btn.pos()
-            if old is None or old == new:
+            if old == new:
                 continue   # 位置没变的按钮不做动画
             anim = QPropertyAnimation(btn, b"pos", self)
             anim.setDuration(duration)
@@ -1222,6 +1566,7 @@ class MainWindow(QWidget):
         btn = self._nav_group.button(self._stack.currentIndex())
         if btn is not None:
             btn.setChecked(True)
+            self._move_nav_indicator(btn)
             self._move_nav_indicator(btn, animate=False)
 
     def _switch_to_nav_slot(self, n: int):
@@ -1297,15 +1642,23 @@ class MainWindow(QWidget):
         self._nav_drag_opacity_effect = None
 
     # ---------------- 实时让位：拖拽期间按钮脱离布局自由定位 ----------------
-    def _freeze_nav_buttons(self) -> bool:
-        """把 8 个功能页按钮从布局中摘出、按当前几何自由定位。
+    def _freeze_nav_buttons(self, group: str) -> bool:
+        """把**被拖按钮所在组**的功能页条目从布局中摘出、按当前几何自由定位。
 
-        原位插一个等高 spacer 顶住垂直空间，设置/说明/版本号不会被顶上移；
-        按钮几何保持不变，随后由拖拽逻辑直接改 y 实现"空档跟着鼠标走"。
+        ★ 分组是"被拖按钮所属的组"，**不是"第一个展开组"** —— 多组可同时
+        展开后，"当前展开组"不再唯一；按"第一个展开组"取会取到别的组的
+        条目，槽位数组与拖拽目标错位（2026-09-29）。
+
+        原位插一个等高 spacer 顶住垂直空间（插在该组标题之后），其它组的
+        标题/条目与固定项不会被推动；按钮几何保持不变，随后由拖拽逻辑
+        直接改 y 实现"空档跟着鼠标走"。
+
+        ★ 坐标基准是 ``_nav_area``（滚动内容部件），不是视口 —— 因此
+        mapFromGlobal 得到的坐标**天然与滚动偏移无关**，拖拽期间不需要
+        冻结/锁定滚动条（2026-09-29 的关键简化）。
         """
         v = self._nav_btns_layout
-        # _nav_order 可能含尚未注册的插件 key（无按钮），只冻结已建的
-        keys = [k for k in self._nav_order if k in self._nav_btns]
+        keys = self._nav_item_group_order(group=group)
         btns = [self._nav_btns[k] for k in keys]
         if not btns:
             return False
@@ -1313,48 +1666,36 @@ class MainWindow(QWidget):
         total = (geos[-1].y() + geos[-1].height()) - geos[0].y()
         for b in btns:
             v.removeWidget(b)
+        # spacer 插在该组标题之后。下标**必须在摘除之后**重新取：隐藏项的
+        # 布局项仍在计数里，摘除会改动标题之后的下标
+        hdr_idx = self._nav_header_index(group)
         spacer = QSpacerItem(0, total, QSizePolicy.Policy.Fixed,
                              QSizePolicy.Policy.Fixed)
-        v.insertSpacerItem(1, spacer)
+        v.insertSpacerItem((hdr_idx + 1) if hdr_idx >= 0 else 0, spacer)
         self._nav_free_spacer = spacer
         self._nav_free_layout = True
+        self._nav_drag_group = group
         v.activate()
         for b, g in zip(btns, geos):
             b.setGeometry(g)
             b.show()
         self._nav_slot_ys = [g.y() for g in geos]
         self._nav_slot_h = geos[0].height()
-        # 拖拽序只含已注册键（与 slot_ys 一一对齐）；未注册插件键不进拖拽
-        self._nav_drag_order = [k for k in self._nav_order
-                                if k in self._nav_btns]
+        # 拖拽序只含展开组的已注册键（与 slot_ys 一一对齐）
+        self._nav_drag_order = list(keys)
         return True
 
     def _restore_nav_layout(self):
-        """把按钮按 ``_nav_order`` 重新插回布局，并移除占位 spacer（幂等）。
+        """把按钮按 ``_nav_order`` 重新铺回布局（幂等）。
 
         以 ``_nav_free_layout`` 为唯一状态真相：即使 spacer 已被提前移除
-        （落定滑入路径会先移除它），这里也必须把按钮插回布局，否则设置/
-        说明/版本号会被布局顶到上方。
+        （落定滑入路径会先移除它），这里也必须把按钮交还布局，否则
+        设置/说明/版本号会被布局顶到上方。
         """
         if not self._nav_free_layout:
             return
-        v = self._nav_btns_layout
-        if self._nav_free_spacer is not None:
-            v.removeItem(self._nav_free_spacer)
-            self._nav_free_spacer = None
-        # _nav_order 可能含未注册插件键（无按钮），插回/钉死都跳过
-        restore_keys = [k for k in self._nav_order if k in self._nav_btns]
-        for i, key in enumerate(restore_keys):
-            v.insertWidget(1 + i, self._nav_btns[key])
-        self._nav_free_layout = False
-        v.activate()
-        # 拖拽态样式会让 QPushButton 的 sizeHint 内部缓存 +1px（Qt 私有缓存，
-        # polish/updateGeometry 不一定失效）→ 交还布局后按冻结的槽位几何钉死，
-        # 保证侧栏精确回到拖拽前的排版
-        for i, key in enumerate(restore_keys):
-            b = self._nav_btns[key]
-            b.setGeometry(b.x(), self._nav_slot_y(i), b.width(), self._nav_slot_h)
-        v.invalidate()
+        self._relayout_nav(self._nav_order)
+        self._nav_drag_group = None
 
     def _nav_slot_y(self, index: int) -> int:
         """槽位 Y（拖拽冻结值）"""
@@ -1440,8 +1781,8 @@ class MainWindow(QWidget):
                 pass
         self._nav_shift_anims.clear()
         if self._nav_free_layout:
-            for i, key in enumerate(k for k in self._nav_order
-                                    if k in self._nav_btns):
+            for i, key in enumerate(
+                    self._nav_item_group_order(group=self._nav_drag_group)):
                 b = self._nav_btns[key]
                 b.move(b.x(), self._nav_slot_y(i))
         self._nav_drag_order = []
@@ -1477,6 +1818,8 @@ class MainWindow(QWidget):
         先做防御性复位（上一次拖拽若有残留状态，含未落定的自由布局与动画）。
         """
         self._abort_nav_settle_animations()   # 动画中再次拖拽 → 先停旧动画
+        # 分组展开/折叠动画同理：必须停在终态，否则冻结到的槽位是动画中间值
+        self._stop_nav_group_anims()
         # 停掉的动画会把按钮留在中间位置 → 先按布局吸附回槽位，
         # 否则下面冻结的"槽位 Y"是动画中间值（间距被算错），拖拽判定全乱。
         # ⚠ 必须先 invalidate()：QLayout.activate() 只在布局"脏"时才真正
@@ -1487,7 +1830,9 @@ class MainWindow(QWidget):
         if self._nav_free_spacer is not None:
             self._revert_nav_drag()
         self._nav_drag_btn = btn
-        if not self._freeze_nav_buttons():
+        # ★ 按**被拖按钮所属组**冻结，而不是"第一个展开组"：多组可同时
+        #   展开后后者不再唯一，会取到别的组的条目 → 槽位全错
+        if not self._freeze_nav_buttons(group_of(btn.nav_key)):
             self._nav_drag_btn = None
             return
         self._nav_drag_grab_dy = self._nav_drag_press_offset(btn)
@@ -1539,7 +1884,8 @@ class MainWindow(QWidget):
         btn.setDown(False)
         if not self._nav_free_layout:
             return
-        new_order = list(self._nav_drag_order)
+        group = self._nav_drag_group or group_of(btn.nav_key)
+        new_group_order = list(self._nav_drag_order)
         # 其它按钮吸附到让位后的槽位（让位动画可能还在跑）；被拖按钮
         # 必须停在松手位置，留给落定滑入动画
         self._settle_nav_shift_anims(keep=btn)
@@ -1552,17 +1898,21 @@ class MainWindow(QWidget):
         if self._nav_free_spacer is not None:
             self._nav_btns_layout.removeItem(self._nav_free_spacer)
             self._nav_free_spacer = None
-        if new_order == list(self._nav_order):
+        # 组内拖拽**只改组内相对顺序**：其它组与未注册插件键的槽位不动
+        # （reorder_within_group 的契约；集合对不上返回 None → 不落盘）
+        new_order = reorder_within_group(self._nav_order, group, new_group_order)
+        if new_order is None:
+            self._restore_nav_layout()
+            return
+        if new_group_order == self._nav_item_group_order(group=group):
             # 位置未变（拖起又放回）→ 滑回原槽位，不落盘
-            key = btn.nav_key
-            if key in self._nav_order:
-                self._animate_nav_drop(btn, self._nav_slot_y(self._nav_order.index(key)))
-            else:
-                self._restore_nav_layout()
+            slot = self._nav_item_group_order(group=group).index(btn.nav_key)
+            self._animate_nav_drop(btn, self._nav_slot_y(slot))
             return
         btn.move(drag_pos)
         self._apply_nav_order(new_order, save=True)
         self._nav_free_layout = False   # _apply_nav_order 已按新顺序交还布局
+        self._nav_drag_group = None
 
     def _force_end_nav_drag(self):
         """异常路径兜底：窗口失活/隐藏/缩放时强制退出拖拽态（幂等）。
@@ -1589,15 +1939,34 @@ class MainWindow(QWidget):
 
 
     def _move_nav_indicator(self, btn, animate: bool = True):
-        """把选中指示条移动到指定导航按钮的垂直中心"""
+        """把选中指示条移动到指定导航按钮的垂直中心。
+
+        ★ 分组/滚动（2026-09-29）后新增两条守卫：
+        1. 按钮属于**收起的组**（不可见）→ 隐藏指示条。否则它会停在上一处
+           位置，指向一个当前页面并不在的条目，看起来像"高亮错了"。
+        2. 按钮被滚出视口 → 也隐藏。指示条的父级是侧栏，不受滚动裁剪，
+           不守卫的话会画到品牌字或版本号上面。
+        """
         indicator = getattr(self, "_nav_indicator", None)
         if indicator is None or btn is None:
             return
         parent = indicator.parentWidget()
         if parent is None:
             return
+        if not btn.isVisible():
+            indicator.hide()
+            return
         top_left = btn.mapTo(parent, QPoint(0, 0))
         target_y = top_left.y() + (btn.height() - indicator.height()) / 2.0
+        scroll = getattr(self, "_nav_scroll", None)
+        if scroll is not None:
+            vp = scroll.viewport()
+            vy0 = scroll.mapTo(parent, QPoint(0, 0)).y()
+            vy1 = vy0 + vp.height()
+            if target_y + indicator.height() < vy0 or target_y > vy1:
+                indicator.hide()
+                return
+        indicator.show()
         if animate:
             indicator.move_to_y(target_y)
         else:
@@ -1761,10 +2130,15 @@ class MainWindow(QWidget):
                 old.deleteLater()
             self._stack.insertWidget(old_index, widget)
             # 侧栏按钮已存在：只更新文案
+            # ⚠ 原实现写的是 ``for b, k in self._nav_btns.items():
+            #   if k == key: b.setText(...)`` —— _nav_btns 是 {key: btn}，
+            #   这样 unpack 出来 b 是**键**、k 是按钮，``k == key`` 恒为
+            #   False，文案更新静默失效（"重复注册只换 widget 不换索引"
+            #   的契约里漏了这一半）。2026-09-29 由离屏脚本 K 组断言抓出。
             NAV_PAGE_TITLES[key] = title
-            for b, k in self._nav_btns.items():
-                if k == key:
-                    b.setText(title)
+            old_btn = self._nav_btns.get(key)
+            if old_btn is not None:
+                old_btn.setText(title)
             return old_index
 
         index = self._stack.count()
@@ -2076,11 +2450,18 @@ class MainWindow(QWidget):
             self._page_assets.apply_theme()
 
     def _sync_nav_indicator_color(self, colors=None):
-        """同步导航指示条颜色（主题切换时调用）"""
+        """同步导航指示条与**分组箭头**的颜色（主题切换时调用）。
+
+        箭头是自绘的（NavArrow），不在 QSS 覆盖范围内 —— 换主题时若不
+        显式同步，浅色主题下会留一枚深色三角（反之亦然）。
+        """
         if not hasattr(self, '_nav_indicator'):
             return
         colors = colors if colors is not None else get_colors(self._theme)
         self._nav_indicator.set_color(QColor(colors["primary"]))
+        for hd in getattr(self, "_nav_group_headers", {}).values():
+            hd.set_arrow_color(QColor(colors["text_placeholder"]),
+                               QColor(colors["text_secondary"]))
 
     def _toggle_theme(self):
         """切换浅色/深色主题"""
