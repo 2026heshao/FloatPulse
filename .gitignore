@@ -26,6 +26,10 @@ temp_assets/
 知识库.docx
 知识库.docx.bak
 
+# ---- 内部开发文档与 AI 会话数据（2026-09-29 起不入公开仓库，本地保留）----
+.zcode/
+docs/
+
 # ---- 本地会话与编辑器 ----
 .workbuddy/
 .vscode/
