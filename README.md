@@ -91,17 +91,17 @@
 
 **三步装好：**
 
-1. 在 [Releases](https://github.com/2026heshao/FloatPulse/releases) 页面的 Assets 区单独下载想要的 `.fpplug`（每个只有 10–40 KB）
+1. 在下表点链接直接下载想要的 `.fpplug`（每个只有 10–40 KB；也可到 [Releases](https://github.com/2026heshao/FloatPulse/releases) 页面的 Assets 区手动挑选）
 2. 把它放进程序目录下的 **`plugin_store\`** 文件夹（不解压、不改名）
 3. 启动程序 → 插件中心 → 「🏪 插件商店」→ 点「安装」，装完即生效，无需重启
 
 | 插件包 | 页面 / 热键 | 能力 | 说明 |
 |---|---|---|---|
-| `ai-assistant.fpplug` | 🤖 AI 助手 / `Ctrl+Alt+I` | 🌐 ✍ 🛠 🧠 | 本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用本机 llama-server 全程离线 |
-| `ai-text-workshop.fpplug` | ✂ 文本工坊 / `Ctrl+Alt+T` | 🌐 ✍ 🧠 | 剪贴板一键 AI 加工：润色成邮件、翻译、总结要点、提取待办并转任务 |
-| `kb-search.fpplug` | 🔍 站内搜索 / `Ctrl+Alt+F` | 只读 | 五类数据全文检索：自研中文分词 + 倒排索引 + BM25，`Ctrl+K` 也由它承接 |
-| `recurring-tasks.fpplug` | 🔁 周期任务 / `Ctrl+Alt+R` | ✍ | 只给规则（每天/每周几/每月几号/每 N 天），到点自动生成任务 |
-| `weekly-report.fpplug` | 周报草稿 / `Ctrl+Alt+W` | 只读 | 汇总区间内已完成任务、碎片与番茄次数，生成 Markdown 草稿 |
+| [ai-assistant.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-assistant.fpplug) | 🤖 AI 助手 / `Ctrl+Alt+I` | 🌐 ✍ 🛠 🧠 | 本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用本机 llama-server 全程离线 |
+| [ai-text-workshop.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-text-workshop.fpplug) | ✂ 文本工坊 / `Ctrl+Alt+T` | 🌐 ✍ 🧠 | 剪贴板一键 AI 加工：润色成邮件、翻译、总结要点、提取待办并转任务 |
+| [kb-search.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/kb-search.fpplug) | 🔍 站内搜索 / `Ctrl+Alt+F` | 只读 | 五类数据全文检索：自研中文分词 + 倒排索引 + BM25，`Ctrl+K` 也由它承接 |
+| [recurring-tasks.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/recurring-tasks.fpplug) | 🔁 周期任务 / `Ctrl+Alt+R` | ✍ | 只给规则（每天/每周几/每月几号/每 N 天），到点自动生成任务 |
+| [weekly-report.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/weekly-report.fpplug) | 周报草稿 / `Ctrl+Alt+W` | 只读 | 汇总区间内已完成任务、碎片与番茄次数，生成 Markdown 草稿 |
 
 > 能力标记的含义：🌐 会经宿主联网（只记 URL 与耗时进日志）· ✍ 能新增数据 · 🛠 能改删数据（删除带撤销令牌）· 🧠 可接入设置页的「AI 总配置」共用一套后端。插件本身拿不到网络库，未声明的能力调用会被直接拒绝。
 

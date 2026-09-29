@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
 
-## [Unreleased]
+## [v4.7.0] - 2026-09-29
 
 ### Added
 - **「AI 总配置」收口：插件模型配置代码全部删除（ai-assistant v1.8.0 / ai-text-workshop v1.4.0）**：按用户指示，两个 AI 插件的**全部模型配置相关代码删除**，AI 后端**唯一来源 = 设置页「🧠 AI 总配置」**。ai-assistant 净删 ~630 行——后端设置卡（云端 API + 本地推理两区块 + 预设 + 保存并测试 + 断开连接）、自建 LocalServerManager（QProcess/探活/JobObject，8093）、`cloud_*`/`local_*`/`backend_mode` 配置键与旧版迁移代码全部移除，`config.json` 只剩 `custom_rules` 与 `max_data_chars`；聊天页「⚙ 后端设置」「云端|本地」模式按钮删除，「⏹ 停止模型服务」保留但改走 **`ctx.ai.stop_local()`**（宿主 AI_SERVER 停止；门面新增该方法，宿主 provider 透传）——启动只在设置页做、停止保留快捷入口，避免多处拉起服务打架；未接入 / 本地未就绪时对话气泡明确引导去设置页，**绝不发出注定失败的请求**。ai-text-workshop 同步清零（v1.4.0，动作页只剩动作/结果/落库），`_attached_params()` + `build_request(params,…)` 两插件同构：每次发请求前重查 `is_attached`/`params`（实时读宿主配置），设置页改后端、勾选或取消勾选，下一发请求即生效；本地就绪唯一真相 = `params["local_ready"]`（AI_SERVER 广播，页面经 `ctx.ai.add_listener` 订阅、销毁时退订）。verify 脚本同步重构：`verify_text_workshop.py` **35/35**（新增 F 未接入分支拦截、G 接入后实时生效走总配置、B4 断言插件已无私有后端配置符号、I3 未声明 write 隐藏按钮）；`verify_ai_backend.py` **26/26**（新增 B3/B4 模式切换分区显隐（用 `isHidden()` 断言——设置页不在当前页时 `isVisible` 恒 False 的坑）、I3 stop_local 门面透传；E2/F3 改用新选择器 `setChecked` 真实信号路径）。回归钉子 `tests/test_text_workshop.py` 重写为 **38 项**（新增「插件已无私有后端配置符号」符号级断言；删除随配置代码一起消失的 load/save/backend_configured/is_local_url 用例），`tests/test_plugin_ai.py` 扩至 **24 项**（+stop_local 门禁/透传/无 provider 降级）。已重打包 `plugin_store/ai-assistant.fpplug`（v1.8.0）、`ai-text-workshop.fpplug`（v1.4.0）
