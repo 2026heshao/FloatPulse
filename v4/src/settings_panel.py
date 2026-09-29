@@ -30,9 +30,12 @@ from PyQt6.QtGui import QAction
 
 from src.controls import Stepper, ToggleSwitch
 from src.glass_dialog import make_separator
-from src.plugin_net import make_async_poster
+from src.plugin_net import make_async_getter, make_async_poster
 from src.ai_server import AI_SERVER, ST_READY, ST_STARTING
 from src.app_version import APP_VERSION
+from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
+                                CHECK_TIMEOUT_S, check_headers, extract_tag,
+                                is_newer)
 from src import autostart
 
 
@@ -681,6 +684,45 @@ class SettingsPanel(QWidget):
         ab_v.addWidget(about_text)
 
         av = self._new_category_page("about")
+
+        # ---- 软件更新（手动检查：点击时才联网一次，离线零影响）----
+        # 产品承诺「程序不联网」不变：不点按钮就零网络请求；发现新版
+        # 只给下载页入口，不自动下载（立场详见 update_checker 模块注释）。
+        gv = group(av, "🔄 软件更新")
+
+        ver_label = QLabel(f"v{APP_VERSION}")
+        ver_label.setObjectName("hintLabel")
+        add_row(gv, "当前版本", "与 CHANGELOG、Release tag 三处同步维护",
+                ver_label)
+
+        upd_ctl = QWidget()
+        upd_row = QHBoxLayout(upd_ctl)
+        upd_row.setContentsMargins(0, 0, 0, 0)
+        upd_row.setSpacing(8)
+        self._upd_btn = QPushButton("🔍 检查更新")
+        self._upd_btn.setObjectName("secondaryBtn")
+        self._upd_btn.setFixedHeight(30)
+        self._upd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._upd_btn.clicked.connect(self._on_check_update)
+        upd_row.addWidget(self._upd_btn)
+        self._upd_open_btn = QPushButton("🌐 打开下载页")
+        self._upd_open_btn.setObjectName("secondaryBtn")
+        self._upd_open_btn.setFixedHeight(30)
+        self._upd_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._upd_open_btn.setVisible(False)
+        self._upd_open_btn.clicked.connect(self._on_open_downloads)
+        upd_row.addWidget(self._upd_open_btn)
+        add_row(gv, "检查更新",
+                "点击时才访问一次 GitHub Releases API（不携带任何本机数据）；"
+                "发现新版只给下载页入口，不自动下载；离线不影响任何功能",
+                upd_ctl, last=True)
+        self._upd_status = QLabel("")
+        self._upd_status.setObjectName("hintLabel")
+        self._upd_status.setMinimumHeight(18)
+        self._upd_status.setWordWrap(True)
+        gv.addWidget(self._upd_status)
+        self._upd_getter = None      # 懒创建（首次点击时建异步 GET 桥）
+
         av.addWidget(about_box)
 
         # 每个分类页尾统一补 stretch：卡片顶对齐、不随窗口高度拉伸
@@ -1286,6 +1328,52 @@ class SettingsPanel(QWidget):
         """接入集合变化：即时落盘（插件下一发请求即生效，无需重启）"""
         self._config.set("ai_plugins", list(selected))
         self._config.save()
+
+    # ---- 软件更新（手动检查；离线零影响，立场见 update_checker 注释） ----
+    def _on_check_update(self):
+        """点「检查更新」：一次 GET 拉 Releases latest，回调在 UI 线程比对"""
+        if self._upd_getter is None:
+            self._upd_getter = make_async_getter()
+        self._upd_btn.setEnabled(False)
+        self._upd_open_btn.setVisible(False)
+        self._upd_status.setText("正在检查更新…")
+        ok = self._upd_getter(RELEASES_API_URL, check_headers(),
+                              CHECK_TIMEOUT_S, self._on_update_result)
+        if not ok:
+            # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复按钮
+            self._upd_status.setText("⚠ 检查请求未能发出（详见 app.log）")
+
+    def _on_update_result(self, result: dict):
+        """更新检查回调（UI 线程）：新版 → 提示 + 下载页出口；按原因给文案"""
+        self._upd_btn.setEnabled(True)
+        if not result.get("ok"):
+            err = str(result.get("error") or "未知错误")
+            if "HTTP 403" in err:
+                hint = "（GitHub API 限流，每小时 60 次，请稍后再试）"
+            elif "timed out" in err.lower() or "timeout" in err.lower():
+                hint = "（网络超时，可重试一次）"
+            else:
+                hint = "（无法连接 GitHub，离线不影响任何功能）"
+            self._upd_status.setText(f"✗ 检查失败：{err}{hint}")
+            return
+        tag = extract_tag(result.get("body") or "")
+        if not tag:
+            self._upd_status.setText("⚠ 响应格式异常，请稍后再试")
+            return
+        if is_newer(tag):
+            self._upd_status.setText(
+                f"🆕 发现新版本 {tag}（当前 v{APP_VERSION}），可打开下载页获取")
+            self._upd_open_btn.setVisible(True)
+        else:
+            self._upd_status.setText(f"✓ 已是最新（当前 v{APP_VERSION}）")
+
+    def _on_open_downloads(self):
+        """系统浏览器打开 Releases 页；失败在状态行提示而非弹窗打断"""
+        try:
+            os.startfile(RELEASES_PAGE_URL)
+            self._upd_status.setText("已在浏览器打开下载页")
+        except OSError as exc:
+            self._upd_status.setText(f"✗ 打开浏览器失败：{exc!r}")
 
     def _on_reset_settings(self):
         """恢复默认设置：二次确认 → 重置配置 → 广播全部联动信号 → 刷新面板"""
