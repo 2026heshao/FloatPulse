@@ -2628,6 +2628,13 @@ def main():
                 {"num": i + 1, "text": p.text, "preview": p.preview,
                  "hash": p.hash}
                 for i, p in enumerate(docx_manager.get_paragraphs())],
+            # 临时素材：只给元数据，**不给 stored_path**——素材本体在宿主
+            # 私有目录里，插件拿不到也不该拿（依赖白名单没有文件系统）
+            "assets": lambda: [
+                {"asset_id": a.asset_id, "original_name": a.original_name,
+                 "is_image": a.is_image, "size_bytes": a.size_bytes,
+                 "added_time": a.added_time}
+                for a in temp_asset_manager.get_all_assets()],
         },
     )
 

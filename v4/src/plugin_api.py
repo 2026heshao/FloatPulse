@@ -176,7 +176,7 @@ class PluginData:
       - 宿主内部结构调整时，只需同步 provider，插件的读法不用改
 
     内置数据源名：``tasks`` / ``fragments`` / ``notes`` / ``pomodoro`` /
-    ``knowledge``（知识库 docx 段落）。
+    ``knowledge``（知识库 docx 段落）/ ``assets``（临时素材元数据）。
 
     所有方法都不抛异常：数据源缺失 / 调用失败 → 记 warning 并返回空值，
     插件据此自然降级（例如「本周没有已完成任务」），而不是崩掉。
@@ -187,6 +187,7 @@ class PluginData:
     SOURCE_NOTES = "notes"
     SOURCE_POMODORO = "pomodoro"
     SOURCE_KNOWLEDGE = "knowledge"
+    SOURCE_ASSETS = "assets"
 
     def __init__(self, logger=None, providers=None):
         self._logger = logger
@@ -250,6 +251,16 @@ class PluginData:
         那一段吗」校验：知识库 docx 允许用户用 Word 外部编辑。
         """
         return self.fetch(self.SOURCE_KNOWLEDGE) or []
+
+    def assets(self) -> list:
+        """临时素材快照（``asset_id`` / ``original_name`` / ``is_image`` /
+        ``size_bytes`` / ``added_time``）
+
+        插件能拿到的只有**元数据**：素材本体在宿主私有目录里，插件既拿不到
+        也不该拿到文件路径（依赖白名单没有文件系统）。所以检索类插件只能
+        按文件名匹配，与宿主自带搜索的口径保持一致。
+        """
+        return self.fetch(self.SOURCE_ASSETS) or []
 
     # ---------------- 内部 ----------------
     def _warn(self, msg: str):

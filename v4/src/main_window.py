@@ -206,7 +206,6 @@ class MainWindow(QWidget):
         self._clipboard_monitor = clipboard_monitor
         self._temp_asset_manager = temp_asset_manager
         self._nav_manager = nav_manager
-        self._search_dialog = None   # 全库搜索对话框（懒创建）
 
         # 当前主题
         self._theme = self._config.get("theme", DEFAULT_THEME)
@@ -386,10 +385,12 @@ class MainWindow(QWidget):
         help_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
         help_shortcut.activated.connect(self._toggle_help_page)
 
-        # Ctrl+K: 全库统一搜索（碎片/笔记/任务/素材聚合）
+        # Ctrl+K: 站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材聚合）
+        # 入口指向 kb-search 插件页（2026-09-29 全库搜索并入插件）。
+        # 插件停用 / 加载失败时不做第二套 UI，只提示一句该怎么恢复。
         search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
         search_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        search_shortcut.activated.connect(self._open_global_search)
+        search_shortcut.activated.connect(self._open_search_entry)
 
         # Ctrl+1~8: 切到左栏显示顺序第 N 个功能页（快捷键跟随位置：
         # 拖动换位后 Ctrl+N 指向新排到第 N 位的那个功能页）
@@ -398,22 +399,77 @@ class MainWindow(QWidget):
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.activated.connect(lambda n=i: self._switch_to_nav_slot(n))
 
-    def _open_global_search(self):
-        """打开全库统一搜索对话框（懒创建，复用实例，样式跟随当前主题）"""
-        if self._search_dialog is None:
-            from src.global_search_dialog import GlobalSearchDialog
-            self._search_dialog = GlobalSearchDialog(
-                self._fragment_manager, self._note_manager,
-                self._task_manager, self._temp_asset_manager,
-                parent=self, host=self)
-            self._search_dialog.jump_requested.connect(self._on_search_jump)
-        # 主题可能在两次打开之间被切换 → 重新套一遍主窗口 QSS 与玻璃壳配色
-        self._search_dialog.apply_theme()
-        self._search_dialog.open_and_focus()
+    # ==================================================================
+    # 站内搜索（Ctrl+K）
+    # ------------------------------------------------------------------
+    # 2026-09-29：原内置的「全库搜索对话框」整体并入 kb-search 插件，
+    # 宿主这里只保留两个职责——**打开入口**与**跳转回面板**。
+    #
+    # 为什么搜索做成插件而不是内置页（不是偷懒，是架构决定）：
+    #   0-9 的内置页槽位已被占满（见 NAV_PAGE_INDEX 与 LAST_PAGE_INDEX_MAX），
+    #   而「物理索引与功能的映射永不改变」是本文件的**核心约束**；10+ 才是
+    #   约定给插件的段位（show_plugin_page 里 idx < 10 直接 False）。
+    # ==================================================================
+    SEARCH_PLUGIN_ID = "kb-search"
 
-    def _on_search_jump(self, page_idx: int, keyword: str):
-        """搜索结果跳转：切页并尽量把关键词带入该面板的搜索框"""
-        self._switch_page(page_idx)
+    def _open_search_entry(self):
+        """Ctrl+K / 悬浮球菜单：打开站内搜索插件页。
+
+        插件被停用 / 加载失败时**不做第二套 UI**（用户主动停用即视为放弃
+        这项功能），只提示一句恢复方式——否则 Ctrl+K 毫无反应，用户会
+        以为程序坏了。
+        """
+        try:
+            if self.show_plugin_page(f"plugin:{self.SEARCH_PLUGIN_ID}"):
+                return
+        except Exception as exc:                      # noqa: BLE001
+            self._log_warn(f"[搜索] 打开插件页失败：{exc!r}")
+        try:
+            self.show_toast("站内搜索插件未启用：请到「插件中心」启用后重试")
+        except Exception:                             # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _log_warn(msg: str):
+        """写宿主 app.log（懒 import，避免 main_window 顶层多一个依赖环风险）"""
+        try:
+            from src.logger import get_logger
+            get_logger().warning(msg)
+        except Exception:                             # noqa: BLE001
+            pass
+
+    def show_search_result(self, kind: str, keyword: str, num=None) -> bool:
+        """搜索结果跳转——站内搜索插件经 ``ctx.parent_window()`` 调用的**公开入口**。
+
+        （与 ``show_plugin_page`` 同款的「约定公开入口」写法：插件不碰
+        宿主私有属性，宿主换实现也不影响插件。）
+
+        - ``kind``：插件侧数据源标识，映射到物理页索引
+        - ``num``：只有知识库用（位置型数据源）→ 定位到第 num 段
+        - 未知 kind → 返回 False，让插件侧静默降级
+
+        知识库额外做定位：它是段落列表，几百段时不定位等于「搜到了也找不到」；
+        其余页面清单短，切过去肉眼可及。
+        """
+        idx = {"fragment": 0, "task": 1, "note": 2,
+               "knowledge": 3, "asset": 4}.get(str(kind or ""))
+        if idx is None:
+            return False
+        try:
+            self._switch_page(idx)                    # 内部已同步刷新该面板
+        except Exception as exc:                      # noqa: BLE001
+            self._log_warn(f"[搜索] 跳转失败 kind={kind} -> {exc!r}")
+            return False
+        self._bring_keyword_to_page(idx, keyword, num)
+        return True
+
+    def _bring_keyword_to_page(self, page_idx: int, keyword: str, num=None):
+        """跳转后把关键词 / 段号带进目标面板。
+
+        整体兜底：带入失败**不影响已经完成的切页**（用户至少到了对的页面），
+        所以这里只记日志、不向上抛。
+        """
+        keyword = str(keyword or "").strip()
         try:
             if page_idx == 0 and hasattr(self._page_fragments, "_frag_search"):
                 # 走专用入口：立即过滤，不等 250ms 搜索去抖
@@ -423,8 +479,12 @@ class MainWindow(QWidget):
                     self._page_fragments._frag_search.setText(keyword)
             elif page_idx == 2 and hasattr(self._page_notes, "_note_search"):
                 self._page_notes._note_search.setText(keyword)
-        except Exception:
-            pass
+            elif page_idx == 3 and num is not None:
+                panel = getattr(self, "_page_knowledge", None)
+                if panel is not None:
+                    panel.locate_paragraph(num)
+        except Exception as exc:                      # noqa: BLE001
+            self._log_warn(f"[搜索] 带入关键词失败 page={page_idx} -> {exc!r}")
 
     def _quit_app(self):
         """退出整个程序：重置页面为首页，然后退出"""
@@ -839,7 +899,6 @@ class MainWindow(QWidget):
         if self._config.get("close_to_tray", True):
             # 托盘图标常驻，始终有唤回入口 → 隐藏到托盘
             event.ignore()
-            self._hide_aux_windows()
             self.hide()
             return
         # 兼容旧行为：按悬浮球可见性决定隐藏还是退出
@@ -847,18 +906,11 @@ class MainWindow(QWidget):
         if ball_visible:
             # 悬浮球还在 → 只隐藏主窗口
             event.ignore()
-            self._hide_aux_windows()
             self.hide()
         else:
             # 悬浮球已隐藏 → 退出程序（否则用户无法再次唤起）
             event.accept()
             self._quit_app()
-
-    def _hide_aux_windows(self):
-        """主窗口收进托盘时一并收起附属顶层窗口（目前只有 Ctrl+K 全局搜索框）"""
-        dlg = getattr(self, "_search_dialog", None)
-        if dlg is not None and dlg.isVisible():
-            dlg.hide()
 
     def _init_ui(self):
         """构建主UI：阴影容器 + 标题栏 + 侧栏 + 内容区"""
@@ -2016,9 +2068,6 @@ class MainWindow(QWidget):
         # 任务面板行委托为自绘，配色需显式同步（QSS 无法覆盖 delegate 绘制）
         if getattr(self, "_page_tasks", None) is not None:
             self._page_tasks.apply_theme()
-        # 全局搜索对话框是懒创建的独立顶层窗口，已创建时同样要跟随主题
-        if getattr(self, "_search_dialog", None) is not None:
-            self._search_dialog.apply_theme()
         # 设置页的自绘开关（ToggleSwitch）与主题按钮也要跟随主题
         if getattr(self, "_page_settings", None) is not None:
             self._page_settings.apply_theme()
@@ -2094,7 +2143,7 @@ class MainWindow(QWidget):
         <p>• <b>Esc</b>：退出程序（主窗口与小卡片中都生效）<br>
         • <b>Ctrl+W / Ctrl+H</b>：隐藏主窗口（程序继续在托盘后台运行）<br>
         • <b>Ctrl+T</b>：切换浅色 / 深色主题<br>
-        • <b>Ctrl+K</b>：全库统一搜索（碎片 / 任务 / 笔记 / 素材，双击结果跳转到对应面板）<br>
+        • <b>Ctrl+K</b>：站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）<br>
         • <b>F1</b>：进入使用说明页；再按一次返回进入前的页面<br>
         • <b>Ctrl+1 ~ Ctrl+8</b>：依次切换到左栏第 1~8 个功能页（含插件中心）<br>
         • <b>Ctrl+Alt+K</b>：呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭；热键与开关可在设置中修改）</p>

@@ -367,6 +367,11 @@ class _FakeData:
             "tasks": [{"task_id": 1, "title": "写周报", "note": "带上数据",
                        "deadline": "2026-09-30", "done": False},
                       {"task_id": 2, "title": "", "note": "", "deadline": ""}],
+            "assets": [{"asset_id": 1, "original_name": "客户报价单.xlsx",
+                        "is_image": False, "size_bytes": 2048,
+                        "added_time": "2026-09-28 10:00:00"},
+                       {"asset_id": 2, "original_name": "", "is_image": True,
+                        "size_bytes": 10, "added_time": "2026-09-28 10:00:00"}],
         }
         self._d.update(over)
 
@@ -382,13 +387,17 @@ class _FakeData:
     def tasks(self):
         return self._d["tasks"]
 
+    def assets(self):
+        return self._d["assets"]
+
 
 class TestCollectDocuments:
-    def test_collects_four_sources(self, kb):
+    def test_collects_all_sources(self, kb):
+        """五个数据源都要进索引（含并入前由宿主全库搜索覆盖的「素材」）"""
         mod = _load_plugin_module(kb)
         docs = mod.collect_documents(_FakeData())
         kinds = {kind for _uid, kind, _t, _x in docs}
-        assert kinds == {"knowledge", "note", "fragment", "task"}
+        assert kinds == {"knowledge", "note", "fragment", "task", "asset"}
 
     def test_knowledge_uid_uses_paragraph_number(self, kb):
         """知识库是位置型数据源，uid 必须带段落编号（与面板口径一致）"""
@@ -401,9 +410,10 @@ class TestCollectDocuments:
         mod = _load_plugin_module(kb)
         docs = mod.collect_documents(_FakeData())
         assert not any(not text.strip() for _u, _k, _t, text in docs)
-        # 无标题且无正文的笔记 / 无标题的任务都不进索引
+        # 无标题且无正文的笔记 / 无标题的任务 / 无文件名的素材都不进索引
         assert not any(uid == "note:2" for uid, _k, _t, _x in docs)
         assert not any(uid == "task:2" for uid, _k, _t, _x in docs)
+        assert not any(uid == "asset:2" for uid, _k, _t, _x in docs)
 
     def test_task_title_searchable(self, kb):
         """任务标题要能被搜到（正文里拼了 title）"""
@@ -418,6 +428,24 @@ class TestCollectDocuments:
                   mod.collect_documents(_FakeData())}
         assert "2026-09-30" in titles["task:1"]
 
+    def test_asset_indexed_by_filename(self, kb):
+        """素材只给元数据（没有文件路径），所以按**文件名**索引——
+        与并入前宿主全库搜索的口径一致：用户找的是「那个 Excel」"""
+        mod = _load_plugin_module(kb)
+        docs = dict((uid, text) for uid, _k, _t, text in
+                    mod.collect_documents(_FakeData()))
+        assert docs["asset:1"] == "客户报价单.xlsx"
+
+    def test_asset_not_leaking_path(self, kb):
+        """即便宿主误把 stored_path 塞进快照，插件也不该索引文件路径"""
+        mod = _load_plugin_module(kb)
+        docs = mod.collect_documents(_FakeData(
+            assets=[{"asset_id": 3, "original_name": "报表.xlsx",
+                     "stored_path": r"C:\Users\me\Desktop\报表.xlsx",
+                     "is_image": False, "size_bytes": 1, "added_time": ""}]))
+        text = dict((uid, x) for uid, _k, _t, x in docs)["asset:3"]
+        assert "Users" not in text and "Desktop" not in text
+
     def test_dirty_entries_do_not_break_collection(self, kb):
         """一条坏数据只跳过自己（宿主结构变化 / None 混进来时不能整轮失败）"""
         mod = _load_plugin_module(kb)
@@ -427,17 +455,24 @@ class TestCollectDocuments:
         assert [uid for uid, _k, _t, _x in docs if uid.startswith("note:")] \
             == ["note:9"]
 
+    def test_dirty_asset_entries_skipped(self, kb):
+        mod = _load_plugin_module(kb)
+        docs = mod.collect_documents(_FakeData(
+            assets=[None, 42, {"asset_id": 7, "original_name": "好文件.pdf"}]))
+        assert [uid for uid, _k, _t, _x in docs if uid.startswith("asset:")] \
+            == ["asset:7"]
+
     def test_empty_sources(self, kb):
         mod = _load_plugin_module(kb)
         docs = mod.collect_documents(_FakeData(
-            knowledge=[], notes=[], fragments=[], tasks=[]))
+            knowledge=[], notes=[], fragments=[], tasks=[], assets=[]))
         assert docs == []
 
     def test_long_text_truncated(self, kb):
         mod = _load_plugin_module(kb)
         # 只喂一个数据源：否则 docs[0] 会是知识库那条，长度断言对不上
         docs = mod.collect_documents(_FakeData(
-            knowledge=[], fragments=[], tasks=[],
+            knowledge=[], fragments=[], tasks=[], assets=[],
             notes=[{"note_id": 5, "title": "长文", "content": "字" * 9000}]))
         assert len(docs) == 1
         assert len(docs[0][3]) == mod.PREVIEW_CHARS
@@ -471,14 +506,149 @@ class TestRenderResults:
         assert '<span class="hit">周报</span>' in out
         assert "[笔记]" in out
 
+    def test_title_is_an_anchor_with_stable_index(self, kb):
+        """标题行必须包成 fp-result:<下标> 锚点，且下标与 hits 顺序一致——
+        点错行等于把用户送到错误的内容上"""
+        mod = _load_plugin_module(kb)
+        idx = kb.SearchIndex()
+        for i in range(3):
+            idx.add(f"note:{i}", f"共同词 第{i}条", kind="note",
+                    title=f"标题{i}")
+        idx.finalize()
+        hits = idx.search("共同词")
+        assert len(hits) == 3
+        out = mod.render_results_html(hits, "共同词")
+        for i in range(len(hits)):
+            assert f'href="{mod.RESULT_SCHEME}:{i}"' in out, out
+        assert f'href="{mod.RESULT_SCHEME}:{len(hits)}"' not in out
+
+    def test_anchor_text_is_still_escaped(self, kb):
+        """锚点标签是我们生成的、不进 escape；但锚点**文本**是用户标题，
+        必须照旧转义——两者混在一起最容易漏一处"""
+        mod = _load_plugin_module(kb)
+        idx = kb.SearchIndex()
+        idx.add("note:1", "正文 命中词", kind="note", title="<b>粗体</b>标题")
+        idx.finalize()
+        out = mod.render_results_html(idx.search("命中词"), "命中词")
+        assert "&lt;b&gt;粗体&lt;/b&gt;标题" in out
+        assert "<b>粗体" not in out
+        assert f'href="{mod.RESULT_SCHEME}:0"' in out
+
+    def test_anchor_scheme_is_not_http(self, kb):
+        """必须是自定义 scheme：http/file 会被 QTextBrowser 或系统浏览器抢走"""
+        mod = _load_plugin_module(kb)
+        assert mod.RESULT_SCHEME not in ("http", "https", "file")
+        assert ":" not in mod.RESULT_SCHEME
+
     def test_kind_label_shown(self, kb):
         mod = _load_plugin_module(kb)
         assert mod.KIND_LABEL["knowledge"] == "知识库"
-        assert set(mod.KIND_LABEL) == {"knowledge", "note", "fragment", "task"}
+        assert mod.KIND_LABEL["asset"] == "素材"
+        assert set(mod.KIND_LABEL) == {"knowledge", "note", "fragment",
+                                       "task", "asset"}
 
 
 # ====================================================================
-# F 插件契约
+# G 富文本强调色跟随主题
+# ====================================================================
+def _srgb_to_lin(v: float) -> float:
+    v /= 255.0
+    return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+
+def _lum(hex_color: str) -> float:
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return 0.2126 * _srgb_to_lin(r) + 0.7152 * _srgb_to_lin(g) \
+        + 0.0722 * _srgb_to_lin(b)
+
+
+def _contrast(c1: str, c2: str) -> float:
+    a, b = _lum(c1), _lum(c2)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+
+class TestThemedAccent:
+    """QTextBrowser 内部着色走**行内样式**，宿主的 QSS 完全管不到它。
+
+    所以它不受 ``tests/test_theme_contrast.py``（那条护栏扫的是 QSS）保护，
+    必须单独钉。本次修复的原始 bug 就在这里：早期把强调色写死成 #0a7d7b，
+    浅色主题正常，**深色主题下结果标题对卡片底色只有 3.05:1，实测截图里
+    几乎看不见**。
+    """
+
+    @pytest.mark.parametrize("theme", ["light", "dark"])
+    def test_accent_meets_wcag_against_card(self, kb, theme):
+        from src.theme import get_colors
+        mod = _load_plugin_module(kb)
+        accent = mod.accent_for(theme)
+        bg = get_colors(theme)["card_bg_solid"]
+        assert _contrast(accent, bg) >= 4.5, \
+            f"{theme} 主题强调色 {accent} 在卡片底色 {bg} 上对比度不足"
+
+    def test_light_and_dark_accents_differ(self, kb):
+        """两个主题必须是不同的色值——写死同一个就是本次修掉的 bug"""
+        mod = _load_plugin_module(kb)
+        assert mod.accent_for("light") != mod.accent_for("dark")
+
+    def test_old_hardcoded_color_would_fail(self, kb):
+        """反向锚定：证明这条护栏真的能抓到旧值（否则它只是装饰）"""
+        from src.theme import get_colors
+        assert _contrast("#0a7d7b", get_colors("dark")["card_bg_solid"]) < 4.5
+
+    def test_accent_reads_host_token(self, kb):
+        """强调色应当取自宿主的 $secondary_text（浅底/深底都要读得清的那个 token）"""
+        from src.theme import get_colors
+        mod = _load_plugin_module(kb)
+        for theme in ("light", "dark"):
+            assert mod.accent_for(theme) == get_colors(theme)["secondary_text"]
+
+    def test_accent_unknown_theme_falls_back(self, kb):
+        mod = _load_plugin_module(kb)
+        assert mod.accent_for(None) == mod.accent_for("light")
+        assert mod.accent_for("彩虹") == mod.accent_for("light")
+        assert mod.accent_for("") == mod.accent_for("light")
+
+    def test_theme_of_reads_host_property(self, kb):
+        mod = _load_plugin_module(kb)
+
+        class _Host:
+            current_theme = "dark"
+        assert mod.theme_of(_Host()) == "dark"
+
+        class _Weird:
+            @property
+            def current_theme(self):
+                raise RuntimeError("取值就炸")
+        assert mod.theme_of(_Weird()) == "light"      # 不许抛
+        assert mod.theme_of(None) == "light"
+        assert mod.theme_of(object()) == "light"
+
+    def test_render_injects_given_accent(self, kb):
+        """accent 参数必须真的写进 HTML（否则切换主题后颜色不变）"""
+        mod = _load_plugin_module(kb)
+        idx = kb.SearchIndex()
+        idx.add("note:1", "每周五写周报", kind="note", title="笔记")
+        idx.finalize()
+        hits = idx.search("周报")
+        for accent in ("#123456", "#ABCDEF"):
+            out = mod.render_results_html(hits, "周报", accent)
+            assert out.count(accent) == 2, out       # .hit 与 .res 各一处
+
+    def test_render_default_accent_is_light(self, kb):
+        """不传 accent 时用 light 值——保证纯函数调用方行为稳定"""
+        mod = _load_plugin_module(kb)
+        idx = kb.SearchIndex()
+        idx.add("note:1", "每周五写周报", kind="note", title="笔记")
+        idx.finalize()
+        out = mod.render_results_html(idx.search("周报"), "周报")
+        assert mod.accent_for("light") in out
+
+
+# ====================================================================
+# H 插件契约
 # ====================================================================
 class TestPluginContract:
     @pytest.fixture(scope="class")
