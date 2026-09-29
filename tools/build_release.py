@@ -40,6 +40,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -50,6 +51,14 @@ EXE_NAME = "FloatPulse.exe"
 VERSION_FILE = os.path.join(ROOT, "v4", "src", "app_version.py")
 GUIDE_FILE = os.path.join(ROOT, "shared", "插件安装说明.txt")
 PLUGIN_STORE_DIR = os.path.join(ROOT, "plugin_store")
+ISS_FILE = os.path.join(ROOT, "installer", "FloatPulse.iss")
+
+# ISCC.exe（Inno Setup 6 命令行编译器）的常见安装位置，按序探测
+ISCC_CANDIDATES = (
+    r"D:\INNO setup\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files\Inno Setup 6\ISCC.exe",
+)
 
 DIST_DEFAULT = "dist2"
 OUT_DEFAULT = "宣传页"
@@ -305,6 +314,36 @@ def sha256_of(path: str) -> str:
     return h.hexdigest()
 
 
+def locate_iscc(explicit: str = "") -> str:
+    """定位 ISCC.exe：显式指定 > 常见安装位置；找不到返回空串"""
+    if explicit:
+        return explicit if os.path.isfile(explicit) else ""
+    for cand in ISCC_CANDIDATES:
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def build_installer(iscc: str, version: str, out_dir: str) -> int:
+    """调 Inno Setup 编译 setup.exe（版本经 /D 注入 iss，脚本内不写死）"""
+    cmd = [iscc, f"/DAPP_VERSION={version}", f"/O{out_dir}", ISS_FILE]
+    proc = subprocess.run(cmd, capture_output=True)
+    # ISCC 控制台输出是 GBK（中文 Windows），按 GBK 解码，坏字节不炸
+    log = (proc.stdout or b"").decode("gbk", "replace")
+    tail = "\n".join(log.strip().splitlines()[-6:])
+    print(tail)
+    if proc.returncode != 0:
+        print(f"[X] Inno 编译失败（rc={proc.returncode}），脚本：{ISS_FILE}")
+        return 1
+    exe = os.path.join(out_dir, f"{APP_NAME}-v{version}-setup.exe")
+    if not os.path.isfile(exe):
+        print(f"[X] 编译声称成功但找不到产物：{exe}")
+        return 1
+    print(f"[OK] {exe}")
+    print(f"     体积 {human_mb(os.path.getsize(exe))} / SHA-256 {sha256_of(exe)}")
+    return 0
+
+
 def human_mb(n: int) -> str:
     return f"{n / 1048576:.1f} MB"
 
@@ -318,6 +357,9 @@ def main(argv=None) -> int:
     ap.add_argument("--with-knowledge", action="store_true",
                     help="连 float_data/知识库.docx 一起打进包（默认不打）")
     ap.add_argument("--no-plugin-assets", action="store_true", help="不复制插件附件")
+    ap.add_argument("--installer", action="store_true",
+                    help="附带编译 Inno Setup 安装包（FloatPulse-v<版本>-setup.exe）")
+    ap.add_argument("--iscc", default="", help="ISCC.exe 路径（默认按常见位置探测）")
     args = ap.parse_args(argv)
 
     version = args.version or read_app_version()
@@ -394,6 +436,15 @@ def main(argv=None) -> int:
     print(f"     SHA-256 {digest}")
     print(f"     插件附件目录 {os.path.join(out_dir, 'plugin-assets')}"
           f"（{len(plugins)} 个 .fpplug + 插件清单.md）")
+
+    if args.installer:
+        iscc = locate_iscc(args.iscc)
+        if not iscc:
+            print("[X] 找不到 ISCC.exe（Inno Setup 6），用 --iscc 指定路径")
+            return 1
+        print("-" * 68)
+        if build_installer(iscc, version, out_dir) != 0:
+            return 1
     return 0
 
 
