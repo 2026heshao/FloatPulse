@@ -11,7 +11,7 @@
 
 | 主窗口（深色） | 主窗口（浅色） |
 |---|---|
-| ![主窗口](docs/images/preview-main-dark.png) | ![主窗口](docs/images/preview-main-light.png) |
+| ![主窗口](assets/images/preview-main-dark.png) | ![主窗口](assets/images/preview-main-light.png) |
 
 ---
 
@@ -36,7 +36,7 @@
 
 **表里的 ❌ 不是缺陷，是取舍。** 全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义；插件生态刚起步，目前是 5 个外置插件 + 插件商店 + 打包器，社区插件的数量不跟任何人比，写 ⚠️ 就是 ⚠️。项目 Stars 是 0 也照实写 0：这是个还在自用打磨阶段的项目，没有外部用户验证，不装成「已被广泛使用」。
 
-*Stars 数据取自 GitHub API（仓库：`lch319/Floatyball`、`pengjie1115/FocusCapture`、`Flow-Launcher/Flow.Launcher`），2026-09-29 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单见 [docs/竞品分析-2026-09-27.md](docs/竞品分析-2026-09-27.md)。*
+*Stars 数据取自 GitHub API（仓库：`lch319/Floatyball`、`pengjie1115/FocusCapture`、`Flow-Launcher/Flow.Launcher`），2026-09-29 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单属内部调研资料，未随仓库公开，需要可开 Issue 索取。*
 
 ---
 
@@ -49,7 +49,7 @@
 - 全局热键快速捕捉条（`Ctrl+Alt+K`）：不打断当前工作随手记
 - **截图钉屏（`Ctrl+Alt+S`）**：框选屏幕任意区域，钉成置顶参考浮窗；滚轮缩放内容（光标锚定）、右下角抓手等比例调整窗框、批注（画笔/箭头/马赛克，Ctrl+Z 撤销）、右键复制/保存
 
-![悬浮球 + 快捷卡片](docs/images/preview-card-dark.png)
+![悬浮球 + 快捷卡片](assets/images/preview-card-dark.png)
 
 ### 🃏 快捷卡片（三模式）
 | 模式 | 行为 |
@@ -107,7 +107,7 @@
 
 **卸载与重装**：插件中心的「🗑 卸载」只删 `plugins\` 里那份副本，`plugin_store\` 里的源包保留——想再装回来，回商店点一次「安装」即可。插件的私有数据（`float_data\plugins\<插件id>\`）卸载时不会被删除。
 
-**自己做插件**：依赖只允许 PyQt6 + Python 标准库，开发说明见 [docs/插件开发说明-2026-09-26.md](docs/插件开发说明-2026-09-26.md)，打成 `.fpplug` 用 `python tools/pack_plugin.py plugins/<插件目录>`。
+**自己做插件**：依赖只允许 PyQt6 + Python 标准库，打成 `.fpplug` 用 `python tools/pack_plugin.py plugins/<插件目录>` 即可分发安装。完整开发说明（插件契约、能力声明、知识库接口）属内部资料，需要可开 Issue 索取。
 
 ---
 
@@ -182,11 +182,9 @@ python tools/build_release.py                      # 产出 宣传页/FloatPulse
 FloatPulse/
 ├── v4/                # 【开发主线】源码、测试与离屏验证脚本
 ├── plugins/           # 外置插件源码（一包一目录；发布包里此目录为空，插件按需下载）
-├── plugin_store/      # 插件源包仓（.fpplug；程序永不自动解压，装/卸都在插件中心操作）
-├── tools/             # 工程脚本（打包插件 / 组装发布包 / 仓库自动巡检）
+├── assets/images/     # README 截图
+├── tools/             # 工程脚本（打包插件 / 组装发布包 / 发布前自检）
 ├── shared/            # 图标 / 打包 spec / 包内《插件安装说明.txt》
-├── float_data/        # 运行数据（碎片 / 笔记 / 任务 / 知识库.docx，自动生成）
-├── docs/              # 文档与图片
 └── 启动v4.bat          # 启动器
 ```
 
@@ -205,7 +203,7 @@ UI 层    FloatingBall / CardWindow / MainWindow / 九个 Panel
 数据层   docx + 7 个 JSON（原子写入 / 损坏回退 / 增量指纹）
 ```
 
-开发与测试约定见 `docs/` 下各主题文档；核心测试：
+开发与测试约定见 `CONTRIBUTING.md`；核心测试：
 
 ```bash
 cd v4

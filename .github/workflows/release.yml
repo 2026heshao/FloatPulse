@@ -23,6 +23,15 @@ jobs:
       - name: PyInstaller 打包
         run: python -m PyInstaller --noconfirm --clean --distpath dist2 --workpath build2 FloatPulse.spec
 
+      - name: 由插件源码打包出 Release 附件源（plugin_store/*.fpplug）
+        shell: bash
+        run: |
+          for d in plugins/*/; do
+            [ -f "$d/manifest.json" ] || continue
+            python tools/pack_plugin.py "$d" --force
+          done
+          ls -l plugin_store/
+
       - name: 组装发布包（tools/build_release.py 白名单收集，防个人数据夹带）
         run: python tools/build_release.py
 

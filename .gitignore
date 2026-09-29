@@ -27,8 +27,15 @@ temp_assets/
 知识库.docx.bak
 
 # ---- 内部开发文档与 AI 会话数据（2026-09-29 起不入公开仓库，本地保留）----
-.zcode/
+.zcode*
 docs/
+
+# ---- 本地开发与发布用产物：对外无意义，私留在工作区 ----
+# .gitignore/外部工具配置、插件源包仓（改由 release.yml 现场从 plugins/ 打包）、
+# 巡检与打包冒烟脚本（纯本地流程）
+plugin_store/
+tools/git_autopilot.py
+tools/smoke_packaged.py
 
 # ---- 本地会话与编辑器 ----
 .workbuddy/
