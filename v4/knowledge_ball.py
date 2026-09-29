@@ -78,6 +78,7 @@ from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
     STATE_IDLE, STATE_RUNNING, STATE_PAUSED,
 )
+from src.ai_server import AI_SERVER
 
 
 # ====================================================================
@@ -2914,6 +2915,54 @@ def main():
             "undo_delete": _undo_delete,
         }
 
+    def _make_ai_providers():
+        """AI 总配置 provider（2026-09-29 设置页「🧠 AI 总配置」）。
+
+        插件单一真相源：设置页配好云端 / 本地 + 下拉框勾选接入插件后，
+        声明 ``capabilities=["ai"]`` 且被勾选的插件经 ``ctx.ai`` 实时读取。
+        **params 每次调用都实时读配置**——设置页改完即生效，插件无需
+        重建页面或重启程序；is_attached 按插件 id 查 ``ai_plugins`` 列表。
+        未接入的插件照旧用各自私有配置（向后兼容），互不影响。
+        """
+        def _is_attached(plugin_id):
+            attached = config_manager.get("ai_plugins", []) or []
+            return str(plugin_id or "") in attached
+
+        def _params():
+            try:
+                port = int(config_manager.get("ai_local_port", 8095) or 8095)
+            except (TypeError, ValueError):
+                port = 8095
+            return {
+                "mode": str(config_manager.get("ai_backend_mode", "cloud")
+                            or "cloud"),
+                "base_url": str(config_manager.get("ai_cloud_base_url", "")
+                                or "").strip(),
+                "api_key": str(config_manager.get("ai_cloud_api_key", "") or ""),
+                "model": str(config_manager.get("ai_cloud_model", "")
+                             or "").strip(),
+                "local_port": port,
+                "local_ready": AI_SERVER.status == "ready",
+                "local_status": AI_SERVER.status,
+                "local_detail": AI_SERVER.detail,
+            }
+
+        def _add_listener(fn):
+            return AI_SERVER.add_listener(fn)
+
+        def _remove_listener(fn):
+            return AI_SERVER.remove_listener(fn)
+
+        def _stop_local():
+            AI_SERVER.stop()
+            return True
+
+        return {
+            "is_attached": _is_attached, "params": _params,
+            "add_listener": _add_listener, "remove_listener": _remove_listener,
+            "stop_local": _stop_local,
+        }
+
     plugin_ctx = PluginContext(
         logger=get_logger(),
         config=config_manager.as_dict(),        # 只读快照，插件改不了宿主配置
@@ -2937,6 +2986,10 @@ def main():
         # 才能经 ctx.manage 改/删既有任务、碎片、笔记。删除返回撤销令牌，
         # undo_delete 可恢复；每次操作进审计日志（app.log 的 [插件管理]）。
         manage_providers=_make_manage_providers(),
+        # AI 总配置（2026-09-29）：只有声明 capabilities=["ai"] 且在设置页
+        # 下拉框被勾选接入的插件，才能经 ctx.ai 实时读取总配置（params 每
+        # 次调用实时读，设置页改完即生效）；本地服务状态由 AI_SERVER 广播。
+        ai_providers=_make_ai_providers(),
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 

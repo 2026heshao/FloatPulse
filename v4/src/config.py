@@ -101,7 +101,17 @@ DEFAULT_CONFIG = {
     # 左栏当前**已展开**的分组集合（多组可同时展开；空列表 = 全部折叠）
     # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
     "nav_expanded_groups":  ["workbench"],
+    # ===== AI 总配置（2026-09-29 设置页「🧠 AI 总配置」，插件单一真相源）=====
     # 插件声明 capabilities=["ai"] 且被用户在设置页下拉框勾选接入后，
+    # 经 ctx.ai.params() 实时读取——各 AI 插件不再各自维护一份后端配置。
+    "ai_backend_mode":      "cloud",      # cloud=云端 API / local=本机 llama-server
+    "ai_cloud_base_url":    "https://api.deepseek.com/v1",
+    "ai_cloud_api_key":     "",           # 明文本机存储；回环地址可留空
+    "ai_cloud_model":       "deepseek-chat",
+    "ai_local_server_exe":  "",           # llama-server.exe 路径
+    "ai_local_gguf":        "",           # .gguf 模型路径
+    "ai_local_port":        8095,         # 避开 AI 助手 8093 / 文本工坊 8094 / Ollama 11434
+    "ai_plugins":           [],           # 接入总配置的插件 id 列表（设置页多选）
 }
 
 # 配置项类型映射（用于校验）
@@ -148,6 +158,14 @@ _CONFIG_TYPES = {
     "clipboard_capture_images": bool,
     "nav_order":            list,
     "nav_expanded_groups":  list,
+    "ai_backend_mode":      str,
+    "ai_cloud_base_url":    str,
+    "ai_cloud_api_key":     str,
+    "ai_cloud_model":       str,
+    "ai_local_server_exe":  str,
+    "ai_local_gguf":        str,
+    "ai_local_port":        int,
+    "ai_plugins":           list,
 }
 
 # 主窗口「最后浏览页面」允许的最大物理索引。
@@ -177,6 +195,8 @@ _CONFIG_RANGES = {
     # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
     "pomodoro_focus_minutes": (1, 120),
     "pomodoro_break_minutes": (1, 60),
+    # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
+    "ai_local_port":        (1024, 65535),
 }
 
 
