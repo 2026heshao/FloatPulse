@@ -138,9 +138,10 @@ def _make_loaded_plugin(tmp_path, description="", doc=None,
 def _plugin_cards(panel):
     """_cards_layout 里的「已装插件卡片」列表。
 
-    布局结构为 [已装卡片..., stretch]（2026-09-28 起商店区已拆入
-    PluginStoreDialog 独立弹窗），不能再用固定下标取卡片，
-    必须按 objectName == "pluginCard" 过滤。
+    布局结构（2026-09-29 起）为双列 QGridLayout：网格只装已装卡片本体，
+    尾部 stretch 在外层 vbox（2026-09-28 起商店区已拆入 PluginStoreDialog
+    独立弹窗）。不能再用固定下标取卡片，必须按 objectName == "pluginCard"
+    过滤；QGridLayout 的 count()/itemAt() 与 VBox 同构，本助手无需改动。
     """
     cards = []
     for i in range(panel._cards_layout.count()):
@@ -682,3 +683,55 @@ class TestStoreDialog:
             assert "都已安装" in dlg._empty_label.text()
         finally:
             dlg.deleteLater()
+
+
+# ====================================================================
+# 双列网格（2026-09-29）：行优先摆放 + 窄视口回落单列
+# ====================================================================
+class TestTwoColumnGrid:
+    def _make_panel(self, qapp, tmp_path, n=4):
+        from src.plugins_panel import PluginsPanel
+        lps = [_make_loaded_plugin(tmp_path, description=f"第{i}个")
+               for i in range(n)]
+        return PluginsPanel(_FakeHost(loader=_FakeLoader(lps)))
+
+    def test_row_major_two_columns(self, qapp, tmp_path):
+        panel = self._make_panel(qapp, tmp_path, 4)
+        panel._reflow_cards(1024)     # 直接以视口宽度驱动（确定性，免事件循环）
+        grid = panel._cards_layout
+        assert [grid.getItemPosition(i)[:2] for i in range(grid.count())] == [
+            (0, 0), (0, 1), (1, 0), (1, 1)]
+
+    def test_falls_back_to_single_column_when_narrow(self, qapp, tmp_path):
+        panel = self._make_panel(qapp, tmp_path, 3)
+        panel._reflow_cards(700)
+        grid = panel._cards_layout
+        assert [grid.getItemPosition(i)[:2] for i in range(grid.count())] == [
+            (0, 0), (1, 0), (2, 0)]
+
+    def test_reflow_back_to_two_columns(self, qapp, tmp_path):
+        panel = self._make_panel(qapp, tmp_path, 2)
+        panel._reflow_cards(700)
+        panel._reflow_cards(1024)
+        grid = panel._cards_layout
+        assert [grid.getItemPosition(i)[:2] for i in range(grid.count())] == [
+            (0, 0), (0, 1)]
+
+    def test_resize_event_drives_reflow(self, qapp, tmp_path):
+        """真实事件路径：滚动区 resizeEvent（按视口宽度）驱动列数。
+
+        视口是唯一可靠信号——widgetResizable 会把容器钳在网格最小宽上，
+        双列最小宽大于回落阈值时容器永远收不到「变窄」的 resize（离屏
+        无字体环境实测复现），只有滚动区本体每次尺寸变化都走 resizeEvent。
+        """
+        from PyQt6.QtWidgets import QApplication
+        panel = self._make_panel(qapp, tmp_path, 2)
+        panel.resize(1280, 700)
+        panel.show()
+        for _ in range(5):
+            QApplication.processEvents()
+        assert panel._card_cols == 2
+        panel.resize(500, 700)
+        for _ in range(5):
+            QApplication.processEvents()
+        assert panel._card_cols == 1
