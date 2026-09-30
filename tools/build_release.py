@@ -10,7 +10,8 @@
     --dry-run            只体检不写文件（打完包先跑一次看清单）
     --out <目录>         输出目录，默认「宣传页」
     --dist <目录>        产物目录，默认 dist2
-    --with-knowledge     连 float_data/知识库.docx 一起打进包（默认**不打**）
+    --with-knowledge     连 float_data/知识库.docx 一起打进包（默认**不打**，
+                         但会现场生成一份空白知识库模板补进包，功能开箱可用）
     --no-plugin-assets   不复制插件附件
 
 为什么要有这个脚本
@@ -72,6 +73,16 @@ DENY_SUFFIXES = (".log", ".pyc")
 
 # float_data/ 内只允许这些文件进包（其余是运行数据）
 FLOAT_DATA_ALLOW = {"知识库.docx"}
+
+# 不带 --with-knowledge 时，包内补一份现场生成的空白知识库模板（纯 stdlib 手造，
+# 已实测 python-docx 可正常打开/追加/保存）。没有它，下载用户的知识库页是
+# 「共 0 段」且写不进去，功能等于摆设。
+KB_DOCX_NAME = "知识库.docx"
+KB_WELCOME = (
+    "欢迎使用 FloatPulse。这里每一段就是一个知识条目：写成一段一段，"
+    "每段自动编号，可在知识库页增删改，也会被 Ctrl+K 站内搜索和插件读取。"
+    "本段是示例，可直接编辑或删除。"
+)
 
 
 def read_app_version() -> str:
@@ -267,20 +278,63 @@ def write_plugin_manifest_md(items: list, out_dir: str, version: str, copy: bool
     return text
 
 
-def build_zip(zip_path: str, keep: list, guide_text: str, app_name: str) -> int:
-    """写 zip：进包文件 + 两个空目录 + 安装说明。返回写入的文件条目数。"""
+def blank_kb_docx_bytes(welcome: str = KB_WELCOME) -> bytes:
+    """纯 stdlib 造一个最小可用的 .docx（一段欢迎文字）。
+
+    OOXML 最小三件套：[Content_Types].xml + _rels/.rels + word/document.xml。
+    已实测 python-docx 对它「打开 / add_paragraph / save」全通过，
+    Word 与 WPS 也能正常打开。不依赖 python-docx，CI 环境零负担。
+    """
+    from xml.sax.saxutils import escape
+    ct = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType='
+        '"application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        "</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type='
+        '"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+        'Target="word/document.xml"/></Relationships>'
+    )
+    doc = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>" + escape(welcome) + "</w:t></w:r></w:p></w:body></w:document>"
+    )
+    import io as _io
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+    return buf.getvalue()
+
+
+def build_zip(zip_path: str, keep: list, guide_text: str, app_name: str,
+              extra_bytes: list = None) -> int:
+    """写 zip：进包文件 + 字节条目 + 两个空目录 + 安装说明。返回写入的文件条目数。"""
+    extra_bytes = extra_bytes or []
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         guide_arc = f"{app_name}/插件安装说明.txt"
         # 说明写成 UTF-8 BOM：Windows 记事本双击打开不乱码
         zf.writestr(guide_arc, b"\xef\xbb\xbf" + guide_text.encode("utf-8"))
         for arcname, abs_path in keep:
             zf.write(abs_path, arcname)
+        for arcname, data in extra_bytes:
+            zf.writestr(arcname, data)
         # 两个空目录：带 MS-DOS 目录位，否则资源管理器不认它是文件夹
         for d in ("plugins", "plugin_store"):
             info = zipfile.ZipInfo(f"{app_name}/{d}/")
             info.external_attr = (0o40775 << 16) | 0x10
             zf.writestr(info, b"")
-    return len(keep) + 3
+    return len(keep) + len(extra_bytes) + 3
 
 
 def verify_zip(zip_path: str) -> list:
@@ -290,6 +344,8 @@ def verify_zip(zip_path: str) -> list:
         names = zf.namelist()
     if f"{APP_NAME}/{EXE_NAME}" not in names:
         problems.append(f"缺少 {EXE_NAME}")
+    if f"{APP_NAME}/float_data/{KB_DOCX_NAME}" not in names:
+        problems.append(f"缺少 float_data/{KB_DOCX_NAME}（真实文件或空白模板至少要有一个，否则用户知识库功能残废）")
     for d in ("plugins/", "plugin_store/"):
         if f"{APP_NAME}/{d}" not in names:
             problems.append(f"缺少空目录 {APP_NAME}/{d}")
@@ -418,7 +474,18 @@ def main(argv=None) -> int:
     if os.path.exists(zip_path):
         os.remove(zip_path)
 
-    n_entries = build_zip(zip_path, keep, guide_text, APP_NAME)
+    # 知识库口径：--with-knowledge 打真实文件；否则现场生成空白模板补进包，
+    # 保证下载用户的知识库「开箱可用」（可增删改、可被搜索），又不夹带个人内容
+    extra_bytes = []
+    if not args.with_knowledge:
+        extra_bytes.append((f"{APP_NAME}/float_data/{KB_DOCX_NAME}",
+                            blank_kb_docx_bytes()))
+        print("-" * 68)
+        print(f"[i] 包内补空白知识库模板 float_data/{KB_DOCX_NAME}"
+              f"（--with-knowledge 打真实文件时不补）")
+
+    n_entries = build_zip(zip_path, keep, guide_text, APP_NAME,
+                          extra_bytes=extra_bytes)
     problems = verify_zip(zip_path)
     if problems:
         os.remove(zip_path)

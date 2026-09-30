@@ -2,6 +2,11 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
 
+## [Unreleased]
+
+### Changed
+- **发布包默认内置空白知识库模板（用户可见变更）**：主程序 zip 此前不带 `float_data/知识库.docx`（防个人内容夹带），但下载用户首次打开知识库页是「共 0 段」且写不进去（新增段落 / 碎片加入知识库都因文件不存在而失败，点「🔄 重新加载」还会弹「找不到文件」），知识库功能等于摆设。现 `tools/build_release.py` 在**不带 `--with-knowledge`** 时现场生成一份空白模板补进包：纯标准库手造 OOXML 最小三件套（`[Content_Types].xml` + `_rels/.rels` + `word/document.xml`），内含一段可编辑可删除的欢迎示例，实测 python-docx 对它「打开 / add_paragraph / save」全通过（Word / WPS 亦可正常打开），不依赖 python-docx、CI 零负担；`--with-knowledge`（打真实文件）时行为不变。事后校验新增断言「包内必须有 `float_data/知识库.docx`」，真实文件与模板都没有就删输出报错、不留坏包。隐私口径不变：模板内容是写死在脚本里的欢迎语，绝不读本机真实知识库
+
 ## [v4.7.0] - 2026-09-29
 
 ### Added
