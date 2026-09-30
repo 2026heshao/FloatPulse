@@ -21,18 +21,21 @@ from PyQt6.QtWidgets import (
     QMenu, QCheckBox, QWidgetAction, QButtonGroup,
     QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 # ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
 #   此前漏了这行导入 → MainWindow 构造走到设置页就 NameError，
 #   程序直接起不来（2026-09-29 11:07 修）。
-from PyQt6.QtGui import QAction
+# ★ QDesktopServices：关于页「📂 打开日志」用系统文件管理器开数据目录。
+from PyQt6.QtGui import QAction, QDesktopServices
 
 
 from src.controls import Stepper, ToggleSwitch
 from src.glass_dialog import make_separator
 from src.plugin_net import make_async_getter, make_async_poster
-from src.ai_server import AI_SERVER, ST_READY, ST_STARTING
+from src.ai_server import AI_SERVER, ST_READY, ST_STARTING, sync_loopback_allowlist
 from src.app_version import APP_VERSION
+from src.app_paths import get_data_dir
+from src.theme import resolve_theme_name
 from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
                                 CHECK_TIMEOUT_S, check_headers, extract_tag,
                                 is_newer)
@@ -258,7 +261,15 @@ class SettingsPanel(QWidget):
         self._set_theme_dark.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_theme_dark.clicked.connect(lambda: self._on_set_theme("dark"))
         theme_row.addWidget(self._set_theme_dark)
-        add_row(gv, "主题外观", "浅色 / 深色两套配色，切换即时生效", theme_ctl)
+        self._set_theme_follow = QPushButton("🖥 跟随系统")
+        self._set_theme_follow.setObjectName("secondaryBtn")
+        self._set_theme_follow.setCheckable(True)
+        self._set_theme_follow.setFixedHeight(30)
+        self._set_theme_follow.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._set_theme_follow.clicked.connect(lambda: self._on_set_theme("follow"))
+        theme_row.addWidget(self._set_theme_follow)
+        add_row(gv, "主题外观", "浅色 / 深色 / 跟随系统（系统深浅色变化时自动换），切换即时生效",
+                theme_ctl)
 
         # anim_speed 存浮点（0.5~2.0），Stepper 内部用整数 50~200，
         # divisor=100 / decimals=1 → 显示「1.3」，对外仍发内部整数。
@@ -686,14 +697,24 @@ class SettingsPanel(QWidget):
         av = self._new_category_page("about")
 
         # ---- 软件更新（手动检查：点击时才联网一次，离线零影响）----
-        # 产品承诺「程序不联网」不变：不点按钮就零网络请求；发现新版
-        # 只给下载页入口，不自动下载（立场详见 update_checker 模块注释）。
+        # 产品承诺「程序不联网」不变：不点按钮就零网络请求（自动检查见下，
+        # 同样只 GET Releases latest，失败静默）；发现新版只给下载页入口，
+        # 不自动下载（立场详见 update_checker 模块注释）。
         gv = group(av, "🔄 软件更新")
 
-        ver_label = QLabel(f"v{APP_VERSION}")
-        ver_label.setObjectName("hintLabel")
+        self._ver_label = QLabel(self._version_label_text())
+        self._ver_label.setObjectName("hintLabel")
         add_row(gv, "当前版本", "与 CHANGELOG、Release tag 三处同步维护",
-                ver_label)
+                self._ver_label)
+
+        # 自动检查（2.3）：启动后延迟静默查一次/天，托盘气泡被动提示；
+        # 勾选行为与其它开关一致——toggled 即写配置并落盘
+        self._set_auto_update = self._toggle("auto_check_updates", True)
+        self._set_auto_update.toggled.connect(self._on_auto_update_toggled)
+        add_row(gv, "自动检查更新",
+                "启动后每天最多静默检查一次新版本（失败不提示、"
+                "发现新版只弹一次托盘气泡），不自动下载",
+                self._set_auto_update)
 
         upd_ctl = QWidget()
         upd_row = QHBoxLayout(upd_ctl)
@@ -715,13 +736,29 @@ class SettingsPanel(QWidget):
         add_row(gv, "检查更新",
                 "点击时才访问一次 GitHub Releases API（不携带任何本机数据）；"
                 "发现新版只给下载页入口，不自动下载；离线不影响任何功能",
-                upd_ctl, last=True)
+                upd_ctl)
         self._upd_status = QLabel("")
         self._upd_status.setObjectName("hintLabel")
         self._upd_status.setMinimumHeight(18)
         self._upd_status.setWordWrap(True)
         gv.addWidget(self._upd_status)
         self._upd_getter = None      # 懒创建（首次点击时建异步 GET 桥）
+
+        # ---- 日志入口（3.2）：崩溃可感知的配套——出问题得有地方看现场 ----
+        log_ctl = QWidget()
+        log_row = QHBoxLayout(log_ctl)
+        log_row.setContentsMargins(0, 0, 0, 0)
+        log_row.setSpacing(8)
+        self._open_log_btn = QPushButton("📂 打开日志")
+        self._open_log_btn.setObjectName("secondaryBtn")
+        self._open_log_btn.setFixedHeight(30)
+        self._open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._open_log_btn.clicked.connect(self._on_open_log)
+        log_row.addWidget(self._open_log_btn)
+        add_row(gv, "打开日志",
+                "在文件管理器中打开数据目录 float_data/（app.log 在里面，"
+                "报障时可整份提供给开发者）",
+                log_ctl, last=True)
 
         av.addWidget(about_box)
 
@@ -793,8 +830,10 @@ class SettingsPanel(QWidget):
         for sw in getattr(self, "_toggles", []):
             sw.set_theme(theme)
         if hasattr(self, "_set_theme_light"):
+            # 三态：显式 light/dark 亮对应钮；"follow"（跟随系统）亮第三钮
             self._set_theme_light.setChecked(theme == "light")
             self._set_theme_dark.setChecked(theme == "dark")
+            self._set_theme_follow.setChecked(theme == "follow")
 
     def _sync_auto_hide_rows(self):
         """同步「自动隐藏」相关行的可用性：总开关关闭时秒数步进器灰化。
@@ -818,6 +857,14 @@ class SettingsPanel(QWidget):
         """
         self._set_theme_light.setChecked(self._host.current_theme == "light")
         self._set_theme_dark.setChecked(self._host.current_theme == "dark")
+        self._set_theme_follow.setChecked(self._host.current_theme == "follow")
+        # 版本行提示：静默检查可能在面板关闭期间写入 latest_known_version
+        self._ver_label.setText(self._version_label_text())
+        if hasattr(self, '_set_auto_update'):
+            self._set_auto_update.blockSignals(True)
+            self._set_auto_update.setChecked(
+                bool(self._config.get("auto_check_updates", True)))
+            self._set_auto_update.blockSignals(False)
         for stepper, key, default in (
             (self._set_clipboard_max, "clipboard_max_items", 200),
             (self._set_auto_hide, "auto_hide_seconds", 3),
@@ -908,8 +955,28 @@ class SettingsPanel(QWidget):
             self._set_vault_path.setText(self._vault_path_text())
 
     def _on_set_theme(self, theme_name: str):
-        """设置面板切换主题"""
+        """设置面板切换主题（light / dark / follow 三态）"""
+        if theme_name == "follow":
+            self._on_set_follow_theme()
+            return
         self._host.apply_external_theme(theme_name)
+        self.refresh()
+
+    def _on_set_follow_theme(self):
+        """切到「跟随系统」（3.1）。
+
+        主窗口 apply_external_theme 只收 light / dark，follow 在这里
+        落配置，再驱动主窗口走既有换主题路径：_apply_theme 重取配色
+        （get_colors 内部现读系统 scheme），theme_changed 广播具体主题
+        名给球 / 卡片 / 便签 / 快捕条 / 截图钉屏。
+        """
+        host = self._host
+        self._config.set("theme", "follow")
+        self._config.save()
+        if host._theme != "follow":
+            host._theme = "follow"
+            host._apply_theme()
+            host.theme_changed.emit(resolve_theme_name("follow"))
         self.refresh()
 
     def _on_spin_changed(self):
@@ -1235,6 +1302,8 @@ class SettingsPanel(QWidget):
         for key, val in cfg.items():
             self._config.set(key, val)
         self._config.save()
+        # 本地端点（llama-server / 回环 base_url）登记进插件桥回环白名单（1.5 配套）
+        sync_loopback_allowlist(self._config)
         if cfg["ai_backend_mode"] == "local":
             self._ai_status.setText("配置已保存，正在拉起本地服务…")
             AI_SERVER.start(self._ai_poster(), cfg["ai_local_server_exe"],
@@ -1374,6 +1443,29 @@ class SettingsPanel(QWidget):
             self._upd_status.setText("已在浏览器打开下载页")
         except OSError as exc:
             self._upd_status.setText(f"✗ 打开浏览器失败：{exc!r}")
+
+    def _version_label_text(self) -> str:
+        """「当前版本」行文案：静默检查发现过新版本（≠ 当前版本）时旁注提示。
+
+        不弹窗——用户下次打开设置页自然看到；等版本号追上后提示自动消失。
+        """
+        known = str(self._config.get("latest_known_version", "") or "").strip()
+        if known and known not in (f"v{APP_VERSION}", APP_VERSION):
+            return f"v{APP_VERSION}（有新版本 {known}）"
+        return f"v{APP_VERSION}"
+
+    def _on_auto_update_toggled(self, on: bool):
+        """自动检查更新开关：即时落盘（下次启动的静默检查读此值）"""
+        self._config.set("auto_check_updates", bool(on))
+        self._config.save()
+
+    def _on_open_log(self):
+        """「📂 打开日志」（3.2）：系统文件管理器打开数据目录 float_data/。
+
+        打开目录而非 app.log 文件本身——文件管理器里还能顺带看到
+        config.json / 备份等现场；路径取自 app_paths 的统一入口。
+        """
+        QDesktopServices.openUrl(QUrl.fromLocalFile(get_data_dir()))
 
     def _on_reset_settings(self):
         """恢复默认设置：二次确认 → 重置配置 → 广播全部联动信号 → 刷新面板"""

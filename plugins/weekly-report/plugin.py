@@ -26,7 +26,7 @@ import os
 import re
 from datetime import date, datetime, timedelta
 
-from PyQt6.QtCore import QDate, Qt, QTimer
+from PyQt6.QtCore import QDate, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QDateEdit, QFileDialog, QHBoxLayout,

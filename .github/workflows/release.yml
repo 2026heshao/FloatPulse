@@ -17,6 +17,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # ① 发版闸门（成熟化 2.4）：tag ↔ app_version.py ↔ CHANGELOG 三源对齐，
+      #    对不上直接终止发布。--expect 取 tag 名去掉 v 前缀（v4.7.0 → 4.7.0）；
+      #    纯标准库脚本，放在装依赖之前，最快暴露版本漂移。
+      - name: 版本三源一致性自检（app_version.py ↔ CHANGELOG ↔ tag）
+        shell: bash
+        run: python tools/check_release_consistency.py --expect "${GITHUB_REF_NAME#v}"
+
       - name: 安装依赖
         run: pip install -r requirements.txt
 
@@ -32,13 +39,31 @@ jobs:
           done
           ls -l plugin_store/
 
+      # ② 安装包进 CI（成熟化 2.1）：CI 镜像不预装 Inno Setup，本机那些
+      #    探测路径在这里统统不存在，用 choco 一条命令装上（Windows 官方
+      #    包管理器，runner 出厂自带 choco，无需额外引导）
+      - name: 安装 Inno Setup（CI 无预装，choco 安装）
+        run: choco install innosetup -y --no-progress
+
+      # 装完先确认 ISCC 就位再编译：若 Inno 未来换了默认安装目录，宁可这里
+      # 变红，也不能让发布悄悄退化成「没有 setup.exe 的 Release」
+      - name: 确认 ISCC.exe 就位（choco 默认安装目录）
+        shell: bash
+        run: test -f "/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+
+      # ③ 组装发布包：--installer 编译 setup.exe；ISCC 路径经 FP_ISCC_PATH
+      #    传入（build_release.py 探测顺序：FP_ISCC_PATH 优先 → 本机常见位置兜底）
       - name: 组装发布包（tools/build_release.py 白名单收集，防个人数据夹带）
-        run: python tools/build_release.py
+        env:
+          FP_ISCC_PATH: C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+        run: python tools/build_release.py --installer
 
       - name: 发布到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: |
             宣传页/FloatPulse-*-win64.zip
+            宣传页/FloatPulse-v*-setup.exe
             宣传页/plugin-assets/*.fpplug
+            宣传页/SHA256SUMS.txt
           generate_release_notes: true

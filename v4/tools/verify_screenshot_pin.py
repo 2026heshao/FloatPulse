@@ -310,7 +310,6 @@ check("I15 结束批注恢复箭头光标", pin_a._tool is None
       and pin_a.cursor().shape() == Qt.CursorShape.ArrowCursor)
 
 # ================= J. 右下角抓手：窗框等比例缩放，内容铺满 =================
-from PyQt6.QtGui import QMouseEvent
 
 pin_b = PinWindow(shot.copy(QRect(0, 0, round(200 * DPR), round(140 * DPR))),
                   QPoint(50, 50), "dark")

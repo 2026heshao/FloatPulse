@@ -1,0 +1,1475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FloatPulse · 生活悬浮球 — 把每一个碎片，稳稳接住</title>
+<meta name="description" content="Windows 桌面常驻悬浮球工具：碎片收集 → 分类归档 → 转任务/笔记 → 截图钉屏，一个球全搞定。原生 PyQt6，本地优先，插件按需安装。">
+<link rel="icon" href="data:image/png;base64,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">
+<style>
+:root{
+  /* 宣纸与墨分五色 */
+  --paper:#F4EEE1; --paper-hi:#FBF7EC; --paper-lo:#E8E0CE;
+  --ink-900:#171512;  /* 焦墨 */
+  --ink-800:#2B2823;  /* 浓墨 */
+  --ink-700:#4E4A43;  /* 重墨 */
+  --ink-600:#7C776D;  /* 淡墨 */
+  --ink-500:#A8A296;  /* 清墨 */
+  --cinnabar:#A8341C; /* 朱砂 */
+  --cinnabar-hi:#C64A2C;
+  --stone-blue:#44697A;  /* 石青 */
+  --ochre-earth:#9A6E3C; /* 赭石 */
+  /* 语义 */
+  --text:var(--ink-900);
+  --text-soft:#453F37;
+  --text-mute:#6E685D;
+  --line:rgba(43,40,35,.16);
+  --line-soft:rgba(43,40,35,.08);
+  --card:#FBF7EC;
+  --card-brd:rgba(43,40,35,.14);
+  --focus:var(--cinnabar);
+  --sp-1:8px; --sp-2:16px; --sp-3:24px; --sp-4:40px; --sp-5:64px; --sp-6:96px;
+  --maxw:1180px;
+  --r-sm:6px; --r-md:10px; --r-lg:16px; --r-xl:22px;
+  --ease-out:cubic-bezier(.22,.68,.32,1);
+  --font-display:"Songti SC","Noto Serif SC","Source Han Serif SC",SimSun,STSong,serif;
+  --font-kai:"KaiTi","Kaiti SC",STKaiti,"Noto Serif SC",serif;
+  --font-body:"HarmonyOS Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--paper);color:var(--text);
+  font-family:var(--font-body);font-size:16px;line-height:1.8;
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;
+}
+/* ══════════ 纸与墨的层（固定挂载） ══════════ */
+.mount{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.mount svg{position:absolute;inset:0;width:100%;height:100%}
+/* 宣纸纤维 */
+.fiber{
+  position:absolute;inset:-15%;opacity:.5;mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='.62 .9' numOctaves='5' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='300' height='300' filter='url(%23f)' opacity='.3'/></svg>");
+}
+/* 帘纹（宣纸抄纸纹路） */
+.weave{
+  position:absolute;inset:0;opacity:.09;
+  background-image:repeating-linear-gradient(90deg,rgba(43,40,35,.55) 0 1px,transparent 1px 7px);
+}
+/* 纸面薄罩：压住山体，保证任何正文落在背景上都 >= 4.5:1 */
+.mount::after{
+  content:"";position:absolute;inset:0;border-radius:0;
+  background:rgba(246,241,231,.30);
+}
+/* 四边做旧晕 */
+.vignette{
+  position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 50% 40%,transparent 42%,rgba(120,105,80,.16) 100%);
+}
+.shell{position:relative;z-index:2}
+.skip{
+  position:absolute;left:-9999px;top:0;z-index:20;padding:10px 16px;
+  background:var(--ink-900);color:var(--paper-hi);text-decoration:none;border-radius:0 0 4px 0;
+  font-size:13px;
+}
+.skip:focus{left:0}
+/* ══════════ 样张标识条 ══════════ */
+.flag{
+  position:fixed;top:0;left:0;right:0;z-index:9;
+  display:flex;gap:12px;align-items:center;justify-content:center;
+  padding:9px 16px;font-family:var(--font-mono);font-size:11px;letter-spacing:.18em;
+  background:rgba(23,21,18,.92);color:#E8D9B8;border-bottom:1px solid rgba(232,217,184,.2);
+}
+.flag b{font-weight:500;letter-spacing:.06em;font-family:var(--font-body);font-size:12px;color:#FBF7EC}
+/* ══════════ 落款（竖排，右侧） ══════════ */
+.colophon{
+  position:fixed;right:26px;top:286px;z-index:6;
+  writing-mode:vertical-rl;font-family:var(--font-kai);font-size:15px;
+  letter-spacing:.32em;color:var(--ink-600);opacity:.85;
+}
+.colophon span{display:block;margin-bottom:12px}
+.seal{
+  width:40px;height:40px;margin-top:18px;border:1.6px solid var(--cinnabar);
+  border-radius:4px;display:flex;align-items:center;justify-content:center;
+  font-family:var(--font-kai);font-size:13px;line-height:1.05;letter-spacing:0;
+  color:var(--cinnabar);text-align:center;writing-mode:horizontal-tb;
+  padding:0;transform:rotate(-1.5deg);opacity:.9;
+}
+/* ══════════ 导航 ══════════ */
+.nav{
+  position:sticky;top:33px;z-index:8;display:flex;align-items:center;justify-content:space-between;
+  gap:var(--sp-3);max-width:var(--maxw);margin:0 auto;padding:18px 28px;
+  background:rgba(244,238,225,.86);
+  backdrop-filter:blur(12px) saturate(120%);
+  -webkit-backdrop-filter:blur(12px) saturate(120%);
+  border-bottom:1px solid var(--line-soft);
+}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .ball{
+  width:24px;height:24px;border-radius:50%;flex:0 0 auto;display:block;
+  background:url("data:image/png;base64,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") center/contain no-repeat;
+  filter:drop-shadow(0 3px 7px rgba(23,21,18,.36));
+}
+.brand{gap:11px;flex:0 0 auto;white-space:nowrap}
+.brand span{font-family:var(--font-display);font-size:17px;letter-spacing:.06em;color:var(--text);white-space:nowrap}
+.brand em{font-style:normal;font-family:var(--font-mono);font-size:10.5px;color:var(--text-mute);letter-spacing:.1em;margin-left:8px}
+.nav-links{display:flex;gap:24px;font-size:13.5px;font-family:var(--font-display);letter-spacing:.08em}
+.nav-links a{color:var(--text-mute);text-decoration:none;padding:6px 2px;transition:color .2s var(--ease-out);position:relative}
+.nav-links a:hover{color:var(--ink-900)}
+.nav-links a::after{content:"";position:absolute;left:0;right:100%;bottom:2px;height:1px;background:var(--cinnabar);transition:right .3s var(--ease-out)}
+.nav-links a:hover::after{right:0}
+.ghost{
+  font-family:var(--font-display);font-size:13.5px;letter-spacing:.1em;
+  color:var(--cinnabar);border:1px solid rgba(168,52,28,.42);border-radius:2px;
+  padding:10px 20px;text-decoration:none;transition:all .24s var(--ease-out);
+  background:linear-gradient(180deg,rgba(168,52,28,.05),transparent);
+  white-space:nowrap;flex:0 0 auto;
+}
+.ghost:hover{background:var(--cinnabar);color:#FBF7EC;border-color:var(--cinnabar)}
+/* ══════════ Hero ══════════ */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 28px}
+.hero{padding:calc(var(--sp-6) + 26px) 0 var(--sp-6);position:relative}
+.eyebrow{
+  font-family:var(--font-kai);font-size:14px;letter-spacing:.42em;color:var(--ink-600);
+  margin:0 0 26px;display:flex;align-items:center;gap:14px;
+}
+.eyebrow::before,.eyebrow::after{content:"";height:1px;background:linear-gradient(90deg,transparent,var(--ink-600));display:block;width:44px}
+.eyebrow::after{background:linear-gradient(90deg,var(--ink-600),transparent)}
+h1{
+  font-family:var(--font-display);font-weight:400;
+  font-size:clamp(38px,6.8vw,78px);line-height:1.2;letter-spacing:.02em;
+  margin:0 0 30px;color:var(--ink-900);
+}
+h1 .line{display:block}
+h1 .accent{color:var(--cinnabar);position:relative}
+h1 .accent::after{
+  content:"";position:absolute;left:-2px;right:-2px;bottom:.1em;height:.06em;
+  background:linear-gradient(90deg,transparent,var(--cinnabar),transparent);opacity:.5;
+}
+.lede{font-size:17px;color:var(--text-soft);max-width:48ch;margin:0 0 36px;line-height:2}
+.lede b{font-weight:600;color:var(--ink-900);border-bottom:2px solid rgba(168,52,28,.3)}
+.cta-row{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.btn{
+  display:inline-flex;align-items:center;gap:10px;text-decoration:none;
+  padding:15px 30px;font-size:14.5px;font-family:var(--font-display);letter-spacing:.1em;
+  border-radius:2px;transition:transform .26s var(--ease-out),box-shadow .26s var(--ease-out);
+}
+.btn-main{color:#FBF7EC;background:var(--ink-900);box-shadow:0 14px 30px -14px rgba(23,21,18,.8)}
+.btn-main:hover{transform:translateY(-3px);box-shadow:0 20px 38px -14px rgba(23,21,18,.9);background:#000}
+.btn-soft{color:var(--ink-800);border:1px solid var(--line);background:rgba(251,247,236,.5)}
+.btn-soft:hover{transform:translateY(-3px);border-color:var(--ink-600)}
+.meta{
+  display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:38px;
+  font-family:var(--font-mono);font-size:11px;letter-spacing:.14em;color:var(--ink-700);
+}
+.meta i{font-style:normal;color:var(--cinnabar)}
+/* ══════════ 卷轴式形态演示 ══════════ */
+.scroll-box{
+  margin-top:var(--sp-5);background:linear-gradient(180deg,var(--paper-hi),#F7F1E4);
+  border:1px solid var(--line);border-radius:var(--r-lg);
+  padding:36px 32px 28px;position:relative;
+  box-shadow:0 24px 50px -34px rgba(43,40,35,.55);
+}
+.scroll-box::before,.scroll-box::after{
+  content:"";position:absolute;top:10px;bottom:10px;width:8px;border-radius:4px;
+  background:linear-gradient(90deg,rgba(43,40,35,.13),rgba(43,40,35,.03));
+}
+.scroll-box::before{left:-4px}
+.scroll-box::after{right:-4px;transform:scaleX(-1)}
+.stage-grid{display:grid;grid-template-columns:1.12fr 1fr;gap:38px;align-items:center}
+.stage-label{
+  font-family:var(--font-kai);font-size:13.5px;letter-spacing:.36em;
+  color:var(--cinnabar);margin:0 0 16px;
+}
+.scroll-box h3{
+  font-family:var(--font-display);font-weight:400;font-size:23px;margin:0 0 14px;
+  color:var(--ink-900);letter-spacing:.03em;line-height:1.55;
+}
+.scroll-box p.d{font-size:14px;color:var(--text-soft);margin:0 0 20px;max-width:38ch;line-height:1.95}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.1em;color:var(--ink-700);
+  padding:6px 12px;border:1px solid var(--line);border-radius:2px;background:rgba(255,255,255,.5);
+}
+svg.art{display:block;width:100%;height:auto}
+/* ══════════ 素纸卡 ══════════ */
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin:var(--sp-5) 0}
+.papercard{
+  position:relative;padding:30px 26px 32px;border-radius:var(--r-md);
+  background:var(--card);border:1px solid var(--card-brd);
+  box-shadow:0 18px 36px -30px rgba(43,40,35,.7),inset 0 1px 0 rgba(255,255,255,.8);
+  transition:transform .28s var(--ease-out),box-shadow .28s var(--ease-out),border-color .28s var(--ease-out);
+}
+.papercard::before{
+  content:"";position:absolute;left:26px;right:26px;top:0;height:2px;
+  background:linear-gradient(90deg,var(--cinnabar),transparent 62%);
+  opacity:.55;transition:opacity .28s var(--ease-out);
+}
+.papercard:hover{transform:translateY(-5px);box-shadow:0 26px 46px -30px rgba(43,40,35,.85);border-color:rgba(168,52,28,.3)}
+.papercard:hover::before{opacity:1}
+.papercard .k{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink-500);margin:0 0 14px;
+}
+.papercard h4{
+  font-family:var(--font-display);font-size:18px;font-weight:400;margin:0 0 11px;
+  color:var(--ink-900);letter-spacing:.04em;
+}
+.papercard p{font-size:13.5px;color:var(--text-soft);margin:0;line-height:1.9}
+.papercard ul{margin:16px 0 0;padding:14px 0 0;list-style:none;font-size:12.5px;color:var(--text-mute);
+  border-top:1px dashed var(--line);display:grid;gap:8px;font-family:var(--font-mono);letter-spacing:.02em}
+.papercard ul li{padding-left:15px;position:relative}
+.papercard ul li::before{content:"·";position:absolute;left:3px;color:var(--cinnabar);font-weight:700}
+/* ══════════ 收尾 ══════════ */
+.tail{max-width:var(--maxw);margin:0 auto;padding:var(--sp-6) 28px var(--sp-5);text-align:center;position:relative}
+.tail p{
+  font-family:var(--font-kai);font-size:clamp(23px,3.2vw,34px);line-height:1.85;
+  color:var(--ink-800);margin:0 0 20px;letter-spacing:.06em;
+}
+.tail p em{font-style:normal;color:var(--cinnabar)}
+.tail .note{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;color:var(--text-mute)}
+.tail .seal-lg{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:52px;height:52px;border:1.8px solid var(--cinnabar);border-radius:5px;
+  color:var(--cinnabar);font-family:var(--font-kai);font-size:15px;line-height:1.1;
+  transform:rotate(-2deg);margin-bottom:24px;opacity:.92;text-align:center;
+}
+/* ══════════ 滚动揭示（no-js / reduce 双兜底） ══════════ */
+.reveal{transition:opacity .55s var(--ease-out),transform .55s var(--ease-out)}
+body.js .reveal:not(.is-in){opacity:0;transform:translateY(16px)}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;transition-duration:.001ms!important}
+  body.js .reveal:not(.is-in){opacity:1;transform:none}
+}
+/* ══════════ 通用版式 ══════════ */
+section.sec{padding:var(--sp-6) 0 0}
+.sec-head{max-width:62ch}
+.sec-eyebrow{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--ink-500);margin:0 0 16px;display:flex;align-items:center;gap:12px;
+}
+.sec-eyebrow b{
+  font-family:var(--font-kai);font-size:13px;letter-spacing:.1em;color:var(--cinnabar);
+  border:1.4px solid rgba(168,52,28,.5);border-radius:3px;padding:2px 7px;font-weight:400;
+  writing-mode:horizontal-tb;line-height:1.2;
+}
+.sec-eyebrow::after{content:"";flex:1;height:1px;background:var(--line);max-width:220px}
+h2{
+  font-family:var(--font-display);font-weight:400;font-size:clamp(26px,3.4vw,40px);
+  line-height:1.4;letter-spacing:.02em;color:var(--ink-900);margin:0 0 18px;
+}
+h3.sub{
+  font-family:var(--font-display);font-weight:400;font-size:21px;letter-spacing:.03em;
+  color:var(--ink-900);margin:var(--sp-4) 0 16px;display:flex;align-items:center;gap:12px;
+}
+h3.sub::before{content:"";width:3px;height:16px;background:var(--cinnabar);border-radius:1px;opacity:.8}
+.sec-lede{font-size:16px;color:var(--text-soft);line-height:1.95;margin:0 0 var(--sp-4);max-width:60ch}
+.sec-lede b{font-weight:600;color:var(--ink-900)}
+.mono{font-family:var(--font-mono);font-size:12px;letter-spacing:.08em;color:var(--text-mute)}
+.cin{color:var(--cinnabar)}
+.seal-rule{
+  display:flex;align-items:center;gap:14px;margin:var(--sp-6) 0 0;
+}
+.seal-rule::before,.seal-rule::after{content:"";height:1px;background:var(--line);flex:1}
+.seal-rule span{
+  font-family:var(--font-kai);font-size:13px;letter-spacing:.3em;color:var(--ink-500);
+}
+/* ══════════ 数字条 ══════════ */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin:var(--sp-4) 0 0;
+  border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.stat{padding:26px 20px 24px;border-right:1px dashed var(--line)}
+.stat:last-child{border-right:0}
+.stat b{display:block;font-family:var(--font-display);font-size:clamp(30px,4.4vw,46px);
+  font-weight:400;line-height:1.1;color:var(--ink-900);letter-spacing:.01em}
+.stat b em{font-style:normal;font-family:var(--font-kai);font-size:.44em;color:var(--ink-500);
+  margin-left:6px;letter-spacing:.06em}
+.stat span{display:block;margin-top:10px;font-size:12.5px;color:var(--text-mute);line-height:1.7}
+/* ══════════ 表格 ══════════ */
+.tablewrap{overflow-x:auto;border:1px solid var(--card-brd);border-radius:var(--r-md);
+  background:var(--card);box-shadow:0 18px 36px -32px rgba(43,40,35,.7)}
+table.tbl{width:100%;border-collapse:collapse;font-size:13.5px;min-width:640px}
+table.tbl th{
+  text-align:left;font-family:var(--font-display);font-weight:400;font-size:13.5px;
+  letter-spacing:.06em;color:var(--ink-800);padding:14px 16px;white-space:nowrap;
+  background:rgba(43,40,35,.05);border-bottom:1px solid var(--line);
+}
+table.tbl td{padding:14px 16px;border-bottom:1px dashed var(--line);color:var(--text-soft);
+  vertical-align:top;line-height:1.8}
+table.tbl tr:last-child td{border-bottom:0}
+table.tbl td:first-child{color:var(--ink-900);font-weight:500;white-space:nowrap}
+table.tbl .yes{color:var(--cinnabar);font-weight:600}
+table.tbl .no{color:var(--ink-500)}
+table.tbl .part{color:var(--ochre-earth)}
+/* ══════════ 徽标（能力标记） ══════════ */
+.badge{
+  display:inline-block;font-family:var(--font-kai);font-size:12px;line-height:1.3;
+  padding:2px 7px;margin:0 3px 3px 0;border:1.2px solid rgba(43,40,35,.3);
+  color:var(--ink-800);border-radius:2px;letter-spacing:.08em;white-space:nowrap;
+}
+.badge.b-net{border-color:rgba(68,105,122,.5);color:var(--stone-blue)}
+.badge.b-write{border-color:rgba(43,40,35,.4);color:var(--ink-800)}
+.badge.b-manage{border-color:rgba(168,52,28,.45);color:var(--cinnabar)}
+.badge.b-ai{border-color:rgba(154,110,60,.5);color:var(--ochre-earth)}
+.badge.b-ro{border-color:rgba(124,119,109,.35);color:var(--ink-600)}
+/* ══════════ 诚实说明块 ══════════ */
+.note{
+  position:relative;margin:var(--sp-3) 0 0;padding:20px 24px 20px 26px;
+  background:rgba(251,247,236,.7);border:1px dashed var(--line);border-radius:var(--r-md);
+  font-size:13.5px;color:var(--text-soft);line-height:1.95;
+}
+.note::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;
+  background:var(--cinnabar);opacity:.55;border-radius:2px}
+.note b{color:var(--ink-900)}
+/* ══════════ 能力卡（分组） ══════════ */
+.mods{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin:var(--sp-3) 0 0}
+.mods.two{grid-template-columns:repeat(2,1fr)}
+.mod{
+  position:relative;padding:26px 24px 28px;border-radius:var(--r-md);background:var(--card);
+  border:1px solid var(--card-brd);
+  box-shadow:0 18px 36px -32px rgba(43,40,35,.75),inset 0 1px 0 rgba(255,255,255,.8);
+  transition:transform .28s var(--ease-out),box-shadow .28s var(--ease-out),border-color .28s var(--ease-out);
+}
+.mod::before{content:"";position:absolute;left:24px;right:24px;top:0;height:2px;
+  background:linear-gradient(90deg,var(--cinnabar),transparent 60%);opacity:.5;
+  transition:opacity .28s var(--ease-out)}
+.mod:hover{transform:translateY(-4px);border-color:rgba(168,52,28,.28);
+  box-shadow:0 26px 44px -32px rgba(43,40,35,.9)}
+.mod:hover::before{opacity:1}
+.mod .k{font-family:var(--font-mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--ink-500);margin:0 0 12px}
+.mod h4{font-family:var(--font-display);font-size:18px;font-weight:400;margin:0 0 10px;
+  color:var(--ink-900);letter-spacing:.04em}
+.mod .hk{font-family:var(--font-mono);font-size:10.5px;color:var(--cinnabar);letter-spacing:.06em;
+  margin:0 0 12px}
+.mod p{font-size:13.5px;color:var(--text-soft);margin:0;line-height:1.9}
+.mod ul{margin:14px 0 0;padding:13px 0 0;list-style:none;font-size:12.5px;color:var(--text-mute);
+  border-top:1px dashed var(--line);display:grid;gap:7px;line-height:1.7}
+.mod ul li{padding-left:14px;position:relative}
+.mod ul li::before{content:"·";position:absolute;left:3px;color:var(--cinnabar);font-weight:700}
+/* ══════════ 时间轴 ══════════ */
+.tline{margin:var(--sp-3) 0 0;border-left:1px solid var(--line);padding-left:0}
+.titem{position:relative;padding:0 0 var(--sp-4) 34px;margin-left:0}
+.titem::before{content:"";position:absolute;left:-5px;top:9px;width:9px;height:9px;border-radius:50%;
+  background:var(--paper);border:1.6px solid var(--cinnabar)}
+.titem:last-child{padding-bottom:0}
+.titem time{display:block;font-family:var(--font-mono);font-size:11.5px;letter-spacing:.14em;
+  color:var(--cinnabar);margin:0 0 8px}
+.titem h4{font-family:var(--font-display);font-size:17.5px;font-weight:400;margin:0 0 8px;
+  color:var(--ink-900);letter-spacing:.04em}
+.titem p{margin:0;font-size:13.5px;color:var(--text-soft);line-height:1.95;max-width:62ch}
+/* ══════════ FAQ ══════════ */
+.faq{margin:var(--sp-3) 0 0;border-top:1px solid var(--line)}
+.faq details{border-bottom:1px dashed var(--line)}
+.faq summary{
+  cursor:pointer;list-style:none;padding:20px 40px 20px 0;position:relative;
+  font-family:var(--font-display);font-size:16.5px;color:var(--ink-900);letter-spacing:.03em;
+  transition:color .2s var(--ease-out);
+}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary:hover{color:var(--cinnabar)}
+.faq summary::after{
+  content:"＋";position:absolute;right:10px;top:50%;transform:translateY(-50%);
+  font-family:var(--font-mono);font-size:15px;color:var(--cinnabar);transition:transform .26s var(--ease-out);
+}
+.faq details[open] summary::after{content:"－"}
+.faq .a{padding:0 40px 22px 0;font-size:13.5px;color:var(--text-soft);line-height:2;max-width:72ch}
+.faq .a code{font-family:var(--font-mono);font-size:12px;background:rgba(43,40,35,.06);
+  padding:1px 5px;border-radius:3px;color:var(--ink-800)}
+/* ══════════ 下载卡 ══════════ */
+.get{
+  margin:var(--sp-4) 0 0;padding:44px 40px 40px;border-radius:var(--r-xl);
+  background:linear-gradient(180deg,var(--paper-hi),#F5EFE2);border:1px solid var(--line);
+  position:relative;box-shadow:0 30px 60px -44px rgba(43,40,35,.8);
+}
+.get::before{content:"";position:absolute;left:40px;right:40px;top:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--cinnabar),transparent);opacity:.6}
+.get h2{margin:0 0 14px}
+.get .rows{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin:var(--sp-3) 0 0}
+.get .rowcard{padding:20px 20px 22px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:rgba(255,255,255,.55)}
+.get .rowcard b{display:block;font-family:var(--font-display);font-size:15.5px;font-weight:400;
+  color:var(--ink-900);margin:0 0 8px}
+.get .rowcard p{margin:0;font-size:12.5px;color:var(--text-mute);line-height:1.85}
+.get .rowcard code{font-family:var(--font-mono);font-size:11.5px;color:var(--ink-800)}
+.get .cta-row{margin-top:var(--sp-3)}
+/* ══════════ 路线图 ══════════ */
+.roadmap{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin:var(--sp-3) 0 0}
+.rm{padding:20px 22px;border:1px dashed var(--line);border-radius:var(--r-md);
+  background:rgba(251,247,236,.55)}
+.rm .tag{font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--ink-500);margin:0 0 10px}
+.rm h4{font-family:var(--font-display);font-size:16px;font-weight:400;margin:0 0 8px;color:var(--ink-900)}
+.rm p{margin:0;font-size:13px;color:var(--text-mute);line-height:1.85}
+/* ══════════ 页脚 ══════════ */
+.foot{
+  margin:var(--sp-6) auto 0;padding:30px 32px 32px;
+  display:flex;flex-wrap:wrap;gap:16px 30px;align-items:flex-start;justify-content:space-between;
+  font-size:12.5px;color:var(--text-soft);line-height:1.95;
+  background:rgba(251,247,236,.96);
+  border:1px solid var(--line);border-radius:var(--r-md);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  box-shadow:0 22px 46px -34px rgba(43,40,35,.8);
+}
+.foot .col{max-width:44ch}
+.foot b{color:var(--ink-900);font-weight:500}
+.foot code{font-family:var(--font-mono);font-size:11.5px}
+.foot a{color:var(--cinnabar);text-decoration:none;border-bottom:1px solid rgba(168,52,28,.3);
+  transition:border-color .2s var(--ease-out)}
+.foot a:hover{border-bottom-color:var(--cinnabar)}
+@media (max-width:960px){
+  .mods,.mods.two,.get .rows,.roadmap{grid-template-columns:1fr}
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .stat{border-right:0;border-bottom:1px dashed var(--line)}
+  .stat:nth-child(odd){border-right:1px dashed var(--line)}
+  .stat:nth-last-child(-n+2){border-bottom:0}
+  .stage-grid{grid-template-columns:1fr}
+  .cards{grid-template-columns:1fr}
+  .nav-links{display:none}
+  .colophon{display:none}
+}
+@media (max-width:720px){
+  .nav{padding:14px 18px;gap:12px}
+  .wrap{padding:0 18px}
+  .flag-sub{display:none}
+  .hero{padding:calc(var(--sp-5) + 14px) 0 var(--sp-4)}
+  .scroll-box{padding:26px 20px 22px}
+  .scroll-box::before,.scroll-box::after{display:none}
+  .meta{gap:6px 16px}
+}
+</style>
+</head>
+<body class="no-js">
+
+<!-- ════════ 纸与墨：固定挂载，aria-hidden ════════ -->
+<div class="mount" aria-hidden="true">
+  <svg viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+    <defs>
+      <!-- 墨笔触：比油画笔触边缘更脆（低模糊），baseFrequency y 更大 -->
+      <filter id="ink" x="-15%" y="-15%" width="130%" height="130%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.0035 0.021" numOctaves="5" seed="7" result="t"/>
+        <feDisplacementMap in="SourceGraphic" in2="t" scale="96" xChannelSelector="R" yChannelSelector="G" result="d"/>
+        <feGaussianBlur in="d" stdDeviation="2.2"/>
+      </filter>
+      <!-- 淡墨山：柔化更重 -->
+      <filter id="inkSoft" x="-20%" y="-20%" width="140%" height="140%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.005 0.016" numOctaves="4" seed="23" result="t2"/>
+        <feDisplacementMap in="SourceGraphic" in2="t2" scale="64" xChannelSelector="R" yChannelSelector="G" result="d2"/>
+        <feGaussianBlur in="d2" stdDeviation="9"/>
+      </filter>
+      <!-- 飞白：干笔擦过留下的断续 -->
+      <filter id="dry" x="-10%" y="-10%" width="120%" height="120%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.014 0.05" numOctaves="3" seed="41" result="t3"/>
+        <feDisplacementMap in="SourceGraphic" in2="t3" scale="34" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+      <!-- 云雾：留白 -->
+      <filter id="mist" x="-30%" y="-30%" width="160%" height="160%">
+        <feGaussianBlur stdDeviation="42"/>
+      </filter>
+      <linearGradient id="farGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5E5A52" stop-opacity=".42"/>
+        <stop offset="1" stop-color="#5E5A52" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="nearGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2B2823" stop-opacity=".70"/>
+        <stop offset="1" stop-color="#2B2823" stop-opacity=".20"/>
+      </linearGradient>
+      <radialGradient id="paperG" cx=".46" cy=".34" r=".78">
+        <stop offset="0" stop-color="#FDFAF3"/>
+        <stop offset=".62" stop-color="#F4EEE1"/>
+        <stop offset="1" stop-color="#E5DCC8"/>
+      </radialGradient>
+    </defs>
+
+    <rect width="1600" height="900" fill="url(#paperG)"/>
+
+    <!-- 远山：淡墨，只露山头 -->
+    <g filter="url(#inkSoft)" opacity=".5">
+      <path d="M-80 660 C 120 560, 240 606, 360 520 C 470 442, 560 500, 660 452
+               C 770 400, 870 470, 980 428 C 1100 382, 1180 452, 1300 414
+               C 1420 376, 1520 442, 1700 400 L1700 900 L-80 900 Z" fill="url(#farGrad)"/>
+    </g>
+
+    <!-- 中景山：重墨 + 皴法擦痕 -->
+    <g filter="url(#ink)">
+      <path d="M-80 740 C 90 668, 200 706, 320 620 C 420 548, 500 596, 600 546
+               C 700 496, 800 560, 900 520 C 1010 476, 1090 540, 1200 504
+               C 1320 466, 1420 528, 1700 486 L1700 900 L-80 900 Z"
+            fill="#4E4A43" opacity=".5"/>
+    </g>
+
+    <!-- 近景：焦墨山脊 + 水岸 -->
+    <g filter="url(#ink)">
+      <path d="M-80 812 C 120 748, 260 786, 400 706 C 500 650, 590 692, 700 644
+               C 810 596, 900 654, 1010 616 C 1130 574, 1230 632, 1340 596
+               C 1450 560, 1550 618, 1700 580 L1700 900 L-80 900 Z"
+            fill="url(#nearGrad)"/>
+    </g>
+
+    <!-- 飞白枯笔：两笔横向扫过 -->
+    <g filter="url(#dry)" opacity=".3">
+      <path d="M-60 706 C 260 686, 520 716, 820 692 C 1080 672, 1340 700, 1660 678 L1660 690 C 1340 712, 1080 684, 820 704 C 520 728, 260 698, -60 718 Z" fill="#2B2823"/>
+      <path d="M-60 760 C 300 742, 560 768, 860 744 C 1120 724, 1380 752, 1660 730 L1660 740 C 1380 762, 1120 734, 860 754 C 560 778, 300 752, -60 770 Z" fill="#2B2823"/>
+    </g>
+
+    <!-- 云雾留白：压住山脚 -->
+    <g filter="url(#mist)">
+      <ellipse cx="330" cy="700" rx="360" ry="74" fill="#F7F2E7" opacity=".9"/>
+      <ellipse cx="880" cy="676" rx="420" ry="66" fill="#F7F2E7" opacity=".82"/>
+      <ellipse cx="1420" cy="712" rx="380" ry="72" fill="#F7F2E7" opacity=".86"/>
+      <ellipse cx="620" cy="520" rx="520" ry="58" fill="#F7F2E7" opacity=".72"/>
+      <ellipse cx="800" cy="886" rx="940" ry="96" fill="#F7F2E7" opacity=".6"/>
+    </g>
+  </svg>
+  <div class="weave"></div>
+  <div class="fiber"></div>
+  <div class="vignette"></div>
+</div>
+
+<a class="skip" href="#main">跳到主要内容</a>
+
+<div class="flag">
+  FloatPulse <b>v4.7.0</b>
+  <span class="flag-sub">· Windows 10 / 11 · 原生 PyQt6 · 本地优先 · 插件按需</span>
+</div>
+
+<div class="colophon" aria-hidden="true">
+  <span>墨分五色</span>
+  <div class="seal">浮光<br>随笔</div>
+</div>
+
+<div class="shell">
+<nav class="nav">
+  <div class="brand">
+    <span class="ball" aria-hidden="true"></span>
+    <span>FloatPulse<em>v4.7.0</em></span>
+  </div>
+  <div class="nav-links">
+    <a href="#shape">形态</a><a href="#mods">能力</a><a href="#plugins">插件</a><a href="#ai">AI</a><a href="#spec">规格</a>
+  </div>
+  <a class="ghost" href="#get">下载 Windows 版</a>
+</nav>
+
+<main id="main">
+<header class="wrap hero">
+  <p class="eyebrow">原生 PYQT6 · 本地优先 · 插件按需</p>
+  <h1>
+    <span class="line">把每一个碎片，</span>
+    <span class="line"><span class="accent">稳稳接住</span>。</span>
+  </h1>
+  <p class="lede">
+    划词、路径、文件、截图、念头——顺手一划，桌面角落替你收好，不打开窗口、不打断心流。
+    <b>碎片工作台、截图钉屏、番茄钟、AI 助手、插件商店</b>，全在那一颗球后面。
+  </p>
+  <div class="cta-row">
+    <a class="btn btn-main" href="#get">下载 Windows 版</a>
+    <a class="btn btn-soft" href="#mods">看看它能做什么</a>
+  </div>
+  <div class="meta">
+    <span>WINDOWS 10 / 11</span>
+    <span><i>·</i> 免装 PYTHON</span>
+    <span><i>·</i> 主程序实测 75 MB</span>
+    <span><i>·</i> 不装插件时全程离线</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="stats reveal">
+    <div class="stat">
+      <b>10<em>页面</em></b>
+      <span>主窗口工作台，侧栏四组折叠、可同时展开</span>
+    </div>
+    <div class="stat">
+      <b>5<em>个</em></b>
+      <span>官方外置插件，主程序包里一个都不装</span>
+    </div>
+    <div class="stat">
+      <b>200<em>条</em></b>
+      <span>剪贴板历史上限，LRU 自动淘汰、上限可调</span>
+    </div>
+    <div class="stat">
+      <b>0<em>联网</em></b>
+      <span>不装联网插件时无任何云端依赖，断网照用</span>
+    </div>
+  </div>
+</div>
+
+<section class="sec wrap" id="why">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>壹</b> What it actually does</p>
+    <h2>它补的不是「找东西」，<br>是「记完之后那一段」</h2>
+  </div>
+  <p class="sec-lede reveal">
+    启动器负责找东西，截图工具负责看东西。FloatPulse 管的是中间那段没人管的事：
+    记下来的碎片怎么归类、怎么变成任务或笔记、怎么导出进你已有的知识库。它不是要替代谁，是把散落的动作接成一条线。
+  </p>
+
+  <div class="tablewrap reveal">
+    <table class="tbl">
+      <thead>
+        <tr><th>能力</th><th>FloatPulse</th><th>悬浮球类工具</th><th>启动器</th><th>截图工具</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>悬浮球常驻入口</td><td class="yes">✓ 可拖拽 / 四向吸边</td><td class="yes">✓</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>随手记录碎片</td><td class="yes">✓ 快捕条 + 剪贴板 + 拖拽</td><td class="part">△ 仅剪贴板</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>碎片双轴分类</td><td class="yes">✓ 来源 + 内容语义</td><td class="no">✕ 仅时间流</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>转成任务 / 笔记</td><td class="yes">✓ 一键转，可撤销</td><td class="no">✕</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>临时素材中转</td><td class="yes">✓ sha256 去重 + 过期清理</td><td class="no">✕</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>截图钉屏</td><td class="yes">✓ 含批注与逐笔撤销</td><td class="no">✕</td><td class="no">✕</td><td class="yes">✓</td></tr>
+        <tr><td>软件 / 网址启动</td><td class="yes">✓ 拖 .exe / .lnk 即建</td><td class="part">△ 需写脚本</td><td class="yes">✓</td><td class="no">✕</td></tr>
+        <tr><td>AI 总结 / 对话</td><td class="yes">✓ 可选，本地 + 云端</td><td class="no">✕</td><td class="no">✕</td><td class="no">✕</td></tr>
+        <tr><td>全局文件搜索</td><td class="no">✕ 交给 Everything / Flow Launcher</td><td class="no">✕</td><td class="yes">✓</td><td class="no">✕</td></tr>
+        <tr><td>插件生态</td><td class="part">△ 5 个外置插件，按需下载不预装</td><td class="part">△ 脚本动作</td><td class="yes">✓ 社区插件</td><td class="no">✕</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note reveal">
+    <b>表里的 ✕ 不是缺陷，是取舍。</b>全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义。
+    插件生态刚起步，目前是 5 个外置插件 + 插件商店 + 打包器，不跟任何人的数量比，写 △ 就是 △。
+    <br>本页也<b>不放用户评价、下载量、评分</b>——项目还在自用打磨阶段，没有外部用户验证，不装成「已被广泛使用」。所有功能与数值均取自 v4.7.0 源码与文档，快照日期 2026-09-30。
+  </div>
+</section>
+<section class="sec wrap" id="shape">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>贰</b> One ball, three forms</p>
+    <h2>从桌面角落到完整工作台，<br>按需展开三层</h2>
+  </div>
+  <p class="sec-lede reveal">
+    悬浮球是入口，快捷卡片是快答，主窗口是全套。三层分工，各干各的活，互不打扰——不用的时候，它只是屏幕边缘的半个圆。
+  </p>
+
+  <div class="scroll-box reveal">
+    <div class="stage-grid">
+      <div>
+        <p class="stage-label">形 态 一 · 悬 浮 球</p>
+        <h3>常驻桌面、四向吸边、拖拽即走</h3>
+        <p class="d">靠近屏幕边缘隐去一半，鼠标移近自动滑出。空闲 3 秒自动吸边隐藏（可关），全屏应用在前台时自动让位。<b>位置会被记住</b>，下次启动回到原位。</p>
+        <div class="chips">
+          <span class="chip">球体直径 64 px</span>
+          <span class="chip">可调 48 – 88 px</span>
+          <span class="chip">悬停放大 1.1 ×</span>
+          <span class="chip">空闲隐藏 3 s</span>
+        </div>
+      </div>
+      <div>
+        <svg class="art" viewBox="0 0 320 200" role="img" aria-label="悬浮球默认态（直径 64 像素）与悬停态（放大 1.1 倍）对比，按真实尺寸绘制">
+          <defs>
+            <symbol id="appIcon" viewBox="0 0 128 128"><image href="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" width="128" height="128"/></symbol>
+            <filter id="ballShadow" x="-70%" y="-70%" width="240%" height="240%">
+              <feGaussianBlur stdDeviation="9"/>
+            </filter>
+          </defs>
+          <ellipse cx="72" cy="128" rx="30" ry="9" fill="#2B2823" opacity=".16" filter="url(#ballShadow)"/>
+          <use href="#appIcon" x="40" y="64" width="64" height="64"/>
+          <text x="72" y="168" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#6E685D" letter-spacing="1.4">默认 64 px</text>
+          <line x1="130" y1="42" x2="130" y2="150" stroke="#2B2823" stroke-opacity=".18" stroke-dasharray="3 6"/>
+          <ellipse cx="196" cy="130" rx="33" ry="10" fill="#2B2823" opacity=".18" filter="url(#ballShadow)"/>
+          <use href="#appIcon" x="160.8" y="60.8" width="70.4" height="70.4"/>
+          <text x="196" y="168" text-anchor="middle" font-family="Consolas,monospace" font-size="11" fill="#6E685D" letter-spacing="1.4">悬停 1.1 ×</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="scroll-box reveal">
+    <div class="stage-grid">
+      <div>
+        <p class="stage-label">形 态 二 · 快 捷 卡 片</p>
+        <h3>悬停即弹，鼠标一走就收</h3>
+        <p class="d">440 × 340 的小卡片，左侧竖排切三种模式，<b>滚轮翻卡、点击换卡</b>。记任务、写便签、查知识段落都在这一张卡里完成，不用打开主窗口。</p>
+        <div class="chips">
+          <span class="chip">尺寸 440 × 340</span>
+          <span class="chip">知识卡片速查</span>
+          <span class="chip">日程任务</span>
+          <span class="chip">随时笔记</span>
+        </div>
+      </div>
+      <div>
+        <svg class="art" viewBox="0 0 520 420" role="img" aria-label="快捷卡片示意：440×340 卡片，左侧竖排三模式切换，右侧为日程任务列表">
+          <defs>
+            <linearGradient id="paneFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#FDFAF3"/>
+              <stop offset="1" stop-color="#F2ECDD"/>
+            </linearGradient>
+          </defs>
+          <rect x="30" y="24" width="440" height="340" rx="10" fill="url(#paneFill)" stroke="#2B2823" stroke-opacity=".2"/>
+          <rect x="30" y="24" width="440" height="3" rx="1.5" fill="#A8341C" opacity=".5"/>
+          <rect x="42" y="48" width="48" height="292" rx="7" fill="#2B2823" opacity=".05"/>
+          <rect x="52" y="60" width="28" height="28" rx="6" fill="#A8341C" opacity=".86"/>
+          <rect x="52" y="102" width="28" height="28" rx="6" fill="#2B2823" opacity=".14"/>
+          <rect x="52" y="144" width="28" height="28" rx="6" fill="#2B2823" opacity=".14"/>
+          <rect x="59" y="70" width="14" height="8" rx="2" fill="#FBF7EC" opacity=".85"/>
+          <rect x="59" y="112" width="14" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="59" y="154" width="14" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="106" y="52" width="120" height="9" rx="4.5" fill="#2B2823" opacity=".72"/>
+          <rect x="106" y="76" width="150" height="7" rx="3.5" fill="#2B2823" opacity=".16"/>
+          <rect x="106" y="98" width="330" height="30" rx="6" fill="#2B2823" opacity=".07"/>
+          <rect x="118" y="109" width="150" height="8" rx="4" fill="#2B2823" opacity=".22"/>
+          <rect x="394" y="104" width="34" height="18" rx="5" fill="#171512" opacity=".82"/>
+          <rect x="106" y="144" width="46" height="7" rx="3.5" fill="#A8341C" opacity=".7"/>
+          <rect x="106" y="162" width="330" height="1" fill="#2B2823" opacity=".1"/>
+          <rect x="106" y="176" width="14" height="14" rx="4" fill="none" stroke="#2B2823" stroke-opacity=".4"/>
+          <rect x="130" y="179" width="160" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="392" y="178" width="44" height="10" rx="5" fill="#9A6E3C" opacity=".28"/>
+          <rect x="106" y="206" width="14" height="14" rx="4" fill="none" stroke="#2B2823" stroke-opacity=".4"/>
+          <rect x="130" y="209" width="130" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="392" y="208" width="44" height="10" rx="5" fill="#9A6E3C" opacity=".28"/>
+          <rect x="106" y="236" width="46" height="7" rx="3.5" fill="#2B2823" opacity=".5"/>
+          <rect x="106" y="254" width="330" height="1" fill="#2B2823" opacity=".1"/>
+          <rect x="106" y="268" width="14" height="14" rx="4" fill="#2B2823" opacity=".72"/>
+          <path d="M109 275 l4 4 l7 -8" fill="none" stroke="#FBF7EC" stroke-width="2" stroke-linecap="round"/>
+          <rect x="130" y="271" width="172" height="8" rx="4" fill="#2B2823" opacity=".16"/>
+          <text x="42" y="392" font-family="Consolas,monospace" font-size="11" fill="#6E685D" letter-spacing="1.2">滚轮翻卡 · 点击换卡 · 卡片尺寸 1:1</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="scroll-box reveal">
+    <div class="stage-grid">
+      <div>
+        <p class="stage-label">形 态 三 · 主 窗 口</p>
+        <h3>十个页面，侧栏按四组折叠</h3>
+        <p class="d">侧栏分「工作台 / 工具 / 插件 / 系统」四组，点组标题开合，<b>多组可同时展开</b>。展开集合与窗口尺寸都会被记住，下次启动原样恢复；窗口装不下时侧栏出现滚动条，按钮尺寸恒定不再被压扁。</p>
+        <div class="chips">
+          <span class="chip">默认 1280 × 740</span>
+          <span class="chip">最小 920 × 620</span>
+          <span class="chip">深浅双主题</span>
+          <span class="chip">跟随系统主题</span>
+        </div>
+      </div>
+      <div>
+        <svg class="art" viewBox="0 0 940 590" role="img" aria-label="主窗口示意图：侧栏四组折叠、工作台组展开，右侧为内容区与预览栏（按 0.7 倍缩放）">
+          <defs>
+            <linearGradient id="winFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#FDFAF3"/>
+              <stop offset="1" stop-color="#F3EDDF"/>
+            </linearGradient>
+          </defs>
+          <rect x="20" y="20" width="896" height="518" rx="10" fill="url(#winFill)" stroke="#2B2823" stroke-opacity=".22"/>
+          <rect x="20" y="20" width="896" height="26" rx="10" fill="#2B2823" opacity=".06"/>
+          <rect x="20" y="40" width="896" height="6" fill="#2B2823" opacity=".06"/>
+          <circle cx="38" cy="33" r="4" fill="#A8341C" opacity=".5"/>
+          <circle cx="52" cy="33" r="4" fill="#2B2823" opacity=".2"/>
+          <circle cx="66" cy="33" r="4" fill="#2B2823" opacity=".2"/>
+          <rect x="80" y="29" width="120" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <line x1="188" y1="46" x2="188" y2="538" stroke="#2B2823" stroke-opacity=".14"/>
+          <rect x="34" y="62" width="56" height="8" rx="4" fill="#A8341C" opacity=".65"/>
+          <path d="M160 66 l-6 -5 v10 z" fill="#2B2823" opacity=".5"/>
+          <rect x="40" y="82" width="120" height="22" rx="5" fill="#A8341C" opacity=".1"/>
+          <rect x="48" y="89" width="10" height="8" rx="2" fill="#A8341C" opacity=".7"/>
+          <rect x="64" y="89" width="70" height="8" rx="4" fill="#2B2823" opacity=".62"/>
+          <rect x="48" y="113" width="10" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="64" y="113" width="58" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="48" y="137" width="10" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="64" y="137" width="66" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="48" y="161" width="10" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="64" y="161" width="52" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="48" y="185" width="10" height="8" rx="2" fill="#2B2823" opacity=".3"/>
+          <rect x="64" y="185" width="62" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="34" y="214" width="48" height="8" rx="4" fill="#2B2823" opacity=".5"/>
+          <path d="M160 218 l6 -5 v10 z" fill="#2B2823" opacity=".4"/>
+          <rect x="48" y="234" width="10" height="8" rx="2" fill="#2B2823" opacity=".22"/>
+          <rect x="64" y="234" width="44" height="8" rx="4" fill="#2B2823" opacity=".22"/>
+          <rect x="48" y="258" width="10" height="8" rx="2" fill="#2B2823" opacity=".22"/>
+          <rect x="64" y="258" width="50" height="8" rx="4" fill="#2B2823" opacity=".22"/>
+          <rect x="34" y="287" width="48" height="8" rx="4" fill="#2B2823" opacity=".5"/>
+          <path d="M160 291 l6 -5 v10 z" fill="#2B2823" opacity=".4"/>
+          <rect x="34" y="316" width="48" height="8" rx="4" fill="#2B2823" opacity=".5"/>
+          <path d="M160 320 l6 -5 v10 z" fill="#2B2823" opacity=".4"/>
+          <rect x="212" y="62" width="150" height="12" rx="6" fill="#2B2823" opacity=".7"/>
+          <rect x="212" y="86" width="240" height="8" rx="4" fill="#2B2823" opacity=".18"/>
+          <rect x="212" y="112" width="90" height="26" rx="6" fill="#2B2823" opacity=".08"/>
+          <rect x="312" y="112" width="90" height="26" rx="6" fill="#2B2823" opacity=".08"/>
+          <circle cx="770" cy="125" r="11" fill="#A8341C" opacity=".55"/>
+          <circle cx="770" cy="125" r="14" fill="none" stroke="#A8341C" stroke-opacity=".25"/>
+          <rect x="212" y="158" width="400" height="1" fill="#2B2823" opacity=".12"/>
+          <rect x="212" y="174" width="360" height="40" rx="6" fill="#2B2823" opacity=".05"/>
+          <rect x="224" y="184" width="60" height="8" rx="4" fill="#A8341C" opacity=".5"/>
+          <rect x="224" y="198" width="200" height="8" rx="4" fill="#2B2823" opacity=".28"/>
+          <rect x="212" y="226" width="360" height="40" rx="6" fill="#2B2823" opacity=".05"/>
+          <rect x="224" y="236" width="60" height="8" rx="4" fill="#44697A" opacity=".45"/>
+          <rect x="224" y="250" width="240" height="8" rx="4" fill="#2B2823" opacity=".28"/>
+          <rect x="212" y="278" width="360" height="40" rx="6" fill="#2B2823" opacity=".05"/>
+          <rect x="224" y="288" width="60" height="8" rx="4" fill="#9A6E3C" opacity=".45"/>
+          <rect x="224" y="302" width="180" height="8" rx="4" fill="#2B2823" opacity=".28"/>
+          <rect x="212" y="330" width="360" height="40" rx="6" fill="#2B2823" opacity=".05"/>
+          <rect x="224" y="340" width="60" height="8" rx="4" fill="#2B2823" opacity=".3"/>
+          <rect x="224" y="354" width="210" height="8" rx="4" fill="#2B2823" opacity=".28"/>
+          <line x1="596" y1="158" x2="596" y2="500" stroke="#2B2823" stroke-opacity=".14"/>
+          <rect x="616" y="174" width="278" height="150" rx="8" fill="#2B2823" opacity=".06"/>
+          <rect x="616" y="340" width="180" height="9" rx="4.5" fill="#2B2823" opacity=".24"/>
+          <rect x="616" y="362" width="240" height="8" rx="4" fill="#2B2823" opacity=".16"/>
+          <rect x="616" y="382" width="200" height="8" rx="4" fill="#2B2823" opacity=".16"/>
+          <rect x="616" y="410" width="80" height="24" rx="6" fill="#171512" opacity=".78"/>
+          <text x="20" y="570" font-family="Consolas,monospace" font-size="11" fill="#6E685D" letter-spacing="1.2">示意图按 0.7 倍缩放 · 真实尺寸 1280 × 740</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+<section class="sec wrap" id="mods">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>叁</b> Everyday features</p>
+    <h2>高频的事，一步到位</h2>
+  </div>
+  <p class="sec-lede reveal">
+    按「收集 → 决定 → 沉淀 → 交付」四段拆开看：每一件你在办公里反复做的小动作，都有一条不用切窗口的路径。
+  </p>
+
+  <h3 class="sub reveal">收集 · 先接住</h3>
+  <div class="mods">
+    <article class="mod reveal">
+      <p class="k">Quick capture</p>
+      <h4>快捕条</h4>
+      <p class="hk">Ctrl + Alt + K</p>
+      <p>全局热键唤起一行输入条，不打断当前工作随手记一句；回车即进碎片池。</p>
+      <ul>
+        <li>可拖动摆放，位置被记住</li>
+        <li>与悬浮球、主窗口共用同一份碎片数据</li>
+        <li>设置页可单独关闭</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Fragments</p>
+      <h4>碎片工作台</h4>
+      <p>剪贴板文本、文件路径、网址、知识段落统一收纳，每一条都带来源与时间。</p>
+      <ul>
+        <li>来源 + 内容语义双轴筛选</li>
+        <li>关键词搜索、多选合并</li>
+        <li>一键转任务 / 转笔记</li>
+        <li>右栏预览面板可关，腾出行宽</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Temp assets</p>
+      <h4>临时素材池</h4>
+      <p>文件拖到球上即拾取，自动去重与过期清理——下载目录不再是临时的尽头。</p>
+      <ul>
+        <li>sha256 内容去重</li>
+        <li>上限 50 个 · 保留 30 天</li>
+        <li>单文件 50 MB 上限，<b>算哈希前拦截</b></li>
+        <li>缩略图宽 128 px（80–160 可调）</li>
+        <li>剪贴板里的图片自动入池</li>
+      </ul>
+    </article>
+  </div>
+
+  <h3 class="sub reveal">决定 · 排到哪里去</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">Tasks</p>
+      <h4>日程任务</h4>
+      <p>卡片上直接记，状态在主窗口统一管。锁定状态下卡片不自动收起，盯着你做完为止。</p>
+      <ul>
+        <li>输入即添加，回车落库</li>
+        <li>按截止日分组：逾期 · 今天 · 本周 · 以后 · 无期限 · 已完成</li>
+        <li>显示相对时间（「3 天后」）</li>
+        <li>批量勾选 / 批量删除，删完有撤销条</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Pomodoro</p>
+      <h4>番茄钟</h4>
+      <p>球体自带进度环，不打开主窗口也能盯着进度。计时器是内置功能，不依赖任何插件。</p>
+      <ul>
+        <li>专注 25 / 休息 5 分钟，均可调</li>
+        <li>可选「专注结束自动进入休息」</li>
+        <li>系统休眠后计时自动补偿，不错账</li>
+        <li>计时中不触发悬浮球闲置隐藏</li>
+      </ul>
+    </article>
+  </div>
+
+  <h3 class="sub reveal">沉淀 · 留下能复用的</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">Notes</p>
+      <h4>笔记管理</h4>
+      <p>列表 + 编辑区，边写边存，不需要记得按保存。</p>
+      <ul>
+        <li>800 ms 防抖自动保存</li>
+        <li>碎片可合并编辑后一键存为笔记</li>
+        <li>与卡片上的「随时笔记」共用同一份数据</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Knowledge base</p>
+      <h4>知识库（docx）</h4>
+      <p>内容继续用 Word 维护，改完重载即生效，不用再学一套编辑器。</p>
+      <ul>
+        <li>段落级增删改，寻址按过滤后的位置</li>
+        <li>mtime + sha1 双指纹检测外部修改，改完弹窗询问是否重载</li>
+        <li>段落可勾选加入碎片池，随时复用</li>
+        <li>写入前校验内容指纹，避免覆盖别处的改动</li>
+      </ul>
+    </article>
+  </div>
+  <h3 class="sub reveal">交付 · 能直接拿去用</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">Screenshot pin</p>
+      <h4>截图钉屏</h4>
+      <p class="hk">Ctrl + Alt + S</p>
+      <p>框选屏幕任意区域，钉成一张置顶参考浮窗——对着写方案、对着改代码、对着抄数据。</p>
+      <ul>
+        <li>滚轮缩放内容，缩放锚定在光标位置</li>
+        <li>右下角抓手等比调整窗框大小</li>
+        <li>批注：画笔 / 箭头 / 马赛克，Ctrl+Z 逐笔撤销</li>
+        <li>右键复制到剪贴板或另存为文件</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Obsidian export</p>
+      <h4>导出进你的知识库</h4>
+      <p>笔记、碎片、任务三类内容，写进 vault 的 <b>FloatPulse/</b> 目录——不接管你的 vault，只在里面落一个可读的文件夹。</p>
+      <ul>
+        <li>目录结构：FloatPulse/笔记 · FloatPulse/碎片 · FloatPulse/任务</li>
+        <li>只读导出：不会改你 vault 里已有的任何文件</li>
+        <li>幂等：重复导出不产生重复文件</li>
+        <li>UTF-8 + LF 换行，Windows 上也不出乱码</li>
+      </ul>
+    </article>
+  </div>
+
+  <h3 class="sub reveal">直达 · 少找两次</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">App launcher</p>
+      <h4>软件导航</h4>
+      <p>把 <b>.exe / .lnk 拖到球上</b>就能建一个启动项，图标自动提取，桌面上少放几个快捷方式。</p>
+      <ul>
+        <li>拖 .exe 直接建项并提取图标</li>
+        <li>拖 .lnk 走系统关联启动，不破坏快捷方式语义</li>
+        <li>卡片边长 96 px，可调</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">URL navigation</p>
+      <h4>网址导航</h4>
+      <p>常去的站点收在一块面板里，增删改一键完成，不用再翻收藏夹。</p>
+      <ul>
+        <li>收藏网址一键打开（默认浏览器）</li>
+        <li>网址与软件分面板管理，互不混杂</li>
+      </ul>
+    </article>
+  </div>
+</section>
+
+<!-- ══════════ 插件 ══════════ -->
+<section class="sec wrap" id="plugins">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>肆</b> Plugins, opt-in</p>
+    <h2>主程序包里，<br>一个插件都没有</h2>
+  </div>
+  <p class="sec-lede reveal">
+    你可能只想用其中一个，没必要为一两个功能下载全部。所以插件走独立分发：主程序的
+    <code class="mono">plugins\</code> 与 <code class="mono">plugin_store\</code> 都是空目录，
+    每个插件只有 <b>10 – 26 KB</b>，想要哪个装哪个。<b>不装插件不影响任何核心功能</b>——
+    悬浮球、碎片、任务、笔记、知识库、素材、截图钉屏、软件/网址导航全部照常可用。
+  </p>
+
+  <div class="mods">
+    <article class="mod reveal">
+      <p class="k">Step 01</p>
+      <h4>下载</h4>
+      <p>从 Release 页面的 Assets 区挑一个下载，每个插件只有 10 – 26 KB。</p>
+      <ul><li>文件名形如 <code class="mono">ai-assistant.fpplug</code></li></ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Step 02</p>
+      <h4>放进目录</h4>
+      <p>把 <code class="mono">.fpplug</code> 丢进程序目录下的 <code class="mono">plugin_store\</code> 文件夹。</p>
+      <ul><li>不解压、不改名，源包保持原样</li></ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Step 03</p>
+      <h4>安装</h4>
+      <p>启动程序 → 插件中心 → 插件商店 → 点「安装」。</p>
+      <ul><li>装完即生效，<b>不需要重启</b></li></ul>
+    </article>
+  </div>
+
+  <h3 class="sub reveal">五个官方插件</h3>
+  <div class="tablewrap reveal">
+    <table class="tbl" style="min-width:820px">
+      <thead>
+        <tr><th>插件包</th><th>名称</th><th>版本</th><th>体积</th><th>页面 / 热键</th><th>能力</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>ai-assistant</td><td>AI 助手</td><td>1.8.0</td><td>25.9 KB</td>
+          <td>AI 助手页 / <code class="mono">Ctrl+Alt+I</code></td>
+          <td><span class="badge b-net">网</span><span class="badge b-write">写</span><span class="badge b-manage">删</span><span class="badge b-ai">AI</span></td>
+          <td>本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用规则库自定义 AI 行为</td>
+        </tr>
+        <tr>
+          <td>ai-text-workshop</td><td>AI 文本工坊</td><td>1.4.0</td><td>11.7 KB</td>
+          <td>文本工坊页 / <code class="mono">Ctrl+Alt+T</code></td>
+          <td><span class="badge b-net">网</span><span class="badge b-write">写</span><span class="badge b-ai">AI</span></td>
+          <td>剪贴板一键 AI 加工：原文自动带入剪贴板内容，一键润色成邮件、翻译、总结要点、改写正式、提取待办并转任务</td>
+        </tr>
+        <tr>
+          <td>kb-search</td><td>站内搜索</td><td>1.0.0</td><td>21.6 KB</td>
+          <td>站内搜索页 / <code class="mono">Ctrl+Alt+F</code>（并承接 <code class="mono">Ctrl+K</code>）</td>
+          <td><span class="badge b-ro">只读</span></td>
+          <td>在知识库 / 笔记 / 碎片 / 任务 / 素材五类数据里全文检索：自研中文分词 + 倒排索引 + BM25 排序，命中片段高亮，点结果标题跳到对应面板。纯站内检索，不碰文件系统</td>
+        </tr>
+        <tr>
+          <td>recurring-tasks</td><td>周期任务</td><td>1.0.0</td><td>18.1 KB</td>
+          <td>周期任务页 / <code class="mono">Ctrl+Alt+R</code></td>
+          <td><span class="badge b-write">写</span></td>
+          <td>只给规则（每天 / 每周几 / 每月几号 / 每 N 天），到点自动生成任务；错过的补一次、同一天不重复生成</td>
+        </tr>
+        <tr>
+          <td>weekly-report</td><td>日报 / 周报草稿</td><td>1.0.0</td><td>10.7 KB</td>
+          <td>无独立页面 / <code class="mono">Ctrl+Alt+W</code></td>
+          <td><span class="badge b-ro">只读</span></td>
+          <td>汇总区间内已完成任务、碎片与番茄次数，拼成一份 Markdown 草稿，可直接编辑或复制走</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note reveal">
+    <b>能力标记怎么读：</b><span class="badge b-net">网</span>会经宿主联网（日志只记 URL 与耗时） ·
+    <span class="badge b-write">写</span>能新增数据 ·
+    <span class="badge b-manage">删</span>能改删数据（删除会返回一次性撤销令牌，用过即失效） ·
+    <span class="badge b-ai">AI</span>可接入设置页的「AI 总配置」，多个 AI 插件共用同一套后端 ·
+    <span class="badge b-ro">只读</span>不写任何数据。
+  </div>
+
+  <h3 class="sub reveal">插件能碰到什么，碰不到什么</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">Boundary</p>
+      <h4>能力要声明，未声明就拒绝</h4>
+      <p>插件必须在 manifest 里显式声明能力，宿主按声明放行；没声明的调用直接返回失败，而不是偷偷放过去。</p>
+      <ul>
+        <li>依赖白名单：只允许 <b>PyQt6 + Python 标准库</b>，<code class="mono">ssl / socket / requests</code> 一律拒绝</li>
+        <li>插件自身拿不到网络库，联网只能走宿主的网络桥</li>
+        <li>网络桥目前只支持 POST JSON，单次 ≤ 4 MB、超时 ≤ 120 s</li>
+        <li>未声明能力被调用时返回 <code class="mono">False / 0</code> 并记 warning，不会抛异常拖垮程序</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Honesty</p>
+      <h4>信任链做透明，不假装有沙箱</h4>
+      <p>插件与主程序同进程运行——这是架构事实，我们不把它说成「沙箱隔离」。能保证的是：能力可见、网络可审计、卸载可彻底。</p>
+      <ul>
+        <li>插件中心卡片上直接标出该插件申请了哪些能力</li>
+        <li>所有联网请求只把 URL 与耗时写进 <code class="mono">app.log</code>，不记录正文</li>
+        <li>卸载只删 <code class="mono">plugins\&lt;插件id&gt;\</code>，源包留在 <code class="mono">plugin_store\</code>，想装回来点一次即可</li>
+        <li>插件私有数据（<code class="mono">float_data\plugins\&lt;插件id&gt;\</code>）<b>卸载时不会被删</b></li>
+      </ul>
+    </article>
+  </div>
+
+  <div class="note reveal">
+    <b>插件中心</b>负责安装 / 启停 / 卸载 / 商店四件事，改完<b>免重启</b>即生效。
+    想自己写一个：依赖只允许 PyQt6 + 标准库，用
+    <code class="mono">python tools/pack_plugin.py plugins/&lt;插件目录&gt;</code> 打成 <code class="mono">.fpplug</code> 即可分发安装。
+    完整插件契约（能力声明、知识库接口、AI 动作协议）属内部资料，需要可开 Issue 索取。
+  </div>
+</section>
+<!-- ══════════ AI ══════════ -->
+<section class="sec wrap" id="ai">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>伍</b> Optional AI</p>
+    <h2>AI 是可选件，<br>而且默认不联网</h2>
+  </div>
+  <p class="sec-lede reveal">
+    AI 助手走外置插件，不是主程序的一部分。不装 AI 插件、不填 key、不开本地服务时，
+    程序其余功能与「从没听说过 AI」的版本完全一致。装了也由你决定它连哪里、能不能出网。
+  </p>
+
+  <div class="mods">
+    <article class="mod reveal">
+      <p class="k">Backend 01</p>
+      <h4>云端 API</h4>
+      <p>走 OpenAI 兼容协议，填地址 + Key + 模型名即可，DeepSeek、硅基流动这类服务通吃。</p>
+      <ul>
+        <li>地址 / Key / 模型三项可改</li>
+        <li>Key 明文本机存储，不上传</li>
+        <li>接回环地址时可留空</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Backend 02</p>
+      <h4>接 Ollama</h4>
+      <p>本机已经跑着 Ollama 的话，指向它就行，不用额外装东西。</p>
+      <ul>
+        <li>默认地址 <code class="mono">127.0.0.1:11434</code></li>
+        <li>模型由 Ollama 自己管</li>
+        <li>完全离线，数据不出机</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Backend 03</p>
+      <h4>自带本地推理</h4>
+      <p>程序自己拉起 <code class="mono">llama-server</code>，浏览选择 exe 与 <code class="mono">.gguf</code> 模型，点一下启动。</p>
+      <ul>
+        <li>显卡全量卸载（<code class="mono">-ngl 99</code>）</li>
+        <li>退出程序自动结束，不占残留显存</li>
+        <li>本地模式断网可用，数据不出机</li>
+      </ul>
+    </article>
+  </div>
+
+  <h3 class="sub reveal">端口分工：四处服务各占一个口，互不冲突</h3>
+  <div class="tablewrap reveal">
+    <table class="tbl" style="min-width:560px">
+      <thead><tr><th>角色</th><th>默认端口</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td>宿主「AI 总配置」拉起</td><td><code class="mono">8095</code></td><td>一处启动，所有接入总配置的 AI 插件共用同一套后端</td></tr>
+        <tr><td>AI 助手插件自管</td><td><code class="mono">8093</code></td><td>插件使用自己那份后端配置时走这个端口</td></tr>
+        <tr><td>AI 文本工坊自管</td><td><code class="mono">8094</code></td><td>同上，与 AI 助手独立实例</td></tr>
+        <tr><td>Ollama</td><td><code class="mono">11434</code></td><td>用 Ollama 时的默认监听地址</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="sub reveal">配一次，所有接入的插件都跟着改</h3>
+  <div class="mods two">
+    <article class="mod reveal">
+      <p class="k">AI 总配置</p>
+      <h4>一处配置，多插件共用</h4>
+      <p>设置页里配好后端，再勾选授权哪些 AI 插件接入——接入的插件直接读这套地址与 Key，<b>改完即生效，无需重启</b>；没勾选的插件继续用各自私有配置。</p>
+      <ul>
+        <li>云端 / 本地两种模式，切换即显示对应配置区</li>
+        <li>本地推理由宿主统一拉起，一处启动、所有接入插件共用</li>
+        <li>「保存并测试连接」一键落盘 + 探活</li>
+      </ul>
+    </article>
+    <article class="mod reveal">
+      <p class="k">Diagnostics</p>
+      <h4>连不上时，告诉你为什么</h4>
+      <p>探活结果直接写在状态行上，不同故障给不同提示，不用自己猜是 key 错了还是服务没起。</p>
+      <ul>
+        <li><code class="mono">401</code> → Key 无效或未填</li>
+        <li><code class="mono">404</code> → 地址或模型名不对</li>
+        <li>超时 → 地址不可达 / 本地服务未启动</li>
+        <li>AI 动作解析失败时整块不执行，不会「猜着执行一半」</li>
+      </ul>
+    </article>
+  </div>
+
+  <div class="note reveal">
+    <b>隐私立场（写进代码注释里的那种）：</b>不做遥测、不做崩溃自动上报、不做应用内自动下载更新。
+    联网只发生在你装了联网插件、或主动点「检查更新」时；网络桥只把 URL 与耗时写进日志，不记正文。
+    这个立场不会因为版本升级而改变。
+  </div>
+</section>
+
+<!-- ══════════ 一天的动线 ══════════ -->
+<section class="sec wrap" id="day">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>陆</b> A day with it</p>
+    <h2>一天的动线，是这样的</h2>
+  </div>
+  <p class="sec-lede reveal">六个普通时刻，看它怎么接住一个工作日里散落的碎片。</p>
+
+  <div class="tline reveal">
+    <div class="titem">
+      <time>09:30</time>
+      <h4>看到就收下</h4>
+      <p>查资料时顺手复制一段关键结论——不用管它，剪贴板监听已经把它放进碎片池，来源和时间都记着，你的注意力可以继续留在正文上。</p>
+    </div>
+    <div class="titem">
+      <time>11:00</time>
+      <h4>钉住参照物</h4>
+      <p><code class="mono">Ctrl+Alt+S</code> 框选报价单或设计稿，钉在屏幕一角置顶。要圈的地方直接画笔标出来，画错了 <code class="mono">Ctrl+Z</code> 撤一笔，不用重截。</p>
+    </div>
+    <div class="titem">
+      <time>14:00</time>
+      <h4>悬停就速记</h4>
+      <p>开会开到一半想到一件待办，鼠标挪到悬浮球上，卡片自动弹出切到任务模式，一句话记下。鼠标一走卡片就收，全程不切窗口。</p>
+    </div>
+    <div class="titem">
+      <time>15:30</time>
+      <h4>专注一段</h4>
+      <p>球上的进度环开始走。计时期间它不会自己缩回边缘——这一轮结束前，它一直在那儿。</p>
+    </div>
+    <div class="titem">
+      <time>18:30</time>
+      <h4>晚上统一理</h4>
+      <p>打开碎片工作台：按类型筛选、关键词搜索、多选合并。要复用的一键复制，值得留的存成笔记，其余批量清掉——一次清完一天的收成。</p>
+    </div>
+    <div class="titem">
+      <time>周五 17:00</time>
+      <h4>让工具先写一遍</h4>
+      <p>周报草稿插件汇总区间内已完成任务、碎片与番茄次数，先拼出一份 Markdown 草稿。你只需要在它上面改，而不是从空白页开始回忆周一干过啥。（需装 weekly-report 插件）</p>
+    </div>
+  </div>
+</section>
+<!-- ══════════ 工程细节 ══════════ -->
+<section class="sec wrap" id="under">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>柒</b> Under the hood</p>
+    <h2>好看的皮囊，靠谱的里子</h2>
+  </div>
+  <p class="sec-lede reveal">
+    UI / 业务 / 数据三层解耦，每一处异常都有兜底——工具软件，稳定是第一颜值。下面这些不是宣传话术，是代码里真实存在的模块。
+  </p>
+
+  <div class="roadmap reveal">
+    <div class="rm">
+      <p class="tag">atomic_write</p>
+      <h4>原子写入</h4>
+      <p>所有数据先写临时文件再 <code class="mono">os.replace</code> 落盘，写一半断电也不会留下损坏文件。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">single_instance</p>
+      <h4>单实例防护</h4>
+      <p>Windows 互斥量防重复启动，双击多少次都只有一个实例在跑。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">schema_version</p>
+      <h4>数据版本与迁移</h4>
+      <p>每个 JSON 数据文件带 schema 版本号与迁移注册表，旧数据升级打开无损。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">corrupt_fallback</p>
+      <h4>损坏自动回退</h4>
+      <p>数据 JSON 解析失败时先备份成 <code class="mono">.corrupt.bak</code> 再回退默认，不静默丢数据。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">docx_sync</p>
+      <h4>外部修改检测</h4>
+      <p><code class="mono">mtime</code> + <code class="mono">sha1</code> 双指纹识别外部改动，段落级 hash 比对内容变更。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">exception_hook</p>
+      <h4>全局异常钩子</h4>
+      <p>出错弹窗告诉你原因并写进 <code class="mono">app.log</code>，绝不静默崩溃；下次启动能感知上次未正常退出。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">geometry_guard</p>
+      <h4>位置兜底</h4>
+      <p>分辨率变化、多屏插拔、显示器漂移之后，窗口位置自动兜底，永远找得回来。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">clipboard_lru</p>
+      <h4>历史上界</h4>
+      <p>剪贴板历史上限可配（默认 200 条），LRU 自动淘汰，内存占用有明确上界。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">theme_engine</p>
+      <h4>双主题引擎</h4>
+      <p>QSS 模板 + 颜色字典统一管理浅色 / 深色两套配色，跟随系统主题，对比度有测试护栏。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">update_check</p>
+      <h4>被动更新提示</h4>
+      <p>每天最多静默查一次新版本，<b>只查不下载</b>，设置页可关。宁可少一个功能，也不做应用内自动更新。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ 规格 ══════════ -->
+<section class="sec wrap" id="spec">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>捌</b> Specs &amp; hotkeys</p>
+    <h2>所有可调的，都列在这儿</h2>
+  </div>
+  <p class="sec-lede reveal">数字都写了口径：能改的标了范围，实测的标了快照日期。选中的内容可直接抄去做备忘。</p>
+
+  <h3 class="sub reveal">全局热键</h3>
+  <div class="tablewrap reveal">
+    <table class="tbl" style="min-width:600px">
+      <thead><tr><th>热键</th><th>功能</th><th>来源</th></tr></thead>
+      <tbody>
+        <tr><td><code class="mono">Ctrl+Alt+K</code></td><td>快速捕捉条（随手记碎片）</td><td>主程序内置</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+S</code></td><td>截图钉屏（框选区域置顶参考，支持批注）</td><td>主程序内置</td></tr>
+        <tr><td><code class="mono">Esc</code></td><td>关闭卡片 / 取消截图</td><td>主程序内置</td></tr>
+        <tr><td><code class="mono">Ctrl+K</code></td><td>站内搜索（搜索即入口）</td><td>需装 kb-search</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+I</code></td><td>AI 助手</td><td>需装 ai-assistant</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+T</code></td><td>AI 文本工坊</td><td>需装 ai-text-workshop</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+F</code></td><td>站内搜索页</td><td>需装 kb-search</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+R</code></td><td>周期任务</td><td>需装 recurring-tasks</td></tr>
+        <tr><td><code class="mono">Ctrl+Alt+W</code></td><td>日报 / 周报草稿</td><td>需装 weekly-report</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="sub reveal">尺寸与默认值</h3>
+  <div class="tablewrap reveal">
+    <table class="tbl" style="min-width:600px">
+      <thead><tr><th>项目</th><th>默认值</th><th>可调范围 / 口径</th></tr></thead>
+      <tbody>
+        <tr><td>悬浮球直径</td><td><code class="mono">64 px</code></td><td>48 – 88 px</td></tr>
+        <tr><td>快捷卡片</td><td><code class="mono">440 × 340</code></td><td>固定尺寸（含 16 px 阴影留白）</td></tr>
+        <tr><td>主窗口</td><td><code class="mono">1280 × 740</code></td><td>最小 920 × 620</td></tr>
+        <tr><td>主页数</td><td><code class="mono">10</code></td><td>不含插件页；侧栏四组折叠、多组可同开</td></tr>
+        <tr><td>剪贴板历史</td><td><code class="mono">200 条</code></td><td>可调；LRU 自动淘汰</td></tr>
+        <tr><td>临时素材</td><td><code class="mono">50 个</code></td><td>保留 30 天 · 单文件 50 MB 上限</td></tr>
+        <tr><td>素材缩略图宽</td><td><code class="mono">128 px</code></td><td>80 – 160 px</td></tr>
+        <tr><td>番茄钟</td><td><code class="mono">25 / 5 分钟</code></td><td>专注 1 – 120 · 休息 1 – 60</td></tr>
+        <tr><td>空闲自动隐藏</td><td><code class="mono">3 秒</code></td><td>可单独关闭</td></tr>
+        <tr><td>软件卡片边长</td><td><code class="mono">96 px</code></td><td>可调</td></tr>
+        <tr><td>主程序体积</td><td><code class="mono">约 75 MB</code></td><td>onedir，实测快照 2026-09-27</td></tr>
+        <tr><td>插件包体积</td><td><code class="mono">10.7 – 25.9 KB</code></td><td>5 个官方插件实测值</td></tr>
+        <tr><td>自动化测试</td><td><code class="mono">1300+ 用例</code></td><td>pytest 逻辑层 + 40 余个离屏 GUI 验证脚本</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+<!-- ══════════ 下载 ══════════ -->
+<section class="sec wrap" id="get">
+  <div class="get reveal">
+    <p class="sec-eyebrow"><b>玖</b> Get it</p>
+    <h2>让它住进你的桌面角落</h2>
+    <p class="sec-lede">不需要先装 Python，整个文件夹拷走即用——数据跟着走，换电脑不断档。</p>
+    <div class="cta-row">
+      <a class="btn btn-main" href="https://github.com/2026heshao/FloatPulse/releases/latest" target="_blank" rel="noopener">下载 FloatPulse v4.7.0</a>
+      <a class="btn btn-soft" href="https://github.com/2026heshao/FloatPulse/releases/latest" target="_blank" rel="noopener">插件单独下载</a>
+    </div>
+    <div class="rows">
+      <div class="rowcard">
+        <b>Windows 10 / 11（64 位）</b>
+        <p>不写注册表、不需要管理员权限。压缩包解压到任意目录即可运行。</p>
+      </div>
+      <div class="rowcard">
+        <b>绿色免安装</b>
+        <p>依赖（含 PyQt6 界面框架）整个打包在文件夹里，开箱即用——所以它比较大。</p>
+      </div>
+      <div class="rowcard">
+        <b>插件在附件区</b>
+        <p>Release 页面的 Assets 里逐个列出 <code class="mono">.fpplug</code> 与安装包 <code class="mono">setup.exe</code>。</p>
+      </div>
+    </div>
+    <div class="note">
+      发布包由脚本组装，不走手工压缩：白名单只认 <code class="mono">FloatPulse.exe</code> 与 <code class="mono">_internal/</code>，
+      碎片 / 笔记 / 任务等个人数据、<code class="mono">app.log</code>、剪贴板截图一律不进包；包内<b>不预装任何插件</b>，
+      打完会重新打开 zip 自校验。下载后可用随包的 <code class="mono">SHA256SUMS.txt</code> 核验完整性。
+    </div>
+  </div>
+</section>
+
+<!-- ══════════ FAQ ══════════ -->
+<section class="sec wrap" id="faq">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>拾</b> Questions</p>
+    <h2>常见问题</h2>
+  </div>
+  <div class="faq reveal">
+    <details open>
+      <summary>怎么装？三步够吗？</summary>
+      <div class="a">比三步还少：下载压缩包 → 解压到任意文件夹（建议别放 <code>C:\Program Files</code>，放桌面或 D 盘都行）→ 双击 <code>FloatPulse.exe</code>。悬浮球常驻桌面角落，主窗口从球上右键唤起；点窗口的 ✕ 默认收进托盘而不是退出。</div>
+    </details>
+    <details>
+      <summary>需要先装 Python 或其他运行环境吗？</summary>
+      <div class="a">不需要。所有依赖（含 PyQt6）都打包在程序文件夹里，开箱即用。这也是整个文件夹有 75 MB 的原因——它把运行环境整个背在身上，替你省掉配环境的麻烦。</div>
+    </details>
+    <details>
+      <summary>我的数据存在哪里？</summary>
+      <div class="a">看你是哪种安装方式，程序按发布形态双轨解析：<b>zip 便携版</b>数据留在 exe 同目录的 <code>float_data\</code>，解压即用、随目录整体移动；<b>安装版（setup.exe）</b>数据走 <code>%APPDATA%\FloatPulse\float_data\</code>，与安装目录解耦——升级或重装换目录数据不跟随丢失。里面是 JSON 明文 + 知识库 docx，没有数据库、没有加密黑盒，随时可以自己备份、自己看。</div>
+    </details>
+    <details>
+      <summary>它会偷偷联网吗？</summary>
+      <div class="a">不装联网插件、不用 AI 时，没有任何云端依赖，断网状态下所有功能照常可用。装了带「网」标记的插件后，请求也<b>只能经宿主的网络桥发出</b>——插件自身拿不到网络库，未声明网络的插件联网调用会被直接拒绝；每次请求只把 URL 与耗时写进 <code>app.log</code>，不记正文。</div>
+    </details>
+    <details>
+      <summary>插件为什么不做进安装包里？</summary>
+      <div class="a">因为你可能只想用其中一个。为了一两个功能下载全部没必要，所以插件走 Release 附件的独立下载，每个只有 10 – 26 KB。主程序包里的 <code>plugins\</code> 与 <code>plugin_store\</code> 都是空目录，不装插件不影响悬浮球、碎片、任务、笔记、知识库、素材、截图钉屏等任何核心功能。</div>
+    </details>
+    <details>
+      <summary>卸载干净吗？会留残留吗？</summary>
+      <div class="a">便携版把程序文件夹删掉就完成了。有一点必须提前说明：<b>插件的私有数据不会被卸载删除</b>（<code>float_data\plugins\&lt;插件id&gt;\</code>，安装版在 <code>%APPDATA%</code> 下同样保留），这是故意的——避免你卸载一个插件时连带丢掉它记的东西。没有注册表项、没有后台进程残留。</div>
+    </details>
+    <details>
+      <summary>换电脑怎么办？</summary>
+      <div class="a">便携版：整个文件夹拷走即用，碎片、笔记、任务、知识库一起搬家。安装版：把 <code>%APPDATA%\FloatPulse\</code> 一起带走即可，或直接用它自己的导出（笔记 / 碎片 / 任务可写进 Obsidian vault）。</div>
+    </details>
+    <details>
+      <summary>和我已经在用的剪贴板 / 截图工具有什么区别？</summary>
+      <div class="a">剪贴板工具只管「收」，FloatPulse 把收、存、翻出来再用做成了闭环：碎片能合并成笔记、段落能存进知识库、任务能直接在球上记、截图能钉屏批注，最后还能导出进你自己的知识库。不替代谁，只是把散落的动作接成一条线。全局文件搜索这类做不过别人的事，我们直接不做——交给 Everything 和 Flow Launcher。</div>
+    </details>
+    <details>
+      <summary>常驻后台会不会拖慢电脑？</summary>
+      <div class="a">它常驻的部分只监听剪贴板事件和鼠标位置，不带联网服务、不做后台扫描。空闲 3 秒后会吸边隐藏；剪贴板历史有明确上限（默认 200 条，LRU 自动淘汰），临时素材也有数量与体积上限，内存占用有上界。普通办公本长期挂机没有压力。</div>
+    </details>
+    <details>
+      <summary>AI 一定要联网吗？</summary>
+      <div class="a">不一定。三条路：① 云端 OpenAI 兼容 API（要联网）；② 接本机已经在跑的 Ollama（<code>127.0.0.1:11434</code>）；③ 由程序自己拉起 <code>llama-server</code> + 本地 <code>.gguf</code> 模型。后两种全程离线、数据不出机。不装 AI 插件时，这些配置项完全不参与运行。</div>
+    </details>
+  </div>
+</section>
+
+<!-- ══════════ 路线图 ══════════ -->
+<section class="sec wrap" id="roadmap">
+  <div class="sec-head reveal">
+    <p class="sec-eyebrow"><b>拾壹</b> Roadmap</p>
+    <h2>已经做完的，和还没做的</h2>
+  </div>
+  <p class="sec-lede reveal">未完成项单独列在这儿并标上 PLANNED，<b>不代表任何交付时间承诺</b>。</p>
+
+  <div class="roadmap reveal">
+    <div class="rm">
+      <p class="tag">Planned</p>
+      <h4>／ 命令面板</h4>
+      <p>用一个 <code class="mono">/</code> 让搜索变成唯一入口，键盘直接跳任务、笔记、碎片。未排期。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">Not doing</p>
+      <h4>应用内自动下载更新</h4>
+      <p>与「核心功能离线、不联网」的承诺冲突，只做被动提示，不做自动下载与重启安装。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">Not doing</p>
+      <h4>遥测 / 崩溃上报</h4>
+      <p>不做任何形式的行为统计与自动上报。日志只留在本机，你自己决定要不要看。</p>
+    </div>
+    <div class="rm">
+      <p class="tag">Deferred</p>
+      <h4>代码签名与插件签名</h4>
+      <p>签名证书需要年费、插件验签需要发布方密钥体系——等出现真实外部用户与开放插件生态之后再评估。</p>
+    </div>
+  </div>
+</section>
+</main>
+
+<div class="tail">
+  <div class="seal-lg">浮光<br>随笔</div>
+  <p>重要的不是省下多少时间，<br>是<em>每个闪过的念头</em>，都有处安放。</p>
+</div>
+
+<footer class="wrap foot">
+  <div class="col">
+    <b>FloatPulse · 生活悬浮球</b><br>
+    PyQt6 原生 · 本地优先 · 为 Windows 桌面而生<br>
+    MIT License · 版本 <code>v4.7.0</code>
+  </div>
+  <div class="col">
+    本页所有功能描述与数值取自 v4.7.0 源码与文档，快照日期 2026-09-30；未实现项单列在「路线图」区并标注状态，不代表交付时间承诺。<br>
+    <a href="https://github.com/2026heshao/FloatPulse" target="_blank" rel="noopener">GitHub 仓库</a> ·
+    <a href="https://github.com/2026heshao/FloatPulse/releases/latest" target="_blank" rel="noopener">下载最新版</a> ·
+    <a href="https://github.com/2026heshao/FloatPulse/releases/latest" target="_blank" rel="noopener">插件附件</a>
+  </div>
+</footer>
+</div>
+
+<script>
+document.body.classList.remove('no-js');
+document.body.classList.add('js');
+(function () {
+  var items = document.querySelectorAll('.reveal');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !('IntersectionObserver' in window)) {
+    for (var i = 0; i < items.length; i++) items[i].classList.add('is-in');
+    return;
+  }
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) { e.target.classList.add('is-in'); io.unobserve(e.target); }
+    });
+  }, { rootMargin: '0px 0px -8% 0px', threshold: 0.06 });
+  for (var j = 0; j < items.length; j++) io.observe(items[j]);
+  setTimeout(function () {
+    for (var k = 0; k < items.length; k++) items[k].classList.add('is-in');
+  }, 3000);
+})();
+</script>
+</body>
+</html>

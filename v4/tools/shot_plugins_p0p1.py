@@ -32,7 +32,7 @@ from src.fragment_manager import FragmentManager              # noqa: E402
 from src.nav_manager import NavManager                        # noqa: E402
 from src.temp_asset_manager import TempAssetManager           # noqa: E402
 from src.clipboard_monitor import ClipboardMonitor            # noqa: E402
-from src.app_paths import get_base_dir, get_data_dir, get_docx_path  # noqa: E402
+from src.app_paths import get_base_dir, get_docx_path  # noqa: E402
 
 OUT_DIR = os.path.join(BASE, "..", "build", "shots")
 os.makedirs(OUT_DIR, exist_ok=True)

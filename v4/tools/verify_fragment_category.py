@@ -6,7 +6,6 @@
 列表渲染（含类别色条 delegate）不崩。
 """
 import os
-import shutil
 import sys
 import tempfile
 
@@ -19,7 +18,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.fragment_manager import FragmentManager
 from src.fragment_classifier import (
-    CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
+    CAT_CODE,
 )
 
 PASS = 0

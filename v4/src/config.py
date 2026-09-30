@@ -8,13 +8,16 @@
 设计要点：
   1. 使用与 exe / py 同目录下的 config.json 持久化用户配置
   2. 兼容 PyInstaller 打包环境（路径由外部传入）
-  3. 文件缺失自动初始化默认配置；json 解析异常回退到默认配置
+  3. 文件缺失自动初始化默认配置；json 解析异常先备份 .corrupt.bak 再回退默认
+     （load_reset_reason="corrupt" 供 UI 层提示，不再无痕迹丢失）
   4. 配置项带类型校验，损坏值回退默认
-  5. 所有修改后调用 save() 写盘，原子写入避免损坏
+  5. 所有修改后调用 save() 写盘，原子写入避免损坏；写前滚动备份（同日一次）
   6. UI 层只能通过本类公开方法操作，禁止直接读写 config.json
 
 配置项：
-  - theme:                主题名 ("light" | "dark")，默认值见 constants.DEFAULT_THEME
+  - theme:                主题名 ("light" | "dark" | "follow")，默认值见
+                          constants.DEFAULT_THEME；"follow"=跟随系统深浅色
+                          （合法取值白名单见 theme.THEME_VALUES）
   - clipboard_max_items:  剪贴板历史条数上限
   - auto_hide_seconds:    悬浮球空闲吸边隐藏秒数
   - auto_hide_enabled:    悬浮球空闲吸边自动隐藏总开关（关闭后球始终完整显示）
@@ -46,13 +49,24 @@
   - temp_asset_max_days:  临时素材自动清理天数（0 = 不按天数清理）
   - temp_asset_max_file_mb: 单个临时素材体积上限（MB，0 = 不限制）
   - asset_thumb_size:     临时素材缩略图宽度（像素，80-160，决定网格每行个数）
+  - schema_version:       config.json 结构版本（系统保留键，非用户设置；
+                          变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移）
+  - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
+                          下载、失败静默、不上传任何数据」立场见 update_checker）
+  - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
+  - latest_known_version: 最近发现的新版本 tag（如 "v4.8.0"；空 = 未发现）
 ====================================================================
 """
 
 import os
 import json
 
-from src.constants import DEFAULT_THEME
+from src.constants import DEFAULT_THEME, backup_corrupt_file
+from src.theme import THEME_VALUES
+from src.data_backups import rotate_backup
+from src.json_store import (STORE_VERSIONS, CONFIG_VERSION_KEY,
+                            migrate_data)
+from src.logger import get_logger
 
 
 # 默认配置
@@ -77,6 +91,11 @@ DEFAULT_CONFIG = {
     "restore_last_page":    False,        # 启动时是否恢复上次浏览的页面
     "last_page_index":      0,            # 最后浏览的页面索引（0..LAST_PAGE_INDEX_MAX）
     "close_to_tray":        True,         # 关闭主窗口 → 最小化到托盘（False 沿用旧规则）
+    "tray_hint_shown":      False,        # 已展示过「收进托盘」气泡提示（3.3，仅提示一次）
+    # ===== 更新检查（2.3 被动提示；只查不下载，失败静默）=====
+    "auto_check_updates":   True,         # 启动后每天最多静默检查一次新版本
+    "last_update_check":    "",           # 最近一次检查日期 "YYYY-MM-DD"（空=从未检查）
+    "latest_known_version": "",           # 最近发现的新版本 tag（如 "v4.8.0"；空=未发现）
     "task_reminder_enabled": True,        # 任务到期提醒（托盘气泡）
     "quick_capture_enabled": True,        # 全局快速捕捉条
     "quick_capture_hotkey": "Ctrl+Alt+K", # 快速捕捉全局热键
@@ -112,6 +131,10 @@ DEFAULT_CONFIG = {
     "ai_local_gguf":        "",           # .gguf 模型路径
     "ai_local_port":        8095,         # 避开 AI 助手 8093 / 文本工坊 8094 / Ollama 11434
     "ai_plugins":           [],           # 接入总配置的插件 id 列表（设置页多选）
+    # ===== 数据 schema 版本（系统保留键，非用户设置）=====
+    # config.json 结构变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移；
+    # 存量文件缺失该键视为当前版本（零迁移），由加载路径收敛后随下次保存落盘。
+    "schema_version":       1,
 }
 
 # 配置项类型映射（用于校验）
@@ -136,6 +159,10 @@ _CONFIG_TYPES = {
     "restore_last_page":    bool,
     "last_page_index":      int,
     "close_to_tray":        bool,
+    "tray_hint_shown":      bool,
+    "auto_check_updates":   bool,
+    "last_update_check":    str,
+    "latest_known_version": str,
     "task_reminder_enabled": bool,
     "quick_capture_enabled": bool,
     "quick_capture_hotkey": str,
@@ -166,6 +193,7 @@ _CONFIG_TYPES = {
     "ai_local_gguf":        str,
     "ai_local_port":        int,
     "ai_plugins":           list,
+    "schema_version":       int,
 }
 
 # 主窗口「最后浏览页面」允许的最大物理索引。
@@ -197,6 +225,13 @@ _CONFIG_RANGES = {
     "pomodoro_break_minutes": (1, 60),
     # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
     "ai_local_port":        (1024, 65535),
+}
+
+# 枚举类配置的取值白名单（类型是 str 但合法值有限）：加载与 set 同口径，
+# 不在白名单内的值一律回退默认 / 拒绝写入。theme 新增 "follow"（3.1 跟随
+# 系统）后收敛于此，防止手改 config.json 塞进垃圾值静默破坏主题链路。
+_CONFIG_VALUE_WHITELISTS = {
+    "theme": THEME_VALUES,
 }
 
 
@@ -268,6 +303,9 @@ class ConfigManager:
     def __init__(self, json_path: str):
         self._json_path = json_path     # config.json 完整路径
         self._config = dict(DEFAULT_CONFIG)  # 内存配置（默认值副本）
+        # 最近一次 _load 的降级原因：None=正常加载；"corrupt"=文件损坏已重置默认
+        # （供 UI 层启动时做非阻塞提示，见成熟化路线图 1.1）
+        self.load_reset_reason = None
         self._load()
 
     # ---------------- 持久化 ----------------
@@ -275,7 +313,8 @@ class ConfigManager:
         """
         从磁盘加载配置。
         - 文件不存在 → 使用默认配置
-        - json 解析异常 → 使用默认配置
+        - json 解析异常/顶层结构异常 → 先备份 .corrupt.bak 再回退默认配置，
+          并记录 load_reset_reason="corrupt"（热键/AI key 等不再无痕迹丢失）
         - 配置项缺失/类型错误/取值越界 → 该项回退默认
         """
         if not os.path.exists(self._json_path):
@@ -285,7 +324,16 @@ class ConfigManager:
             with open(self._json_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, dict):
-                return  # 结构异常，用默认
+                raise ValueError("Invalid config structure: expected dict")
+
+            # schema 版本迁移：显式旧版本号 → 逐级跑 json_store.MIGRATIONS
+            # （config 当前为空表，机制预留）；缺失视为当前版本，存量零迁移。
+            # 迁移后版本号收敛到当前值，随下次 save() 落盘。
+            raw_version = data.get(CONFIG_VERSION_KEY)
+            if isinstance(raw_version, int) \
+                    and raw_version < STORE_VERSIONS.get("config", 1):
+                data = migrate_data("config", data, raw_version)
+                data[CONFIG_VERSION_KEY] = STORE_VERSIONS.get("config", 1)
 
             # 逐项校验并合并
             for key, default_val in DEFAULT_CONFIG.items():
@@ -300,18 +348,28 @@ class ConfigManager:
                     lo, hi = _CONFIG_RANGES[key]
                     if not (lo <= val <= hi):
                         continue
+                # 枚举取值白名单校验（theme：light / dark / follow）
+                whitelist = _CONFIG_VALUE_WHITELISTS.get(key)
+                if whitelist and val not in whitelist:
+                    continue
                 self._config[key] = val
-        except Exception:
-            # json 解析异常或文件损坏 → 保留默认配置
-            pass
+        except Exception as exc:
+            # 损坏先备份原文件再回退默认，与数据 JSON 的 .corrupt.bak 链路对齐
+            # （见 constants.backup_corrupt_file / json_store.load_records）
+            backup_corrupt_file(self._json_path)
+            get_logger().warning("config.json 损坏已备份并重置默认：%s（%s: %s）",
+                                 self._json_path, type(exc).__name__, exc)
+            self.load_reset_reason = "corrupt"
 
     def save(self):
         """
         统一保存：将内存配置一次性写入磁盘 json。
-        原子写入：先写临时文件，再替换原文件。
+        原子写入：先写临时文件，再替换原文件；
+        写前做当日一次滚动备份（float_data/backups/，失败不阻断保存）。
         """
         try:
             os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
+            rotate_backup(self._json_path)
             tmp_path = self._json_path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
@@ -347,6 +405,10 @@ class ConfigManager:
             lo, hi = _CONFIG_RANGES[key]
             if not (lo <= value <= hi):
                 return False
+        # 枚举取值白名单校验（theme：light / dark / follow）
+        whitelist = _CONFIG_VALUE_WHITELISTS.get(key)
+        if whitelist and value not in whitelist:
+            return False
         self._config[key] = value
         return True
 

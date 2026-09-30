@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QMenu, QToolButton,
+    QMenu, QToolButton,
     QStackedWidget, QListWidget, QListWidgetItem, QLineEdit, QDateEdit,
     QDialog, QFormLayout, QTextEdit, QScrollArea,
     QFrame, QSizePolicy, QGridLayout, QSystemTrayIcon, QApplication,
@@ -46,7 +46,7 @@ from PyQt6.QtCore import (
     Qt, QTimer, QDate, QPoint, QRect, QSize, pyqtSignal, QVariantAnimation,
     QEasingCurve, QPropertyAnimation, QRectF, QMimeData, QEvent,
 )
-from PyQt6.QtGui import QColor, QAction, QDesktopServices, QPainter, QPixmap, QFontMetrics, QFont, QIcon, QDrag, QImageReader
+from PyQt6.QtGui import QColor, QAction, QDesktopServices, QPainter, QPixmap, QFontMetrics, QFont, QIcon, QDrag, QImageReader, QShortcut, QKeySequence
 from PyQt6.QtCore import QUrl
 
 from src.glass_dialog import make_dialog_buttons
@@ -409,6 +409,11 @@ class CardWindow(QWidget):
         self._init_window()
         self._init_ui()
         self._init_context_menu()
+
+        # Esc → 关闭卡片（1.3）：与鼠标离开自动关闭同语义（hide），不退出
+        # 程序。窗口级 QShortcut，焦点在任意子控件（含输入框）上都触发。
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc.activated.connect(self.hide)
 
     # ---------------- 初始化 ----------------
     def _init_window(self):

@@ -60,6 +60,14 @@ TIME_ROLE = Qt.ItemDataRole.UserRole + 1
 # 绘制代理据此在条目左侧画类别色条
 CAT_ROLE = Qt.ItemDataRole.UserRole + 2
 
+# 条目前景色对应的主题 token（"primary" / "link" / None=用代理默认色）。
+# ★ 存 token 而不是 QColor：条目前景色是**创建时取色**烘进 item 的，
+#   QSS 覆盖不到；换主题时必须按 token 重新取色（见 apply_theme），
+#   否则列表停留在旧主题配色，要切一次页面（触发 refresh）才恢复。
+#   token 与色值同源（light.primary=#5BC0BE / link=#1976D2，
+#   dark.primary=#6FFFE9 / link=#64B5F6），替换掉原先的 theme 三元表达式。
+COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 3
+
 # 类别 -> 主题色 token 映射（色条颜色唯一来源，token 定义见 theme.py）：
 #   链接=link(蓝) / 代码=primary(青) / 路径=warn(橙) / 命令=danger(红) /
 #   文本=text_secondary(灰，弱化"普通"存在感)
@@ -571,6 +579,36 @@ class FragmentsPanel(QWidget):
         self._empty_state.setVisible(True)
         self._empty_state.raise_()
 
+    # ---- 主题同步（供 host._apply_theme 调用） ----
+    def apply_theme(self):
+        """换主题时把列表配色就地刷新一遍（不重建数据）。
+
+        必须存在的原因：列表有两处颜色**不经 QSS**——
+          1. 绘制代理的字色/时间色/高亮色/类别色条（``_delegate.set_theme``）
+          2. 条目前景色（日期分组行=主色、路径行=link 色，创建时烘进 item）
+        换主题只重设 QSS 时这两处都还是旧配色：浅色主题下深色字（#E4E8EE）
+        落在白底上几乎不可见，用户必须切一次页面（触发 refresh）才恢复。
+
+        只按 token 重取色 + 重绘，不走 refresh()：换主题与数据无关，
+        重建列表会白跑一遍筛选/搜索，还会多发一次 data_changed。
+        """
+        colors = get_colors(self._host.current_theme)
+        self._delegate.set_theme(colors)
+
+        lst = self._frag_list
+        lst.setUpdatesEnabled(False)
+        try:
+            for i in range(lst.count()):
+                token = lst.item(i).data(COLOR_TOKEN_ROLE)
+                if not token:
+                    continue          # 普通条目：前景色留空，由代理取 _base_color
+                color = QColor(colors.get(token, ""))
+                if color.isValid():
+                    lst.item(i).setForeground(color)
+        finally:
+            lst.setUpdatesEnabled(True)
+        lst.viewport().update()
+
     # ---- 刷新入口（供 host.refresh_page 调用） ----
     def refresh(self, preserve_view: bool = True):
         """刷新碎片列表显示：按日期分组，每条只显示内容+时间(时分)。
@@ -619,9 +657,8 @@ class FragmentsPanel(QWidget):
                 flags = date_item.flags()
                 date_item.setFlags(flags & ~Qt.ItemFlag.ItemIsSelectable
                                    & ~Qt.ItemFlag.ItemIsEnabled)
-                date_item.setForeground(
-                    QColor("#5BC0BE") if theme == "light" else QColor("#6FFFE9")
-                )
+                date_item.setData(COLOR_TOKEN_ROLE, "primary")
+                date_item.setForeground(QColor(colors["primary"]))
                 f_font = date_item.font()
                 f_font.setBold(True)
                 date_item.setFont(f_font)
@@ -635,8 +672,8 @@ class FragmentsPanel(QWidget):
             item.setData(TIME_ROLE, time_part)
             item.setData(CAT_ROLE, f.category)
             if f.type in ("clipboard_path", "file_pickup"):
-                item.setForeground(QColor("#1976D2") if theme == "light"
-                                   else QColor("#64B5F6"))
+                item.setData(COLOR_TOKEN_ROLE, "link")
+                item.setForeground(QColor(colors["link"]))
             icon = TYPE_ICONS.get(f.type, "📄")
             label = TYPE_LABELS.get(f.type, "未知")
             cat_label = CATEGORY_LABELS.get(f.category, f.category)

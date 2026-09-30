@@ -7,8 +7,12 @@
 ; 设计口径：
 ;   · per-user 安装（PrivilegesRequired=lowest）→ 默认装到
 ;     {localappdata}\Programs\FloatPulse，不需要 UAC，学校/公司机器也能装
-;   · 用户数据不随卸载删除：float_data\（碎片/笔记/任务/知识库）是运行期
-;     生成的，Inno 只删它自己装过的文件 → 卸载后数据自动留在原地
+;   · 用户数据与安装目录解耦（成熟化 2.2 双轨制）：安装版数据保存在
+;     %APPDATA%\FloatPulse\float_data\（碎片/笔记/任务/知识库），升级/
+;     重装换目录数据不跟随丢失；zip 便携版走 portable.marker 标记留在
+;     exe 同目录，dist2 组包天然没有该标记 → 本安装包自动落在安装版轨道
+;   · 用户数据不随卸载删除：float_data 是运行期生成的，Inno 只删它自己
+;     装过的文件，[UninstallDelete] 刻意留空 → 卸载后数据自动留在 APPDATA
 ;   · 不做静默更新、不写注册表 Run 项（开机自启用程序内设置，单一来源）
 ;   · 检测到程序在跑时提示关闭（AppMutex = single_instance.py 的打包环境名）
 ;   · 界面语言用 [Messages] 内嵌简中覆盖（Default.isl 为底），零外部依赖
@@ -71,8 +75,8 @@ ReadyLabel1=安装程序已准备好安装 [name] 到你的电脑。
 ReadyLabel2a=点击「安装」开始安装，或点击「上一步」修改设置。
 InstallingLabel=正在安装 [name]，请稍候…
 FinishedHeadingLabel=[name] v{#APP_VERSION} 安装完成
-FinishedLabelNoIcons=[name] v{#APP_VERSION} 已安装到你的电脑。%n%n你的数据保存在安装目录的 float_data 文件夹，卸载程序不会删除它。
-FinishedLabel=[name] v{#APP_VERSION} 已安装到你的电脑。%n%n你的数据保存在安装目录的 float_data 文件夹，卸载程序不会删除它。
+FinishedLabelNoIcons=[name] v{#APP_VERSION} 已安装到你的电脑。%n%n你的数据保存在 %APPDATA%\FloatPulse 文件夹（位于安装目录之外），卸载程序不会删除它。
+FinishedLabel=[name] v{#APP_VERSION} 已安装到你的电脑。%n%n你的数据保存在 %APPDATA%\FloatPulse 文件夹（位于安装目录之外），卸载程序不会删除它。
 ClickFinish=点击「完成」退出安装向导。
 SelectStartMenuFolderDesc=选择「开始菜单」文件夹位置
 SelectStartMenuFolderLabel3=安装程序将在以下「开始菜单」文件夹中创建程序的快捷方式。

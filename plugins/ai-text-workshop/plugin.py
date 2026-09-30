@@ -40,7 +40,7 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QPlainTextEdit, QPushButton,
-    QVBoxLayout, QWidget, QLabel, QLineEdit,
+    QVBoxLayout, QWidget, QLineEdit,
 )
 
 from src.plugin_api import BallAction, BallPlugin, PluginContext

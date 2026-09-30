@@ -29,6 +29,21 @@ from src.plugin_net import (http_get_json, http_post_json,   # noqa: E402
                              make_async_getter, make_async_poster)
 
 
+# ---------------- 模块级开关：临时放行内网闸 ----------------
+@pytest.fixture(scope="module", autouse=True)
+def _allow_private_network():
+    """本模块全部用例都打 127.0.0.1 本地测试服务，须临时放行 SSRF 闸。
+
+    net_guard 默认拦截本地/内网地址（插件桥的 SSRF 防护，生产插件
+    流量走外网不受影响）；测试服务在本机回环上，故模块内放行、
+    模块结束恢复默认拦截（开关泄漏会被 test_net_guard 的重置夹具兜底）。
+    """
+    from src import net_guard
+    net_guard.set_allow_private_network(True)
+    yield
+    net_guard.set_allow_private_network(False)
+
+
 # ---------------- 本地测试服务器 ----------------
 class _EchoHandler(BaseHTTPRequestHandler):
     """POST /echo → 回显 JSON；POST /deny → 404；其他 → 404"""

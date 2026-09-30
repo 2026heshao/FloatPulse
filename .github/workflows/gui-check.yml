@@ -1,0 +1,57 @@
+# GUI 夜检（离屏端到端验证）——成熟化 4.2 前置
+# --------------------------------------------------------------------
+# ★ 当前仅 workflow_dispatch 手动触发：先在 Actions 页手动跑绿几次，
+#   把偶发不稳定的脚本剔出下方 --only 名单后，再放开定时档——把 on: 换成
+#       on:
+#         schedule:
+#           - cron: "0 19 * * *"   # 每天北京时间凌晨 3 点
+#         workflow_dispatch:       # 保留手动档，补跑/排查用
+#
+# 名单口径（≤8 个精选子集，覆盖主链路，不贪多）：
+#   首启        verify_splash            启动闪屏可见/动画/阶段文案
+#   导航        verify_nav_groups        侧栏分组契约（2026-09-29 重构钉子）
+#               verify_nav_live_letway   拖拽实时让位机制（run_gui_check 默认脚本）
+#   设置        verify_settings_groups   设置分组 + 悬浮球自动隐藏开关
+#   插件安装链路 verify_plugin_loader     目录扫描 → 注册表 → 菜单（.fpplug 解压安装）
+#               verify_plugin_store      商店/安装双目录模型（卸载不丢源包）
+#               verify_plugins_page      插件中心页 + 使用说明查看器
+#   主题        verify_theme_live_switch  换主题即时跟随（含真实 MainWindow 像素判据）
+name: GUI Check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gui-check:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 依赖装法对齐 tests.yml（PyQt6 走 requirements.txt）
+      - name: 安装依赖
+        run: pip install -r ../requirements.txt
+
+      # run_gui_check.py 批量档：逐个脚本独立子进程 + 独立超时，任一失败整体红；
+      # 运行器自身也会注入 QT_QPA_PLATFORM=offscreen，这里显式声明只为可读性
+      - name: 离屏 GUI 精选验证（run_gui_check.py --only 精选子集）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python tools/run_gui_check.py --only verify_splash,verify_nav_groups,verify_nav_live_letway,verify_settings_groups,verify_plugin_loader,verify_plugin_store,verify_plugins_page,verify_theme_live_switch
+
+      # 离屏截图留档：nav_groups 写 v4/build/shots/，plugins_page 写 v4/docs/images/
+      - name: 上传离屏截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-check-shots
+          path: |
+            v4/build/shots/
+            v4/docs/images/*.png
+          if-no-files-found: ignore

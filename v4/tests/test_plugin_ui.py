@@ -187,7 +187,7 @@ def test_theme_qss_reused_from_host(qapp):
 # ---------------- H ----------------
 def test_reexports_available(qapp):
     """官方再导出的组件都可以直接用"""
-    dlg = PluginDialog(None, title="t")
+    _ = PluginDialog(None, title="t")  # 构造即校验再导出可用（保留引用防提前回收）
     assert isinstance(make_separator(), QWidget)
     assert make_section_label("标题").objectName() == "sectionLabel"
     assert make_hint_label("提示").objectName() == "hintLabel"

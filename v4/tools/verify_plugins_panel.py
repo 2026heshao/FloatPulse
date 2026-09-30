@@ -60,7 +60,7 @@ check("A. 面板文案不再出现错误的安装路径 float_data/plugins",
 # 不再用「与程序同级」这类相对说法——两个目录都直接写绝对路径。
 check("B. 文案指向插件安装目录 plugins/，且引导走商店安装",
       "插件安装目录" in blob and ".fpplug" in blob and "安装" in blob,
-      f"命中={[l for l in labels if '插件安装目录' in l][:1]}")
+      f"命中={[lb for lb in labels if '插件安装目录' in lb][:1]}")
 
 # ---------- C. 压缩包后缀是 .fpplug（与加载器一致） ----------
 check("C. 压缩包后缀写作 .fpplug（与加载器实际支持一致）",
@@ -126,7 +126,7 @@ check("G. 无插件时空态引导可见、计数 0",
 # ====================================================================
 # 2026-09-27 增强：加载失败可感知 + 单插件启停 + 重新扫描
 # ====================================================================
-from src.plugin_api import ActionRegistry, BallAction, BallPlugin  # noqa: E402
+from src.plugin_api import ActionRegistry  # noqa: E402
 from src.plugin_loader import (                                     # noqa: E402
     PluginLoader, stage_label,
 )

@@ -40,8 +40,6 @@ from PyQt6.QtWidgets import QApplication
 
 from src.fragment_manager import (
     FragmentManager,
-    TYPE_CLIPBOARD_TEXT,
-    TYPE_CLIPBOARD_PATH,
 )
 
 # 剪贴板图片 MIME → 落盘扩展名（md.hasImage() 为假时的兜底路径）

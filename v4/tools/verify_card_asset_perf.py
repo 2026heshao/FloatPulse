@@ -78,7 +78,7 @@ def main() -> int:
     assert len(cache) == 8 and all(v is not False for v in cache.values()), \
         f"A. 缩略图缓存未填满: {len(cache)}"
     assert card._asset_page_dirty is False, "A. 刷新后脏标记应为 False"
-    ok(f"A. 首次进入素材页：8 项缓存就绪，脏标记已清")
+    ok("A. 首次进入素材页：8 项缓存就绪，脏标记已清")
 
     # ---------------- B. 来回切页不重建 ----------------
     calls = {"n": 0}
@@ -132,7 +132,8 @@ def main() -> int:
     pump(app, 100)
     t0 = time.perf_counter()
     card.notify_assets_changed()             # 可见 + 当前页 task? 先切走
-    card._switch_mode("task"); pump(app, 50)
+    card._switch_mode("task")
+    pump(app, 50)
     card._asset_page_dirty = True
     t0 = time.perf_counter()
     card._switch_mode("asset")

@@ -20,7 +20,6 @@
 跑法：python tools/run_gui_check.py tools/verify_kb_search.py
 产物：build/shots/kb-search-page-{light,dark}.png
 """
-import json
 import logging
 import os
 import shutil

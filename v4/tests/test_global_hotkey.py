@@ -55,3 +55,25 @@ def test_register_unregister_cycle():
             assert not mgr.is_registered("Ctrl+Alt+F9")
     finally:
         mgr.unregister_all()
+
+
+def test_unregister_all_idempotent():
+    """unregister_all 连调多次必须安全（1.4 退出收尾可能重复触发）"""
+    mgr = GlobalHotkeyManager()
+    try:
+        ok = mgr.register("Ctrl+Alt+F11", lambda: None)
+        if ok:  # 键位未被占用时才可断言注册态
+            assert mgr.is_registered("Ctrl+Alt+F11")
+        mgr.unregister_all()
+        assert not mgr._hotkeys
+        mgr.unregister_all()      # 第二次：无注册可注销，不得抛异常
+        assert not mgr._hotkeys
+    finally:
+        mgr.unregister_all()      # 兜底再清一次（同样幂等）
+
+
+def test_unregister_all_on_fresh_manager():
+    """从未注册过的管理器直接 unregister_all 也安全（启动早期退出场景）"""
+    mgr = GlobalHotkeyManager()
+    mgr.unregister_all()
+    assert not mgr._hotkeys

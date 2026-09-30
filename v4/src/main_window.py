@@ -35,20 +35,15 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
     QStackedWidget, QButtonGroup,
-    QListWidget, QListWidgetItem, QComboBox, QLineEdit, QTextEdit,
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
-    QFrame, QMessageBox, QMenu, QSplitter, QApplication, QFileDialog,
-    QScrollArea, QTableWidget, QTableWidgetItem,
-    QAbstractItemView, QHeaderView, QInputDialog, QSlider,
-    QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
-    QSpacerItem, QSizePolicy,
+    QFrame, QMenu, QApplication, QFileDialog,
+    QScrollArea, QSpacerItem, QSizePolicy,
 )
 from PyQt6.QtCore import (
-    Qt, QPoint, pyqtSignal, QDate, QTimer, QRect, QRectF, QSize, QEvent,
+    Qt, QPoint, pyqtSignal, QTimer, QRect, QRectF, QEvent,
     QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
     QSequentialAnimationGroup,
 )
-from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QPixmap, QShortcut, QKeySequence
+from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QShortcut, QKeySequence
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
@@ -262,6 +257,7 @@ class MainWindow(QWidget):
     plugins_changed = pyqtSignal(bool)           # 悬浮球外置插件总闸变更
     pomodoro_changed = pyqtSignal()              # 番茄钟设置（开关/时长/自动休息）变更
     task_focus_requested = pyqtSignal(int, str)  # 任务页请求对某任务开始专注（task_id, title）
+    hidden_to_tray = pyqtSignal()                # 主窗口被收进托盘时发射（3.3：宿主提示一次）
 
     def __init__(self, task_manager, note_manager, fragment_manager,
                  docx_manager, config_manager, clipboard_monitor,
@@ -436,10 +432,9 @@ class MainWindow(QWidget):
     # ==================================================================
     def _init_shortcuts(self):
         """初始化主窗口快捷键"""
-        # ESC: 退出整个程序（主窗口打开时也能生效）
-        quit_shortcut = QShortcut(QKeySequence("Escape"), self)
-        quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        quit_shortcut.activated.connect(self._quit_app)
+        # 注（1.3）：主窗口 Esc 不绑定任何动作——旧实现把 Esc 绑成
+        # ApplicationShortcut 退出整个程序，与应用内其他表面的 Esc 语义
+        # （关卡/取消）冲突且易误杀进程。退出只走托盘菜单 / 悬浮球右键。
 
         # Ctrl+W 或 Ctrl+H: 隐藏主窗口（不用 Ctrl+Q，它是 Qt 默认退出快捷键）
         hide_shortcut1 = QShortcut(QKeySequence("Ctrl+W"), self)
@@ -974,6 +969,8 @@ class MainWindow(QWidget):
             # 托盘图标常驻，始终有唤回入口 → 隐藏到托盘
             event.ignore()
             self.hide()
+            # 3.3：通知宿主（首次时托盘气泡提示一次，tray_hint_shown 防重复）
+            self.hidden_to_tray.emit()
             return
         # 兼容旧行为：按悬浮球可见性决定隐藏还是退出
         ball_visible = self._config.get("ball_visible", True)
@@ -2577,6 +2574,14 @@ class MainWindow(QWidget):
         # 任务面板行委托为自绘，配色需显式同步（QSS 无法覆盖 delegate 绘制）
         if getattr(self, "_page_tasks", None) is not None:
             self._page_tasks.apply_theme()
+        # 碎片列表同理：代理字色 + 条目前景色（日期行/路径行）都是创建时
+        # 取色烘进 item 的，QSS 刷不到 —— 不显式同步的话切主题后列表停在
+        # 旧配色（深色字落在浅色底上几乎不可见），要切一次页面才恢复。
+        if getattr(self, "_page_fragments", None) is not None:
+            self._page_fragments.apply_theme()
+        # 知识库面板：只有"检测到外部修改"警告文字是 inline stylesheet 着色
+        if getattr(self, "_page_knowledge", None) is not None:
+            self._page_knowledge.apply_theme()
         # 设置页的自绘开关（ToggleSwitch）与主题按钮也要跟随主题
         if getattr(self, "_page_settings", None) is not None:
             self._page_settings.apply_theme()

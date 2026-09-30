@@ -445,7 +445,7 @@ check("F7 vault 未配置 → 写入按钮置灰且给出原因",
 # ====================================================================
 from src.glass_dialog import GlassDialog            # noqa: E402
 from src.plugin_ui import PluginDialog              # noqa: E402
-from src.theme import DEFAULT_THEME, get_colors     # noqa: E402
+from src.theme import get_colors     # noqa: E402
 from PyQt6.QtCore import Qt as _Qt                  # noqa: E402
 
 check("F8 对话框继承官方玻璃基类（PluginDialog → GlassDialog）",

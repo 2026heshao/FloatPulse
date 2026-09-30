@@ -44,7 +44,7 @@ from PyQt6.QtWidgets import QStyledItemDelegate, QStyle
 
 from src.constants import CHECK_BOUNCE_SCALE
 from src.task_manager import (
-    STATE_NONE, STATE_OVERDUE, STATE_TODAY, KIND_ROW, KIND_HEADER,
+    STATE_NONE, STATE_OVERDUE, STATE_TODAY, KIND_HEADER,
 )
 
 
@@ -180,14 +180,13 @@ class TaskItemDelegate(QStyledItemDelegate):
         cb_rect = self._checkbox_rect(option.rect)
         title_rect = self._title_rect(option.rect)
         if cb_rect.contains(pos):
-            hit = True
+            pass  # 复选框命中，放行
         elif title_rect.contains(pos):
             # 带 Ctrl / Shift 时让位给多选，避免误触发完成
             mods = event.modifiers()
             if mods & (Qt.KeyboardModifier.ControlModifier
                        | Qt.KeyboardModifier.ShiftModifier):
                 return False
-            hit = True
         else:
             return False
 

@@ -10,7 +10,8 @@
   2. 鼠标悬停悬浮球 → 自动弹出卡片；鼠标离开球+卡片区域 → 自动关闭
   3. 拖拽悬浮球时不显示卡片
   4. 卡片弹窗支持「知识卡片 / 日程任务 / 临时笔记」三模式切换
-  5. 右键悬浮球 / 右键卡片 / 按 Esc 键 → 退出程序
+  5. 右键悬浮球 / 右键卡片 → 退出程序；Esc 只关闭当前表面（卡片/快捕条/
+     截图框选/钉图/便签），不退出程序（1.3）
   6. 悬浮球靠近桌面上/下/左/右任一边缘 → 自动吸边隐藏一半；鼠标移近滑出
   7. 单实例限制，防止重复启动
   8. 拖拽文件到悬浮球 → 自动加入碎片池
@@ -45,7 +46,7 @@ import threading
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMenu, QMessageBox,
-    QGraphicsDropShadowEffect, QSystemTrayIcon,
+    QSystemTrayIcon,
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QTimer, QPropertyAnimation, QEasingCurve,
@@ -53,7 +54,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QFontMetrics, QPen, QAction, QCursor,
-    QShortcut, QKeySequence, QIcon, QPixmap, QPainterPath, QRadialGradient,
+    QIcon, QRadialGradient,
 )
 
 # 引入独立模块
@@ -71,7 +72,7 @@ from src.temp_asset_manager import TempAssetManager, REJECT_TOO_LARGE
 from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
-from src.theme import get_menu_qss, get_colors
+from src.theme import get_menu_qss, get_colors, resolve_theme_name
 from src.controls import ScreenToast
 from src.constants import sanitize_filename, DEFAULT_THEME
 from src.pomodoro import (
@@ -501,7 +502,10 @@ class FloatingBall(QWidget):
         self._clipboard_monitor = clipboard_monitor
         self._main_window = main_window
         self._temp_asset_manager = temp_asset_manager
-        self._theme = (config_manager.get("theme", DEFAULT_THEME)
+        # 主题取 config 原始值（可能是 "follow"）→ 解析成具体主题再进
+        # 内部链路：_BallSurface / 卡片窗口都按 light|dark 显式比对，
+        # 解析统一收口在 theme.resolve_theme_name（3.1 跟随系统）
+        self._theme = (resolve_theme_name(config_manager.get("theme", DEFAULT_THEME))
                        if config_manager else DEFAULT_THEME)
         # 动画速度档位（0.5-2.0，统一缩放各类动画时长）
         try:
@@ -2151,10 +2155,35 @@ def _find_icon_file() -> str:
     return find_icon_file()
 
 
+def _shutdown_once(state, steps) -> bool:
+    """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
+
+    _safe_quit（托盘退出）与 aboutToQuit（事件循环结束）都会触发收尾，
+    二者收口到这里，靠 state["done"] 保证连调多次只有第一次生效。
+
+    state : {"done": bool} 收尾状态标记（首次调用置 True）
+    steps : [(描述, 可调用)]；可调用抛任何异常（含组件尚未创建的
+            NameError——启动早期异常退出时收尾仍可能被触发）都只写日志
+    返回  True=本次实际执行；False=已收尾过，幂等跳过
+    """
+    if state.get("done"):
+        return False
+    state["done"] = True
+    from src.logger import get_logger
+    log = get_logger()
+    for desc, fn in steps:
+        try:
+            fn()
+        except Exception as exc:                  # noqa: BLE001
+            log.warning(f"[退出] {desc}失败：{exc}")
+    log.info("[退出] 资源收尾完成（热键注销 / AI 本地服务 / 剪贴板监听）")
+    return True
+
+
 def main():
     app = QApplication(sys.argv)
     # 禁用"最后一个窗口关闭时自动退出"——悬浮球/主窗口可能同时隐藏，
-    # 程序应保持后台运行，仅通过显式退出（右键/Esc/closeEvent）退出
+    # 程序应保持后台运行，仅通过显式退出（托盘菜单/悬浮球右键/closeEvent）退出
     app.setQuitOnLastWindowClosed(False)
 
     # ---- 设置程序图标（影响任务栏和窗口标题栏图标）----
@@ -2182,8 +2211,16 @@ def main():
     singleton.create_event()
 
     # ---- 定位数据文件（统一收纳进 float_data/，路径函数见 src/app_paths.py）----
-    from src.app_paths import get_data_dir, get_docx_path
+    from src.app_paths import get_data_dir, get_docx_path, get_data_root
     base_dir = _get_base_dir()
+    # 2.2 双轨：logger / TempAssetManager 等自行拼「base_dir + float_data」
+    # 的调用方，安装版要改传数据根（源码/便携下与 base_dir 同值，行为不变）
+    data_base = get_data_root()
+    # 2.2 安装版数据迁移：旧版数据写在 exe 同目录 float_data/，安装版数据根
+    # 在 %APPDATA%\FloatPulse。必须先于任何数据文件创建询问一次（检测零
+    # 副作用；便携/源码/已迁移过一律静默跳过，同意后旧目录改名留备份）。
+    from src.portable_migrate import maybe_prompt_migrate
+    _migrate_result = maybe_prompt_migrate(exe_dir=base_dir)
     data_dir = get_data_dir(base_dir)
     docx_path = get_docx_path(base_dir)
     schedule_path = os.path.join(data_dir, "schedule.json")
@@ -2193,17 +2230,31 @@ def main():
     config_path = os.path.join(data_dir, "config.json")
 
     # ---- 初始化日志系统（自动创建 float_data/app.log）----
-    from src.logger import init_logger, install_excepthook, get_logger
-    logger = init_logger(base_dir, level=logging.INFO)
+    from src.logger import (init_logger, install_excepthook, get_logger,
+                            mark_session_start, mark_session_end,
+                            previous_session_abnormal)
+    logger = init_logger(data_base, level=logging.INFO)
     install_excepthook()  # 替换全局异常钩子为带日志记录的版本
+    # 3.2 崩溃可感知：判定必须发生在本会话写「启动」标记**之前**——
+    # 否则读到的是当前会话的 start（无 end），永远误报。结果存到
+    # prev_abnormal，等托盘建好后（启动完成段）再提示。
+    prev_abnormal = previous_session_abnormal()
+    mark_session_start()   # [会话] 启动 vX.Y.Z（与 aboutToQuit 的正常退出标记成对）
     logger.info("=" * 50)
     logger.info("程序启动")
     logger.info(f"base_dir = {base_dir}")
     logger.info(f"data_dir = {data_dir}")
+    if _migrate_result:
+        logger.info("[迁移] 旧版数据迁移结果：%s", _migrate_result)
 
     # ---- 配置管理器 ----
     config_manager = ConfigManager(config_path)
     logger.info("配置管理器初始化完成")
+    # 3.1 跟随系统：config 可能存 "follow"——启动链路各窗口统一吃解析后
+    # 的具体主题（light/dark），"follow" 原始值只留在 config 与主窗口；
+    # 运行期切换走 main_window.theme_changed 广播（同样发具体主题名）。
+    _resolved_theme = resolve_theme_name(
+        config_manager.get("theme", DEFAULT_THEME))
 
     # ---- 启动闪屏 + 分阶段打点 ----
     # 启动序列是同步的，功能/插件增多后可达数秒：闪屏让等待可见，
@@ -2211,7 +2262,7 @@ def main():
     # _mark 在每个阶段开始时调用：结算上一段耗时 → 更新闪屏文案 →
     # 泵一次事件循环（动画在同步段之间才有机会转起来）。
     from src.splash import LaunchSplash
-    splash = LaunchSplash(theme=config_manager.get("theme", "light"))
+    splash = LaunchSplash(theme=_resolved_theme)
     splash.start()
     _boot = {"t0": time.monotonic(), "last": time.monotonic(),
              "stage": "初始准备"}
@@ -2279,13 +2330,13 @@ def main():
     )
     sticky_manager = StickyNoteManager(
         note_manager, sticky_store,
-        theme=config_manager.get("theme", DEFAULT_THEME),
+        theme=_resolved_theme,
         task_manager=task_manager)
 
     # ---- 临时素材管理器（拖图片/文件到悬浮球时复制保存）----
     _mark("初始化素材与导航")
     temp_asset_manager = TempAssetManager(
-        base_dir,
+        data_base,
         max_assets=config_manager.get("temp_asset_max_count", 50),
         max_days=config_manager.get("temp_asset_max_days", 30),
         max_file_mb=config_manager.get("temp_asset_max_file_mb", 50),
@@ -2381,6 +2432,44 @@ def main():
                 get_logger().info("托盘点击 → 显示主窗口")
     _tray_icon.activated.connect(_on_tray_activated)
 
+    # ---- 3.3 首次「关窗收进托盘」→ 托盘气泡提示一次 ----
+    # 关主窗口默认收进托盘（close_to_tray=True），但此前无任何说明，
+    # 新用户容易以为程序丢了。用 config 的 tray_hint_shown 防重复，
+    # 提示后置 True 并落盘。主窗口只发信号（hidden_to_tray），
+    # 不直接戳托盘/配置——分层与既有通信模式一致。
+    def _on_hidden_to_tray():
+        if config_manager.get("tray_hint_shown", False):
+            return
+        _tray_icon.showMessage(
+            "已收进托盘",
+            "程序仍在后台运行——从托盘图标或悬浮球随时找回。",
+            QSystemTrayIcon.MessageIcon.Information, 6000)
+        config_manager.set("tray_hint_shown", True)
+        config_manager.save()
+        get_logger().info("首次收进托盘提示已展示（tray_hint_shown → True）")
+    main_window.hidden_to_tray.connect(_on_hidden_to_tray)
+
+    # ---- 1.1 config.json 损坏提示：启动时若发生「损坏重置」，托盘告知一次 ----
+    # 此前损坏是静默回退默认，用户的热键/AI key/主题无痕迹丢失；
+    # 损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
+    if getattr(config_manager, "load_reset_reason", None) == "corrupt":
+        _tray_icon.showMessage(
+            "设置已重置",
+            "config.json 已损坏，程序已恢复默认设置；"
+            "原文件备份为 float_data/config.json.corrupt.bak。",
+            QSystemTrayIcon.MessageIcon.Warning, 8000)
+        get_logger().warning("[启动] config.json 损坏，已回退默认配置并托盘提示用户")
+
+    # ---- 3.2 上次会话可能异常退出 → 托盘告知一次（一次性，不落 config）----
+    # prev_abnormal 在 mark_session_start 之前已判定（否则会读到本次会话
+    # 的 start 标记而恒真）；拖到托盘建好后再提示，不打断启动闪屏。
+    if prev_abnormal:
+        _tray_icon.showMessage(
+            "上次可能异常退出",
+            "如遇问题可把 float_data/app.log 提供给开发者",
+            QSystemTrayIcon.MessageIcon.Warning, 8000)
+        get_logger().warning("[启动] 检测到上次会话可能异常退出，已托盘提示")
+
     # ==================================================================
     # 信号槽桥梁：大小窗口数据双向同步
     # ==================================================================
@@ -2390,8 +2479,27 @@ def main():
     ball._card_window.set_asset_manager(temp_asset_manager)
     ball._card_window.set_fragment_manager(fragment_manager)
 
+    # ---- 退出显式收尾（1.4）：热键注销 / AI 本地服务 / 剪贴板监听 ----
+    # 各组件在下方集成段才创建（晚绑定），首次调用必然发生在事件循环期
+    _shutdown_state = {"done": False}
+
+    def _shutdown_resources():
+        """幂等收尾：三个热键管理器注销 + AI_SERVER.stop + 剪贴板监听停止"""
+        _shutdown_once(_shutdown_state, [
+            # global_hotkey.py：程序退出前务必 unregister_all()，否则
+            # 组合键残留占用到进程结束
+            ("快捕条热键注销", lambda: hotkey_mgr.unregister_all()),
+            ("截图热键注销", lambda: shot_hotkey_mgr.unregister_all()),
+            ("插件热键注销", lambda: plugin_hotkey_mgr.unregister_all()),
+            # AI 本地服务（llama-server）：退出时主动停止，不再只靠 JobObject 兜底
+            ("AI 本地服务停止", lambda: AI_SERVER.stop()),
+            # 剪贴板监听断开（stop 自身幂等：未启动时直接返回）
+            ("剪贴板监听停止", lambda: clipboard_monitor.stop()),
+        ])
+
     # 安全退出函数：重置卡片状态为默认首页，再退出程序
     def _safe_quit():
+        _shutdown_resources()
         # 关闭截图覆盖层与全部钉图（V4 截图钉屏；晚绑定：集成代码在其后定义）
         try:
             screenshot_pin.close_all()
@@ -2409,10 +2517,9 @@ def main():
         main_window._allow_close = True
         QApplication.quit()
 
-    # 全局 ESC 快捷键：通过安全退出程序
-    quit_shortcut = QShortcut(QKeySequence("Escape"), app)
-    quit_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-    quit_shortcut.activated.connect(_safe_quit)
+    # 注（1.3）：不再注册「全局 Esc → 退出程序」快捷键——此前任何窗口按
+    # Esc 都会杀掉整个进程，与桌面软件惯例相反。Esc 语义逐表面收口：
+    # 卡片 / 快捕条 / 截图框选 / 钉图 / 便签各自关闭或取消，主窗口 Esc 无动作。
 
     # ---- 托盘右键菜单（F1）：显示/隐藏主窗口、显示/隐藏悬浮球、退出程序 ----
     def _toggle_main_window():
@@ -2527,6 +2634,43 @@ def main():
     QTimer.singleShot(4000, _check_task_reminders)          # 启动 4 秒后首次检查
     QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)  # 之后每天 9:00
 
+    # ---- 2.3 启动后延迟静默检查更新（默认开，每天至多一次）----
+    # 立场不变：不自动下载、失败静默、不携带任何本机数据。延迟 15 秒
+    # 错开启动高峰；频率判定走 update_checker 的纯逻辑（should_check_now
+    # / mark_checked），托盘只在真的发现新版本时打扰一次。
+    def _silent_update_check():
+        from src import update_checker
+        from src.app_version import APP_VERSION
+        from src.plugin_net import make_async_getter
+        if not update_checker.should_check_now(config_manager):
+            return
+        # 发起即记账（成功失败都算当天已查），写盘在这里负责
+        update_checker.mark_checked(config_manager)
+        config_manager.save()
+
+        def _on_silent_result(result: dict):
+            if not result.get("ok"):
+                return                  # 离线 / 限流：静默，不扰民
+            tag = update_checker.extract_tag(result.get("body") or "")
+            if not tag or not update_checker.is_newer(tag):
+                return                  # 无新版：不动 latest_known_version
+            config_manager.set("latest_known_version", tag)
+            config_manager.save()
+            _tray_icon.showMessage(
+                f"发现新版本 {tag}",
+                f"当前 v{APP_VERSION}——到 设置 → 关于 查看更新内容",
+                QSystemTrayIcon.MessageIcon.Information, 8000)
+            get_logger().info(
+                f"[更新] 静默检查发现新版本 {tag}（当前 v{APP_VERSION}）")
+
+        getter = make_async_getter()
+        if not getter(update_checker.RELEASES_API_URL,
+                      update_checker.check_headers(),
+                      update_checker.CHECK_TIMEOUT_S, _on_silent_result):
+            pass  # 桥拒绝时也会回调一次 ok=False 的结果，静默即可
+
+    QTimer.singleShot(15000, _silent_update_check)
+
     # ---- 全局快速捕捉条（热键呼出 → 一句话进碎片池）----
     _mark("注册热键")
     from src.global_hotkey import GlobalHotkeyManager
@@ -2535,7 +2679,7 @@ def main():
     hotkey_mgr = GlobalHotkeyManager()
     app.eventDispatcher().installNativeEventFilter(hotkey_mgr)
 
-    quick_capture = QuickCaptureWindow(fragment_manager, theme=config_manager.get("theme", "light"), config_manager=config_manager)
+    quick_capture = QuickCaptureWindow(fragment_manager, theme=_resolved_theme, config_manager=config_manager)
 
     def _apply_quick_capture():
         """按当前配置重注册快速捕捉热键（开关/热键串变更/恢复默认时调用）"""
@@ -2561,7 +2705,7 @@ def main():
     shot_hotkey_mgr = GlobalHotkeyManager()
     app.eventDispatcher().installNativeEventFilter(shot_hotkey_mgr)
     screenshot_pin = ScreenshotPinController(
-        theme=config_manager.get("theme", "dark")
+        theme=_resolved_theme
     )
 
     def _apply_screenshot_hotkey():
@@ -2599,6 +2743,10 @@ def main():
     # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
     #       只把「新增的专精单一功能」外置。详见 docs/插件开发说明.md
     _mark("加载插件")
+    # 1.5 配套：本地 AI 端点（llama-server / 回环 base_url）登记进插件桥
+    # 回环白名单，否则 SSRF 闸会把本地 AI 请求一并拦掉
+    from src.ai_server import sync_loopback_allowlist
+    sync_loopback_allowlist(config_manager)
     from src.plugin_api import ActionRegistry, PluginContext, PluginData
     from src.plugin_loader import PluginLoader
     from src.plugin_net import make_async_poster
@@ -3142,6 +3290,24 @@ def main():
     # 3b. 主题切换 → 桌面便签全部换肤
     main_window.theme_changed.connect(sticky_manager.apply_theme)
 
+    # 3c. 系统深浅色变化 → 「跟随系统」模式整链路换肤（3.1）
+    # 只复用既有换主题路径：主窗口 _apply_theme 重取配色（get_colors 内部
+    # 经 resolve_theme_name 现读系统 scheme），theme_changed 再把具体主题
+    # 名广播给球 / 卡片 / 便签 / 快捕条 / 截图钉屏；显式 light/dark 模式忽略。
+    def _on_system_scheme_changed(_scheme):
+        if config_manager.get("theme", DEFAULT_THEME) != "follow":
+            return
+        resolved = resolve_theme_name("follow")
+        if main_window._theme == "follow":
+            main_window._apply_theme()
+        main_window.theme_changed.emit(resolved)
+        get_logger().info(f"[主题] 系统深浅色变化，跟随系统 → {resolved}")
+
+    from PyQt6.QtGui import QGuiApplication as _QGuiApp
+    _scheme_hints = _QGuiApp.instance().styleHints() if _QGuiApp.instance() else None
+    if _scheme_hints is not None and hasattr(_scheme_hints, "colorSchemeChanged"):
+        _scheme_hints.colorSchemeChanged.connect(_on_system_scheme_changed)
+
     # 4. 剪贴板新增碎片 → 大窗口刷新碎片页面（若可见）+ 球体脉冲反馈
     def _on_fragment_added(_content=None):
         main_window.refresh_fragments()
@@ -3282,7 +3448,15 @@ def main():
 
     # ---- 退出诊断日志 ----
     def _on_about_to_quit():
+        # 3.2 正常退出标记：必须排在所有退出日志之前（见 mark_session_end），
+        # 下次启动的 previous_session_abnormal 以它为「上次会话善终」的依据
+        mark_session_end()
         get_logger().info("程序准备退出（aboutToQuit 信号触发）")
+        # 显式收尾（1.4，幂等）：若 _safe_quit 已收尾过则直接跳过
+        try:
+            _shutdown_resources()
+        except Exception:
+            pass
         # 通知唤醒后台线程停止（避免退出后仍阻塞等待）
         try:
             _wakeup_stop["flag"] = True

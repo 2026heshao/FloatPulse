@@ -10,13 +10,12 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
-    QSplitter, QDialog, QDialogButtonBox, QMessageBox,
-    QAbstractItemView, QStyledItemDelegate, QStyle,
+    QSplitter, QDialog, QMessageBox,
+    QAbstractItemView, QStyledItemDelegate,
 )
 from PyQt6.QtCore import QRectF, Qt, QTimer, QEvent
 from PyQt6.QtGui import QColor, QPainter, QPen
 
-import os
 from datetime import datetime
 
 from src.glass_dialog import make_dialog_buttons

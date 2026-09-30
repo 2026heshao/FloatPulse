@@ -669,7 +669,7 @@ class TestPluginContract:
     def test_page_key_matches_convention(self, manifest):
         """页面 key 必须带 plugin: 前缀，否则 show_plugin_page 恒返回 False"""
         assert manifest["page"]["title"].strip()
-        assert f"plugin:{manifest['id']}" == f"plugin:kb-search"
+        assert f"plugin:{manifest['id']}" == "plugin:kb-search"
 
     def test_hotkey_free(self, manifest):
         """Ctrl+Alt+F 不能撞核心热键（K/S）与其它插件（I/R/W）"""

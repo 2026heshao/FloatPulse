@@ -95,6 +95,8 @@
 2. 把它放进程序目录下的 **`plugin_store\`** 文件夹（不解压、不改名）
 3. 启动程序 → 插件中心 → 「🏪 插件商店」→ 点「安装」，装完即生效，无需重启
 
+**更省事：应用内在线市场。** 插件商店弹窗里有「🌐 检查在线市场」按钮——点一下自动拉取官方插件索引、列出本地还没装的插件，点「⬇ 下载安装」即可（下载经 sha256 校验后落商店目录，再走同一条安装链路）。只在点击那一刻访问 GitHub API，不点不联网，离线时本地安装完全不受影响。
+
 | 插件包 | 页面 / 热键 | 能力 | 说明 |
 |---|---|---|---|
 | [ai-assistant.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-assistant.fpplug) | 🤖 AI 助手 / `Ctrl+Alt+I` | 🌐 ✍ 🛠 🧠 | 本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用本机 llama-server 全程离线 |
@@ -105,7 +107,7 @@
 
 > 能力标记的含义：🌐 会经宿主联网（只记 URL 与耗时进日志）· ✍ 能新增数据 · 🛠 能改删数据（删除带撤销令牌）· 🧠 可接入设置页的「AI 总配置」共用一套后端。插件本身拿不到网络库，未声明的能力调用会被直接拒绝。
 
-**卸载与重装**：插件中心的「🗑 卸载」只删 `plugins\` 里那份副本，`plugin_store\` 里的源包保留——想再装回来，回商店点一次「安装」即可。插件的私有数据（`float_data\plugins\<插件id>\`）卸载时不会被删除。
+**卸载与重装**：插件中心的「🗑 卸载」只删 `plugins\` 里那份副本，`plugin_store\` 里的源包保留——想再装回来，回商店点一次「安装」即可。插件的私有数据（`float_data\plugins\<插件id>\`）卸载时不会被删除（安装版该目录位于 `%APPDATA%\FloatPulse`，同样不随卸载删除）。
 
 **自己做插件**：依赖只允许 PyQt6 + Python 标准库，打成 `.fpplug` 用 `python tools/pack_plugin.py plugins/<插件目录>` 即可分发安装。完整开发说明（插件契约、能力声明、知识库接口）属内部资料，需要可开 Issue 索取。
 
@@ -172,6 +174,12 @@ python tools/build_release.py                      # 产出 宣传页/FloatPulse
 - 打完**重新打开 zip 自校验**（缺 exe / 缺目录 / 夹带数据都算失败，不留坏包），输出体积与 SHA-256
 - 顺带把 `plugin_store/*.fpplug` 复制到 `宣传页/plugin-assets/` 并生成 `插件清单.md`——这些就是 Release 上**逐个上传的插件附件**
 
+**Release 工程三件套**（推送 `v*` tag 后 `.github/workflows/release.yml` 自动完成）：
+
+- **安装包进 CI**：CI 用 choco 装 Inno Setup，`build_release.py --installer` 编译出 `FloatPulse-v<版本>-setup.exe`，与 zip、`.fpplug` 一并上传——Release 页从此可直接下载安装包
+- **发布前三源一致性自检**：打包前先跑 `tools/check_release_consistency.py`，核对 `APP_VERSION` ↔ `CHANGELOG.md` 版本标题 ↔ Release tag 三者对齐，任一不符直接终止发布（本地也能手动跑）
+- **产物附 `SHA256SUMS.txt`**：`build_release.py` 收尾生成校验清单（覆盖 zip / setup.exe / 插件附件），下载后在 `宣传页/` 目录 `sha256sum -c SHA256SUMS.txt` 一键核验完整性
+
 体积口径：实测产物 75 MB（2026-09-27，`FloatPulse.spec` 内有构成分析）；恢复 ssl 支持插件联网桥后约 +4 MB，下次打包时以 `build_release.py` 输出为准。
 
 ---
@@ -190,7 +198,7 @@ FloatPulse/
 
 未列出的 `dist2/`（打包产物）与 `宣传页/`（发布 zip 与插件附件）都不进版本库——前者可随时重建，后者走 GitHub Release 附件。
 
-运行数据统一收纳在 `float_data/`（含 `temp_assets/` 与 `知识库.docx`），路径定位见 `v4/src/app_paths.py`；该目录已在 `.gitignore` 中，不会入库。
+运行数据统一收纳在 `float_data/`（含 `temp_assets/` 与 `知识库.docx`），路径定位见 `v4/src/app_paths.py`，按发布形态**双轨**解析：**zip 便携版**数据留在 exe 同目录（解压即用，随目录移动）；**安装版**（setup.exe）数据走 `%APPDATA%\FloatPulse\float_data\`，与安装目录解耦——升级 / 重装换目录数据不跟随丢失，卸载也不会删除。安装版首次启动若检测到旧位置（程序目录内）有历史数据，会弹窗询问并自动迁移，原数据保留备份（改名 `float_data.migrated-<时间戳>`）。开发仓库内该目录已在 `.gitignore` 中，不会入库。
 
 ---
 

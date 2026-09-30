@@ -160,14 +160,31 @@ class KnowledgePanel(QWidget):
         if not recheck:
             return
 
-        theme = self._host.current_theme
         if self._docx_manager.check_external_modification():
             self._kb_modify_label.setText("⚠️ 检测到外部修改，建议重新加载")
-            self._kb_modify_label.setStyleSheet("color: #E67E22;" if theme == "light"
-                                                else "color: #F39C12;")
+            self._apply_modify_label_color()
         else:
             self._kb_modify_label.setText("✓ 文件无外部修改")
             self._kb_modify_label.setStyleSheet("")
+
+    def _apply_modify_label_color(self):
+        """外部修改警告文字色按主题取（唯一着色点，refresh / apply_theme 共用）。
+
+        警告色必须走这里：这是 inline stylesheet 覆盖，QSS 换主题时刷不到，
+        若只在 refresh 里设色，切主题后文字会停在旧主题的橙（深色主题的
+        #F39C12 落在浅色底上偏刺眼，反之偏暗）。
+        """
+        theme = self._host.current_theme
+        self._kb_modify_label.setStyleSheet(
+            "color: #E67E22;" if theme == "light" else "color: #F39C12;")
+
+    def apply_theme(self):
+        """换主题时同步非 QSS 覆盖的颜色（当前仅"外部修改"警告文字色）。
+
+        只在警告文案仍显示时重新着色——正常态是空 stylesheet，无需处理。
+        """
+        if "检测到外部修改" in self._kb_modify_label.text():
+            self._apply_modify_label_color()
 
     def _find_row(self, index) -> int:
         """按段落 index（0 基）找列表行号；找不到返回 -1"""

@@ -28,7 +28,7 @@ import pytest
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from src.plugin_api import ActionRegistry, BallAction, BallPlugin  # noqa: E402
+from src.plugin_api import ActionRegistry  # noqa: E402
 from src.plugin_loader import (                                    # noqa: E402
     FAIL_HINTS, FailedPlugin, PluginLoader, STAGE_CREATE_ACTIONS_FAILED,
     STAGE_ENTRY_MISSING, STAGE_IMPORT_FAILED, STAGE_INSTANTIATE_FAILED,

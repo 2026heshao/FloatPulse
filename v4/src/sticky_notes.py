@@ -30,12 +30,13 @@
 ====================================================================
 """
 
-import json
 import os
 from datetime import datetime
 
+from src.json_store import save_records
+
 from PyQt6.QtCore import QObject, QPoint, QRect, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QTextEdit, QVBoxLayout, QWidget,
@@ -45,7 +46,6 @@ from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
 from src.theme import get_colors, get_menu_qss
 from src.app_paths import get_data_dir, get_screen_geometry
-from src.logger import get_logger
 from src.task_manager import task_state, format_relative_deadline
 
 
@@ -136,14 +136,8 @@ class StickyStore:
             "stickies": [s.to_dict() for s in self._stickies],
             "next_id": self._next_id,
         }
-        try:
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            pass  # 写盘失败不崩溃（与 NoteManager 同策略）
+        # 写前滚动备份 + data_version + 原子写入，统一走 json_store 骨架
+        save_records(self._json_path, data, store="stickies")
 
     # ---------------- 增删改查 ----------------
     def upsert(self, note_id: int, x: int, y: int, w: int, h: int,
@@ -299,6 +293,11 @@ class StickyNoteWindow(QWidget):
 
         self._build_ui()
         self.apply_theme(theme)
+
+        # Esc → 取消钉住（1.3）：与标题栏 ✕ 同一语义（关闭便签、数据保留），
+        # 不退出程序。窗口级 QShortcut，焦点在正文编辑器时同样触发。
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc.activated.connect(self.request_close.emit)
 
         # 几何落盘 600ms 防抖
         self._geo_timer = QTimer(self)

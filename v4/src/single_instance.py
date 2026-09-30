@@ -100,7 +100,6 @@ class SingleInstance:
         try:
             WAIT_OBJECT_0 = 0
             WAIT_FAILED = 0xFFFFFFFF
-            INFINITE = 0xFFFFFFFF
             # 以 500ms 为粒度阻塞等待，便于及时响应退出请求
             while not stop_flag():
                 result = ctypes.windll.kernel32.WaitForSingleObject(

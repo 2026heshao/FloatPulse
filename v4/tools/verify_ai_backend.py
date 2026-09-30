@@ -29,7 +29,7 @@ BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(BASE)
 sys.path.insert(0, BASE)
 
-from PyQt6.QtCore import Qt, QTimer                  # noqa: E402
+from PyQt6.QtCore import QTimer                  # noqa: E402
 from PyQt6.QtWidgets import QApplication             # noqa: E402
 from PyQt6.QtGui import QFontDatabase                # noqa: E402
 

@@ -45,7 +45,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-from PyQt6.QtWidgets import QApplication, QLabel       # noqa: E402
+from PyQt6.QtWidgets import QApplication       # noqa: E402
 from PyQt6.QtGui import QFontDatabase                   # noqa: E402
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -169,7 +169,7 @@ check("D2. 冻结→恢复后插件键 y 不变",
 # ---------- E. 拖拽落定端到端（真实回调） ----------
 drag_key = order[0]
 drag_btn = win._nav_btns[drag_key]
-from PyQt6.QtCore import QPoint, QPointF, QEvent  # noqa: E402
+from PyQt6.QtCore import QPoint  # noqa: E402
 
 # 注入替身 + 调真实回调（离屏驱动惯例）：press → drag_started → moved → finished
 drag_btn._press_global = drag_btn.mapToGlobal(QPoint(10, 10))

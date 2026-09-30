@@ -285,7 +285,7 @@ def main():
     # ---------------- K. 插件页注册 / 幂等 / 注销 ----------------
     keep_key = pg[1]
     before_count = len(win._nav_btns)
-    idx_again = win.register_plugin_page(keep_key, "演示插件（改名）", QWidget())
+    _ = win.register_plugin_page(keep_key, "演示插件（改名）", QWidget())  # 幂等性靠下方按钮数校验
     pump(app, 300)
     check(len(win._nav_btns) == before_count,
           "K. 重复注册同一 key 不新增按钮（幂等）")

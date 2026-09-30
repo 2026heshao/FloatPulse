@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QPushButton  # noqa: E402
 app = QApplication.instance() or QApplication(sys.argv)
 
 from src.plugin_api import ActionRegistry                      # noqa: E402
-from src.plugin_loader import PluginLoader, StoreEntry         # noqa: E402
+from src.plugin_loader import PluginLoader         # noqa: E402
 from src.plugins_panel import PluginsPanel                     # noqa: E402
 
 results = []

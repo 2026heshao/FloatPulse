@@ -24,7 +24,7 @@ import shutil
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 # ★ 必须在 import PyQt6 之前设定，否则进程硬崩
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

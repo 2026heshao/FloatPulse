@@ -595,7 +595,6 @@ class ChatInput(QPlainTextEdit):
     submit_requested = pyqtSignal()
 
     def keyPressEvent(self, event):
-        from PyQt6.QtGui import QKeyEvent
         enter = event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
         if enter and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             self.submit_requested.emit()

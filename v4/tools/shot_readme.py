@@ -18,7 +18,6 @@ README 是公开页面，而真实 `float_data/` 里是个人数据（剪贴板�
 「多组可同时展开」这条交互；插件组留折叠态，顺便交代还有第四组。
 """
 
-import json
 import os
 import sys
 import tempfile

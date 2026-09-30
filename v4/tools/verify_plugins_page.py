@@ -27,7 +27,7 @@ from src.note_manager import NoteManager
 from src.fragment_manager import FragmentManager
 from src.clipboard_monitor import ClipboardMonitor
 from src.temp_asset_manager import TempAssetManager
-from src.main_window import MainWindow, NAV_PAGE_TITLES
+from src.main_window import MainWindow
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT_DIR = os.path.join(PROJECT, "docs", "images")
@@ -97,7 +97,7 @@ def main():
     app.processEvents()
     check("B1. 切到 9 号页", win._stack.currentIndex() == 9)
     page = win._page_plugins
-    labels = [l.text() for l in page.findChildren(QLabel)]
+    labels = [lbl.text() for lbl in page.findChildren(QLabel)]
     check("B2. 页面标题存在", any("插件中心" in t for t in labels))
     # 真实环境 loader 未注入 → 空态
     check("B3. 未注入 loader 显示空态", page._empty_label.isVisibleTo(page))
@@ -137,7 +137,7 @@ def main():
     check("C1. 空态消失", not page._empty_label.isVisibleTo(page))
     check("C2. 计数 1", "共 1 个插件" in page._count_label.text())
     page_labels = " ".join(
-        l.text() for l in page.findChildren(QLabel))
+        lbl.text() for lbl in page.findChildren(QLabel))
     check("C3. manifest 描述优先", "把本周碎片整理成周报草稿" in page_labels)
     check("C4. 动作与热键", "生成周报草稿" in page_labels
           and "Ctrl+Alt+W" in page_labels)

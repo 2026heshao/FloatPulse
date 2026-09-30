@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""组装发布包：主程序 zip + 插件附件清单（纯标准库，无 GUI 环境可跑）。
+r"""组装发布包：主程序 zip + 插件附件清单（纯标准库，无 GUI 环境可跑）。
 
 用法（在项目根执行）
 ====================================================================
@@ -13,6 +13,26 @@
     --with-knowledge     连 float_data/知识库.docx 一起打进包（默认**不打**，
                          但会现场生成一份空白知识库模板补进包，功能开箱可用）
     --no-plugin-assets   不复制插件附件
+    --installer          附带编译 Inno Setup 安装包（FloatPulse-v<版本>-setup.exe），
+                         ISCC.exe 探测顺序：--iscc > 环境变量 FP_ISCC_PATH（CI 用）>
+                         常见安装位置；都没有则跳过编译并打印说明，不影响 zip 产出
+
+收尾产物
+====================================================================
+打完 zip、编译完 setup.exe 后生成「宣传页/SHA256SUMS.txt」（标准
+sha256sum 清单格式，LF 换行），覆盖 zip、setup.exe 与 plugin-assets/*.fpplug，
+回读自校验后随 Release 上传——用户下载后 ``sha256sum -c`` 一键核验完整性。
+
+便携 / 安装双轨（成熟化 2.2：数据目录与安装解耦）
+====================================================================
+zip 内会写入一个与 FloatPulse.exe 同级的空 ``portable.marker``（注意必须
+放进包内顶层 FloatPulse/ 目录：解压后它要落在 exe 同目录，app_paths 才
+检测得到）。据此实现数据目录双轨制：
+
+  - zip 便携版（有 marker）→ 数据留在 exe 同目录 float_data/
+  - 安装版（Inno 从 dist2 组包，天然无 marker）→ 数据走 %APPDATA%\FloatPulse
+
+事后校验会核对「zip 内必须有 portable.marker」，缺了按坏包处理。
 
 为什么要有这个脚本
 ====================================================================
@@ -54,12 +74,16 @@ GUIDE_FILE = os.path.join(ROOT, "shared", "插件安装说明.txt")
 PLUGIN_STORE_DIR = os.path.join(ROOT, "plugin_store")
 ISS_FILE = os.path.join(ROOT, "installer", "FloatPulse.iss")
 
-# ISCC.exe（Inno Setup 6 命令行编译器）的常见安装位置，按序探测
+# ISCC.exe（Inno Setup 6 命令行编译器）的常见安装位置，按序探测（本机兜底）
 ISCC_CANDIDATES = (
     r"D:\INNO setup\Inno Setup 6\ISCC.exe",
     r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     r"C:\Program Files\Inno Setup 6\ISCC.exe",
 )
+
+# CI 上 ISCC 的指路环境变量：release.yml 用 choco 装好 Inno Setup 后把
+# 固定安装路径传进来，探测顺序见 locate_iscc()
+ISCC_ENV_VAR = "FP_ISCC_PATH"
 
 DIST_DEFAULT = "dist2"
 OUT_DEFAULT = "宣传页"
@@ -78,6 +102,12 @@ FLOAT_DATA_ALLOW = {"知识库.docx"}
 # 已实测 python-docx 可正常打开/追加/保存）。没有它，下载用户的知识库页是
 # 「共 0 段」且写不进去，功能等于摆设。
 KB_DOCX_NAME = "知识库.docx"
+
+# 便携版标记（成熟化 2.2 双轨制）：空文件，写入 zip 内顶层 FloatPulse/ 目录
+# 与 exe 同级——app_paths 据此判定「zip 便携版」（数据留 exe 同目录）；
+# 安装版（Inno 从 dist2 组包，dist2 里没有此文件）走 %APPDATA%\FloatPulse
+PORTABLE_MARKER_NAME = "portable.marker"
+
 KB_WELCOME = (
     "欢迎使用 FloatPulse。这里每一段就是一个知识条目：写成一段一段，"
     "每段自动编号，可在知识库页增删改，也会被 Ctrl+K 站内搜索和插件读取。"
@@ -319,12 +349,18 @@ def blank_kb_docx_bytes(welcome: str = KB_WELCOME) -> bytes:
 
 def build_zip(zip_path: str, keep: list, guide_text: str, app_name: str,
               extra_bytes: list = None) -> int:
-    """写 zip：进包文件 + 字节条目 + 两个空目录 + 安装说明。返回写入的文件条目数。"""
+    """写 zip：进包文件 + 字节条目 + 便携标记 + 两个空目录 + 安装说明。
+
+    返回写入的条目数（含说明 / 标记 / 目录条目）。
+    """
     extra_bytes = extra_bytes or []
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         guide_arc = f"{app_name}/插件安装说明.txt"
         # 说明写成 UTF-8 BOM：Windows 记事本双击打开不乱码
         zf.writestr(guide_arc, b"\xef\xbb\xbf" + guide_text.encode("utf-8"))
+        # 便携版标记：必须是空文件且与 exe 同级（app_name/ 内），解压后才
+        # 落在 exe 目录被 app_paths 检测到 → zip 版数据留程序目录
+        zf.writestr(f"{app_name}/{PORTABLE_MARKER_NAME}", b"")
         for arcname, abs_path in keep:
             zf.write(abs_path, arcname)
         for arcname, data in extra_bytes:
@@ -334,7 +370,8 @@ def build_zip(zip_path: str, keep: list, guide_text: str, app_name: str,
             info = zipfile.ZipInfo(f"{app_name}/{d}/")
             info.external_attr = (0o40775 << 16) | 0x10
             zf.writestr(info, b"")
-    return len(keep) + len(extra_bytes) + 3
+    # 说明 1 + 便携标记 1 + 文件 + 字节条目 + 空目录 2
+    return len(keep) + len(extra_bytes) + 4
 
 
 def verify_zip(zip_path: str) -> list:
@@ -344,6 +381,9 @@ def verify_zip(zip_path: str) -> list:
         names = zf.namelist()
     if f"{APP_NAME}/{EXE_NAME}" not in names:
         problems.append(f"缺少 {EXE_NAME}")
+    if f"{APP_NAME}/{PORTABLE_MARKER_NAME}" not in names:
+        problems.append(f"缺少 {APP_NAME}/{PORTABLE_MARKER_NAME}（便携版标记缺失会让 "
+                        f"zip 版被当成安装版，用户数据错写进 %APPDATA%）")
     if f"{APP_NAME}/float_data/{KB_DOCX_NAME}" not in names:
         problems.append(f"缺少 float_data/{KB_DOCX_NAME}（真实文件或空白模板至少要有一个，否则用户知识库功能残废）")
     for d in ("plugins/", "plugin_store/"):
@@ -371,9 +411,17 @@ def sha256_of(path: str) -> str:
 
 
 def locate_iscc(explicit: str = "") -> str:
-    """定位 ISCC.exe：显式指定 > 常见安装位置；找不到返回空串"""
+    """定位 ISCC.exe：显式 --iscc > 环境变量 FP_ISCC_PATH（CI 用）> 常见安装位置。
+
+    显式指定但路径不存在时返回空串（尊重用户指定的值，不偷偷换一个）；
+    环境变量无效则继续往下兜底。都找不到返回空串，调用方打印明确日志后
+    跳过 iss 编译，不许崩。
+    """
     if explicit:
         return explicit if os.path.isfile(explicit) else ""
+    env_iscc = os.environ.get(ISCC_ENV_VAR, "")
+    if env_iscc and os.path.isfile(env_iscc):
+        return env_iscc
     for cand in ISCC_CANDIDATES:
         if os.path.isfile(cand):
             return cand
@@ -402,6 +450,56 @@ def build_installer(iscc: str, version: str, out_dir: str) -> int:
 
 def human_mb(n: int) -> str:
     return f"{n / 1048576:.1f} MB"
+
+
+# 产物完整性清单（随 Release 上传，用户下载后 sha256sum -c 一键核验）
+SHA256SUMS_NAME = "SHA256SUMS.txt"
+
+
+def write_sha256_sums(out_dir: str, artifacts: list) -> str:
+    """生成 <out>/SHA256SUMS.txt，返回清单路径。
+
+    artifacts 是本次构建产出的相对文件名（相对 out_dir）：主程序 zip、
+    setup.exe（本机没装 Inno 就没有，不列）、plugin-assets/*.fpplug。
+    只写**真实存在**的文件——清单绝不撒谎，缺哪个就不列哪个。
+
+    行格式与 GNU sha256sum 一致：``<sha256>  <相对文件名>``（两个空格，
+    LF 换行）；在 out_dir 里执行 ``sha256sum -c SHA256SUMS.txt`` 即可核验。
+    """
+    rows = []
+    for rel in artifacts:
+        abs_p = os.path.join(out_dir, rel.replace("/", os.sep))
+        if os.path.isfile(abs_p):
+            rows.append((rel, sha256_of(abs_p)))
+    dst = os.path.join(out_dir, SHA256SUMS_NAME)
+    with open(dst, "w", encoding="utf-8", newline="\n") as f:
+        for rel, digest in rows:
+            f.write(f"{digest}  {rel}\n")
+    return dst
+
+
+def verify_sha256_sums(sums_path: str, out_dir: str) -> list:
+    """自校验：回读 SHA256SUMS.txt，逐行核验文件存在、摘要一致。
+
+    返回问题列表（空 = 通过）。清单是发出去的「对账单」，自己先对一遍。
+    """
+    problems = []
+    with open(sums_path, "r", encoding="utf-8") as f:
+        lines = [ln for ln in f.read().splitlines() if ln.strip()]
+    if not lines:
+        return ["清单为空（连 zip 都没产出？前序步骤应已报错）"]
+    for ln in lines:
+        parts = ln.split("  ", 1)
+        if len(parts) != 2 or len(parts[0]) != 64:
+            problems.append(f"行格式不是「<sha256>  <文件名>」：{ln[:40]}…")
+            continue
+        digest, rel = parts
+        abs_p = os.path.join(out_dir, rel.replace("/", os.sep))
+        if not os.path.isfile(abs_p):
+            problems.append(f"清单里的文件不存在：{rel}")
+        elif sha256_of(abs_p) != digest:
+            problems.append(f"摘要不符：{rel}")
+    return problems
 
 
 def main(argv=None) -> int:
@@ -466,6 +564,10 @@ def main(argv=None) -> int:
         print("=" * 68)
         print("[DRY-RUN] 未写任何文件。清单预览：")
         print(md)
+        print("[DRY-RUN] 实跑收尾还会生成 宣传页/SHA256SUMS.txt"
+              "（覆盖 zip / setup.exe / plugin-assets/*.fpplug）")
+        print("[DRY-RUN] zip 内将写入便携版标记 portable.marker（与 exe 同级；"
+              "zip 版数据留程序目录，安装版走 %APPDATA%\\FloatPulse 双轨制）")
         return 0
 
     zip_name = f"{APP_NAME}-v{version}-win64.zip"
@@ -506,12 +608,35 @@ def main(argv=None) -> int:
 
     if args.installer:
         iscc = locate_iscc(args.iscc)
-        if not iscc:
-            print("[X] 找不到 ISCC.exe（Inno Setup 6），用 --iscc 指定路径")
-            return 1
         print("-" * 68)
-        if build_installer(iscc, version, out_dir) != 0:
+        if not iscc:
+            # 找不到 ISCC 不算失败：本地没装 Inno 也要能照常出 zip，这里
+            # 跳过 iss 编译并明确说明（不许崩）；CI 上 release.yml 已用
+            # choco 装好 Inno 并经 test -f 确认 ISCC 就位，走不到这里
+            print("[!] 未找到 ISCC.exe（Inno Setup 6），跳过安装包编译，本次只产出 zip 与插件附件")
+            print("    本机要出 setup.exe：安装 Inno Setup 6，或用 --iscc / "
+                  f"环境变量 {ISCC_ENV_VAR} 指定 ISCC.exe 路径")
+        elif build_installer(iscc, version, out_dir) != 0:
             return 1
+
+    # ---- 收尾：产物完整性清单（任务：发布产物完整性）----
+    # 覆盖 zip / setup.exe / plugin-assets/*.fpplug；没产出的（如本机无 ISCC
+    # 的 setup.exe）自动不列。生成后自校验一遍再放行。
+    artifacts = [zip_name] + [f"plugin-assets/{it['file']}" for it in plugins]
+    setup_name = f"{APP_NAME}-v{version}-setup.exe"
+    if os.path.isfile(os.path.join(out_dir, setup_name)):
+        artifacts.append(setup_name)
+    sums_path = write_sha256_sums(out_dir, artifacts)
+    sums_problems = verify_sha256_sums(sums_path, out_dir)
+    if sums_problems:
+        print("[X] SHA256SUMS.txt 自校验未通过：")
+        for p in sums_problems:
+            print(f"    - {p}")
+        return 1
+    print("-" * 68)
+    print(f"[OK] {sums_path}")
+    print(f"     产物清单（{len(artifacts)} 项）：{'、'.join(artifacts)}")
+    print("     下载后核验：cd 宣传页 && sha256sum -c SHA256SUMS.txt")
     return 0
 
 

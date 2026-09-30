@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QContextMenuEvent
-from PyQt6.QtWidgets import QApplication, QFrame, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from src.app_paths import get_base_dir, get_data_dir
 from src.config import ConfigManager

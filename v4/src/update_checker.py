@@ -14,6 +14,7 @@
 """
 
 import json
+from datetime import date as _date
 
 from src.app_version import APP_VERSION, parse_version
 
@@ -75,3 +76,37 @@ def extract_tag(response_body) -> str:
         return ""
     tag = data.get("tag_name") if isinstance(data, dict) else None
     return tag if isinstance(tag, str) else ""
+
+
+# ====================================================================
+# 被动提示（2.3）：启动后每天至多一次的静默检查判定（纯逻辑，无 I/O）
+# ====================================================================
+def should_check_now(cfg, today=None) -> bool:
+    """判断「现在」是否应该做一次静默更新检查。
+
+    ``cfg`` 只需提供 ``get(key, default)`` 接口（ConfigManager / dict
+    替身均可）。规则（频率护栏，宁少勿扰）：
+      - ``auto_check_updates`` 为 False → False（用户明确关掉就不查）
+      - ``last_update_check`` 已是今天 → False（每天至多一次）
+      - 其余（含从未检查过的空值）→ True
+    ``today`` 可注入 "YYYY-MM-DD" 字符串（测试用）；缺省取本机今天。
+    本函数不发任何网络请求，也不写配置。
+    """
+    if not cfg.get("auto_check_updates", True):
+        return False
+    if today is None:
+        today = _date.today().isoformat()
+    last = cfg.get("last_update_check", "") or ""
+    return last != today
+
+
+def mark_checked(cfg, today=None):
+    """把「今天已检查过」记入 cfg（仅内存；写盘由调用方负责 save）。
+
+    无论后续请求成功与否，调用方都应在**发起检查时**调用本函数——
+    失败静默的立场意味着失败的检查同样消耗掉当天的配额，避免每次
+    启动都对着打不通的网络重试。``today`` 可注入（测试用）。
+    """
+    if today is None:
+        today = _date.today().isoformat()
+    cfg.set("last_update_check", str(today))

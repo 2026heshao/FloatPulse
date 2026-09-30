@@ -38,10 +38,8 @@
 ====================================================================
 """
 
-import os
-import json
 
-from src.json_store import load_records
+from src.json_store import load_records, save_records
 
 
 # ====================================================================
@@ -137,19 +135,12 @@ class NavManager:
         )
 
     def _save(self):
-        """统一保存：原子写入"""
+        """统一保存（写前滚动备份 + data_version + 原子写入，统一走 json_store 骨架）"""
         data = {
             "groups": [g.to_dict() for g in self._groups],
             "next_id": self._next_id,
         }
-        try:
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            pass
+        save_records(self._json_path, data, store="groups")
 
     # ---------------- 分组操作 ----------------
     def add_group(self, name: str) -> int:

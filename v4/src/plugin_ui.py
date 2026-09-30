@@ -38,7 +38,7 @@
 ====================================================================
 """
 
-from PyQt6.QtWidgets import QDialog, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from src.glass_dialog import GlassDialog, flash_button, make_separator  # noqa: F401
 

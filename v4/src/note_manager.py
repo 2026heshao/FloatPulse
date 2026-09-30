@@ -23,13 +23,10 @@
 ====================================================================
 """
 
-import os
-import json
 from datetime import datetime
 
-from src.json_store import load_records
+from src.json_store import load_records, save_records
 from src.constants import (
-    safe_int, backup_corrupt_file,
     NOTE_TITLE_MAX_CHARS,
 )
 
@@ -120,22 +117,13 @@ class NoteManager:
         """
         统一保存：将内存笔记列表一次性写入磁盘 json。
         所有增删改操作完成后调用本方法。
+        （写前滚动备份 + data_version + 原子写入，统一走 json_store 骨架）
         """
         data = {
             "notes": [n.to_dict() for n in self._notes],
             "next_id": self._next_id,
         }
-        try:
-            # 确保目录存在
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            # 原子写入：先写临时文件，再替换原文件，避免写一半损坏
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            # 写盘失败不崩溃（可在此处加日志）
-            pass
+        save_records(self._json_path, data, store="notes")
 
     # ---------------- 增删改查 ----------------
     @staticmethod

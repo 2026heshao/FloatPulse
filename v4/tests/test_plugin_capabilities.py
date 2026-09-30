@@ -19,7 +19,6 @@ import json
 import os
 import sys
 
-import pytest
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE not in sys.path:

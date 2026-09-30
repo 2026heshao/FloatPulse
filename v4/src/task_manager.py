@@ -35,11 +35,9 @@
 ====================================================================
 """
 
-import os
-import json
 from datetime import date, datetime, timedelta
 
-from src.json_store import load_records
+from src.json_store import load_records, save_records
 
 
 # ====================================================================
@@ -267,22 +265,13 @@ class TaskManager:
         """
         统一保存：将内存任务列表一次性写入磁盘 json。
         所有增删改操作完成后调用本方法。
+        （写前滚动备份 + data_version + 原子写入，统一走 json_store 骨架）
         """
         data = {
             "tasks": [t.to_dict() for t in self._tasks],
             "next_id": self._next_id,
         }
-        try:
-            # 确保目录存在
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            # 原子写入：先写临时文件，再替换原文件，避免写一半损坏
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            # 写盘失败不崩溃（可在此处加日志）
-            pass
+        save_records(self._json_path, data, store="tasks")
 
     # ---------------- 增删改查 ----------------
     def add_task(self, title: str, note: str, deadline: str) -> int:

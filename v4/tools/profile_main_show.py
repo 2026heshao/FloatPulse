@@ -89,7 +89,7 @@ def main():
     clip = ClipboardMonitor(frag_mgr, config)
 
     win = MainWindow(task_mgr, note_mgr, frag_mgr, docx_mgr, config, clip, temp_mgr)
-    mark(f"MainWindow.__init__ done")
+    mark("MainWindow.__init__ done")
 
     drift = DriftDetector()
 

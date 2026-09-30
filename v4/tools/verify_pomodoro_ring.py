@@ -18,13 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QColor, QFontDatabase, QImage, QPainter, QRegion
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
-    STATE_IDLE, STATE_RUNNING, STATE_PAUSED,
+    STATE_IDLE, STATE_RUNNING,
 )
 from src.task_manager import TaskManager
 from knowledge_ball import _BallSurface, FloatingBall
@@ -84,7 +84,7 @@ def has_badge(img, x, y):
 
 
 def main():
-    app = QApplication.instance() or QApplication([])
+    _ = QApplication.instance() or QApplication([])  # 仅需 QApplication 存活，无需引用
     QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\msyh.ttc")
 
     # 独立 surface：ball_size=64，画布 112×112（宿主边距规则同 FloatingBall）

@@ -101,7 +101,7 @@ print("[3] PASS 双列网格排布正确")
 elided_any = False
 for card, s in zip(cards, sites):
     labels = card.findChildren(QLabel)
-    names = sorted(l.objectName() for l in labels)
+    names = sorted(lb.objectName() for lb in labels)
     assert names == ["navSiteCardDomain", "navSiteCardTitle"], f"子标签异常: {names}"
     if "…" in labels[0].text():
         elided_any = True

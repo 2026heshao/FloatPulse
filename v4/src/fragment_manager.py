@@ -26,12 +26,10 @@
 ====================================================================
 """
 
-import os
-import json
 import threading
 from datetime import datetime
 
-from src.json_store import load_records
+from src.json_store import load_records, save_records
 from src.fragment_classifier import (
     classify, VALID_CATEGORIES,
 )
@@ -229,19 +227,13 @@ class FragmentManager:
         )
 
     def _save(self):
-        """统一保存：将内存碎片列表一次性写入磁盘 json（原子写入）。"""
+        """统一保存：将内存碎片列表一次性写入磁盘 json
+        （写前滚动备份 + data_version + 原子写入；compact 保持既有紧凑格式）"""
         data = {
             "fragments": [f.to_dict() for f in self._fragments],
             "next_id": self._next_id,
         }
-        try:
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            pass
+        save_records(self._json_path, data, store="fragments", compact=True)
 
     def save(self):
         """立即落盘（同步）。用于需要保证数据已写入磁盘的场景，例如程序退出。"""

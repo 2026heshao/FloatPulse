@@ -35,7 +35,7 @@ from src.fragment_manager import FragmentManager                 # noqa: E402
 from src.nav_manager import NavManager                           # noqa: E402
 from src.temp_asset_manager import TempAssetManager              # noqa: E402
 from src.clipboard_monitor import ClipboardMonitor               # noqa: E402
-from src.app_paths import get_base_dir, get_data_dir, get_docx_path  # noqa: E402
+from src.app_paths import get_base_dir, get_docx_path  # noqa: E402
 
 results = []
 
@@ -311,7 +311,7 @@ win.show_plugins_page()
 app.processEvents()
 win.refresh_page("plugins")
 app.processEvents()
-blob = "\n".join(l.text() for l in win._page_plugins.findChildren(QLabel))
+blob = "\n".join(lbl.text() for lbl in win._page_plugins.findChildren(QLabel))
 check("E8 面板显示 write 能力标记", "✍ 写入数据" in blob,
       [t for t in blob.split("\n") if "能力" in t][:2])
 

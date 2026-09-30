@@ -3,7 +3,8 @@
 ====================================================================
 主题系统模块  -  theme
 ====================================================================
-配色字典 + QSS 模板，支持浅色/深色两套主题。
+配色字典 + QSS 模板，支持浅色/深色两套主题；
+另提供「跟随系统」解析（config 取值 "follow" → resolve_theme_name）。
 
 v2 视觉规范（对照 `设计稿/ui-preview.html` 高仿真稿）：
   · 玻璃壳 = 半透明填充 + 顶部高光带 + 1px 上亮下暗描边 + 噪点，
@@ -1506,11 +1507,74 @@ QMenu::separator {
 
 
 # ====================================================================
+# 主题取值与「跟随系统」解析（成熟化 3.1）
+# ====================================================================
+# config["theme"] 的全部合法取值："light" / "dark" 是显式选择，
+# "follow" 表示跟随系统深浅色。config.py 引用本常量做白名单校验；
+# 本模块的模块级「不 import PyQt6」约束不破坏——Qt 相关引用全部
+# 延迟到函数体内（纯逻辑测试无 GUI 也能 import 本模块）。
+THEME_VALUES = frozenset({"light", "dark", "follow"})
+
+
+def _system_scheme(style_hints=None) -> str:
+    """读系统深浅色偏好，返回 "light" / "dark" / "unknown"。
+
+    ``style_hints`` 可注入（测试替身用）；缺省取当前 QGuiApplication
+    的 styleHints()。PyQt6 6.7 起才有 Qt.ColorScheme / colorScheme()，
+    老版本、无 GUI 环境（无 QGuiApplication 实例）或调用出错一律归为
+    "unknown"，由调用方决定回落色（本模块回落深色）。
+    """
+    if style_hints is None:
+        try:
+            from PyQt6.QtGui import QGuiApplication
+            app = QGuiApplication.instance()
+            if app is None:            # 无 GUI 环境（纯逻辑测试 / 工具脚本）
+                return "unknown"
+            style_hints = app.styleHints()
+        except Exception:
+            return "unknown"
+    try:
+        from PyQt6.QtCore import Qt
+        if not hasattr(Qt, "ColorScheme"):
+            return "unknown"           # PyQt6 < 6.7：没有色 scheme API
+        scheme = style_hints.colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return "dark"
+        if scheme == Qt.ColorScheme.Light:
+            return "light"
+    except Exception:
+        pass
+    return "unknown"
+
+
+def resolve_theme_name(config_value, style_hints=None) -> str:
+    """把 config 的 theme 取值解析成具体主题名 "light" / "dark"。
+
+    - "light" / "dark" 原样返回（显式选择不经过系统判断，现有调用零变化）
+    - "follow" 读系统色 scheme：Light → light，Dark → dark；
+      Unknown / 老版本 PyQt6 / 无 GUI 环境一律回落 **dark**（与
+      DEFAULT_THEME 一致，观感与「未选跟随」时的兜底一致）
+    - 其余非法值回落 DEFAULT_THEME（与旧 get_colors 对未知主题的
+      兜底同口径，不抛错）
+    """
+    if config_value == "follow":
+        return "light" if _system_scheme(style_hints) == "light" else "dark"
+    if config_value in ("light", "dark"):
+        return config_value
+    return DEFAULT_THEME
+
+
+# ====================================================================
 # 公开接口
 # ====================================================================
 def get_colors(theme_name: str = DEFAULT_THEME) -> dict:
-    """获取指定主题的配色字典，未知主题回退到默认主题"""
-    return THEMES.get(theme_name, THEMES[DEFAULT_THEME])
+    """获取指定主题的配色字典。
+
+    ``theme_name`` 允许直接传 config 的原始取值（含 "follow"）：
+    先经 resolve_theme_name 解析成具体主题再查表，未知值仍回退默认
+    主题——调用方无需关心 "follow" 的存在。
+    """
+    return THEMES.get(resolve_theme_name(theme_name), THEMES[DEFAULT_THEME])
 
 
 def get_main_window_qss(theme_name: str = DEFAULT_THEME) -> str:

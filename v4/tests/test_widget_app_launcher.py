@@ -125,7 +125,6 @@ class TestCardActionDispatch:
         QApplication.clipboard().clear()   # 释放 OLE 剪贴板引用，防离屏 teardown 崩溃
 
     def test_locate_valid_path(self, qapp, tmp_path, monkeypatch):
-        import subprocess
         import src.widget_app_launcher as wal
         exe = tmp_path / "real.exe"
         exe.write_bytes(b"MZ")

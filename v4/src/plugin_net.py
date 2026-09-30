@@ -20,7 +20,15 @@
   - 审计日志只记 URL / 耗时 / 状态码，**不记请求体与响应体**
     （可能含用户数据与 API key，日志不是外泄通道）；
   - 响应大小上限 ``max_bytes``（默认 4MB）：LLM 返回一般几十 KB，
-    防御性上限防异常端点拖爆内存。
+    防御性上限防异常端点拖爆内存；
+  - SSRF 防护闸（2026-09-30 起）：真正发请求前先过
+    ``src.net_guard.guard_url``——仅 http/https、拒绝 localhost /
+    *.local 等内网主机名与一切本地/内网 IP（含 IPv4-mapped IPv6）、
+    解析失败 fail-closed。拒绝结果与网络失败**同构**（ok=False），
+    异步路径照常经回调送达并走现有审计日志（只记 URL 与拒绝原因）。
+    宿主可用 ``net_guard.set_allow_private_network(True)`` 放行内网
+    （本地 AI 端点等场景，设置项接线留待后续波次）。遗留项：urllib
+    默认跟随重定向，本闸只做单请求校验，逐跳校验待补。
 
 本模块 import PyQt6，仅供宿主（knowledge_ball / loader）使用；
 插件**不要** import 本模块 —— 走 ctx 桥才是受控通道。
@@ -31,6 +39,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+
+from src.net_guard import guard_url
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
@@ -47,6 +57,13 @@ def _http_request(url, headers, timeout, max_bytes, make_request):
     """
     result = {"ok": False, "status": 0, "body": "", "error": "",
               "url": str(url or "")}
+    # SSRF 闸：真正发请求前先过 net_guard；拒绝时与网络失败**同构**
+    # （ok=False），异步路径会照常经 _finish 走现有审计日志
+    # （只记 URL 与拒绝原因，不记请求体）。
+    guard = guard_url(url)
+    if not guard.ok:
+        result["error"] = guard.reason
+        return result
     try:
         req = make_request()
     except Exception as exc:              # noqa: BLE001 - 构造失败（如 body 序列化）
@@ -116,6 +133,42 @@ def http_get_json(url, headers=None, timeout=30.0,
     return _http_request(url, headers, timeout, max_bytes, make_request)
 
 
+def http_get_bytes(url, headers=None, timeout=30.0,
+                   max_bytes=DEFAULT_MAX_BYTES):
+    """同步 GET **二进制**（2026-09-30 起：插件市场下载 .fpplug 用）。
+
+    与文本 GET 分开的原因：二进制不能走 utf-8 replace 解码（会损坏
+    zip 字节流）。其余契约逐字一致：永不抛异常、SSRF 闸、限长、
+    4xx/5xx 保留错误码。
+    """
+    result = {"ok": False, "status": 0, "data": b"", "error": "",
+              "url": str(url or "")}
+    guard = guard_url(url)
+    if not guard.ok:
+        result["error"] = guard.reason
+        return result
+    try:
+        req = urllib.request.Request(str(url), method="GET")
+        for key, val in dict(headers or {}).items():
+            try:
+                req.add_header(str(key), str(val))
+            except Exception:             # noqa: BLE001 - 坏头直接丢弃
+                pass
+        with urllib.request.urlopen(req, timeout=float(timeout)) as resp:
+            raw = resp.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                result["error"] = f"下载超过大小上限（>{max_bytes} 字节）"
+                return result
+            result.update(ok=True, status=int(resp.status), data=raw)
+            return result
+    except urllib.error.HTTPError as exc:
+        result.update(status=int(exc.code), error=f"HTTP {exc.code}")
+        return result
+    except Exception as exc:              # noqa: BLE001 - 网络/超时/代理等
+        result["error"] = repr(exc)
+        return result
+
+
 # ---------------- 异步包装（QThread + 主线程 Relay） ----------------
 class _Relay(QObject):
     """活在主线程的转发器：跨线程信号经它排队回 UI 线程"""
@@ -151,6 +204,21 @@ class _HttpGetWorker(QThread):
     def run(self):
         self.done.emit(http_get_json(self._url, self._headers,
                                      self._timeout))
+
+
+class _HttpGetBytesWorker(QThread):
+    """后台线程：执行同步二进制 GET，emit 结果（插件市场下载 .fpplug）"""
+    done = pyqtSignal(object)
+
+    def __init__(self, url, headers, timeout, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._headers = headers
+        self._timeout = timeout
+
+    def run(self):
+        self.done.emit(http_get_bytes(self._url, self._headers,
+                                      self._timeout))
 
 
 # 存活的 worker 集合（防 GC；QThread 对象被回收会直接崩溃进程）
@@ -231,3 +299,17 @@ def make_async_getter(logger=None):
         return _spawn_async(logger, "GET", worker, on_done, timeout, url)
 
     return get
+
+
+def make_async_bytes_getter(logger=None):
+    """构造异步**二进制** GET 桥（2026-09-30 起：插件市场下载 .fpplug）。
+
+    与 make_async_getter 同一条管道（每请求独立 relay / 存活集防 GC /
+    UI 线程回调），差别只在结果里是 ``data: bytes`` 而不是 ``body: str``。
+    """
+
+    def get_bytes(url, headers=None, timeout=30.0, on_done=None):
+        worker = _HttpGetBytesWorker(url, dict(headers or {}), timeout)
+        return _spawn_async(logger, "GET-BIN", worker, on_done, timeout, url)
+
+    return get_bytes

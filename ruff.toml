@@ -1,0 +1,50 @@
+# FloatPulse Ruff 基线配置（成熟化路线图 4.1：lint 进 CI + 存量清零）。
+#
+# 选型原则：只查「正确性」（语法错误、未定义名、未用导入/变量、无效转义等），
+# 不做风格大扫除——本仓库代码风格已成型，行长/排版/导入排序类规则一律不开
+# （E501、I、UP、SIM 等均不选），避免制造上千条无意义告警。
+#
+# 检查目标目录：v4、tools、shared、plugins（即出厂代码 + 出厂工具 + 插件）。
+# 其余目录用 extend-exclude 排除（见下），新目录默认会被扫描，出现误报时在此补充。
+
+# 运行环境：Python 3.10+（PyQt6 桌面应用）
+target-version = "py310"
+
+# 缩进宽度按仓库现状：4 空格（影响缩进类规则的判定基准）
+indent-width = 4
+
+# 四大目标目录之外的 Python 文件：
+# - .workbuddy/：会话工具自动落盘的历史备份快照（过时副本，不代表当前代码）
+# - 宣传页/：静态宣传物料及其生成脚本，不随包分发
+extend-exclude = [
+    ".workbuddy",
+    "宣传页",
+]
+
+[lint]
+# E4：pycodestyle 错误级子集（模块级 import 位置 / 一行多 import）
+# E7：pycodestyle 语句级错误（未定义名比较、歧义变量名 E741 等）
+# E9：pycodestyle 运行时必炸级（语法错误 E999、未定义名 F821 同族的 E9 系列）
+# F ：pyflakes 全量（未用 import/变量、f-string 无占位符、未定义名、重定义等）
+# W605：字符串里的无效转义序列（新版本 Python 已是 SyntaxWarning，迟早升级为错误）
+select = ["E4", "E7", "E9", "F", "W605"]
+
+[lint.per-file-ignores]
+# ---- E402（import 不在文件顶部）----
+# 测试与 QA 验证脚本必须先做 sys.path 引导（把仓库根插到 path 上才能 import src.*）
+# 或先设 QT_QPA_PLATFORM 再导入 PyQt6，import 后移是刻意安排，属误报，按下表精确豁免。
+# 另有少数 QA 脚本（verify_splash / verify_sticky_notes / verify_screenshot_pin /
+# verify_plugin_p0p1）是按段落顺序执行的场景脚本，分节延迟导入也是刻意的。
+"v4/tests/test_clipboard_monitor.py" = ["E402"]
+"v4/tests/test_global_hotkey.py" = ["E402"]
+"v4/tests/test_pomodoro.py" = ["E402"]
+"v4/tests/test_sticky_store.py" = ["E402"]
+"v4/tools/qa_verify_nav_drag.py" = ["E402"]
+"v4/tools/verify_ball_drop_apps.py" = ["E402"]
+"v4/tools/verify_nav_drag.py" = ["E402"]
+"v4/tools/verify_nav_plugin_btn.py" = ["E402"]
+"v4/tools/verify_plugin_p0p1.py" = ["E402"]
+"v4/tools/verify_quick_capture.py" = ["E402"]
+"v4/tools/verify_screenshot_pin.py" = ["E402"]
+"v4/tools/verify_splash.py" = ["E402"]
+"v4/tools/verify_sticky_notes.py" = ["E402"]

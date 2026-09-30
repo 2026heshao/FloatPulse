@@ -52,3 +52,40 @@ jobs:
 
       - name: 静态安全扫描（medium 及以上，基线 0 问题 → 阻断）
         run: bandit -r src knowledge_ball.py -ll -c .bandit -f screen
+
+  lint:
+    # Ruff 静态检查闸门（成熟化路线图 4.1）。
+    # 在仓库根跑 `ruff check .`：目标目录 v4 / tools / shared / plugins，
+    # 规则选型与 per-file 豁免理由集中在根目录 ruff.toml（只查正确性，不做风格大扫除）。
+    # 版本写死，保证 CI 与本地贡献者产出一致；本地复现：pip install ruff==0.16.9。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 ruff
+        run: python -m pip install ruff==0.16.9
+
+      - name: Ruff 静态检查（零告警闸门）
+        run: python -m ruff check .
+
+  pip-audit:
+    # 依赖漏洞审计（优化清单 3.5）——先给信号不拦发布：continue-on-error，
+    # 等出现可升级的安全修复时，再把它转成正式闸门（去掉 continue-on-error）。
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 pip-audit
+        run: python -m pip install pip-audit
+
+      - name: 审计 requirements.txt 依赖漏洞
+        run: python -m pip_audit -r requirements.txt

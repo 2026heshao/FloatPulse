@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QRectF, QSize, Qt
 from PyQt6.QtGui import (
-    QColor, QFont, QImageReader, QPainter, QPainterPath, QPen, QPixmap,
+    QColor, QImageReader, QPainter, QPainterPath, QPen, QPixmap,
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors

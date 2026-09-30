@@ -79,7 +79,7 @@ class _FakeMessageBox:
 
 
 def main():
-    app = QApplication.instance() or QApplication([])
+    _ = QApplication.instance() or QApplication([])  # 仅需 QApplication 存活，无需引用
 
     # ---------------- A. 唯一实现 ----------------
     import knowledge_ball

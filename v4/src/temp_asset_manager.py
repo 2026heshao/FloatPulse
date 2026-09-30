@@ -38,13 +38,12 @@ add_asset 返回码约定（调用方判 `> 0` 即成功，负值均为失败）
 """
 
 import os
-import json
 import shutil
 import hashlib
 from datetime import datetime, timedelta
 
 from src.constants import sanitize_filename
-from src.json_store import load_records
+from src.json_store import load_records, save_records
 from src.logger import get_logger
 from src.app_paths import DATA_DIR_NAME, TEMP_ASSETS_DIRNAME
 
@@ -205,21 +204,12 @@ class TempAssetManager:
                 self._hash_index[a.content_hash] = a.asset_id
 
     def _save(self):
-        """统一保存：将内存素材列表一次性写入磁盘 json。"""
+        """统一保存（写前滚动备份 + data_version + 原子写入，统一走 json_store 骨架）"""
         data = {
             "assets": [a.to_dict() for a in self._assets],
             "next_id": self._next_id,
         }
-        try:
-            # 确保目录存在
-            os.makedirs(os.path.dirname(self._json_path), exist_ok=True)
-            # 原子写入
-            tmp_path = self._json_path + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except OSError:
-            pass
+        save_records(self._json_path, data, store="assets")
 
     # ---------------- 配置更新 ----------------
     def update_limits(self, max_assets: int = None, max_days: int = None,

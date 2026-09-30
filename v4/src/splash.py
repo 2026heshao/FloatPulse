@@ -21,7 +21,7 @@
 from PyQt6.QtCore import (
     QRectF, QPropertyAnimation, QTimer, Qt,
 )
-from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
 

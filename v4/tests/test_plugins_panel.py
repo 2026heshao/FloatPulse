@@ -222,7 +222,7 @@ class TestPluginsPanel:
         assert len(cards) == 1
         card = cards[0]
         assert card is not None
-        joined = " ".join(l.text() for l in card.findChildren(QLabel))
+        joined = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
         assert "演示插件" in joined and "v1.2.3" in joined
         assert "整理碎片用" in joined          # manifest.description 优先
         assert "做件事" in joined and "Ctrl+Alt+D" in joined
@@ -235,7 +235,7 @@ class TestPluginsPanel:
             tmp_path, description="", doc="周报草稿生成器。")
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
         card = _plugin_cards(panel)[0]
-        texts = " ".join(l.text() for l in card.findChildren(QLabel))
+        texts = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
         assert "周报草稿生成器" in texts
 
     def test_gate_off_shows_hint(self, qapp, tmp_path):
@@ -374,7 +374,7 @@ class TestDisabledPersistence:
             def plugin_loader(self):
                 return None
 
-        act = _FakeAction()
+        _ = _FakeAction()  # 构造不抛异常即视为通过（宿主无 config 时动作仍可实例化）
         panel = PluginsPanel(_NoCfgHost())
         panel._persist_disabled("demo", False)     # 不应抛异常
 
@@ -431,7 +431,7 @@ class TestUsageDoc:
         lp.path = str(d)
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
         card = _plugin_cards(panel)[0]
-        texts = " ".join(l.text() for l in card.findChildren(QLabel))
+        texts = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
         assert "选定范围后一键汇总" in texts
         # 按钮文案更新为「查看使用说明」
         btn_texts = " ".join(b.text() for b in card.findChildren(
@@ -444,7 +444,7 @@ class TestUsageDoc:
         lp = _make_loaded_plugin(tmp_path)              # 无任何 md
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
         card = _plugin_cards(panel)[0]
-        texts = " ".join(l.text() for l in card.findChildren(QLabel))
+        texts = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
         assert "📖" not in texts
 
 
@@ -586,7 +586,7 @@ class TestStoreDialog:
         assert "pluginStoreBox" not in names
 
     def test_dialog_renders_cards_and_states(self, qapp, tmp_path):
-        from PyQt6.QtWidgets import QLabel, QPushButton
+        from PyQt6.QtWidgets import QPushButton
         from src.plugins_panel import PluginStoreDialog, PluginsPanel
         entries = [
             _make_store_entry(tmp_path, "demo-a", installed=False),
@@ -649,7 +649,7 @@ class TestStoreDialog:
         try:
             cards = _store_cards(dlg)
             assert len(cards) == 1
-            joined = " ".join(l.text() for l in cards[0].findChildren(QLabel))
+            joined = " ".join(lbl.text() for lbl in cards[0].findChildren(QLabel))
             assert "manifest 不合法" in joined
             # 坏包不给可点的安装按钮（文案是「⊘ 无法安装」且禁用）
             assert [b for b in cards[0].findChildren(QPushButton)

@@ -33,10 +33,20 @@ import sys
 import logging
 from logging.handlers import RotatingFileHandler
 
+from src.app_version import APP_VERSION
+
 
 # 单例 logger 实例
 _logger_instance = None
 _log_file_path = None
+
+# 会话标记（3.2 崩溃可感知）：上一条「启动」标记之后若找不到对应的
+# 「正常退出」，即视为上次会话可能异常退出（崩溃 / 断电 / 杀进程）。
+_SESSION_START_MARK = "[会话] 启动"
+_SESSION_END_MARK = "[会话] 正常退出"
+# 扫描窗口：日志末尾 16KB（足够覆盖一次会话的退出段日志；
+# RotatingFileHandler 单文件 2MB，只读尾部避免大文件整读）
+_SESSION_SCAN_BYTES = 16 * 1024
 
 
 def init_logger(base_dir: str, level: int = logging.INFO) -> logging.Logger:
@@ -123,6 +133,67 @@ def get_logger() -> logging.Logger:
 def get_log_file_path() -> str:
     """返回日志文件完整路径（未初始化返回空字符串）"""
     return _log_file_path or ""
+
+
+# ====================================================================
+# 会话标记与上次异常退出判定（成熟化 3.2）
+# ====================================================================
+def mark_session_start():
+    """写一条「[会话] 启动 vX.Y.Z」info 标记（启动早期调用一次）。
+
+    与 mark_session_end 成对使用：下一次启动时据此判断上次会话
+    是否正常收尾。
+    """
+    get_logger().info(f"{_SESSION_START_MARK} v{APP_VERSION}")
+
+
+def mark_session_end():
+    """写一条「[会话] 正常退出」info 标记（aboutToQuit 收尾前调用）。
+
+    注意必须放在退出收尾的**最前面**：若收尾步骤崩溃，日志里也得
+    先有这条标记（标记之后出现的堆栈仍属「正常退出流程中出错」，
+    与「整个进程凭空消失」在诊断上是两类问题）。
+    """
+    get_logger().info(_SESSION_END_MARK)
+
+
+def previous_session_abnormal(path=None) -> bool:
+    """判断**上一次**会话是否可能异常退出（3.2 崩溃可感知）。
+
+    口径：在日志末尾（最后 16KB）找**最后一条**「[会话] 启动」标记，
+    其之后若没有对应的「[会话] 正常退出」标记 → True。具体情形：
+      - 有 start、其后无 end                      → True（含 start 之后
+        只有半截退出日志——收尾中途崩溃也算异常）
+      - 有 start、其后有 end                      → False
+      - 扫描窗口内**没有任何标记**但文件非空      → False（无法归因不
+        扰民：老版本日志本就没有标记，升级首启不应误报）
+      - 文件不存在 / 为空 / 未初始化日志路径      → False
+    ``path`` 可注入日志文件路径（测试用）；缺省取全局初始化路径。
+
+    已知误报边界（接受）：RotatingFileHandler 轮转可能把「启动」标记
+    翻出 16KB 窗口（此时按「无标记」处理，不误报），或把「正常退出」
+    标记截在窗口边界外（此时误报 True）。16KB 尾窗下两者都极罕见，
+    换来的收益是崩溃必留痕；提示文案用「可能」措辞兜住这类误报。
+    """
+    if path is None:
+        path = _log_file_path
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        size = os.path.getsize(path)
+        if size <= 0:
+            return False
+        with open(path, "rb") as f:
+            if size > _SESSION_SCAN_BYTES:
+                f.seek(size - _SESSION_SCAN_BYTES)
+            tail = f.read(_SESSION_SCAN_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    if _SESSION_START_MARK not in tail:
+        # 无标记（含窗口起点截断出半行的情况）：无法归因，不扰民
+        return False
+    last_start = tail.rfind(_SESSION_START_MARK)
+    return _SESSION_END_MARK not in tail[last_start:]
 
 
 def install_excepthook():

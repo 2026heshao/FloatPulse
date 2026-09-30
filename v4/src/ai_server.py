@@ -38,6 +38,40 @@ ST_READY = "ready"
 ST_ERROR = "error"
 
 
+def sync_loopback_allowlist(cfg) -> int:
+    """把 AI 总配置里的本地端点登记进 net_guard 回环白名单（1.5 配套）。
+
+    本地推理与 Ollama 都在 127.0.0.1 上：不登记，插件桥的 SSRF 闸会把
+    本地 AI 一并拦掉。登记两处——
+      1. 宿主拉起的 llama-server 端口（config ``ai_local_port``）；
+      2. 云端 base_url 若指向回环（如 Ollama ``http://127.0.0.1:11434/v1``），
+         net_guard 只放行回环主机，非回环 URL 登记会被忽略。
+
+    启动装配（knowledge_ball）与设置页保存后各调一次；幂等。
+    cfg 为 ConfigManager 或等价 .get 映射。返回本次登记成功的条数。
+    """
+    from urllib.parse import urlparse
+
+    from src.net_guard import allow_loopback_endpoint
+
+    registered = 0
+    try:
+        port = int(cfg.get("ai_local_port", 8095))
+    except (TypeError, ValueError):
+        port = 8095
+    if allow_loopback_endpoint("127.0.0.1", port):
+        registered += 1
+    try:
+        base_url = str(cfg.get("ai_cloud_base_url", "") or "").strip()
+        parts = urlparse(base_url)
+        if parts.hostname and allow_loopback_endpoint(
+                parts.hostname, parts.port or (443 if parts.scheme == "https" else 80)):
+            registered += 1
+    except (ValueError, TypeError):
+        pass
+    return registered
+
+
 def build_launch_args(gguf: str, port: int) -> list:
     """llama-server 启动参数（纯函数，便于验证）
 

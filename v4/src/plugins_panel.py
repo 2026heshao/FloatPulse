@@ -49,6 +49,16 @@ from PyQt6.QtWidgets import (
 # 因此必须是模块级 import（_build_usage_viewer 里的局部 import 只是历史写法）。
 from src.glass_dialog import GlassDialog
 
+from src import plugin_market
+from src.plugin_net import make_async_getter, make_async_bytes_getter
+from src.update_checker import RELEASES_API_URL, check_headers
+
+# 卡片能力标签（商店卡与在线市场卡共用，改一处两处生效）
+CAP_LABELS = {
+    "network": "🌐 网络访问", "write": "✍ 写入数据",
+    "manage": "🛠 改删数据", "ai": "🧠 AI 总配置",
+}
+
 # 插件包内使用说明文件约定（按优先级探测）
 USAGE_FILENAMES = ("使用说明.md", "README.md")
 # 卡片上显示的使用说明摘要最大长度（用户要求：简短一两句话）
@@ -709,11 +719,8 @@ class PluginsPanel(QWidget):
         fname = getattr(entry, "filename", "")
         meta_parts = []
         if caps:
-            cap_labels = {
-                "network": "🌐 网络访问", "write": "✍ 写入数据",
-                "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
             meta_parts.append("能力: " + "、".join(
-                cap_labels.get(c, c) for c in caps))
+                CAP_LABELS.get(c, c) for c in caps))
         if fname:
             meta_parts.append(f"包: {fname}")
         if meta_parts:
@@ -1159,6 +1166,30 @@ class PluginStoreDialog(GlassDialog):
         self._installed_hint.setVisible(False)
         body.addWidget(self._installed_hint)
 
+        # ---- 在线市场（2026-09-30 起，用户主动点击才联网）----
+        self._online_btn = QPushButton("🌐 检查在线市场")
+        self._online_btn.setObjectName("secondaryBtn")
+        self._online_btn.setToolTip(
+            "联网拉取官方插件市场索引（GitHub API）。\n"
+            "只在点击这一刻发请求；不点不联网，离线时本地安装不受影响")
+        self._online_btn.clicked.connect(self._on_check_online)
+        self._online_status = QLabel()
+        self._online_status.setObjectName("pluginCardId")
+        self._online_status.setWordWrap(True)
+        online_row = QHBoxLayout()
+        online_row.addWidget(self._online_btn)
+        online_row.addWidget(self._online_status, 1)
+        body.addLayout(online_row)
+        # 市场状态：_market_items=待安装条目 / _market_assets={文件名: asset id}
+        # / _market_busy=任一网络步骤进行中（防重复点击）
+        self._market_items = []
+        self._market_assets = {}
+        self._market_busy = False
+        from src.logger import get_logger
+        _log = get_logger()
+        self._market_getter = make_async_getter(_log)
+        self._market_bytes_getter = make_async_bytes_getter(_log)
+
         # ---- 滚动区：商店卡片列表（空态提示也在其中）----
         scroll = QScrollArea()
         scroll.setObjectName("storeScroll")
@@ -1258,3 +1289,233 @@ class PluginStoreDialog(GlassDialog):
         for e in pending:
             self._list_layout.insertWidget(
                 self._list_layout.count() - 1, panel._make_store_card(e))
+
+    # ---------------- 在线市场 ----------------
+    def _set_online_status(self, text: str):
+        self._online_status.setText(text)
+
+    def _market_set_busy(self, busy: bool):
+        self._market_busy = busy
+        self._online_btn.setEnabled(not busy)
+
+    def _on_check_online(self):
+        """「🌐 检查在线市场」：拉索引 → 拉最新 Release 解析附件 id → 出卡片。
+
+        两段式的原因：索引只存**文件名**（asset id 每次发版都变），
+        下载地址要在运行时从 /releases/latest 里按文件名解析。
+        """
+        if self._market_busy:
+            return
+        self._market_set_busy(True)
+        self._market_items = []
+        self._market_assets = {}
+        self._set_online_status("正在获取在线市场索引…")
+        started = self._market_getter(
+            plugin_market.INDEX_API_URL, headers=plugin_market.index_headers(),
+            timeout=plugin_market.INDEX_TIMEOUT_S,
+            on_done=self._on_index_loaded)
+        if not started:
+            self._market_set_busy(False)
+            self._set_online_status("无法发起网络请求")
+
+    def _on_index_loaded(self, res: dict):
+        if not res.get("ok"):
+            self._market_set_busy(False)
+            status = res.get("status", 0)
+            if status == 403:
+                self._set_online_status(
+                    "在线市场获取失败：GitHub API 限流（每小时 60 次），"
+                    "稍后再试。离线不影响本地安装")
+            elif status:
+                self._set_online_status(f"在线市场获取失败：HTTP {status}")
+            elif "超时" in (res.get("error") or "") or "timed out" in (
+                    res.get("error") or ""):
+                self._set_online_status(
+                    "在线市场获取超时，可重试。离线不影响本地安装")
+            else:
+                self._set_online_status(
+                    "无法连接 GitHub，离线不影响任何本地功能")
+            return
+        items, problems = plugin_market.parse_index(res.get("body", ""))
+        if not items:
+            self._market_set_busy(False)
+            self._set_online_status(
+                "在线市场响应格式异常：" + "；".join(problems[:2]))
+            return
+        # 已装版本表：loader 扫商店（installed=True 的才进已装清单）
+        installed_versions = {}
+        loader = getattr(self._panel._host, "plugin_loader", None)
+        try:
+            for e in (loader.scan_store() if loader is not None else []):
+                if getattr(e, "usable", False) and getattr(e, "installed", False):
+                    installed_versions[e.plugin_id] = getattr(e, "version", "")
+        except Exception:                      # noqa: BLE001 - 展示层兜底
+            pass
+        pending, updatable = plugin_market.installed_state(
+            items, installed_versions)
+        self._market_items = pending
+        note = f"在线市场共 {len(items)} 个插件：{len(pending)} 个未安装"
+        if updatable:
+            names = "、".join(i["name"] for i in updatable)
+            note += (f"；{len(updatable)} 个有新版本（{names}）——"
+                     f"先卸载旧版，再从这里安装新版")
+        for p in problems[:2]:
+            note += f"\n⚠ {p}"
+        self._set_online_status(note)
+        if not pending:
+            self._market_set_busy(False)
+            return
+        # 第二段：最新 Release 的 assets（按文件名解析 asset id）
+        self._set_online_status(note + "\n正在解析下载地址…")
+        started = self._market_getter(
+            RELEASES_API_URL, headers=check_headers(),
+            timeout=plugin_market.RELEASE_TIMEOUT_S,
+            on_done=self._on_release_loaded)
+        if not started:
+            self._market_set_busy(False)
+            self._set_online_status("无法发起网络请求")
+
+    def _on_release_loaded(self, res: dict):
+        self._market_set_busy(False)
+        body = res.get("body", "") if res.get("ok") else ""
+        for it in self._market_items:
+            aid = plugin_market.find_asset_id(body, it["file"])
+            if aid:
+                self._market_assets[it["file"]] = aid
+        missing = [i["name"] for i in self._market_items
+                   if i["file"] not in self._market_assets]
+        if not self._market_assets:
+            self._set_online_status(
+                "在线列表已获取，但解析下载地址失败"
+                "（最新 Release 还没有插件附件），请稍后再试")
+            return
+        note = (f"在线市场 {len(self._market_assets)} 个插件可安装"
+                + (f"；{len(missing)} 个暂缺附件" if missing else ""))
+        self._set_online_status(note)
+        # 出卡片：插在本地卡片**之前**（紧跟空态 label），末尾 stretch 前的
+        # 位置由本地卡片继续占用——reload() 会连在线卡一起清掉，语义简单
+        insert_at = 1      # [empty_label, 在线卡..., 本地卡..., stretch]
+        for it in reversed(self._market_items):
+            if it["file"] in self._market_assets:
+                self._list_layout.insertWidget(
+                    insert_at, self._make_online_card(it))
+        if not self._market_items:
+            self._empty_label.setVisible(False)
+
+    def _make_online_card(self, it: dict) -> QWidget:
+        """在线市场卡片：与本地商店卡同款骨架，按钮是「⬇ 下载安装」。
+
+        刻意不复用 _make_store_card：那张卡的安装按钮走「包已在商店目录」
+        的前提（_on_install → install_from_store），在线包还没落地，路径不同。
+        """
+        card = QFrame()
+        card.setObjectName("pluginStoreCard")
+        card._is_online_card = True       # 测试/刷新遍历用（区别于本地商店卡）
+        card._market_item = dict(it)
+        v = QVBoxLayout(card)
+        v.setContentsMargins(16, 12, 16, 12)
+        v.setSpacing(6)
+
+        head = QHBoxLayout()
+        name = QLabel(f"{it['name']}  v{it['version']}")
+        name.setObjectName("pluginStoreTitle")
+        head.addWidget(name)
+        tag = QLabel("远程")
+        tag.setObjectName("pluginStoreBadge")
+        head.addWidget(tag)
+        head.addStretch()
+        pid = QLabel(it["id"])
+        pid.setObjectName("pluginCardId")
+        head.addWidget(pid)
+        v.addLayout(head)
+
+        if it["description"]:
+            dl = QLabel(it["description"])
+            dl.setObjectName("pluginCardDesc")
+            dl.setWordWrap(True)
+            v.addWidget(dl)
+
+        meta_parts = []
+        if it["capabilities"]:
+            meta_parts.append("能力: " + "、".join(
+                CAP_LABELS.get(c, c) for c in it["capabilities"]))
+        if it["hotkeys"]:
+            meta_parts.append("热键: " + " ".join(it["hotkeys"]))
+        meta_parts.append(f"{it['size'] / 1024:.1f} KB")
+        meta = QLabel("　".join(meta_parts))
+        meta.setObjectName("pluginCardId")
+        meta.setWordWrap(True)
+        v.addWidget(meta)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        bottom.addStretch()
+        btn = QPushButton("⬇ 下载安装")
+        btn.setObjectName("primaryBtn")
+        btn.setToolTip(
+            "从 GitHub Releases 下载插件包（sha256 校验后放进商店目录）"
+            "并安装；已装插件不会被覆盖")
+        btn.clicked.connect(
+            lambda _checked=False, item=dict(it), b=btn:
+            self._download_and_install(item, b))
+        bottom.addWidget(btn)
+        v.addLayout(bottom)
+        return card
+
+    def _download_and_install(self, it: dict, btn: QPushButton):
+        """下载 .fpplug（octet-stream）→ sha256 校验 → 落商店 → 走既有安装。
+
+        安装委托 panel._on_install：它内部完成 rescan / 菜单重建 /
+        商店弹窗刷新 / 结果反馈，本方法只负责把包「送到商店目录」。
+        """
+        if self._market_busy:
+            return
+        asset_id = self._market_assets.get(it["file"], 0)
+        if not asset_id:
+            self._set_online_status(f"{it['name']}：下载地址尚未解析，请重新检查在线市场")
+            return
+        self._market_set_busy(True)
+        btn.setEnabled(False)
+        btn.setText("⬇ 下载中…")
+        self._set_online_status(f"正在下载 {it['name']}（{it['size'] / 1024:.1f} KB）…")
+        started = self._market_bytes_getter(
+            plugin_market.asset_download_url(asset_id),
+            headers=plugin_market.download_headers(),
+            timeout=plugin_market.DOWNLOAD_TIMEOUT_S,
+            on_done=lambda res, item=it: self._on_downloaded(item, res))
+        if not started:
+            self._market_set_busy(False)
+            btn.setEnabled(True)
+            btn.setText("⬇ 下载安装")
+
+    def _on_downloaded(self, it: dict, res: dict):
+        self._market_set_busy(False)
+        if not res.get("ok"):
+            status = res.get("status", 0)
+            why = (f"HTTP {status}" if status
+                   else "网络失败（离线或 GitHub 不可达）")
+            self._set_online_status(f"{it['name']} 下载失败：{why}")
+            self.reload()          # 恢复按钮文字（卡片已重建）
+            return
+        data = res.get("data") or b""
+        if not plugin_market.sha256_ok(data, it["sha256"]):
+            self._set_online_status(
+                f"{it['name']} 下载校验失败（sha256 不符），已丢弃，请稍后重试")
+            self.reload()
+            return
+        loader = getattr(self._panel._host, "plugin_loader", None)
+        store_dir = ""
+        try:
+            store_dir = loader.store_dir if loader is not None else ""
+        except Exception:                  # noqa: BLE001
+            store_dir = ""
+        ok, where = plugin_market.save_to_store(
+            data, store_dir, it["file"])
+        if not ok:
+            self._set_online_status(f"{it['name']} 保存失败：{where}")
+            self.reload()
+            return
+        # 包已进商店目录 → 走既有安装（rescan + 商店刷新 + 结果弹窗全覆盖）
+        self._set_online_status(f"{it['name']} 已下载并开始安装…")
+        self._panel._on_install(it["id"], it["name"])
+        self._set_online_status(f"✓ {it['name']} 已从在线市场安装")

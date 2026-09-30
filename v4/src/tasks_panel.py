@@ -26,7 +26,7 @@ from datetime import date as _date
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QDialog,
-    QFormLayout, QDialogButtonBox, QMessageBox, QDateEdit,
+    QFormLayout, QMessageBox, QDateEdit,
 )
 from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
