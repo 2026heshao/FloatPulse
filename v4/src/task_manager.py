@@ -120,6 +120,34 @@ def task_state(deadline: str, today: str | None = None):
     return (STATE_FUTURE, delta)
 
 
+def bucket_unfinished(tasks, today: str | None = None):
+    """把**未完成任务**按托盘提醒口径分成三桶，返回 ``(overdue, today_due, undated)``。
+
+    ★2026-09-30 新增：此前提醒只覆盖「今日到期 / 已逾期」，无截止日的
+    未完成任务（``STATE_NONE``）**永远不会被提醒**。这里把口径固化成
+    纯函数，让托盘提醒与未来的其它调用方共用同一份判定，避免再次漏桶。
+
+    - ``overdue``  : STATE_OVERDUE
+    - ``today_due``: STATE_TODAY
+    - ``undated``  : STATE_NONE（无日期 / 日期解析失败）—— 未完成即计入
+
+    已完成的（``task.done``）一律不进任何桶。日期判定统一走
+    ``task_state``（脏日期解析失败视为无日期）。纯逻辑，无 Qt 依赖。
+    """
+    overdue, today_due, undated = [], [], []
+    for t in tasks:
+        if getattr(t, "done", False):
+            continue
+        state, _delta = task_state(getattr(t, "deadline", ""), today)
+        if state == STATE_OVERDUE:
+            overdue.append(t)
+        elif state == STATE_TODAY:
+            today_due.append(t)
+        elif state == STATE_NONE:
+            undated.append(t)
+    return overdue, today_due, undated
+
+
 def format_relative_deadline(deadline: str, today: str | None = None) -> str:
     """UI 相对时间文案：今天 / 明天 / 逾期N天 / M月D日（周X）。
 

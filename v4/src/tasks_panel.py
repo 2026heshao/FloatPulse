@@ -9,7 +9,7 @@
 本轮（日程任务体感与功能优化）在本面板落地的能力：
   - B1 截止日期改为日历选择器（QDateEdit）
   - A1/A2 行内勾选框 + 完成反馈动画（自定义 delegate 自绘），
-    动画时长 = CHECK_ANIM_MS / anim_speed
+    动画时长 = motion.duration(CHECK_ANIM_MS, anim_speed)
   - A3 误勾撤销条（UndoBar，5 秒）
   - B3 相对时间提示（今天/明天/逾期N天/M月D日（周X））
   - C1 分组排序（get_tasks_grouped：逾期→今天→本周→以后→无日期→已完成）
@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
 from src.glass_dialog import make_dialog_buttons
+from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.task_manager import (
     task_state, format_relative_deadline, format_completed_date, group_title,
     KIND_ROW, KIND_HEADER,
@@ -38,8 +39,9 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import UndoBar
+from src.controls import EmptyState, IconButton, PageTitle, UndoBar
 from src.constants import CHECK_ANIM_MS
+from src import motion
 from src.theme import get_colors
 
 
@@ -58,6 +60,11 @@ class TasksPanel(QWidget):
         self._anim_task_id = None
         # 最近一次操作（供撤销还原）：(task_id, prev_done)
         self._undo_target = None
+        # 窗口化渲染状态（成熟化 3.6）：行描述符表 + 分块决策状态机
+        self._rows = None                  # 行描述符表（refresh 时重建）
+        self._row_pos = 0                  # 已建到的描述符下标
+        self._windowing = ListWindowing()  # 分块决策（首屏块大小/追加/重置）
+        self._building = False             # 重建中标志：屏蔽滚动触发的追加
         self._build_ui()
         self._init_animation()
 
@@ -89,8 +96,7 @@ class TasksPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("📋 日程任务")
-        title.setObjectName("pageTitle")
+        title = PageTitle("tasks", "日程任务", self._host)
         header.addWidget(title)
         header.addStretch()
         self._task_count_label = QLabel("共 0 条")
@@ -116,8 +122,11 @@ class TasksPanel(QWidget):
         self._task_deadline.setToolTip("点击选择截止日期（默认今天）")
         input_bar.addWidget(self._task_deadline)
 
-        # 用全角「＋」而非 emoji「➕」：emoji 走彩色字形，不跟随 QSS 的文字色
-        add_btn = QPushButton("＋ 添加")
+        # 「添加」是主操作钮；P1 起带自绘 plus 图标（原先弃用 emoji「➕」是
+        # 因为彩色字形不跟随 QSS 文字色，自绘后这一点天然成立）。
+        # 基础 QPushButton = 主色底 + on_primary 文字，图标同色才不发灰。
+        add_btn = IconButton("plus", text="添加", icon_size=14,
+                             off_color="on_primary", hover_color="on_primary")
         add_btn.clicked.connect(self._on_add)
         input_bar.addWidget(add_btn)
         v.addLayout(input_bar)
@@ -133,7 +142,18 @@ class TasksPanel(QWidget):
             get_colors(self._host.current_theme), self._task_list)
         self._delegate.toggle_requested.connect(self._on_toggle_requested)
         self._task_list.setItemDelegate(self._delegate)
+
+        # 窗口化加载：滚动接近底部时追加下一块（≤FULL_THRESHOLD 行全量直建，
+        # 本回调里的 windowed 检查会让它直接跳过）
+        attach_scroll_loader(self._task_list, self._extend_list_rows)
         v.addWidget(self._task_list, 1)
+
+        # 空态引导（A3）：覆盖层叠在列表上（列表本体不动，itemAt/count
+        # 断言零影响）；无动作钮 → 鼠标全透明，右键菜单照常
+        self._task_empty = EmptyState(
+            "tasks", "还没有任务",
+            "在上方输入待办回车添加，到期会在悬浮球提醒你")
+        self._task_empty.attach_to(self._task_list)
 
         # ---- 底部批量操作 ----
         bottom = QHBoxLayout()
@@ -144,8 +164,8 @@ class TasksPanel(QWidget):
         toggle_btn.clicked.connect(self._on_batch_toggle)
         bottom.addWidget(toggle_btn)
 
-        del_btn = QPushButton("🗑 批量删除")
-        del_btn.setObjectName("dangerBtn")
+        del_btn = IconButton("trash", text="批量删除", icon_size=14,
+                             object_name="dangerBtn")
         del_btn.clicked.connect(self._on_batch_delete)
         bottom.addWidget(del_btn)
 
@@ -179,36 +199,79 @@ class TasksPanel(QWidget):
     # 刷新（分组渲染）
     # ==================================================================
     def refresh(self):
-        """全量重建任务列表：按分组顺序渲染组标题 + 任务行。"""
+        """全量重建任务列表：按分组顺序渲染组标题 + 任务行。
+
+        渲染走窗口化（成熟化 3.6）：≤FULL_THRESHOLD(200) 行全量直建与旧
+        实现一致；超出则首屏只建 FIRST_CHUNK(120) 行，滚动接近底部续建。
+        """
         # 主题可能变化 → 同步 delegate 配色；并清理过期动画进度
         self._delegate.set_colors(get_colors(self._host.current_theme))
         self._delegate.clear_progress_except(self._anim_task_id)
 
         today = _date.today().isoformat()
-        self._task_list.clear()
-
-        grouped = self._task_manager.get_tasks_grouped(today)
-        for group_key, tasks in grouped:
-            header_item = QListWidgetItem(
-                f"{group_title(group_key, today)}  ·  {len(tasks)}")
-            # 组标题：不可选中（多选/批量不会误伤）
-            header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            header_item.setData(KIND_ROLE, KIND_HEADER)
-            self._task_list.addItem(header_item)
-
+        # 展开行描述符（纯 Python，不建 Qt 对象）：
+        # ("header", group_key, n) 组标题行 / ("task", task, state, rel) 任务行
+        rows = []
+        for group_key, tasks in self._task_manager.get_tasks_grouped(today):
+            rows.append(("header", group_key, len(tasks)))
             for t in tasks:
                 state, _delta = task_state(t.deadline, today)
+                rows.append(("task", t, state, self._rel_text(t, today)))
+
+        self._building = True
+        self._task_list.clear()
+        self._rows = rows
+        self._row_pos = 0
+        try:
+            n = self._windowing.reset(len(rows))
+            self._build_list_rows(n, today)
+        finally:
+            self._building = False
+
+        total = len(self._task_manager.get_all_tasks())
+        self._task_count_label.setText(f"共 {total} 条")
+        # 空态引导跟随（A3）：列表一件不剩时显示
+        self._task_empty.setVisible(self._task_list.count() == 0)
+        if self._task_empty.isVisible():
+            self._task_empty.setGeometry(self._task_list.rect())
+            self._task_empty.raise_()
+
+    # ---- 窗口化渲染：分块建行 / 追加回调 ----
+    def _build_list_rows(self, count: int, today: str):
+        """把行描述符表里接下来 count 行建成 item 追加进列表"""
+        for _ in range(count):
+            row = self._rows[self._row_pos]
+            self._row_pos += 1
+            if row[0] == "header":
+                header_item = QListWidgetItem(
+                    f"{group_title(row[1], today)}  ·  {row[2]}")
+                # 组标题：不可选中（多选/批量不会误伤）
+                header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                header_item.setData(KIND_ROLE, KIND_HEADER)
+                self._task_list.addItem(header_item)
+            else:
+                _, t, state, rel = row
                 item = QListWidgetItem("")
                 item.setData(Qt.ItemDataRole.UserRole, t.task_id)
                 item.setData(KIND_ROLE, KIND_ROW)
                 item.setData(ROLE_TITLE, t.title)
-                item.setData(ROLE_REL, self._rel_text(t, today))
+                item.setData(ROLE_REL, rel)
                 item.setData(ROLE_STATE, state)
                 item.setData(ROLE_DONE, bool(t.done))
                 self._task_list.addItem(item)
 
-        total = len(self._task_manager.get_all_tasks())
-        self._task_count_label.setText(f"共 {total} 条")
+    def _extend_list_rows(self):
+        """滚动接近底部 → 追加下一块（attach_scroll_loader 的回调入口）。
+
+        重建中 / 未窗口化（小列表全量直建）/ 已建满时直接跳过。
+        """
+        if self._building or self._rows is None:
+            return
+        if not self._windowing.windowed:
+            return
+        n = self._windowing.extend()
+        if n > 0:
+            self._build_list_rows(n, _date.today().isoformat())
 
     def _rel_text(self, t, today: str) -> str:
         """行尾右侧文案：已完成→完成日期，未完成→相对截止时间；
@@ -259,7 +322,8 @@ class TasksPanel(QWidget):
         start = 0.0 if new_done else 1.0
         end = 1.0 if new_done else 0.0
         self._delegate.set_check_progress(task_id, start)
-        duration = max(1, int(CHECK_ANIM_MS / max(0.01, self._anim_speed)))
+        # 时长口径统一走 src.motion（UI 强化方案 A1），此处只保留「至少 1ms」
+        duration = max(1, motion.duration(CHECK_ANIM_MS, self._anim_speed))
         self._anim.setDuration(duration)
         self._anim.setStartValue(start)
         self._anim.setEndValue(end)
