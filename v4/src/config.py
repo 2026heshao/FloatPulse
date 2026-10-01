@@ -27,7 +27,8 @@
   - restore_last_page:    启动时是否恢复上次浏览的页面
   - last_page_index:      最后浏览的页面索引（0..LAST_PAGE_INDEX_MAX，说明页 8 不记录）
   - close_to_tray:        关闭主窗口时最小化到托盘（不退出程序）
-  - task_reminder_enabled: 任务到期提醒开关（启动时 + 每日 9:00 托盘气泡）
+  - task_reminder_enabled: 任务提醒开关（启动时 + 每日 9:00 托盘气泡，
+    汇总逾期 / 今日到期 / 未安排日期的未完成任务）
   - quick_capture_enabled: 全局快速捕捉条开关
   - quick_capture_hotkey:  快速捕捉全局热键（如 "Ctrl+Alt+K"）
   - quick_capture_pos:     快速捕捉输入条最后拖动位置 [x, y]（None=屏幕居中）
@@ -55,6 +56,10 @@
                           下载、失败静默、不上传任何数据」立场见 update_checker）
   - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
   - latest_known_version: 最近发现的新版本 tag（如 "v4.8.0"；空 = 未发现）
+  - first_run_done:       首启引导已完成（3.4 三步欢迎向导只弹一次；「重看
+                          引导」会置回 False，向导关闭时再落 True）
+  - ui_scale:             界面缩放百分比（85-150，默认 100；只缩放全局字号
+                          不缩放 px 布局，见 theme.scaled_font_pt）
 ====================================================================
 """
 
@@ -87,16 +92,20 @@ DEFAULT_CONFIG = {
     "app_card_size":        96,           # 软件卡片边长（像素）
     "app_auto_back_home":   False,        # 启动软件后是否自动回到主页面
     "anim_speed":           1.0,          # 悬浮球动画速度档位（0.5-2.0，统一缩放动画时长）
+    "reduce_motion":        False,        # 减弱动效：界面过渡动画一律瞬显（#14）
     "ball_position":        None,         # 悬浮球最后保存位置 [x, y]
     "restore_last_page":    False,        # 启动时是否恢复上次浏览的页面
     "last_page_index":      0,            # 最后浏览的页面索引（0..LAST_PAGE_INDEX_MAX）
     "close_to_tray":        True,         # 关闭主窗口 → 最小化到托盘（False 沿用旧规则）
     "tray_hint_shown":      False,        # 已展示过「收进托盘」气泡提示（3.3，仅提示一次）
+    # ===== 首启引导 / 界面缩放（成熟化 3.4 / 3.5）=====
+    "first_run_done":       False,        # 已完成三步欢迎向导（onboarding.should_show 判定）
+    "ui_scale":             100,          # 界面缩放百分比（85-150，只缩放全局字号）
     # ===== 更新检查（2.3 被动提示；只查不下载，失败静默）=====
     "auto_check_updates":   True,         # 启动后每天最多静默检查一次新版本
     "last_update_check":    "",           # 最近一次检查日期 "YYYY-MM-DD"（空=从未检查）
     "latest_known_version": "",           # 最近发现的新版本 tag（如 "v4.8.0"；空=未发现）
-    "task_reminder_enabled": True,        # 任务到期提醒（托盘气泡）
+    "task_reminder_enabled": True,        # 任务提醒（托盘气泡，三桶汇总）
     "quick_capture_enabled": True,        # 全局快速捕捉条
     "quick_capture_hotkey": "Ctrl+Alt+K", # 快速捕捉全局热键
     "quick_capture_pos":    None,         # 快速捕捉输入条拖动后位置 [x, y]
@@ -155,11 +164,14 @@ _CONFIG_TYPES = {
     "app_card_size":        int,
     "app_auto_back_home":   bool,
     "anim_speed":           float,
+    "reduce_motion":        bool,
     "ball_position":        list,
     "restore_last_page":    bool,
     "last_page_index":      int,
     "close_to_tray":        bool,
     "tray_hint_shown":      bool,
+    "first_run_done":       bool,
+    "ui_scale":             int,
     "auto_check_updates":   bool,
     "last_update_check":    str,
     "latest_known_version": str,
@@ -223,6 +235,8 @@ _CONFIG_RANGES = {
     # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
     "pomodoro_focus_minutes": (1, 120),
     "pomodoro_break_minutes": (1, 60),
+    # 界面缩放百分比：与设置页「界面缩放」下拉档位（85/100/115/130/150）一致
+    "ui_scale":             (85, 150),
     # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
     "ai_local_port":        (1024, 65535),
 }

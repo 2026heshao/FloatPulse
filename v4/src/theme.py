@@ -83,6 +83,13 @@ THEMES = {
         # 看起来都像禁用态。这里单独给一个加深的同色系文字色：白底上 5.18:1。
         # （深色主题不必加深，$primary 在深底上是 14.7:1）
         "secondary_text":    "#27787A",
+        # ---- 键盘焦点环（UI 强化方案 A4）----
+        # 焦点环是「非文本前景」，须在面板底上达 WCAG 下限 3:1。$primary
+        # (#5BC0BE) 压在白玻璃面板底上只有约 2.1:1 —— 焦点环会看不见，
+        # 与 secondaryBtn 文字是同一类问题、同一个解，故取同值。
+        # 独立 token 命名（而非直接复用 $secondary_text）是为了不让
+        # 「次按钮文字色」与「焦点环色」两个语义被绑死，将来可各自演化。
+        "focus_ring":        "#27787A",
 
         # ---- 文字 ----
         "text":              "#2C3E50",
@@ -163,6 +170,10 @@ THEMES = {
         # 深色主题下 $primary(#6FFFE9) 在深底上已达 14.7:1，直接用主色即可，
         # 这里只为与 light 主题保持同一 token 名（QSS 模板共用一份）。
         "secondary_text":    "#6FFFE9",
+        # ---- 键盘焦点环（A4）----
+        # 深色主题下 $primary(#6FFFE9) 在深底上已达 14.7:1，直接用主色即可
+        # （与 $secondary_text 同值同因，理由见 light 主题处注释）。
+        "focus_ring":        "#6FFFE9",
 
         "text":              "#E4E8EE",
         "text_secondary":    "#98A2AE",
@@ -774,7 +785,8 @@ QLineEdit#stepValue {
 }
 QLineEdit#stepValue:focus {
     border: none;
-    border-bottom: 1px solid $primary;
+    border-bottom: 1px solid $focus_ring;
+    outline: none;
 }
 /* 步进器灰化态（自动隐藏总开关关闭时其秒数步进器整体 setEnabled(False)）：
    stepValue 有专属 objectName，特化规则会盖掉通用的 QLineEdit:disabled，
@@ -837,9 +849,12 @@ QLineEdit, QTextEdit, QPlainTextEdit, QDateEdit, QSpinBox, QDoubleSpinBox, QComb
 QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover {
     border: 1px solid $primary_a30;
 }
+/* 焦点环色用 $focus_ring 而非 $primary（A4）：$primary 在浅色主题的面板底上
+   只有约 2.1:1，等于「有焦点态但看不见」；$focus_ring 与面板底 ≥4:1 */
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QDateEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-    border: 1px solid $primary;
+    border: 1px solid $focus_ring;
+    outline: none;
     background-color: $panel_fill;
 }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
@@ -1170,6 +1185,57 @@ QPushButton#undoUndoBtn:hover {
     background-color: $primary_lite;
     color: $on_primary;
 }
+
+/* ====================================================================
+   ---- 键盘焦点态（UI 强化方案 A4）----
+   纪律一：**只改 border-color，绝不增删边框宽度、绝不改 padding/margin**。
+   下列每个控件在基态就已声明 1px 边框（透明或弱色），所以焦点态不改变
+   盒模型 → 不触发重排，项目里大量几何断言才不会被这一层影响。
+   纪律二：环色按「环压在什么底色上」选 ——
+     · 透明/浅底 → $focus_ring（对面板底 ≥4:1）
+     · 主色实底 → $on_primary（与主色 ≥4.5:1，护栏 test_theme_contrast 背书）
+     · 危险底   → $danger（对白玻璃底约 4.2:1）
+   为什么不用 outline：Qt QSS 的 outline 只对 item view 可靠，且不参与盒模型，
+   各控件表现不一；统一用 1px 边框最可控。
+   注意：QPushButton#stepBtn（Controls.Stepper 的 ± 钮）与
+   QPushButton#navGroupHeader（NavGroupHeader）都是显式 NoFocus，不在这里
+   出现死规则；步进器只有可键入的 QLineEdit#stepValue 需要焦点环。
+   ==================================================================== */
+QPushButton:focus {
+    /* 基础按钮/primaryBtn 是主色实底，深墨环才看得见 */
+    border: 1px solid $on_primary;
+    outline: none;
+}
+QPushButton#primaryBtn:focus {
+    border: 1px solid $on_primary;
+    outline: none;
+}
+QPushButton#secondaryBtn:focus,
+QPushButton#iconBtn:focus,
+QPushButton#navBtn:focus,
+QPushButton#settingsNavBtn:focus,
+QPushButton#tableOpenBtn:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+QPushButton#dangerBtn:focus {
+    border: 1px solid $danger;
+    outline: none;
+}
+/* 列表基态是 outline:none（原生焦点框被关掉了），不补这一条键盘用户
+   在列表里完全看不到自己在哪 */
+QListWidget:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+/* 复选标记的焦点环写在 indicator 子控件上。
+   ★ 写法必须是「子控件在前、伪态在后」= ``QCheckBox::indicator:focus``。
+   实测（2026-09-30，见 tests/test_keyboard_focus.py 的变体探针结论）：
+   写成 ``QCheckBox:focus::indicator`` 会被 Qt **无条件应用** —— 从未聚焦的
+   复选框也带着焦点环，等于把「焦点态」变成「常态」。 */
+QCheckBox::indicator:focus {
+    border: 1px solid $focus_ring;
+}
 """)
 _QSS_MAIN_WINDOW = _QSS_MAIN_WINDOW  # 保持名称稳定，便于外部引用
 
@@ -1255,9 +1321,12 @@ QPushButton#nextBtn {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 $primary_lite, stop:0.6 $primary, stop:1 $primary_deep);
     color: $on_primary;
-    border: none;
+    /* A4：原本 border:none，为了能有焦点环改成 1px 透明边框，
+       padding 各减 1px 补偿 —— padding+border 总量不变，sizeHint 与
+       内容区位置逐像素保持原样（否则会给卡片整体带来 2px 抖动）。 */
+    border: 1px solid transparent;
     border-radius: 13px;
-    padding: 9px 24px;
+    padding: 8px 23px;
     font-size: 13px;
     font-weight: 600;
 }
@@ -1280,7 +1349,8 @@ QLineEdit#taskInput {
     color: $text;
 }
 QLineEdit#taskInput:focus {
-    border: 1px solid $primary;
+    border: 1px solid $focus_ring;
+    outline: none;
 }
 QDateEdit#taskDate {
     background-color: $panel_fill;
@@ -1294,9 +1364,10 @@ QDateEdit#taskDate::drop-down { width: 18px; }
 QPushButton#taskAddBtn {
     background-color: $primary;
     color: $on_primary;
-    border: none;
+    /* A4：同 #nextBtn，透明边框 + padding 补偿（7px 15px → 6px 14px） */
+    border: 1px solid transparent;
     border-radius: 9px;
-    padding: 7px 15px;
+    padding: 6px 14px;
     font-size: 12px;
 }
 QPushButton#taskAddBtn:hover {
@@ -1332,7 +1403,8 @@ QTextEdit#noteEdit {
     color: $text;
 }
 QTextEdit#noteEdit:focus {
-    border: 1px solid $primary;
+    border: 1px solid $focus_ring;
+    outline: none;
 }
 
 /* ---- 滚动区：视口透明，透出玻璃壳（漏掉这条会在深色系统下渲染成黑块）---- */
@@ -1475,6 +1547,42 @@ QPushButton#undoUndoBtn:hover {
     background-color: $primary_lite;
     color: $on_primary;
 }
+
+/* ====================================================================
+   ---- 键盘焦点态（A4）---- 规则同主窗口：只改 border-color。
+   卡片窗是常驻悬浮窗，Tab 键在这里是真实的导航路径（7 个模式 Tab +
+   关闭/翻页/动作按钮），此前只有 taskInput / noteEdit 有焦点态。
+   ==================================================================== */
+QPushButton#sideTabIconBtn:focus,
+QPushButton#modeBtn:focus,
+QPushButton#navSiteCard:focus,
+QPushButton#fragCopyBtn:focus,
+QToolButton#appLaunchBtn:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+QPushButton#modeBtn:checked:focus,
+QPushButton#nextBtn:focus,
+QPushButton#taskAddBtn:focus {
+    /* 主色实底：环必须用深墨色（$on_primary 与 $primary ≥4.5:1） */
+    border: 1px solid $on_primary;
+    outline: none;
+}
+QPushButton#cardCloseBtn:focus,
+QPushButton#fragDelBtn:focus {
+    border: 1px solid $danger;
+    outline: none;
+}
+QPushButton#undoUndoBtn:focus {
+    /* 撤销条底色是深色自定义底（$undo_bg），环沿用其亮青文字色 */
+    border: 1px solid $primary_lite;
+    outline: none;
+}
+QDateEdit#taskDate:focus,
+QListWidget#taskList:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
 """)
 
 
@@ -1504,6 +1612,58 @@ QMenu::separator {
     margin: 4px 8px;
 }
 """)
+
+
+# ====================================================================
+# 界面缩放 / 全局字号（成熟化 3.5：活字缩放）
+# ====================================================================
+# 全局字体的基准 pointSize：实际字号 = round(BASE_FONT_PT * ui_scale / 100)。
+# 刻意的低风险取舍：ui_scale 只缩放全局**字号**，不缩放 QSS 里写死的
+# px 布局（间距/圆角/控件尺寸）——全量 px token 化改动面太大，且字号
+# 缩放已覆盖「字太小看不清」的主要诉求；代价是部分固定像素间距不随
+# 缩放，85–130% 观感最佳（设置页文案同口径）。
+BASE_FONT_PT = 10
+
+# 界面缩放合法档位（百分比）：config._CONFIG_RANGES 的范围校验之外，
+# 设置页下拉框与 apply_app_font 的调用方都以此为准（收敛取值来源）。
+UI_SCALE_VALUES = (85, 100, 115, 130, 150)
+
+
+def scaled_font_pt(ui_scale: int) -> int:
+    """按 ui_scale 百分比计算实际全局字号 pointSize（纯函数，无 Qt 依赖）。
+
+    - 100 → 10、85 → 8、115 → 12、130 → 13、150 → 15
+      （10*0.85=8.5、10*1.15=11.5 落在 .5 上，round 是 half-to-even，
+      8.5→8 / 11.5→12；字号差半磅无观感问题）
+    - 非法输入（非数值）原样抛 TypeError：调用方应传 config 收敛后的值
+    """
+    return round(BASE_FONT_PT * ui_scale / 100)
+
+
+def apply_app_font(ui_scale: int) -> int:
+    """把缩放后的字号设为 QApplication 全局字体（活字缩放，即时生效不重启）。
+
+    - 字族固定 Microsoft YaHei（与 QSS 模板的 font-family 同源）
+    - pointSize 由 scaled_font_pt 计算；Qt 的字体变更会自动重 polish
+      所有未显式指定 font-size 的控件，调用方通常还需走一遍主题刷新
+      链（main_window._apply_theme / theme_changed 广播）让 QSS 全量重载
+    - 无 QApplication 实例（纯逻辑测试 / 工具脚本）时跳过设置，仅返回
+      计算结果——本函数保持「模块级可导入、无 GUI 可调用」
+    - 返回实际应用的 pointSize（测试断言用）
+    """
+    pt = scaled_font_pt(ui_scale)
+    try:
+        from PyQt6.QtGui import QFont
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            return pt
+        font = QFont("Microsoft YaHei")
+        font.setPointSize(pt)
+        app.setFont(font)
+    except Exception:
+        pass
+    return pt
 
 
 # ====================================================================

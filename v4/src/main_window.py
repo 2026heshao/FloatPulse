@@ -41,12 +41,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QPoint, pyqtSignal, QTimer, QRect, QRectF, QEvent,
     QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
-    QSequentialAnimationGroup,
+    QSequentialAnimationGroup, QSize,
 )
 from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QShortcut, QKeySequence
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
+from src import motion
+from src import icon_render
+from src.icons import NAV_ICON, PLUGIN_PAGE_ICON, strip_leading_emoji
 from src.app_version import APP_VERSION
 from src.config import (
     sanitize_nav_order, DEFAULT_NAV_ORDER, LAST_PAGE_INDEX_MAX,
@@ -58,7 +61,7 @@ from src.nav_layout import (
     reorder_within_group,
 )
 from src.glass import GlassPanel, NavIndicator, NavGroupHeader
-from src.controls import ScreenToast
+from src.controls import IconButton, PageTitle, ScreenToast
 from src.app_paths import find_icon_file, get_screen_geometry
 from src.fragments_panel import FragmentsPanel
 from src.tasks_panel import TasksPanel
@@ -89,15 +92,33 @@ NAV_PAGE_INDEX = {
 # 使用说明页的物理索引（QStackedWidget 第 9 个，F1 切换；不参与「记住上次页面」）
 HELP_PAGE_INDEX = 8
 # 各功能页按钮文案（key 固定，文案可随 UI 调整）
+# ★ 2026-09-30（UI 强化 A2）：文案**不再带 emoji 图标前缀**。图标改由
+#   ``src/icons.py`` 自绘、以 setIcon 挂在按钮上，原因有两层：
+#     1) emoji 字形来自系统 emoji 字体，离屏渲染 / 精简系统 / 字体缺失时
+#        一律退化成空心方框（README 首屏截图长期带着这种方框）；
+#     2) 位图图标无法用 QSS 着色，emoji 的字形颜色也不受 token 控制 ——
+#        选中态"变主色"只能靠重设 pixmap，字符做不到。
+#   图标名由 ``NAV_ICON`` 映射（键名与图形解耦），渲染尺寸 NAV_ICON_SIZE。
 NAV_PAGE_TITLES = {
-    "fragments": "🧩  碎片工作台",
-    "tasks": "📋  日程任务",
-    "notes": "📝  笔记管理",
-    "knowledge": "📚  知识库",
-    "assets": "📎  临时素材",
-    "apps": "🚀  软件导航",
-    "nav": "🌐  网址导航",
-    "plugins": "🔌  插件中心",
+    "fragments": "碎片工作台",
+    "tasks": "日程任务",
+    "notes": "笔记管理",
+    "knowledge": "知识库",
+    "assets": "临时素材",
+    "apps": "软件导航",
+    "nav": "网址导航",
+    "plugins": "插件中心",
+}
+# 侧栏导航图标的渲染尺寸（逻辑像素；与 13px 字号的视觉重量对齐）
+NAV_ICON_SIZE = 16
+
+# 非拖拽固定项的文案（设置 / 使用说明）。与 NAV_PAGE_TITLES 分开存放，
+# 因为这两项不在 NAV_PAGE_INDEX 里 —— 它们由 nav_layout.NAV_FIXED_ITEM_GROUP
+# 归入 system 组，键名是宿主内部逻辑名（不是物理页面索引），
+# 混进 NAV_PAGE_TITLES 会让"遍历功能页键"的代码多出两个需要特判的项。
+NAV_PAGE_TITLES_FIXED = {
+    "settings": "设置",
+    "help": "使用说明",
 }
 # 拖拽换位：位移超过该值（像素）才进入拖拽，否则视为普通点击切页
 NAV_DRAG_THRESHOLD = 8
@@ -269,6 +290,8 @@ class MainWindow(QWidget):
         self._fragment_manager = fragment_manager
         self._docx_manager = docx_manager
         self._config = config_manager
+        # 减弱动效总闸（#14）：启动即按配置置位，motion.duration 单点生效
+        motion.set_reduce_motion(bool(config_manager.get("reduce_motion", False)))
         self._clipboard_monitor = clipboard_monitor
         self._temp_asset_manager = temp_asset_manager
         self._nav_manager = nav_manager
@@ -877,10 +900,10 @@ class MainWindow(QWidget):
         if not hasattr(self, '_max_btn'):
             return
         if self.isMaximized():
-            self._max_btn.setText("❐")
+            self._max_btn.set_icon_name("restore")
             self._max_btn.setToolTip("还原窗口")
         else:
-            self._max_btn.setText("⛶")
+            self._max_btn.set_icon_name("maximize")
             self._max_btn.setToolTip("最大化窗口")
 
     def _apply_window_state_margins(self):
@@ -1054,40 +1077,30 @@ class MainWindow(QWidget):
         h.addWidget(sub)
         h.addStretch()
 
-        # 主题切换按钮
-        self._theme_btn = QPushButton("🌙")
-        self._theme_btn.setObjectName("iconBtn")
-        self._theme_btn.setToolTip("切换深色/浅色主题")
-        self._theme_btn.setFixedSize(36, 36)
-        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # 主题切换按钮（🌙/☀️ 一钮两态：换主题时 _apply_theme 换图形）
+        self._theme_btn = IconButton("moon", size=36, icon_size=16,
+                                     object_name="iconBtn", host=self,
+                                     tooltip="切换深色/浅色主题")
         self._theme_btn.clicked.connect(self._toggle_theme)
         h.addWidget(self._theme_btn)
 
         # 最小化按钮
-        min_btn = QPushButton("—")
-        min_btn.setObjectName("iconBtn")
-        min_btn.setToolTip("最小化")
-        min_btn.setFixedSize(36, 36)
-        min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        min_btn = IconButton("minimize", size=36, icon_size=16,
+                             object_name="iconBtn", host=self, tooltip="最小化")
         min_btn.clicked.connect(self.showMinimized)
         h.addWidget(min_btn)
 
         # 全屏/还原切换按钮：最大化铺满屏幕 ⇄ 还原默认尺寸
-        self._max_btn = QPushButton("⛶")
-        self._max_btn.setObjectName("iconBtn")
-        self._max_btn.setToolTip("最大化窗口")
-        self._max_btn.setFixedSize(36, 36)
-        self._max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max_btn = IconButton("maximize", size=36, icon_size=16,
+                                   object_name="iconBtn", host=self,
+                                   tooltip="最大化窗口")
         self._max_btn.clicked.connect(self._toggle_maximize)
         h.addWidget(self._max_btn)
 
         # 关闭按钮（触发 closeEvent 智能判断：悬浮球可见则隐藏，不可见则退出）
-        close_btn = QPushButton("×")
-        close_btn.setObjectName("iconBtn")
-        close_btn.setProperty("danger", "true")
-        close_btn.setToolTip("关闭窗口")
-        close_btn.setFixedSize(36, 36)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn = IconButton("close", size=36, icon_size=16,
+                               object_name="iconBtn", host=self, danger=True,
+                               tooltip="关闭窗口")
         close_btn.clicked.connect(self.close)
         h.addWidget(close_btn)
 
@@ -1193,17 +1206,22 @@ class MainWindow(QWidget):
                 # （此时插件尚未加载）；order 里保留它的记忆位置
                 continue
             btn = self._make_nav_button(NAV_PAGE_TITLES[key],
-                                        NAV_PAGE_INDEX[key], key)
+                                        NAV_PAGE_INDEX[key], key,
+                                        icon_name=NAV_ICON.get(key))
             self._nav_btns[key] = btn
 
         # 设置（物理索引 6）：固定，不参与拖动换位
-        self._settings_btn = self._make_nav_button("⚙  设置", 6)
+        self._settings_btn = self._make_nav_button(
+            NAV_PAGE_TITLES_FIXED["settings"], 6,
+            icon_name=NAV_ICON["settings"])
         self._nav_fixed_btns["settings"] = self._settings_btn
         # 软件导航按钮别名（历史引用点保留）
         self._app_launcher_btn = self._nav_btns.get("apps")
 
         # 使用说明按钮（与其它页面一致，参与页面切换，索引 8）
-        self._help_btn = self._make_nav_button("❓  使用说明", 8)
+        self._help_btn = self._make_nav_button(
+            NAV_PAGE_TITLES_FIXED["help"], 8,
+            icon_name=NAV_ICON["help"])
         self._nav_fixed_btns["help"] = self._help_btn
 
         # 首次铺开：按分组序列落位 + 按当前展开集合显隐（首帧不做动画）
@@ -1562,19 +1580,57 @@ class MainWindow(QWidget):
             self._move_nav_indicator(btn, animate=False)
 
 
+    def _apply_button_icon(self, btn, colors=None):
+        """给导航按钮装／刷新自绘图标（Off 态=次要文字色，On 态=主色）。
+
+        ★ On 态交给 Qt：``QIcon.State.On`` 的 pixmap 被 ``setCheckable(True)``
+        的按钮在选中时自动取用（2026-09-30 离屏实测确认）。因此"选中变主色"
+        **不需要接 toggled 信号**，也就不会出现"漏接信号导致选中后图标
+        不变色"这类静默缺陷。此处只需在图标的**来源色**变了（换主题）时
+        重设一次。
+        """
+        name = btn.property("iconName")
+        if not name:
+            return
+        colors = colors or get_colors(getattr(self, "_theme", DEFAULT_THEME))
+        btn.setIcon(icon_render.icon(
+            name, NAV_ICON_SIZE,
+            colors["text_secondary"], on_color=colors["primary"]))
+        btn.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+
+    def _apply_nav_icons(self, colors=None):
+        """按主题重刷全部导航按钮图标（换主题时调用）。
+
+        图标是 QPixmap，**QSS 换主题刷不到** —— 不显式重设的话，切到深色
+        主题后图标会停在浅色主题的取色上（浅色取色落到深底上就是"看不见"）。
+        """
+        colors = colors or get_colors(getattr(self, "_theme", DEFAULT_THEME))
+        btns = list(getattr(self, "_nav_btns", {}).values())
+        btns += list(getattr(self, "_nav_fixed_btns", {}).values())
+        for btn in btns:
+            self._apply_button_icon(btn, colors)
+
     def _make_nav_button(self, text: str, page_index: int,
-                         nav_key=None) -> QPushButton:
+                         nav_key=None, icon_name=None) -> QPushButton:
         """创建导航按钮：**点击**切页；功能页按钮（nav_key 非空）可拖动换位。
 
         旧实现是鼠标进入按钮即切页，鼠标从侧栏横扫而过会连跳 4~5 页、
         转场动画层层叠加，观感失控。改为点击切页后，hover 只保留
         背景高亮与 2px 右移的视觉反馈。
+
+        ``icon_name`` 非空时挂自绘图标。按钮上的 ``iconName`` 动态属性是
+        图标的**唯一真相源**：换主题要重取色重绘时靠它反查该画哪个图标，
+        不必另建一张 {按钮: 图标名} 平行表（平行表正是"新增按钮忘了登记
+        导致图标不跟随主题"的温床）。
         """
         btn = _NavButton(text, nav_key)
         btn.setObjectName("navBtn")
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setProperty("pageIndex", page_index)
+        if icon_name:
+            btn.setProperty("iconName", icon_name)
+            self._apply_button_icon(btn)
         btn.clicked.connect(lambda _checked=False, idx=page_index: self._switch_page(idx))
         # id 用固定物理索引 → _switch_page 高亮 / last_page_index 全部自然正确
         self._nav_group.addButton(btn, page_index)
@@ -1638,12 +1694,12 @@ class MainWindow(QWidget):
     def _nav_anim_ms(self, base_ms: float) -> int:
         """按全局动画速度档位缩放导航动画时长（档位越大越快 → 时长越短）。
 
-        与任务面板 ``CHECK_ANIM_MS / anim_speed`` 的缩放口径保持一致。
+        口径统一走 ``src.motion``（UI 强化方案 A1）——原先这里与
+        ``card_window`` / ``tasks_panel`` 各写了一份缩放式，现已收敛到
+        ``motion.duration`` 唯一实现。返回值 0 表示「不做动画」，
+        调用侧据此跳过动画注册。
         """
-        speed = self.anim_speed
-        if speed <= 0:
-            speed = 1.0
-        return max(0, int(round(base_ms / speed)))
+        return max(0, motion.duration(base_ms, self.anim_speed))
 
     def _start_nav_settle_animations(self, old_pos: dict):
         """落定动画：位置变化的按钮从旧位置平滑滑到新位置。"""
@@ -2244,6 +2300,12 @@ class MainWindow(QWidget):
           只替换页面内容，索引与按钮保持稳定，旧页面被安全销毁
         返回物理索引。
         """
+        # ★ 2026-09-30（UI 强化 A2）：插件 manifest 的标题常自带 emoji 前缀
+        #   （"🤖 AI 助手"）。图标改由宿主自绘后，这类前缀不但多余，还会因
+        #   系统 emoji 字体缺失退化成豆腐块 —— 统一在这里剥掉；插件页一律
+        #   用通用占位图标 PLUGIN_PAGE_ICON（插件交不出 QPainterPath，宿主
+        #   也不可能认识任意插件的语义，通用包裹图形是唯一稳妥口径）。
+        title = strip_leading_emoji(title)
         old_index = NAV_PAGE_INDEX.get(key)
         # ⚠ 幂等判定必须以「本实例已持有该键的按钮」为准：
         #   NAV_PAGE_INDEX 是模块级 dict，跨 MainWindow 实例共享（测试 /
@@ -2271,7 +2333,8 @@ class MainWindow(QWidget):
         NAV_PAGE_TITLES[key] = title
         NAV_PAGE_INDEX[key] = index
         self._stack.addWidget(widget)
-        btn = self._make_nav_button(title, index, nav_key=key)   # 参与换位
+        btn = self._make_nav_button(title, index, nav_key=key,   # 参与换位
+                                    icon_name=PLUGIN_PAGE_ICON)
         self._nav_btns[key] = btn
         # 顺序：config 里记过位置（上次会话拖过）→ 沿用；新插件 → 追加
         # 到末位（设置之前）。_apply_nav_order 统一重排并交还布局。
@@ -2486,6 +2549,55 @@ class MainWindow(QWidget):
         """外部通知网址导航变化时调用"""
         self.refresh_page("nav")
 
+    # ---------------- 公开 API（D3 穿透清零 2026-09-30）----------------
+    # 宿主（knowledge_ball）此前直接戳 _switch_page / _refresh_page /
+    # _allow_close / _apply_theme / _page_notes 私有成员，
+    # 这里升为公开方法/特性，私有成员保持不动。
+    def show_page(self, index: int):
+        """公开入口：切换到指定页面并刷新对应面板（托盘气泡点击等外部调用）。
+
+        与 show_plugins_page 同族；索引含义见 _refresh_page 的页面表。
+        """
+        self._switch_page(index)
+
+    def refresh_apps_page(self):
+        """公开入口：软件导航页重载配置并刷新 UI（拖入 exe/lnk 收藏后调用）。
+
+        注意语义与 refresh_page(name) 不同：不受"页面当前可见"限制，
+        无条件重载——与原内部 _refresh_page(7) 逐字等价。
+        """
+        self._refresh_page(7)
+
+    def flush_pending_notes(self):
+        """公开入口：落盘未决的笔记编辑（退出前调用，兜自动保存防抖窗口）。
+
+        笔记面板缺失时静默跳过（与退出路径的 getattr 容错一致）。
+        """
+        panel = getattr(self, '_page_notes', None)
+        if panel is not None:
+            panel.flush_pending_save()
+
+    def reapply_theme(self):
+        """公开入口：按当前主题重新应用 QSS/配色（跟随系统深浅色变化时调用）。
+
+        不写配置、不广播 theme_changed——广播时机由调用方决定，
+        语义与原内部 _apply_theme() 逐字等价。
+        """
+        self._apply_theme()
+
+    @property
+    def allow_close(self) -> bool:
+        """是否允许下一次 closeEvent 直接关闭（程序主动退出路径用）。
+
+        宿主 _safe_quit 此前直接写 `_allow_close` 私有成员，升为特性。
+        """
+        return self._allow_close
+
+    @allow_close.setter
+    def allow_close(self, value: bool):
+        self._allow_close = bool(value)
+
+
     def show_fragments_page(self):
         """打开并跳转到碎片工作台"""
         self.show()
@@ -2560,8 +2672,17 @@ class MainWindow(QWidget):
         if isinstance(self._container, GlassPanel):
             self._container.apply_theme(colors)
         self._sync_nav_indicator_color(colors)
-        # 更新主题切换按钮图标
-        self._theme_btn.setText("☀️" if self._theme == "dark" else "🌙")
+        # 导航图标由 QPixmap 承载，同样**不在 QSS 的管辖范围**里 —— 不显式
+        # 重设的话，换到深色主题后图标会停在浅色主题的取色上（浅色落到
+        # 深底上就是"看不见"）。与碎片列表代理、知识库警告文字同一类坑。
+        self._apply_nav_icons(colors)
+        # 更新主题切换按钮图标（🌙/☀️ 一钮两态）
+        self._theme_btn.set_icon_name("sun" if self._theme == "dark" else "moon")
+        # P1 动作图标按钮的位图颜色同样不在 QSS 管辖内 —— 全窗一网打尽统一
+        # 重取色（各面板/设置页/插件页的 IconButton 都在这棵控件树下；
+        # 标题栏几个虽已订阅 theme_changed，重复 apply 一次是无害幂等）。
+        for btn in self.findChildren(IconButton):
+            btn.apply_theme(self._theme)
         # 更新右键菜单样式
         if hasattr(self, '_menu'):
             self._menu.setStyleSheet(qss)
@@ -2642,8 +2763,8 @@ class MainWindow(QWidget):
     def anim_speed(self) -> float:
         """当前动画速度档位（0.5-2.0）。
 
-        供任务面板等子控件按 ``CHECK_ANIM_MS / anim_speed`` 缩放动画时长，
-        使勾选动画与悬浮球动画速度档位一致。
+        供任务面板等子控件按 ``motion.duration(CHECK_ANIM_MS, anim_speed)``
+        缩放动画时长，使勾选动画与悬浮球动画速度档位一致。
         """
         try:
             speed = float(self._config.get("anim_speed", 1.0))
@@ -2755,7 +2876,7 @@ class MainWindow(QWidget):
         • <b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片<br>
         • <b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小<br>
         • <b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）、番茄钟（开关 + 专注 / 休息时长 + 自动进入休息）<br>
-        • <b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务到期提醒<br>
+        • <b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务提醒（汇总逾期 / 今日到期 / 未安排日期的未完成任务）<br>
         • <b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）<br>
         • <b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「💾 保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）<br>
         • <b>关于</b>：版本信息与快捷键速查；「🔍 检查更新」仅在你点击时访问一次 GitHub Releases API（不携带任何本机数据），发现新版只给下载页入口、不自动下载，离线不影响任何功能<br>
@@ -2774,11 +2895,13 @@ class MainWindow(QWidget):
         v.setContentsMargins(8, 0, 8, 0)
         v.setSpacing(12)
 
-        # 标题
-        title = QLabel("📖 FloatPulse 使用说明")
-        title.setObjectName("pageTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        v.addWidget(title)
+        # 标题（图标 + 文字整体居中：两侧加 stretch，与原来 AlignCenter 等效）
+        title_row = QHBoxLayout()
+        title_row.addStretch()
+        title = PageTitle("help", "FloatPulse 使用说明", self)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        v.addLayout(title_row)
 
         # 说明内容（可滚动）
         scroll = QScrollArea()

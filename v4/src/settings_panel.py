@@ -17,7 +17,7 @@ import os
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame, QStackedWidget,
-    QLineEdit,
+    QLineEdit, QComboBox,
     QMenu, QCheckBox, QWidgetAction, QButtonGroup,
     QMessageBox, QFileDialog,
 )
@@ -29,13 +29,14 @@ from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices
 
 
-from src.controls import Stepper, ToggleSwitch
+from src.controls import IconButton, PageTitle, Stepper, ToggleSwitch
 from src.glass_dialog import make_separator
 from src.plugin_net import make_async_getter, make_async_poster
 from src.ai_server import AI_SERVER, ST_READY, ST_STARTING, sync_loopback_allowlist
 from src.app_version import APP_VERSION
 from src.app_paths import get_data_dir
-from src.theme import resolve_theme_name
+from src.theme import resolve_theme_name, apply_app_font, UI_SCALE_VALUES
+from src import motion
 from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
                                 CHECK_TIMEOUT_S, check_headers, extract_tag,
                                 is_newer)
@@ -214,8 +215,7 @@ class SettingsPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        page_title = QLabel("⚙️ 设置")
-        page_title.setObjectName("pageTitle")
+        page_title = PageTitle("settings", "设置", self._host)
         outer.addWidget(page_title)
         outer.addSpacing(8)
 
@@ -271,6 +271,21 @@ class SettingsPanel(QWidget):
         add_row(gv, "主题外观", "浅色 / 深色 / 跟随系统（系统深浅色变化时自动换），切换即时生效",
                 theme_ctl)
 
+        # 界面缩放（3.5 活字缩放）：固定档位下拉——只缩放全局字号不缩放
+        # px 布局（低风险取舍见 theme.BASE_FONT_PT 注释），改动即时生效
+        # （重设 QApplication 字号并走主题刷新链全量重绘，无需重启）。
+        self._set_ui_scale = QComboBox()
+        for pct in UI_SCALE_VALUES:
+            self._set_ui_scale.addItem(f"{pct}%", int(pct))
+        self._set_ui_scale.setCurrentIndex(
+            max(0, self._set_ui_scale.findData(
+                int(self._config.get("ui_scale", 100)))))
+        self._set_ui_scale.currentIndexChanged.connect(self._on_ui_scale_changed)
+        add_row(gv, "界面缩放",
+                "整体字号缩放，改动即时生效；部分固定像素间距不随缩放，"
+                "85–130% 观感最佳",
+                self._set_ui_scale)
+
         # anim_speed 存浮点（0.5~2.0），Stepper 内部用整数 50~200，
         # divisor=100 / decimals=1 → 显示「1.3」，对外仍发内部整数。
         init_speed = self._config.get("anim_speed", 1.0)
@@ -281,6 +296,15 @@ class SettingsPanel(QWidget):
         self._set_anim_speed.valueChanged.connect(self._on_anim_speed_changed)
         add_row(gv, "动画速度", "悬浮球与勾选动画的统一倍速，每档 0.1x",
                 self._set_anim_speed)
+
+        # 减弱动效（#14）：总闸在 motion.duration 单点生效——导航展开/掉落、
+        # 任务勾选、卡片窗口的过渡一律瞬显；悬浮球自身的动画不在此口径内
+        self._set_reduce_motion = ToggleSwitch(
+            checked=bool(self._config.get("reduce_motion", False)))
+        self._set_reduce_motion.toggled.connect(self._on_reduce_motion_changed)
+        add_row(gv, "减弱动效", "导航展开、任务勾选等界面过渡直接瞬显"
+                "（悬浮球自身动画不受影响）",
+                self._set_reduce_motion)
 
         # 数值类用增减按钮（Stepper）而非滑条 ——
         # 滑条会在鼠标滚设置页时被滚轮静默改值，步进器只在数值框聚焦时才吃滚轮。
@@ -475,8 +499,20 @@ class SettingsPanel(QWidget):
 
         self._set_task_reminder = self._toggle("task_reminder_enabled", True)
         self._set_task_reminder.toggled.connect(self._on_task_reminder_changed)
-        add_row(gv, "任务到期提醒", "启动时及每日 9:00 托盘气泡，点击直达任务页",
-                self._set_task_reminder, last=True)
+        add_row(gv, "任务提醒",
+                "启动时及每日 9:00 托盘气泡，汇总逾期 / 今日到期 / 未安排日期的"
+                "未完成任务，点击直达任务页",
+                self._set_task_reminder)
+
+        # 重看引导（3.4）：置回未完成态并弹出同一欢迎向导（复用首启
+        # 状态链——向导关闭时 mark_done 落盘，不会产生残留态）
+        self._onboard_btn = IconButton("refresh", text="重看引导", icon_size=14,
+                                       object_name="secondaryBtn")
+        self._onboard_btn.setFixedHeight(30)
+        self._onboard_btn.clicked.connect(self._on_replay_onboarding)
+        add_row(gv, "新手引导", "重新弹出三步欢迎向导"
+                "（热键速查 / 悬浮球用法 / AI 说明）",
+                self._onboard_btn, last=True)
 
         # ================= 7. 导出 =================
         # 单列一组而非并入现有组：现有六组各管一类"行为配置"，
@@ -627,10 +663,11 @@ class SettingsPanel(QWidget):
             local_ctl)
 
         # ---- 保存并测试 ----
-        self._ai_save_btn = QPushButton("💾 保存并测试连接", self)
-        self._ai_save_btn.setObjectName("primaryBtn")
+        self._ai_save_btn = IconButton("save", text="保存并测试连接", icon_size=14,
+                                       object_name="primaryBtn", parent=self,
+                                       off_color="on_primary",
+                                       hover_color="on_primary")
         self._ai_save_btn.setFixedHeight(30)
-        self._ai_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._ai_save_btn.clicked.connect(self._on_ai_save_test)
         add_row(gv, "保存并测试连接", "配置落盘；云端发 1-token 探活，本地拉起服务并探活",
                 self._ai_save_btn)
@@ -720,10 +757,9 @@ class SettingsPanel(QWidget):
         upd_row = QHBoxLayout(upd_ctl)
         upd_row.setContentsMargins(0, 0, 0, 0)
         upd_row.setSpacing(8)
-        self._upd_btn = QPushButton("🔍 检查更新")
-        self._upd_btn.setObjectName("secondaryBtn")
+        self._upd_btn = IconButton("search", text="检查更新", icon_size=14,
+                                   object_name="secondaryBtn")
         self._upd_btn.setFixedHeight(30)
-        self._upd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._upd_btn.clicked.connect(self._on_check_update)
         upd_row.addWidget(self._upd_btn)
         self._upd_open_btn = QPushButton("🌐 打开下载页")
@@ -940,6 +976,13 @@ class SettingsPanel(QWidget):
             sp = self._config.get("anim_speed", 1.0)
             self._set_anim_speed.setValue(int(round(max(0.5, min(2.0, sp)) * 100)))
             self._set_anim_speed.blockSignals(False)
+        if hasattr(self, '_set_reduce_motion'):
+            self._set_reduce_motion.blockSignals(True)
+            self._set_reduce_motion.setChecked(
+                bool(self._config.get("reduce_motion", False)))
+            self._set_reduce_motion.blockSignals(False)
+        motion.set_reduce_motion(
+            bool(self._config.get("reduce_motion", False)))
         if hasattr(self, '_set_ball_size'):
             self._set_ball_size.blockSignals(True)
             self._set_ball_size.setValue(self._config.get("ball_size", 64))
@@ -978,6 +1021,45 @@ class SettingsPanel(QWidget):
             host._apply_theme()
             host.theme_changed.emit(resolve_theme_name("follow"))
         self.refresh()
+
+    def _on_ui_scale_changed(self, index: int):
+        """「界面缩放」档位变更（3.5 活字缩放）：落盘 + 立即重设全局字号。
+
+        与「跟随系统」同一条刷新链：apply_app_font 重设 QApplication
+        字号（未显式指定 font-size 的控件自动重排），再走主窗口
+        _apply_theme + theme_changed 广播让 QSS 全量重载、球 / 卡片 /
+        便签 / 快捕条 / 截图钉屏同步。ui_scale 只缩放字号不缩放 px 布局，
+        刻意的低风险取舍（见 theme.BASE_FONT_PT）。
+        """
+        scale = self._set_ui_scale.itemData(index)
+        if scale is None or int(scale) == self._config.get("ui_scale", 100):
+            return
+        self._config.set("ui_scale", int(scale))
+        self._config.save()
+        apply_app_font(int(scale))
+        host = self._host
+        apply_theme = getattr(host, "_apply_theme", None)
+        if callable(apply_theme):
+            apply_theme()
+        theme_signal = getattr(host, "theme_changed", None)
+        if theme_signal is not None:
+            theme_signal.emit(resolve_theme_name(
+                getattr(host, "_theme", "dark")))
+
+    def _on_replay_onboarding(self):
+        """「🔄 重看引导」（3.4）：置回未完成态并弹出同一欢迎向导。
+
+        复用首启状态链：mark_show_again 置 first_run_done=False 落盘，
+        向导关闭（完成 / Esc / 跳过）时 mark_done 置回 True——看完不会
+        「下次启动又弹」。
+        """
+        from src import onboarding
+        onboarding.mark_show_again(self._config)
+        dlg = onboarding.WelcomeDialog(host=self._host, parent=self)
+        dlg.finished.connect(
+            lambda _result: onboarding.mark_done(self._config))
+        dlg.exec()
+        dlg.deleteLater()
 
     def _on_spin_changed(self):
         """
@@ -1543,6 +1625,14 @@ class SettingsPanel(QWidget):
             self._config.set("anim_speed", speed)
             self._config.save()
         self._host.anim_speed_changed.emit(speed)
+
+    def _on_reduce_motion_changed(self, checked: bool):
+        """减弱动效开关：即时持久化 + 翻转 motion 总闸（界面下一帧即瞬显）"""
+        checked = bool(checked)
+        if checked != bool(self._config.get("reduce_motion", False)):
+            self._config.set("reduce_motion", checked)
+            self._config.save()
+        motion.set_reduce_motion(checked)
 
     def _on_ball_size_changed(self, value: int):
         """悬浮球大小：即时持久化并广播（悬浮球重建宿主尺寸，保持球心不动）"""

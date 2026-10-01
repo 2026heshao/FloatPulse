@@ -32,6 +32,8 @@
   - DocxManager         : docx 管理器（docx_manager.py）
   - ConfigManager       : 配置管理器（config.py）
   - theme               : 主题系统（theme.py）
+  - TrayController      : 系统托盘（tray.py，成熟化 4.3 D1-lite）
+  - ConfigHotkeyBinding : 全局热键绑定样板（hotkey_binding.py，成熟化 4.3 D4）
   - main                : 程序入口（本文件）
 ====================================================================
 """
@@ -60,9 +62,10 @@ from PyQt6.QtGui import (
 # 引入独立模块
 from src.single_instance import SingleInstance
 from src.card_window import CardWindow
-from src.app_paths import get_screen_geometry
+from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
 from src.task_manager import (
-    TaskManager, task_state, STATE_TODAY, STATE_OVERDUE,
+    TaskManager, task_state, bucket_unfinished,
+    STATE_TODAY, STATE_OVERDUE,
 )
 from src.note_manager import NoteManager
 from src.fragment_manager import FragmentManager, TYPE_CLIPBOARD_TEXT
@@ -72,7 +75,8 @@ from src.temp_asset_manager import TempAssetManager, REJECT_TOO_LARGE
 from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
-from src.theme import get_menu_qss, get_colors, resolve_theme_name
+from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
+    apply_app_font
 from src.controls import ScreenToast
 from src.constants import sanitize_filename, DEFAULT_THEME
 from src.pomodoro import (
@@ -295,7 +299,7 @@ class _BallSurface(QWidget):
         if self._pixmap is not None:
             return
         # 兼容 PyInstaller：图标可能位于 _internal / exe 同级 / 父目录
-        icon_path = _find_icon_file()
+        icon_path = find_icon_file()
         if icon_path:
             icon = QIcon(icon_path)
             pm = icon.pixmap(self._ball_size * 2, self._ball_size * 2)
@@ -447,6 +451,59 @@ class _BallSurface(QWidget):
 
 
 # ====================================================================
+# 模块：悬停轮询空闲降频状态机（纯逻辑，不依赖 Qt，可离线单测）
+# ====================================================================
+class HoverPollPolicy:
+    """悬停检测定时器的空闲降频决策（优化调研 6.1）。
+
+    背景：卡片可见期间 `_hover_check_timer` 以固定 50ms 全速轮询鼠标位置；
+    用户盯着卡片阅读（鼠标静止）时这些轮询全是空转。本状态机在不改变
+    交互观感的前提下空闲降频：
+
+      - 任何活动（进入/离开/移动、球交互、卡片显隐）→ 立即回到 50ms；
+      - 持续静止超过 IDLE_AFTER_MS（1 秒）→ 降到 IDLE_INTERVAL_MS（200ms）。
+
+    最坏感知延迟：降频期间鼠标一动，最多 200ms 后下一次 tick 就会读到新
+    位置；且 enterEvent / mouseMoveEvent 本身也会立刻唤醒（note_activity），
+    「移近球弹卡」不会可感知迟钝。真值表见 tests/test_ball_poll.py。
+    """
+
+    ACTIVE_INTERVAL_MS = 50        # 活动期轮询间隔（= FloatingBall.HOVER_CHECK_INTERVAL）
+    IDLE_INTERVAL_MS = 200         # 空闲降频后的轮询间隔（最坏感知延迟上限）
+    IDLE_AFTER_MS = 1000           # 持续静止多久后降频
+
+    def __init__(self):
+        self.last_activity_ms = 0.0   # 最近一次活动的 monotonic 时间戳（秒）
+        self.slowed = False           # 当前是否处于降频态
+
+    @staticmethod
+    def next_interval(idle_ms: int, active: bool) -> int:
+        """真值表：活动 → 50；静止 <1s → 50；静止 ≥1s → 200"""
+        if active or idle_ms < HoverPollPolicy.IDLE_AFTER_MS:
+            return HoverPollPolicy.ACTIVE_INTERVAL_MS
+        return HoverPollPolicy.IDLE_INTERVAL_MS
+
+    def note_activity(self):
+        """记录一次活动：静止计时清零；若已降频则返回应恢复的间隔，否则 None"""
+        self.last_activity_ms = time.monotonic()
+        if self.slowed:
+            self.slowed = False
+            return self.ACTIVE_INTERVAL_MS
+        return None
+
+    def on_tick(self, now_ms=None) -> int:
+        """每次轮询 tick 调用：返回当前应使用的间隔（可能触发降频）。
+
+        now_ms 供测试注入 monotonic 秒值；缺省取当前时间。
+        """
+        now = time.monotonic() if now_ms is None else now_ms
+        idle_ms = int((now - self.last_activity_ms) * 1000)
+        interval = self.next_interval(idle_ms, active=False)
+        self.slowed = interval != self.ACTIVE_INTERVAL_MS
+        return interval
+
+
+# ====================================================================
 # 模块：悬浮球类
 # ====================================================================
 class FloatingBall(QWidget):
@@ -487,6 +544,9 @@ class FloatingBall(QWidget):
     request_quit = pyqtSignal()   # 请求退出程序
     # 番茄钟相位计满（phase=focus/break, bound_title=绑定任务标题）
     pomodoro_phase_finished = pyqtSignal(str, str)
+    # 番茄钟状态变更中继（str=新状态）：外部接线入口（全屏让位对齐）——
+    # 此前外部直接戳 ball._pomodoro.state_changed 私有成员（D3 穿透清零）
+    pomodoro_state_changed = pyqtSignal(str)
 
     def __init__(self, cards, task_manager=None, note_manager=None,
                  fragment_manager=None, docx_manager=None,
@@ -676,6 +736,16 @@ class FloatingBall(QWidget):
         """插件动作变化（启用/禁用/重载）后重建右键菜单的唯一刷新入口"""
         self._rebuild_context_menu()
 
+    # ---------------- 公开门面（D3 穿透清零 2026-09-30）----------------
+    @property
+    def card_window(self) -> CardWindow:
+        """小卡片窗口公开访问器。
+
+        宿主（main()）此前一律 ``ball._card_window.xxx`` 直戳私有成员，
+        升为公开特性后走此处；小卡片自身的操作继续走 CardWindow 公开 API。
+        """
+        return self._card_window
+
     def open_main_window(self):
         """公开入口：打开主窗口（供插件上下文等外部调用）"""
         self._open_main_window()
@@ -732,6 +802,9 @@ class FloatingBall(QWidget):
         self._pomodoro.phase_changed.connect(self._on_pomodoro_phase_changed)
         self._pomodoro.state_changed.connect(self._on_pomodoro_state_changed)
         self._pomodoro.finished.connect(self._on_pomodoro_finished)
+        # 状态变更中继到公开信号：必须排在内部处理器之后连接，保证外部槽
+        # 仍在内部同步之后运行（与原外部直连 state_changed 的顺序一致）
+        self._pomodoro.state_changed.connect(self.pomodoro_state_changed)
         self._apply_ring_colors()
         self.apply_pomodoro_config()
 
@@ -1144,13 +1217,13 @@ class FloatingBall(QWidget):
                 self._main_window.refresh_fragments()
             if added_apps > 0:
                 # 软件导航页（索引 7）：内部做 load_apps_from_config + reload_settings
-                self._main_window._refresh_page(7)
+                self._main_window.refresh_apps_page()
         # 同步刷新小卡片软件页（仅可见且停留在软件页时重建；
         # 隐藏时无需处理——每次切入 app 页都会重读 config）
         if (added_apps > 0 and self._card_window is not None
                 and self._card_window.isVisible()
-                and self._card_window._last_mode == "app"):
-            self._card_window._refresh_app_page()
+                and self._card_window.current_mode == "app"):
+            self._card_window.refresh_page("app")
 
         # Toast 提示（重复拖入 added_apps=0 但 dup_apps>0 时也要有反馈）
         if added_apps > 0 or dup_apps > 0:
@@ -1530,6 +1603,10 @@ class FloatingBall(QWidget):
         self._update_hover_maybe(self._ball_hit(gpos), gpos)
 
     def _update_hover_maybe(self, in_ball, gpos):
+        # 进入/离开/球上移动都算「活动」：静止计时清零，已降频则立即回 50ms。
+        # 注意要放在 in_ball == _hovered 早退之前——鼠标在球上持续移动时
+        # 悬停态不变，但同样是需要全速轮询的活动。
+        self._note_poll_activity()
         if in_ball == self._hovered:
             return
         self._hovered = in_ball
@@ -1684,8 +1761,8 @@ class FloatingBall(QWidget):
             if self._card_window.isVisible():
                 # 卡片已弹出但停在别的模式（任务/碎片页）时先切回卡片模式，
                 # 否则 next_card() 只改了内容，界面停在原页 → 点击看似无反馈（B9）
-                if self._card_window._last_mode != "card":
-                    self._card_window._switch_mode("card")
+                if self._card_window.current_mode != "card":
+                    self._card_window.switch_mode("card")
                 self._card_window.next_card()
             else:
                 self._card_window.show_next_random()
@@ -1722,11 +1799,11 @@ class FloatingBall(QWidget):
         w = self._card_window
         if not w.isVisible():
             w.step_card(0)
-            w._last_mode = "card"     # 让 popup_near 直接落在卡片页
+            w.current_mode = "card"   # 让 popup_near 直接落在卡片页
             w.popup_near(self._ball_visual_rect())
         else:
-            if w._last_mode != "card":
-                w._switch_mode("card")
+            if w.current_mode != "card":
+                w.switch_mode("card")
             w.step_card(direction)
         self._out_count = 0
         self._hover_check_timer.start(self.HOVER_CHECK_INTERVAL)
@@ -1786,12 +1863,35 @@ class FloatingBall(QWidget):
         self._menu.exec(event.globalPos())
 
     # ---------------- 悬停卡片显示 / 关闭 ----------------
+    def _note_poll_activity(self):
+        """轮询状态机打点：出现活动（进入/离开/移动/弹卡）即恢复全速轮询。
+
+        仅在策略处于降频态时返回间隔，避免每次鼠标事件都无谓触碰定时器。
+        """
+        policy = getattr(self, '_poll_policy', None)
+        if policy is None:
+            return
+        interval = policy.note_activity()
+        if interval is not None:
+            self._apply_poll_interval(interval)
+
+    def _apply_poll_interval(self, interval: int):
+        """把轮询间隔落到悬停检测定时器（运行中的定时器用 start() 重启生效）"""
+        timer = self._hover_check_timer
+        if timer is None or timer.interval() == interval:
+            return
+        if timer.isActive():
+            timer.start(interval)
+        else:
+            timer.setInterval(interval)
+
     def _show_card_on_hover(self):
         if not self._card_window.isVisible():
             if not self._card_window.has_shown_content():
                 self._card_window.show_next_random()
             self._card_window.popup_near(self._ball_visual_rect())
         self._out_count = 0
+        self._note_poll_activity()   # 卡片显隐切换 = 活动（滑出唤起路径也经此处）
         self._hover_check_timer.start(self.HOVER_CHECK_INTERVAL)
 
     def _hide_card_faded(self):
@@ -1817,6 +1917,8 @@ class FloatingBall(QWidget):
 
     def _check_hover_state(self):
         try:
+            # 空闲降频：按状态机决定本次应使用的间隔（静止超 1s 降为 200ms）
+            self._apply_poll_interval(self._poll_policy.on_tick())
             # 悬浮球正在被拖动 → 不检测（拖动期间卡片保持显示）
             if self._dragging:
                 return
@@ -1886,6 +1988,9 @@ class FloatingBall(QWidget):
         self._hover_check_timer = QTimer(self)
         self._hover_check_timer.setInterval(self.HOVER_CHECK_INTERVAL)
         self._hover_check_timer.timeout.connect(self._check_hover_state)
+        # 空闲降频状态机（纯逻辑在 HoverPollPolicy，类里只留接线）：
+        # 鼠标静止超 1s → 200ms；任何活动立即回 50ms（见 _note_poll_activity）
+        self._poll_policy = HoverPollPolicy()
 
         # 看门狗自愈：常驻每秒巡检一次，发现「卡片可见但 hover 检测已停」
         # 即重新拉起（见 _card_watchdog_tick），兜住偶发时序导致的卡片滞留
@@ -2133,27 +2238,10 @@ class FloatingBall(QWidget):
 # ====================================================================
 # 程序入口
 # ====================================================================
-def _get_base_dir() -> str:
-    """获取程序根目录。
-
-    统一委托 src.app_paths.get_base_dir()：
-      - 打包运行 → exe 所在目录
-      - 源码运行 → 项目根目录（v1_baseline / v2 / shared 的公共父目录），
-        使多版本共用同一份 float_data/（内含知识库.docx、temp_assets/）
-    """
-    from src.app_paths import get_base_dir
-    return get_base_dir()
-
-
-def _find_icon_file() -> str:
-    """查找图标文件（统一委托 src.app_paths.find_icon_file）。
-
-    源码运行时优先在项目根 shared/assets/ 下查找，
-    打包后依次尝试 _internal、exe 同级、exe 父目录，png 作为备用。
-    """
-    from src.app_paths import find_icon_file
-    return find_icon_file()
-
+# 说明：`_get_base_dir` / `_find_icon_file` 两个薄包装已删除（成熟化 4.3）
+# —— 它们只是 src/app_paths.get_base_dir / find_icon_file 的转发，
+# 现直接使用 app_paths 公开函数；`_shutdown_once`（幂等退出收尾）与
+# `_check_data_integrity`（启动数据检查）属装配编排，随 wiring.py 拆分一并迁移。
 
 def _shutdown_once(state, steps) -> bool:
     """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
@@ -2188,17 +2276,17 @@ def main():
 
     # ---- 设置程序图标（影响任务栏和窗口标题栏图标）----
     _icon = QIcon()
-    _icon_path = _find_icon_file()
+    _icon_path = find_icon_file()
     if _icon_path:
         _icon = QIcon(_icon_path)
         app.setWindowIcon(_icon)
 
-    # ---- 系统托盘图标（任务栏通知区域）----
-    # 点击托盘图标：悬浮球隐藏时显示，可见时隐藏（不退出程序）
-    _tray_icon = QSystemTrayIcon()
-    _tray_icon.setIcon(_icon)
-    _tray_icon.setToolTip("生活悬浮球")
-    _tray_icon.setVisible(True)
+    # ---- 系统托盘图标（任务栏通知区域；D1-lite 拆至 src/tray.py）----
+    # 点击托盘图标：主窗口显隐切换（不退出程序）。创建时序与原实现一致：
+    # 早于单实例检测；点击/气泡接线在窗口就绪后 tray.attach()，菜单在
+    # 回调闭包就绪后 tray.build_menu() 完成。
+    from src.tray import TrayController
+    tray = TrayController(icon=_icon)
 
     # ---- 单实例检测 ----
     singleton = SingleInstance()
@@ -2212,7 +2300,7 @@ def main():
 
     # ---- 定位数据文件（统一收纳进 float_data/，路径函数见 src/app_paths.py）----
     from src.app_paths import get_data_dir, get_docx_path, get_data_root
-    base_dir = _get_base_dir()
+    base_dir = get_base_dir()
     # 2.2 双轨：logger / TempAssetManager 等自行拼「base_dir + float_data」
     # 的调用方，安装版要改传数据根（源码/便携下与 base_dir 同值，行为不变）
     data_base = get_data_root()
@@ -2250,6 +2338,10 @@ def main():
     # ---- 配置管理器 ----
     config_manager = ConfigManager(config_path)
     logger.info("配置管理器初始化完成")
+    # 3.5 界面缩放：建窗口前按 config 应用全局字号（活字缩放）——
+    # 所有窗口随后以缩放后的字号构建；设置页改动走 settings_panel 的
+    # 同款链路即时生效，无需重启（见 theme.apply_app_font）。
+    apply_app_font(config_manager.get("ui_scale", 100))
     # 3.1 跟随系统：config 可能存 "follow"——启动链路各窗口统一吃解析后
     # 的具体主题（light/dark），"follow" 原始值只留在 config 与主窗口；
     # 运行期切换走 main_window.theme_changed 广播（同样发具体主题名）。
@@ -2413,71 +2505,36 @@ def main():
             return
         ball.set_fullscreen_hidden(not ball.pomodoro_busy())
 
-    _pom_timer = getattr(ball, "_pomodoro", None)
-    if _pom_timer is not None:
-        _pom_timer.state_changed.connect(_sync_fullscreen_for_pomodoro)
+    # 番茄钟状态变更 → 与全屏让位状态对齐（公开中继信号，勿戳 ball._pomodoro 私有成员）
+    ball.pomodoro_state_changed.connect(_sync_fullscreen_for_pomodoro)
 
-    # ---- 托盘图标点击 → 切换主窗口显示/隐藏（不退出程序）----
-    def _on_tray_activated(reason):
-        # 只响应单击（左键点击），忽略双击/右键
-        get_logger().info(f"托盘点击: reason={reason}, 主窗口可见={main_window.isVisible()}")
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if main_window.isVisible():
-                main_window.hide()
-                get_logger().info("托盘点击 → 隐藏主窗口")
-            else:
-                main_window.show()
-                main_window.raise_()
-                main_window.activateWindow()
-                get_logger().info("托盘点击 → 显示主窗口")
-    _tray_icon.activated.connect(_on_tray_activated)
+    # ---- 托盘点击/气泡接线（D1-lite：实现在 src/tray.py）----
+    # —— 原内联 _on_tray_activated 已随托盘本体拆出，行为不变：单击切换
+    #    主窗口显隐（带日志），忽略双击/右键；气泡点击 → 主窗口任务页。
+    tray.attach(main_window, config_manager)
 
     # ---- 3.3 首次「关窗收进托盘」→ 托盘气泡提示一次 ----
     # 关主窗口默认收进托盘（close_to_tray=True），但此前无任何说明，
     # 新用户容易以为程序丢了。用 config 的 tray_hint_shown 防重复，
     # 提示后置 True 并落盘。主窗口只发信号（hidden_to_tray），
     # 不直接戳托盘/配置——分层与既有通信模式一致。
-    def _on_hidden_to_tray():
-        if config_manager.get("tray_hint_shown", False):
-            return
-        _tray_icon.showMessage(
-            "已收进托盘",
-            "程序仍在后台运行——从托盘图标或悬浮球随时找回。",
-            QSystemTrayIcon.MessageIcon.Information, 6000)
-        config_manager.set("tray_hint_shown", True)
-        config_manager.save()
-        get_logger().info("首次收进托盘提示已展示（tray_hint_shown → True）")
-    main_window.hidden_to_tray.connect(_on_hidden_to_tray)
+    main_window.hidden_to_tray.connect(tray.notify_hidden_to_tray)
 
-    # ---- 1.1 config.json 损坏提示：启动时若发生「损坏重置」，托盘告知一次 ----
-    # 此前损坏是静默回退默认，用户的热键/AI key/主题无痕迹丢失；
-    # 损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
-    if getattr(config_manager, "load_reset_reason", None) == "corrupt":
-        _tray_icon.showMessage(
-            "设置已重置",
-            "config.json 已损坏，程序已恢复默认设置；"
-            "原文件备份为 float_data/config.json.corrupt.bak。",
-            QSystemTrayIcon.MessageIcon.Warning, 8000)
-        get_logger().warning("[启动] config.json 损坏，已回退默认配置并托盘提示用户")
-
-    # ---- 3.2 上次会话可能异常退出 → 托盘告知一次（一次性，不落 config）----
-    # prev_abnormal 在 mark_session_start 之前已判定（否则会读到本次会话
-    # 的 start 标记而恒真）；拖到托盘建好后再提示，不打断启动闪屏。
-    if prev_abnormal:
-        _tray_icon.showMessage(
-            "上次可能异常退出",
-            "如遇问题可把 float_data/app.log 提供给开发者",
-            QSystemTrayIcon.MessageIcon.Warning, 8000)
-        get_logger().warning("[启动] 检测到上次会话可能异常退出，已托盘提示")
+    # ---- 1.1 / 3.2 启动一次性托盘告知：config 损坏重置 + 上次会话异常退出 ----
+    # 1.1：此前损坏是静默回退默认，用户的热键/AI key/主题无痕迹丢失；
+    #      损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
+    # 3.2：prev_abnormal 在 mark_session_start 之前已判定（否则会读到本次
+    #      会话的 start 标记而恒真）；拖到托盘建好后再提示，不打断启动闪屏。
+    tray.notify_startup_once(prev_abnormal)
 
     # ==================================================================
     # 信号槽桥梁：大小窗口数据双向同步
     # ==================================================================
     # 0. 注入 nav_manager / config_manager / asset_manager / fragment_manager 到小卡片
-    ball._card_window.set_nav_manager(nav_manager)
-    ball._card_window.set_config_manager(config_manager)
-    ball._card_window.set_asset_manager(temp_asset_manager)
-    ball._card_window.set_fragment_manager(fragment_manager)
+    ball.card_window.set_nav_manager(nav_manager)
+    ball.card_window.set_config_manager(config_manager)
+    ball.card_window.set_asset_manager(temp_asset_manager)
+    ball.card_window.set_fragment_manager(fragment_manager)
 
     # ---- 退出显式收尾（1.4）：热键注销 / AI 本地服务 / 剪贴板监听 ----
     # 各组件在下方集成段才创建（晚绑定），首次调用必然发生在事件循环期
@@ -2512,16 +2569,17 @@ def main():
         except Exception:
             pass
         # 重置卡片窗口状态为默认首页
-        ball._card_window._last_mode = "fragment"
-        ball._card_window._switch_mode("fragment")
-        main_window._allow_close = True
+        ball.card_window.reset_to_home()
+        main_window.allow_close = True
         QApplication.quit()
 
     # 注（1.3）：不再注册「全局 Esc → 退出程序」快捷键——此前任何窗口按
     # Esc 都会杀掉整个进程，与桌面软件惯例相反。Esc 语义逐表面收口：
     # 卡片 / 快捕条 / 截图框选 / 钉图 / 便签各自关闭或取消，主窗口 Esc 无动作。
 
-    # ---- 托盘右键菜单（F1）：显示/隐藏主窗口、显示/隐藏悬浮球、退出程序 ----
+    # ---- 托盘右键菜单（F1；D1-lite：构建在 src/tray.py）----
+    # 显示/隐藏主窗口、显示/隐藏悬浮球、📌 便签子菜单、退出程序。
+    # 闭包依赖经公开回调注入（TrayController 不持有业务对象之外的全局态）。
     def _toggle_main_window():
         if main_window.isVisible():
             main_window.hide()
@@ -2536,39 +2594,12 @@ def main():
         config_manager.set("ball_visible", visible)
         config_manager.save()
 
-    _tray_menu = QMenu()
-    _act_main = _tray_menu.addAction("显示 / 隐藏主窗口")
-    _act_ball = _tray_menu.addAction("显示 / 隐藏悬浮球")
-
-    # ---- 📌 便签子菜单：列出已钉便签 + 全部置前 / 全部关闭 ----
-    _tray_sticky_menu = QMenu("📌 便签", _tray_menu)
-
-    def _rebuild_sticky_menu():
-        _tray_sticky_menu.clear()
-        entries = sticky_manager.get_all()
-        if not entries:
-            empty = _tray_sticky_menu.addAction("（暂无便签）")
-            empty.setEnabled(False)
-        else:
-            for sid, title, _aid, kind in entries:
-                icon = "📋" if kind == "task" else "📄"
-                act = _tray_sticky_menu.addAction(f"{icon} {title[:24]}")
-                act.triggered.connect(
-                    lambda _checked=False, s=sid: sticky_manager.raise_sticky(s))
-            _tray_sticky_menu.addSeparator()
-            front = _tray_sticky_menu.addAction("⬆ 全部置前")
-            front.triggered.connect(sticky_manager.bring_all_to_front)
-        close_all = _tray_sticky_menu.addAction("✕ 全部关闭")
-        close_all.triggered.connect(sticky_manager.close_all)
-
-    _tray_sticky_menu.aboutToShow.connect(_rebuild_sticky_menu)
-    _tray_menu.addMenu(_tray_sticky_menu)
-    _tray_menu.addSeparator()
-    _act_quit = _tray_menu.addAction("退出程序")
-    _act_main.triggered.connect(_toggle_main_window)
-    _act_ball.triggered.connect(_toggle_ball_visibility)
-    _act_quit.triggered.connect(_safe_quit)
-    _tray_icon.setContextMenu(_tray_menu)
+    tray.build_menu(
+        toggle_main_window=_toggle_main_window,
+        toggle_ball_visibility=_toggle_ball_visibility,
+        quit_app=_safe_quit,
+        sticky_manager=sticky_manager,
+    )
 
     # ---- 任务到期提醒（启动时 + 每日 9:00 托盘气泡）----
     def _msecs_until_next(hour: int) -> int:
@@ -2581,56 +2612,59 @@ def main():
         return int((target - now).total_seconds() * 1000)
 
     def _check_task_reminders():
-        """扫描今日到期与逾期未完成任务，有则托盘气泡提醒。
+        """扫描未完成任务并托盘气泡提醒（三桶口径）。
 
-        口径与任务页 / 小卡片 / 球体徽标**完全一致**（统一走 task_state）：
-        脏日期解析失败 → 视为无日期，不计入。
+        ★2026-09-30 修：此前只提醒「今日到期 / 已逾期」两项，导致
+        **无截止日的未完成任务永远不会被提醒**（用户反馈"未完成任务不提示"，
+        实测其 5 条未完成任务 deadline 全为空串 → 命中 STATE_NONE → 静默）。
+
+        三桶（顺序即气泡内展示顺序）：
+          · 已逾期   —— STATE_OVERDUE
+          · 今日到期 —— STATE_TODAY
+          · 未安排日期 —— STATE_NONE 且未完成（无日期 / 日期写坏）
+
+        任务状态仍统一走 task_state（脏日期解析失败 → 无日期，不标红、
+        不进逾期桶），分桶由纯函数 bucket_unfinished 固化，**不新增也不
+        改写任何状态口径**；球体徽标（refresh_badge）保持「逾期 + 今日
+        到期」原口径不变。
         """
         ball.refresh_badge()   # 顺带刷新球体徽标（跨天后"今日到期"口径会变）
         if not config_manager.get("task_reminder_enabled", True):
             return
         from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
-        due, overdue = [], []
-        for t in task_manager.get_all_tasks():
-            if t.done:
-                continue
-            state, _delta = task_state(t.deadline, today)
-            if state == STATE_TODAY:
-                due.append(t)
-            elif state == STATE_OVERDUE:
-                overdue.append(t)
-        if not due and not overdue:
+        overdue, due, undated = bucket_unfinished(
+            task_manager.get_all_tasks(), today)
+        total = len(overdue) + len(due) + len(undated)
+        if not total:
             return
         lines = []
-        if due:
-            lines.append("【今日到期】")
-            lines.extend(f"· {t.title}" for t in due[:5])
-        if overdue:
-            lines.append("【已逾期】")
-            lines.extend(f"· {t.title}" for t in overdue[:5])
-        total = len(due) + len(overdue)
-        _tray_icon.showMessage(
-            f"任务提醒（{total} 项待处理）",
+        for label, bucket in (("【已逾期】", overdue),
+                              ("【今日到期】", due),
+                              ("【未安排日期】", undated)):
+            if not bucket:
+                continue
+            lines.append(label)
+            lines.extend(f"· {t.title}" for t in bucket[:5])
+            if len(bucket) > 5:
+                lines.append(f"· …另有 {len(bucket) - 5} 项")
+        tray.show_message(
+            f"任务提醒（{total} 项未完成）",
             "\n".join(lines),
             QSystemTrayIcon.MessageIcon.Information,
             6000,
         )
-        get_logger().info(f"任务提醒已弹出：今日到期 {len(due)}，逾期 {len(overdue)}")
+        get_logger().info(
+            f"任务提醒已弹出：逾期 {len(overdue)}，今日到期 {len(due)}，"
+            f"未安排日期 {len(undated)}")
 
     def _schedule_daily_reminder():
         """每日 9:00 检查一次（自循环重排）"""
         _check_task_reminders()
         QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)
 
-    def _on_message_clicked():
-        """点击提醒气泡 → 显示主窗口并切到任务页"""
-        main_window.show()
-        main_window.raise_()
-        main_window.activateWindow()
-        main_window._switch_page(1)
-    _tray_icon.messageClicked.connect(_on_message_clicked)
-
+    # 提醒气泡点击 → 显示主窗口并切到任务页（D1-lite：随托盘拆至
+    # TrayController._on_message_clicked，setup 时已接线）
     QTimer.singleShot(4000, _check_task_reminders)          # 启动 4 秒后首次检查
     QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)  # 之后每天 9:00
 
@@ -2656,7 +2690,7 @@ def main():
                 return                  # 无新版：不动 latest_known_version
             config_manager.set("latest_known_version", tag)
             config_manager.save()
-            _tray_icon.showMessage(
+            tray.show_message(
                 f"发现新版本 {tag}",
                 f"当前 v{APP_VERSION}——到 设置 → 关于 查看更新内容",
                 QSystemTrayIcon.MessageIcon.Information, 8000)
@@ -2674,6 +2708,7 @@ def main():
     # ---- 全局快速捕捉条（热键呼出 → 一句话进碎片池）----
     _mark("注册热键")
     from src.global_hotkey import GlobalHotkeyManager
+    from src.hotkey_binding import ConfigHotkeyBinding, reapply_hotkey_bindings
     from src.quick_capture import QuickCaptureWindow
 
     hotkey_mgr = GlobalHotkeyManager()
@@ -2681,21 +2716,19 @@ def main():
 
     quick_capture = QuickCaptureWindow(fragment_manager, theme=_resolved_theme, config_manager=config_manager)
 
-    def _apply_quick_capture():
-        """按当前配置重注册快速捕捉热键（开关/热键串变更/恢复默认时调用）"""
-        hotkey_mgr.unregister_all()
-        quick_capture.hide()
-        if not config_manager.get("quick_capture_enabled", True):
-            return
-        hotkey_text = config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K")
-        if not hotkey_mgr.register(hotkey_text, quick_capture.toggle):
-            get_logger().warning(f"全局热键注册失败（可能被占用）：{hotkey_text}")
+    # D4 样板收敛：配置驱动的单键绑定（注销 → hide 钩子 → 开关判定 → 注册）
+    quick_capture_hotkey = ConfigHotkeyBinding(
+        hotkey_mgr, config_manager,
+        enabled_key="quick_capture_enabled", hotkey_key="quick_capture_hotkey",
+        default_hotkey="Ctrl+Alt+K", callback=quick_capture.toggle,
+        fail_log="全局热键注册失败（可能被占用）：{hotkey}",
+        pre_hooks=(quick_capture.hide,))
 
-    main_window.quick_capture_changed.connect(_apply_quick_capture)
+    main_window.quick_capture_changed.connect(quick_capture_hotkey.reapply)
     main_window.theme_changed.connect(quick_capture.apply_theme)
     # 快速捕捉提交成功 → 球体脉冲反馈（A4）
     quick_capture.capture_submitted.connect(lambda _text: ball.pulse())
-    _apply_quick_capture()
+    quick_capture_hotkey.reapply()
 
     # ---- 截图钉屏（Ctrl+Alt+S → 框选 → 置顶参考浮窗，V4）----
     # 用独立 GlobalHotkeyManager：快捕条重注册会 unregister_all()，
@@ -2708,17 +2741,15 @@ def main():
         theme=_resolved_theme
     )
 
-    def _apply_screenshot_hotkey():
-        """按当前配置重注册截图钉屏热键"""
-        shot_hotkey_mgr.unregister_all()
-        if not config_manager.get("screenshot_enabled", True):
-            return
-        hk_text = config_manager.get("screenshot_hotkey", "Ctrl+Alt+S")
-        if not shot_hotkey_mgr.register(hk_text, screenshot_pin.start_capture):
-            get_logger().warning(f"截图热键注册失败（可能被占用）：{hk_text}")
+    # D4 样板收敛：配置驱动的单键绑定（注销 → 开关判定 → 注册）
+    screenshot_hotkey = ConfigHotkeyBinding(
+        shot_hotkey_mgr, config_manager,
+        enabled_key="screenshot_enabled", hotkey_key="screenshot_hotkey",
+        default_hotkey="Ctrl+Alt+S", callback=screenshot_pin.start_capture,
+        fail_log="截图热键注册失败（可能被占用）：{hotkey}")
 
-    _apply_screenshot_hotkey()
-    main_window.screenshot_changed.connect(_apply_screenshot_hotkey)
+    screenshot_hotkey.reapply()
+    main_window.screenshot_changed.connect(screenshot_hotkey.reapply)
     main_window.theme_changed.connect(screenshot_pin.apply_theme)
     # 悬浮球右键菜单入口
     ball.add_context_action("✂ 截图钉屏", screenshot_pin.start_capture)
@@ -2728,7 +2759,7 @@ def main():
         """相位计满 → 托盘气泡（非模态）+ 主窗口任务页刷新（番茄计数变了）"""
         if phase == PHASE_FOCUS:
             body = f"专注完成「{title}」，休息一下！" if title else "专注完成，休息一下！"
-            _tray_icon.showMessage(
+            tray.show_message(
                 "🍅 番茄钟", body,
                 QSystemTrayIcon.MessageIcon.Information, 6000)
             main_window.refresh_tasks()
@@ -3150,12 +3181,16 @@ def main():
     main_window.set_plugin_loader(plugin_loader)
 
     def _apply_plugin_hotkeys():
-        """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位"""
-        plugin_hotkey_mgr.unregister_all()
+        """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位。
+
+        D4 样板收敛：注销 + 注册 + 失败告警走 reapply_hotkey_bindings，
+        这里只负责按注册表筛出绑定表（冲突让位 / 停用跳过）。
+        """
         core_norm = {
             str(config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K")).strip().lower().replace(" ", ""),
             str(config_manager.get("screenshot_hotkey", "Ctrl+Alt+S")).strip().lower().replace(" ", ""),
         }
+        bindings = []
         for act in plugin_registry.all_actions():
             hotkey = act.declared_hotkey()
             if not hotkey or not act.enabled():
@@ -3164,10 +3199,12 @@ def main():
                 get_logger().warning(
                     f"[插件] 热键与核心功能冲突，插件让位：{act.hotkey}（{act.id}）")
                 continue
-            if not plugin_hotkey_mgr.register(
-                    act.hotkey, lambda aid=act.id: plugin_registry.trigger(aid, plugin_ctx)):
-                get_logger().warning(
-                    f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）")
+            bindings.append((
+                act.hotkey,
+                lambda aid=act.id: plugin_registry.trigger(aid, plugin_ctx),
+                f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）",
+            ))
+        reapply_hotkey_bindings(plugin_hotkey_mgr, bindings)
 
     def _apply_plugins(_enabled=None):
         """插件总闸：开 → 加载/登记；关 → 摘动作 + 摘页面（模块仍驻留）"""
@@ -3266,7 +3303,7 @@ def main():
     _apply_plugins()
 
     # 1. 小卡片退出请求 → 安全退出程序
-    ball._card_window.request_quit.connect(_safe_quit)
+    ball.card_window.request_quit.connect(_safe_quit)
 
     # 1.1 悬浮球右键退出 → 安全退出程序
     ball.request_quit.connect(_safe_quit)
@@ -3283,7 +3320,7 @@ def main():
             main_window.refresh_temp_assets()
         elif kind == "fragment":
             main_window.refresh_fragments()
-    ball._card_window.data_changed.connect(_on_card_data_changed)
+    ball.card_window.data_changed.connect(_on_card_data_changed)
 
     # 3. 大窗口主题切换 → 悬浮球 + 小卡片应用主题
     main_window.theme_changed.connect(ball.apply_theme)
@@ -3298,8 +3335,8 @@ def main():
         if config_manager.get("theme", DEFAULT_THEME) != "follow":
             return
         resolved = resolve_theme_name("follow")
-        if main_window._theme == "follow":
-            main_window._apply_theme()
+        if main_window.current_theme == "follow":
+            main_window.reapply_theme()
         main_window.theme_changed.emit(resolved)
         get_logger().info(f"[主题] 系统深浅色变化，跟随系统 → {resolved}")
 
@@ -3317,7 +3354,7 @@ def main():
     # 4b. 剪贴板图片入库（Y2）→ 刷新素材页面 + 球体脉冲 + 轻提示
     def _on_clipboard_image(_asset_id=None):
         main_window.refresh_temp_assets()
-        ball._card_window.notify_assets_changed()
+        ball.card_window.notify_assets_changed()
         main_window.show_toast("🖼 剪贴板图片已存入素材池（素材页可查看）")
         ball.pulse()
     if getattr(clipboard_monitor, "image_captured", None) is not None:
@@ -3327,21 +3364,21 @@ def main():
     def _on_main_data_changed(kind):
         if kind == "task":
             ball.refresh_badge()      # 大窗口任务变更 → 球体徽标同步（A4）
-            if ball._card_window.isVisible():
-                ball._card_window._refresh_task_list()
+            if ball.card_window.isVisible():
+                ball.card_window.refresh_page("task")
         elif kind == "knowledge":
             # 知识库编辑后重新加载卡片并同步到小卡片
             new_cards = docx_manager.get_cards()
             ball.update_cards(new_cards)
-        elif kind == "nav" and ball._card_window.isVisible():
+        elif kind == "nav" and ball.card_window.isVisible():
             # 网址导航编辑后刷新小卡片导航页
-            ball._card_window._refresh_nav_page()
+            ball.card_window.refresh_page("nav")
         elif kind == "asset":
             # 临时素材变更后刷新小卡片素材页（可见立即重建，隐藏则置脏）
-            ball._card_window.notify_assets_changed()
-        elif kind == "fragment" and ball._card_window.isVisible():
+            ball.card_window.notify_assets_changed()
+        elif kind == "fragment" and ball.card_window.isVisible():
             # 碎片变更后刷新小卡片碎片页
-            ball._card_window._refresh_fragment_page()
+            ball.card_window.refresh_page("fragment")
         elif kind in ("note", "task"):
             # 笔记/任务被删除后，对应桌面便签自动关闭（孤儿窗口不留）
             sticky_manager.validate_open_windows()
@@ -3361,8 +3398,8 @@ def main():
     def _on_card_always_show_changed(always_show: bool):
         # 配置已由 main_window 保存；这里刷新关闭按钮与内容净空（两者必须一起变，
         # 否则按钮出现了、内容却没让位，又会压住首行）
-        if ball._card_window.isVisible():
-            ball._card_window.refresh_always_show_layout()
+        if ball.card_window.isVisible():
+            ball.card_window.refresh_always_show_layout()
     main_window.card_always_show_changed.connect(_on_card_always_show_changed)
 
     # 8. 主窗口临时素材上限变更 → 更新管理器并清理过期素材
@@ -3371,7 +3408,7 @@ def main():
             max_assets=max_count, max_days=max_days, max_file_mb=max_file_mb)
         # 清理后刷新大小窗口的素材页
         main_window.refresh_temp_assets()
-        ball._card_window.notify_assets_changed()
+        ball.card_window.notify_assets_changed()
         get_logger().info(
             f"临时素材上限已更新: max_count={max_count}, max_days={max_days}, "
             f"max_file_mb={max_file_mb}")
@@ -3420,6 +3457,32 @@ def main():
     now = time.monotonic()
     logger.info(f"[启动] 全部完成 总计 {now - _boot['t0']:.2f}s")
     splash.finish()
+
+    # ---- 3.4 首启引导：首次使用时弹出三步欢迎向导（设置页「🚀 启动与
+    # 系统 → 🔄 重看引导」可重看，同一 dialog）----
+    # 延迟 800ms：不抢启动闪屏淡出的风头，主窗口先完整露脸。
+    from src import onboarding
+    _onboarding_ref = {"dlg": None}
+
+    def _show_onboarding():
+        # 防重入：已开着（设置页路径）就置前，不再叠一个
+        existing = _onboarding_ref["dlg"]
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dlg = onboarding.WelcomeDialog(host=main_window, parent=main_window)
+        _onboarding_ref["dlg"] = dlg
+        dlg.exec()
+        # 关闭即落盘：完成 / Esc / 跳过 / 标题栏 × 任何路径都置 True，
+        # 之后不再骚扰（设置页「重看引导」路径在 settings_panel 里
+        # 经 finished 信号走同一个 mark_done，闭环同源）
+        onboarding.mark_done(config_manager)
+        dlg.deleteLater()
+        _onboarding_ref["dlg"] = None
+
+    if onboarding.should_show(config_manager):
+        QTimer.singleShot(800, _show_onboarding)
 
     # ---- 唤醒信号：第二个实例启动时通过命名事件唤醒本实例 ----
     # 使用后台线程阻塞等待命名事件（事件驱动），替代 300ms 持续轮询，
@@ -3470,9 +3533,7 @@ def main():
             pass
         # 强制落盘未决的笔记编辑（防抖窗口内可能仍有待写数据）
         try:
-            _panel = getattr(main_window, '_page_notes', None)
-            if _panel is not None:
-                _panel.flush_pending_save()
+            main_window.flush_pending_notes()
         except Exception:
             pass
         # 立即落盘悬浮球位置（C4）：兜底 600ms 防抖窗口内尚未写入的位置

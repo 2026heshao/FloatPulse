@@ -57,7 +57,7 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import UndoBar
+from src.controls import IconButton, UndoBar
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
@@ -66,6 +66,7 @@ from src.app_paths import get_screen_geometry
 from src.constants import (
     NOTE_AUTOSAVE_INTERVAL_MS, DEFAULT_THEME, CHECK_ANIM_MS,
 )
+from src import motion
 from datetime import date as _date
 
 
@@ -80,6 +81,18 @@ _TABS = [
     ("🚀", "软件导航"),
 ]
 _TAB_KEYS = ["fragment", "card", "task", "note", "nav", "asset", "app"]
+
+# Tab 键 → icons.py 图标名（P1：emoji 字形改自绘，消除字体缺字形时的方框；
+# _TABS 里的 emoji 仅作历史参照，不再参与渲染）
+_TAB_ICONS = {
+    "fragment": "fragments",
+    "card": "knowledge",
+    "task": "tasks",
+    "note": "notes",
+    "nav": "nav",
+    "asset": "assets",
+    "app": "apps",
+}
 
 # 左侧 Tab 栏尺寸（固定宽度，不再展开收起）
 _TAB_BAR_WIDTH = 48         # 固定宽度
@@ -472,15 +485,11 @@ class CardWindow(QWidget):
 
         # 图标按钮（始终显示，固定布局）
         self._tab_buttons = []
-        for i, (icon, name) in enumerate(_TABS):
-            btn = QPushButton(icon)
-            btn.setObjectName("sideTabIconBtn")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(name)
-            btn.setFixedSize(_TAB_BTN_SIZE, _TAB_BTN_SIZE)
+        for i, (_emoji, name) in enumerate(_TABS):
             key = _TAB_KEYS[i]
-            btn.setProperty("tabKey", key)
+            btn = IconButton(_TAB_ICONS[key], size=_TAB_BTN_SIZE, icon_size=18,
+                             object_name="sideTabIconBtn", checkable=True,
+                             tooltip=name)
             # 点击切换 Tab（hover 只保留高亮）：鼠标扫过左侧栏不会再连续误切
             btn.clicked.connect(lambda _checked=False, k=key: self._switch_mode(k))
             self._tab_buttons.append(btn)
@@ -525,11 +534,11 @@ class CardWindow(QWidget):
         outer.addWidget(content_area, 1)
 
         # 保持显示模式下的关闭按钮（右上角，默认隐藏）
-        self._close_btn = QPushButton("×", self._container)
-        self._close_btn.setObjectName("cardCloseBtn")
-        self._close_btn.setFixedSize(self.CLOSE_BTN_SIZE, self.CLOSE_BTN_SIZE)
-        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._close_btn.setToolTip("关闭卡片")
+        self._close_btn = IconButton("close", size=self.CLOSE_BTN_SIZE,
+                                     icon_size=12, object_name="cardCloseBtn",
+                                     off_color="danger", hover_color="#FFFFFF",
+                                     tooltip="关闭卡片", parent=self._container)
+        self._close_btn.apply_theme(self._theme)
         self._close_btn.clicked.connect(self._on_close_button_clicked)
         self._close_btn.setVisible(False)
         self._place_close_button()
@@ -1193,6 +1202,9 @@ class CardWindow(QWidget):
         # 玻璃壳配色（填充/描边/高光/噪点）由 GlassPanel 手绘，需同步
         if isinstance(self._container, GlassPanel):
             self._container.apply_theme(get_colors(self._theme))
+        # P1：图标按钮（侧 Tab + 关闭钮）的位图颜色不在 QSS 管辖内
+        for btn in self.findChildren(IconButton):
+            btn.apply_theme(self._theme)
 
     def apply_theme(self, theme_name: str):
         if theme_name not in ("light", "dark"):
@@ -1256,6 +1268,43 @@ class CardWindow(QWidget):
         供宿主与插件上下文调用——外部不要直接调 _switch_mode（私有成员契约）。
         """
         self._switch_mode(mode)
+
+    # ---------------- 公开 API（D3 穿透清零 2026-09-30）----------------
+    # 宿主（knowledge_ball）此前直接戳 _last_mode / _switch_mode /
+    # _refresh_*_page 私有成员，这里升为公开特性/方法，私有成员保持不动。
+    @property
+    def current_mode(self) -> str:
+        """当前卡片模式（fragment/card/task/note/nav/asset/app）。
+
+        只读场景替代 ``._last_mode`` 读取；setter 仅裸置模式值（不触发
+        切页/转场），供 popup_near 前预置落点（滚轮唤出直接落卡片页）。
+        """
+        return self._last_mode
+
+    @current_mode.setter
+    def current_mode(self, mode: str):
+        self._last_mode = mode
+
+    def reset_to_home(self):
+        """公开入口：重置回默认首页（fragment）——安全退出路径用。"""
+        self._last_mode = "fragment"
+        self._switch_mode("fragment")
+
+    def refresh_page(self, kind: str):
+        """公开入口：按页种类刷新（task / nav / fragment / app）。
+
+        与主窗口 refresh_page(name) 命名对齐；是否需要刷新（如仅可见时）
+        由调用方判定，这里不做可见性过滤——语义与原私有刷新方法一致。
+        """
+        refreshers = {
+            "task": self._refresh_task_list,
+            "nav": self._refresh_nav_page,
+            "fragment": self._refresh_fragment_page,
+            "app": self._refresh_app_page,
+        }
+        refresher = refreshers.get(kind)
+        if refresher is not None:
+            refresher()
 
     def _switch_mode(self, mode: str):
         """切换 Tab 模式（带水平滑入淡入淡出转场）"""
@@ -1489,7 +1538,26 @@ class CardWindow(QWidget):
         self._indicator_ready = True
 
     def is_locked(self) -> bool:
-        return self._dragging
+        """卡片是否处于「拖动中」（拖动期间宿主不做悬停自动收回）。
+
+        ★自愈（2026-09-30 修「小卡片偶发永久滞留 = 变成常驻」）：
+        `_dragging` 只在 mouseReleaseEvent 里清零。一旦 release 丢失
+        （拖动中途切到别的窗口 / 弹出模态 / 抬起点落到别处），标志位会
+        **永久为 True**，后果是宿主的两条收回路径**双双失效**——
+        `_check_hover_state` 与 `_card_watchdog_tick` 都以 is_locked()
+        早退，卡片就此常驻，只有再按一次卡片才能解锁。
+
+        这里用**物理按键状态**做交叉校验：标志位为 True 但左键实际并未
+        按下 → 判定为丢失的 release，清标志并补发 card_drag_finished。
+        正常拖动期间左键始终按下，走不到这条分支，交互零变化。
+        """
+        if not self._dragging:
+            return False
+        if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+            self._dragging = False
+            self.card_drag_finished.emit()
+            return False
+        return True
 
     # ---------------- 数据注入 ----------------
     def set_cards(self, cards):
@@ -1726,7 +1794,8 @@ class CardWindow(QWidget):
         start = 0.0 if new_done else 1.0
         end = 1.0 if new_done else 0.0
         self._task_delegate.set_check_progress(task_id, start)
-        duration = max(1, int(CHECK_ANIM_MS / max(0.01, self._task_anim_speed())))
+        # 时长口径统一走 src.motion（UI 强化方案 A1），此处只保留「至少 1ms」
+        duration = max(1, motion.duration(CHECK_ANIM_MS, self._task_anim_speed()))
         self._task_anim.setDuration(duration)
         self._task_anim.setStartValue(start)
         self._task_anim.setEndValue(end)
@@ -1906,6 +1975,12 @@ class CardWindow(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event):
+        # 左键已松开却没收到 release（失焦 / 模态 / 跨窗释放）→ 立即解锁，
+        # 不等到下一次 is_locked() 轮询（与 is_locked 的自愈同一根因）
+        if self._dragging and not (event.buttons() & Qt.MouseButton.LeftButton):
+            self._dragging = False
+            self.card_drag_finished.emit()
+            return
         if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             self.card_moved.emit()
