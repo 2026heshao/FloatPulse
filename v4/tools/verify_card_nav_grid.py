@@ -5,9 +5,10 @@
 import os
 import sys
 
-PROJECT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-V3 = os.path.join(PROJECT, "v3")
-sys.path.insert(0, V3)
+# 本脚本位于 <项目根>/v4/tools/ 下，需把 **v4** 加进 sys.path 才能 import src.*
+# （2026-09-30 修正：此前写死指向已废弃的 v3 目录，脚本长期无法运行）
+V4 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, V4)
 
 from PyQt6.QtWidgets import QApplication, QPushButton, QLabel  # noqa: E402
 from PyQt6.QtGui import QFontDatabase  # noqa: E402

@@ -25,6 +25,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QDesktopServices, QColor
 
 from src.glass_dialog import make_dialog_buttons
+from src.controls import EmptyState, PageTitle
 
 # ---- 行布局几何 ----
 ROW_H = 44          # 单行高度
@@ -110,11 +111,12 @@ class _NavList(QWidget):
         self._rows = []            # 展示顺序 = 当前视觉顺序
         self._shift_anims = {}     # row -> QPropertyAnimation（邻居让位）
 
-        # ⚠ 必须给 parent：无 parent 的 QLabel 是顶层窗口，
-        # 一旦 show 会变成独立弹窗（2026-09-24 用户实测踩坑）
-        self._empty_label = QLabel("暂无站点，先在上方添加一个吧", self)
-        self._empty_label.setObjectName("hintLabel")
-        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # ⚠ 必须给 parent：无 parent 的空态控件是顶层窗口，
+        # 一旦 show 会变成独立弹窗（2026-09-24 用户实测踩坑）。
+        # A3 通用化：QLabel 占位 → EmptyState（自绘图标+标题+提示），
+        # 无动作钮 → 鼠标全透明，不挡列表自身的拖拽命中测试
+        self._empty_label = EmptyState(
+            "nav", "暂无站点", "先在上方添加一个常用的网址", self)
         self._empty_label.hide()
 
         # ---- 拖拽状态 ----
@@ -156,7 +158,7 @@ class _NavList(QWidget):
             self._empty_label.setGeometry(0, 0, 0, 0)
             self._empty_label.hide()
         else:
-            height = 72
+            height = 150          # EmptyState（图标+标题+提示）需要的高度
             self._empty_label.setGeometry(0, 0, w, height)
             self._empty_label.show()
             self._empty_label.raise_()
@@ -325,8 +327,7 @@ class NavPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("🌐 网址导航")
-        title.setObjectName("pageTitle")
+        title = PageTitle("nav", "网址导航", self._host)
         header.addWidget(title)
         header.addStretch()
         self._nav_count_label = QLabel("共 0 个站点")
