@@ -8,12 +8,12 @@
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
     QSplitter, QDialog, QMessageBox,
     QAbstractItemView, QStyledItemDelegate,
 )
-from PyQt6.QtCore import QRectF, Qt, QTimer, QEvent
+from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPen
 
 from datetime import datetime
@@ -30,6 +30,7 @@ from src.constants import (
 )
 from src.note_manager import Note
 from src.theme import DEFAULT_THEME, get_colors
+from src.controls import EmptyState, IconButton, PageTitle
 
 # 手动命名标题的长度上限（与重命名对话框一致）
 _TITLE_MAX_LEN = 50
@@ -116,8 +117,7 @@ class NotesPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("📝 笔记管理")
-        title.setObjectName("pageTitle")
+        title = PageTitle("notes", "笔记管理", self._host)
         header.addWidget(title)
         header.addStretch()
         self._note_count_label = QLabel("共 0 条")
@@ -129,12 +129,12 @@ class NotesPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        new_btn = QPushButton("＋ 新建笔记")
+        new_btn = IconButton("plus", text="新建笔记", icon_size=14)
         new_btn.clicked.connect(self._on_new)
         toolbar.addWidget(new_btn)
 
-        del_btn = QPushButton("🗑 删除当前")
-        del_btn.setObjectName("dangerBtn")
+        del_btn = IconButton("trash", text="删除当前", icon_size=14,
+                             object_name="dangerBtn")
         del_btn.clicked.connect(self._on_delete)
         toolbar.addWidget(del_btn)
 
@@ -169,16 +169,13 @@ class NotesPanel(QWidget):
         self._note_list.setItemDelegate(_NoteListDelegate(self._host))
         splitter.addWidget(self._note_list)
 
-        # 空态提示：悬浮在列表之上，仅在无条目时显示
-        self._note_empty_label = QLabel(self._note_list)
-        self._note_empty_label.setObjectName("hintLabel")
-        self._note_empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._note_empty_label.setWordWrap(True)
-        self._note_empty_label.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
-        )
-        self._note_empty_label.hide()
-        self._note_list.installEventFilter(self)
+        # 空态引导（A3 通用化）：叠在列表之上的 EmptyState 覆盖层，
+        # 随列表 resize 贴合（attach_to 自带 eventFilter）；无动作钮 →
+        # 鼠标全透明，右键菜单/滚轮照常落到列表
+        self._note_empty_label = EmptyState(
+            "notes", "还没有笔记",
+            "点上方「新建笔记」开始记录，自动保存不怕丢")
+        self._note_empty_label.attach_to(self._note_list)
 
         self._note_edit = QTextEdit()
         self._note_edit.setPlaceholderText("选择左侧笔记查看/编辑，或点「新建笔记」开始...")
@@ -273,23 +270,21 @@ class NotesPanel(QWidget):
             self._current_note_id = None
 
     def _update_empty_state(self, shown: int, keyword: str):
-        """列表无条目时显示空态占位文案"""
+        """列表无条目时显示空态引导（A3：图标+标题+提示）"""
         if shown > 0:
             self._note_empty_label.hide()
             return
-        self._note_empty_label.setText(
-            f"没有匹配「{keyword}」的笔记" if keyword
-            else "还没有笔记，点上方「＋ 新建笔记」开始"
-        )
+        if keyword:
+            self._note_empty_label.set_state(
+                "search", f"没有匹配「{keyword}」的笔记",
+                "换个关键词，或清空搜索框查看全部笔记")
+        else:
+            self._note_empty_label.set_state(
+                "notes", "还没有笔记",
+                "点上方「新建笔记」开始记录，自动保存不怕丢")
         self._note_empty_label.setGeometry(self._note_list.rect())
         self._note_empty_label.show()
         self._note_empty_label.raise_()
-
-    def eventFilter(self, obj, event):
-        """列表尺寸变化时让空态提示贴合列表区域"""
-        if obj is self._note_list and event.type() == QEvent.Type.Resize:
-            self._note_empty_label.setGeometry(self._note_list.rect())
-        return super().eventFilter(obj, event)
 
     def _set_status_editing(self) -> bool:
         """状态栏显示当前笔记的最近修改时间（相对时间）"""
