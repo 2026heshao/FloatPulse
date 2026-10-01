@@ -68,13 +68,14 @@ check("C3 空文案不覆盖", splash._stage_text == "构建主窗口界面…")
 # ================== D：像素比色 ==================
 print("== D 像素比色 ==", flush=True)
 img = splash.grab().toImage()
-center = img.pixelColor(img.width() // 2, 40)      # 卡片上部（避开弧/文字）
+# y=55：标题区之下、悬浮球轨道（顶点 y≈65）之上的空白玻璃区
+center = img.pixelColor(img.width() // 2, 55)
 corner = img.pixelColor(0, 0)                      # 圆角外
-bg = splash._c_bg
+bg = splash._c_bg                                  # glass_fill 解析色
 diff = (abs(center.red() - bg.red())
         + abs(center.green() - bg.green())
         + abs(center.blue() - bg.blue()))
-check("D1 卡片底色 = 主题 card_bg_solid", center.alpha() > 200 and diff <= 60,
+check("D1 玻璃底色 = 主题 glass_fill", center.alpha() >= 190 and diff <= 60,
       f"pixel={center.name()} bg={bg.name()} diff={diff}")
 check("D2 圆角外透明", corner.alpha() == 0, f"alpha={corner.alpha()}")
 

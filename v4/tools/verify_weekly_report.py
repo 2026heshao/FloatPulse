@@ -369,16 +369,22 @@ check("C8 范围与来源写进头部",
 from knowledge_ball import FloatingBall          # noqa: E402
 ball = FloatingBall([])
 ball.set_action_registry(registry, ctx)
-texts = [a.text() for a in ball._menu.actions()]
-print(f"    菜单项：{texts}", flush=True)
-check("D1 插件动作出现在球右键菜单", MENU_TITLE in texts, f"{texts}")
+# v2026-10-01 分组收纳：插件动作在「🧩 插件功能」子菜单里（一级只剩子菜单项）
+_plug_menu = next((a.menu() for a in ball._menu.actions()
+                   if a.text() == "🧩 插件功能"), None)
+texts = [a.text() for a in _plug_menu.actions()] if _plug_menu else []
+print(f"    插件功能子菜单：{texts}", flush=True)
+check("D1 插件动作出现在球右键菜单的插件功能子菜单里",
+      _plug_menu is not None and MENU_TITLE in texts, f"{texts}")
 if MENU_TITLE in texts:
     i_plug = texts.index(MENU_TITLE)
-    check("D2 位置正确：打开主窗口之后、退出程序之前",
-          i_plug > texts.index("🖥  打开主窗口") and i_plug < texts.index("退出程序"),
-          f"plug={i_plug} last={texts.index('退出程序')}")
+    check("D2 位置正确：子菜单夹在「打开主窗口」与「退出程序」之间",
+          _plug_menu.parent() is not None
+          and ball._menu.actions()[-1].text() == "退出程序",
+          f"first={ball._menu.actions()[0].text()} "
+          f"last={ball._menu.actions()[-1].text()}")
 else:
-    check("D2 位置正确：打开主窗口之后、退出程序之前", False)
+    check("D2 位置正确：子菜单夹在「打开主窗口」与「退出程序」之间", False)
 
 # ====================================================================
 # E. 真实触发：QTimer.singleShot 路径
@@ -386,7 +392,8 @@ else:
 real_dialog = plug.ReportDialog
 plug.ReportDialog = _SpyDialog
 _SpyDialog.instances = []
-item = [a for a in ball._menu.actions() if a.text() == MENU_TITLE]
+item = [a for a in _plug_menu.actions() if a.text() == MENU_TITLE] \
+    if _plug_menu else []
 check("E1 能找到菜单 QAction", len(item) == 1)
 item[0].trigger()
 pump(120)

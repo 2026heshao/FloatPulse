@@ -247,16 +247,21 @@ pump(50)
 # 恒为 False——用与祖先无关的 isHidden() 判断「被显式隐藏」
 check("B3 本地模式：本地配置区显示、云端区隐藏",
       not panel._ai_row_local.isHidden() and not panel._ai_row_exe.isHidden()
+      and not panel._ai_row_thinking.isHidden()
+      and not panel._ai_row_ctx.isHidden()
       and panel._ai_row_url.isHidden() and panel._ai_row_key.isHidden())
 panel._ai_mode_cloud.click()
 pump(50)
-check("B4 切回云端：云端区回归、本地区隐藏",
-      not panel._ai_row_url.isHidden() and panel._ai_row_local.isHidden())
+check("B4 切回云端：云端区回归、本地区（含思考/上下文新行）隐藏",
+      not panel._ai_row_url.isHidden() and panel._ai_row_local.isHidden()
+      and panel._ai_row_thinking.isHidden()
+      and panel._ai_row_ctx.isHidden())
 
 candidates = dict(panel._ai_candidate_plugins())
-check("C1 候选 = 两个 AI 插件（声明 ai 才进列表）",
+check("C1 候选 = 三个 AI 插件（声明 ai 才进列表；零能力 kb-search 不进）",
       PLUGIN_ID in candidates and ASSISTANT_ID in candidates
-      and "weekly-report" not in candidates, f"{list(candidates)}")
+      and "weekly-report" in candidates and "kb-search" not in candidates,
+      f"{list(candidates)}")
 
 # ====================================================================
 # D. 保存并测试（假探活桥）：落盘 + 请求结构 + ✓ 状态

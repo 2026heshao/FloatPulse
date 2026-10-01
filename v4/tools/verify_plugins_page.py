@@ -142,7 +142,8 @@ def main():
     check("C4. 动作与热键", "生成周报草稿" in page_labels
           and "Ctrl+Alt+W" in page_labels)
     check("C5. 右键菜单标记", "右键菜单" in page_labels)
-    check("C6. 使用说明摘要上卡", "选定范围后一键汇总" in page_labels)
+    check("C6. 使用说明摘要不上卡（详情看 md 文档）",
+          "选定范围后一键汇总" not in page_labels and "📖" not in page_labels)
     check("C7. 查看使用说明按钮", any(
         "查看使用说明" in b.text()
         for b in page.findChildren(QPushButton)))
