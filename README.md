@@ -6,8 +6,8 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](requirements.txt)
 [![Qt](https://img.shields.io/badge/UI-PyQt6%206.7%2B-41cd52)](requirements.txt)
 
-**一款 Windows 桌面常驻悬浮球工具：碎片收集 → 分类归档 → 转任务/笔记 → 截图钉屏，一个球全搞定。**
-原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核，打包后约 75 MB，启动 1–2 秒。
+**一款 Windows 桌面常驻悬浮球工具：剪贴板自动留存 → 素材临时中转 → 截图钉屏对照，手边的零碎一个球接住。**
+原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核；下载包 31 MB（解压后 75 MB），启动约 1 秒。
 
 | 主窗口（深色） | 主窗口（浅色） |
 |---|---|
@@ -17,14 +17,17 @@
 
 ## 🔍 与同类工具的区别
 
-启动器负责找东西，截图工具负责看东西，FloatPulse 负责**随手记完之后的那一段**——记下来的碎片怎么归类、怎么变成任务或笔记、怎么导出进你已有的知识库。它不是要替代谁，而是补上这些工具都没做的那一环。
+启动器负责找东西，截图工具负责看东西，FloatPulse 负责**你复制过、拖过、截下来那些东西的临时落脚点**——一个 IP、一个文件路径、一张刚截的图、一段待会儿还要用的命令。它们大多活不过半小时，但在那半小时里你得随时能找回来看一眼，而不是再去翻聊天记录或重新截一次。
+
+它不打算做你的第二大脑。碎片进来是什么样，出去还是什么样；能带走的是你主动挑出来存成笔记、丢进知识库、或导出进 Obsidian 的那些。
 
 | 能力 | FloatPulse | FocusCapture | Floatyball | Flow Launcher | Snipaste |
 |---|---|---|---|---|---|
 | 悬浮球常驻入口 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| 随手记录碎片 | ✅ 快捕条 + 剪贴板 | ✅ 剪贴板 | ⚠️ 拖放 | ❌ | ❌ |
+| 随手记录碎片 | ✅ 剪贴板自动收（为主）+ 快捕条 + 拖拽 | ✅ 剪贴板 | ⚠️ 拖放 | ❌ | ❌ |
 | 碎片分类管理 | ✅ 来源 + 内容语义双轴 | ❌ 仅时间流 | ❌ | ❌ | ❌ |
-| 转成任务 / 笔记 | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 碎片转笔记 / 入知识库 | ✅ 一键存为笔记、加入知识库 | ❌ | ❌ | ❌ | ❌ |
+| 碎片转任务 | ❌ 手动无入口（AI 文本工坊可自动提取待办） | ❌ | ❌ | ❌ | ❌ |
 | 临时素材中转 | ✅ 去重 + 缩略图 + 过期清理 | ❌ | ❌ | ❌ | ❌ |
 | 截图钉屏 | ✅ 含批注与撤销 | ❌ | ❌ | ❌ | ✅ |
 | 软件 / 网址启动 | ✅ 拖 exe 即建 | ❌ | ✅ AHK 动作 | ✅ | ❌ |
@@ -32,11 +35,21 @@
 | 全局文件搜索 | ❌ | ❌ | ❌ | ✅ 含 Everything | ❌ |
 | 插件生态 | ⚠️ 外置插件 5 个，按需下载不预装 | ❌ | ✅ AHK | ✅ 200+ 社区插件 | ❌ |
 | 技术栈 | Python + PyQt6 | C# / WPF | AutoHotkey | C# / .NET | 闭源 |
-| GitHub Stars | 0 | 0 | 19 | 15,668 | 闭源 |
+| GitHub Stars | 1 | 0 | 19 | 15,693 | 闭源 |
 
-**表里的 ❌ 不是缺陷，是取舍。** 全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义；插件生态刚起步，目前是 5 个外置插件 + 插件商店 + 打包器，社区插件的数量不跟任何人比，写 ⚠️ 就是 ⚠️。项目 Stars 是 0 也照实写 0：这是个还在自用打磨阶段的项目，没有外部用户验证，不装成「已被广泛使用」。
+**表里的 ❌ 不是缺陷，是取舍。** 全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义；插件生态刚起步，目前是 5 个外置插件 + 插件商店 + 打包器，社区插件的数量不跟任何人比，写 ⚠️ 就是 ⚠️。项目 Stars 是 1 也照实写 1：这是个还在自用打磨阶段的项目，没有外部用户验证，不装成「已被广泛使用」。
 
-*Stars 数据取自 GitHub API（仓库：`lch319/Floatyball`、`pengjie1115/FocusCapture`、`Flow-Launcher/Flow.Launcher`），2026-09-29 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单属内部调研资料，未随仓库公开，需要可开 Issue 索取。*
+**它不适合下面这些期待**——提前说清楚，省得装完才发现不是想要的：
+
+| 如果你想要 | 实际情况 |
+|---|---|
+| 全局文件搜索 | ❌ 交给 Everything / Flow Launcher，它们做得更好 |
+| 多端同步 / 手机也能看 | ❌ 本机单用户，没有服务端，也不会有 |
+| 替代你的笔记软件 | ❌ 它只是中转站，长文写作请交给 Obsidian / Notion |
+| 开箱即用的 AI | ❌ AI 是外置插件的可选能力，不配 key、不开本地服务就完全不联网 |
+| macOS / Linux 版 | ❌ Windows 10/11 only，且 UI 目前只有中文 |
+
+*Stars 数据取自 GitHub API（仓库：`lch319/Floatyball`、`pengjie1115/FocusCapture`、`Flow-Launcher/Flow.Launcher`），2026-10-01 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单属内部调研资料，未随仓库公开，需要可开 Issue 索取。*
 
 ---
 
@@ -71,7 +84,7 @@
 
 | 分组 | 页面 |
 |------|------|
-| 工作台 | 🧩 碎片工作台（剪贴板文本/路径/文件/知识段落统一收纳，来源 + 内容语义双轴筛选、搜索、合并、转任务/笔记）· 📋 日程任务（逾期红标、相对截止时间、撤销条、🍅 专注计时）· 📝 笔记管理（列表 + 编辑区 + 自动保存）· 📚 知识库（docx 数据源，段落增删改、外部修改检测、增量同步）· 📎 临时素材（拖拽拾取、缩略图、sha256 去重、过期清理） |
+| 工作台 | 🧩 碎片工作台（剪贴板文本/路径/文件/知识段落**自动收纳**，来源 + 内容语义双轴筛选、搜索、合并、一键存为笔记 / 加入知识库 / 导出 Obsidian）· 📋 日程任务（逾期红标、相对截止时间、撤销条、🍅 专注计时）· 📝 笔记管理（列表 + 编辑区 + 自动保存）· 📚 知识库（docx 数据源，段落增删改、外部修改检测、增量同步）· 📎 临时素材（拖拽拾取、缩略图、sha256 去重、过期清理） |
 | 工具 | 🌐 网址导航（收藏网址一键打开）· 🚀 软件导航（本地快捷方式、图标提取、一键启动） |
 | 插件 | 全部页面插件，**按需安装**（见下节） |
 | 系统 | 🔌 插件中心（安装 / 启停 / 卸载 / 商店）· ⚙️ 设置 · ❓ 使用说明 |
@@ -180,7 +193,7 @@ python tools/build_release.py                      # 产出 宣传页/FloatPulse
 - **发布前三源一致性自检**：打包前先跑 `tools/check_release_consistency.py`，核对 `APP_VERSION` ↔ `CHANGELOG.md` 版本标题 ↔ Release tag 三者对齐，任一不符直接终止发布（本地也能手动跑）
 - **产物附 `SHA256SUMS.txt`**：`build_release.py` 收尾生成校验清单（覆盖 zip / setup.exe / 插件附件），下载后在 `宣传页/` 目录 `sha256sum -c SHA256SUMS.txt` 一键核验完整性
 
-体积口径：实测产物 75 MB（2026-09-27，`FloatPulse.spec` 内有构成分析）；恢复 ssl 支持插件联网桥后约 +4 MB，下次打包时以 `build_release.py` 输出为准。
+体积口径：**下载包 31 MB**（v4.7.0 zip，2026-09-30 实测）／**解压后 75 MB**（2026-09-27 实测，`FloatPulse.spec` 内有构成分析）；恢复 ssl 支持插件联网桥后约 +4 MB，下次打包时以 `build_release.py` 输出为准。
 
 ---
 
@@ -205,10 +218,10 @@ FloatPulse/
 ## 🧱 架构一览
 
 ```
-UI 层    FloatingBall / CardWindow / MainWindow / 九个 Panel
+UI 层    FloatingBall / CardWindow / MainWindow / 十个页面（索引 0–9）
 业务层   TaskManager / NoteManager / FragmentManager / DocxManager
          ClipboardMonitor / TempAssetManager / ConfigManager / Hotkey
-数据层   docx + 7 个 JSON（原子写入 / 损坏回退 / 增量指纹）
+数据层   docx + 8 个 JSON（原子写入 / 损坏回退 / 增量指纹）
 ```
 
 开发与测试约定见 `CONTRIBUTING.md`；核心测试：
@@ -245,10 +258,10 @@ Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## English
 
-**FloatPulse** is a Windows floating-ball utility built with native PyQt6 — a lightweight, Electron-free "capture everything" hub living on your desktop edge.
+**FloatPulse** is a Windows floating-ball utility built with native PyQt6 — a lightweight, Electron-free landing spot for everything you copy, drag or capture, always one hover away.
 
 - **Floating ball**: drag, edge-snap, hover to pop a quick card; drop files to capture; drop `.exe/.lnk` to create launchers
-- **Quick capture**: global hotkey (`Ctrl+Alt+K`) note bar; clipboard text/image monitoring with dedup
+- **Clipboard capture (the main path)**: text and paths you copy are kept automatically, de-duplicated and timestamped; plus a global hotkey (`Ctrl+Alt+K`) note bar and drag-and-drop pickup
 - **Screenshot pin** (`Ctrl+Alt+S`): select any screen region and pin it as an always-on-top reference window
 - **Main window**: ten pages in a four-group collapsible sidebar (multiple groups can stay open), fragments workbench, tasks with deadline grouping, notes, docx-based knowledge base, asset manager, URL & app launcher
 - **Plugins, opt-in**: the app ships **without any plugins** — download the `.fpplug` you want from Release Assets, drop it into `plugin_store\`, and install it from the plugin center (AI assistant, in-app full-text search, recurring tasks, weekly report)
@@ -260,3 +273,5 @@ cd v4 && python knowledge_ball.py
 ```
 
 Windows 10/11, Python 3.10+. Licensed under MIT. Chinese UI only (i18n welcome).
+
+**Not for**: global file search (use Everything / Flow Launcher), cross-device sync, or replacing your notes app — it is a staging area, not a second brain.
