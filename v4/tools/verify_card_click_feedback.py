@@ -16,7 +16,8 @@ verify_card_click_feedback.py — B9 点击球无反馈缺陷验证
 import os
 import sys
 
-sys.path.insert(0, r"D:\桌面\AI Port\FloatPulse\v4")
+# v4/ 根目录按本文件位置推导（勿写死绝对路径：换机器/改目录名即失效）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -48,6 +49,12 @@ class FakeCardWindow:
     def isVisible(self):
         return self._visible
 
+    @property
+    def current_mode(self):
+        """D3 穿透清零（2026-09-30）：宿主改读公开特性 current_mode，
+        替身须同步补上（原直接读 _last_mode）。只读，语义等价。"""
+        return self._last_mode
+
     def is_locked(self):
         return self._locked_flag
 
@@ -71,6 +78,12 @@ class FakeCardWindow:
     def _switch_mode(self, mode):
         self.calls.append(f"switch_mode:{mode}")
         self._last_mode = mode
+
+    def switch_mode(self, mode):
+        """公开入口（D3 穿透清零 2026-09-30）：宿主改调 switch_mode，
+        替身同步补上——真身 CardWindow.switch_mode 即转调 _switch_mode，
+        故这里保持同一调用记录，断言口径不变。"""
+        self._switch_mode(mode)
 
 
 def click_ball(ball):

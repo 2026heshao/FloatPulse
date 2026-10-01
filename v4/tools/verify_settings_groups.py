@@ -2,8 +2,10 @@
 """离屏功能验证：设置页分组重构 + 悬浮球自动隐藏总开关。
 
 覆盖：
-  A. 分组结构：7 个语义分组 + 1 个关于卡片，标题与顺序正确
-  B. 分组末行不再追加分隔线（分隔线数 = 总行数 - 分组数，消除贴边悬空线）
+  A. 分组结构：9 个分类卡（2026-09-29 分类导航版式）+ 关于页内「软件更新」
+     子卡，标题与导航顺序正确
+  B. 每张分组卡内：分隔线数 = 行数 - 1（末行无悬空线）——逐卡动态校验，
+     新增分组/行数变化不需改本脚本
   C. 自动隐藏开关默认开启；关闭 → 配置持久化 + 信号广播 + 秒数步进器灰化
   D. 重新打开 → 配置恢复 + 步进器恢复可编辑
   E. refresh() 在关闭状态下同步控件且不误触发广播（blockSignals 护栏）
@@ -40,12 +42,15 @@ from knowledge_ball import FloatingBall, get_screen_geometry  # noqa: E402
 
 PASS = 0
 
-EXPECTED_GROUPS = ["🎨 外观与主题", "🔵 悬浮球", "📋 剪贴板与碎片",
-                   "🖼 临时素材", "⚡ 全局工具", "🚀 启动与系统",
-                   "📤 导出"]
-
-# 各组行数（组1..组7），用于推导分隔线数量
-GROUP_ROWS = [3, 7, 3, 4, 8, 4, 2]
+# 各分类分组卡的标题原文（settings_panel._build_ui 里各 group() 调用处），
+# 顺序 = 左导航 SETTINGS_CATEGORIES 页序 + 关于页内子卡。
+# 与导航短名（如「🎨 外观」）刻意不同：卡片标题沿用历史全称，两处口径不要混改。
+EXPECTED_CARD_TITLES = [
+    "🎨 外观与主题", "🔵 悬浮球", "📋 剪贴板与碎片", "🖼 临时素材",
+    "⚡ 全局工具", "🚀 启动与系统", "📤 导出", "🧠 AI 总配置",
+    "🔄 软件更新",   # 关于分类页内的子卡（手动检查更新），排在「关于」卡上方
+    "ℹ️ 关于",
+]
 
 
 def ok(msg):
@@ -64,11 +69,21 @@ def pump(app, ms=0):
         time.sleep(0.01)
 
 
-def group_boxes(root):
-    """取设置分组卡片，按屏幕上→下顺序返回（依赖已切到设置页并完成布局）"""
-    boxes = [w for w in root.findChildren(QWidget)
-             if w.objectName() == "settingsGroup"]
-    boxes.sort(key=lambda w: w.mapTo(root, w.rect().topLeft()).y())
+def group_boxes(sp):
+    """按分类栈页序收集分组卡（每页内再按 y 排序）。
+
+    2026-09-29 起设置页是「左导航 + 分类 QStackedWidget」：不同页的卡片
+    在各自页内布局，跨页 mapTo 的 y 排序没有意义，必须按 _cat_stack 页序
+    展开才能得到与导航一致的卡片顺序。
+    """
+    boxes = []
+    stack = sp._cat_stack
+    for i in range(stack.count()):
+        page = stack.widget(i)
+        page_boxes = [w for w in page.findChildren(QWidget)
+                      if w.objectName() == "settingsGroup"]
+        page_boxes.sort(key=lambda w: w.mapTo(page, w.rect().topLeft()).y())
+        boxes.extend(page_boxes)
     return boxes
 
 
@@ -128,20 +143,26 @@ def main():
     # ---------------- A. 分组结构 ----------------
     boxes = group_boxes(sp)
     titles = [section_title(b) for b in boxes]
-    n_groups = len(EXPECTED_GROUPS)
-    assert len(boxes) == n_groups + 1, \
-        f"A. 期望 {n_groups} 分组 + 1 关于 = {n_groups + 1} 张卡片，实际 {len(boxes)}"
-    assert titles[:n_groups] == EXPECTED_GROUPS, f"A. 分组标题/顺序异常: {titles}"
-    assert "关于" in titles[n_groups], f"A. 最后一张卡片应为关于，实际 {titles[n_groups]!r}"
-    ok(f"A. 分组结构：{len(boxes) - 1} 组 + 关于，顺序 {' / '.join(t[:-4] for t in titles[:n_groups])}")
+    n_expect = len(EXPECTED_CARD_TITLES)
+    assert len(boxes) == n_expect, \
+        f"A. 期望 {n_expect} 张分组卡，实际 {len(boxes)}: {titles}"
+    assert titles == EXPECTED_CARD_TITLES, \
+        f"A. 分类卡标题/顺序异常: {titles}"
+    ok(f"A. 分组结构：{n_expect} 张卡，顺序与导航一致（含软件更新子卡）")
 
-    # ---------------- B. 分组末行无分隔线 ----------------
-    seps = [w for w in sp.findChildren(QFrame)
-            if w.objectName() == "settingsSeparator"]
-    expect_seps = sum(GROUP_ROWS) - len(GROUP_ROWS)   # 每组的最后一行不加线
-    assert len(seps) == expect_seps, \
-        f"B. 分隔线应为 {expect_seps} 条（{sum(GROUP_ROWS)} 行 - {len(GROUP_ROWS)} 组），实际 {len(seps)}"
-    ok(f"B. 分隔线 {len(seps)} 条 = 总行数 {sum(GROUP_ROWS)} - 分组数 {len(GROUP_ROWS)}，分组末行无悬空线")
+    # ---------------- B. 每张卡内末行无分隔线（逐卡动态校验） ----------------
+    for box, title in zip(boxes, titles):
+        rows = len([lab for lab in box.findChildren(QLabel)
+                    if lab.objectName() == "settingTitle"])
+        seps = len([f for f in box.findChildren(QFrame)
+                    if f.objectName() == "settingsSeparator"])
+        # 「关于」这类展示卡不走 _add_row（无 settingTitle），只要不悬空线即可
+        if rows == 0:
+            assert seps == 0, f"B. 卡「{title}」无设置行却有 {seps} 条分隔线"
+            continue
+        assert seps == rows - 1, \
+            f"B. 卡「{title}」{rows} 行应有 {rows - 1} 条分隔线，实际 {seps}（末行悬空线？）"
+    ok(f"B. {len(boxes)} 张卡逐卡校验：分隔线数 = 行数 - 1，末行无悬空线")
 
     # ---------------- C. 关掉自动隐藏 ----------------
     assert hasattr(sp, "_set_auto_hide_enabled"), "C. 设置页缺少自动隐藏开关"

@@ -113,8 +113,10 @@ class StubMW:
     def refresh_fragments(self):
         pass
 
-    def _refresh_page(self, i):
-        self.refreshed.append(i)
+    def refresh_apps_page(self):
+        # D3 穿透清零（2026-09-30）：宿主 dropEvent 改调公开 API
+        # refresh_apps_page()（原私有 _refresh_page(7)），记录值 7 不变
+        self.refreshed.append(7)
 
 
 frag, assets, mw = StubFrag(), StubAssets(), StubMW()
@@ -148,7 +150,7 @@ check("C3 txt 照旧进碎片替身",
 check("C4 txt 照旧进素材替身",
       len(assets.adds) == 1 and same_path(assets.adds[0], txt_path),
       repr(assets.adds))
-check("C5 主窗口软件页刷新 _refresh_page(7)", mw.refreshed == [7],
+check("C5 主窗口软件页刷新 refresh_apps_page()", mw.refreshed == [7],
       repr(mw.refreshed))
 check("C6 toast 文案（数量+去处）",
       any("已添加 2 个应用到启动器" in t for t in toasts), repr(toasts))

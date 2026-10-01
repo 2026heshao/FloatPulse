@@ -227,9 +227,9 @@ check("A1 真实 plugins/ 目录扫到 weekly-report", PLUGIN_ID in ids, f"{ids}
 
 act = registry.get(ACTION_ID)
 check("A2 动作已进注册表且挂菜单", act is not None and act.menu is True)
-check("A3 热键保留（Ctrl+Alt+W 与核心热键不冲突）",
+check("A3 热键保留（Ctrl+Alt+W 与核心热键不冲突；2026-10 起 5 插件各注册热键，改判包含）",
       act is not None and act.hotkey == "Ctrl+Alt+W"
-      and [a.id for a in registry.hotkey_actions()] == [ACTION_ID],
+      and ACTION_ID in [a.id for a in registry.hotkey_actions()],
       f"{act.hotkey if act else None}")
 
 sub_ctx = registry.context_of(ACTION_ID)
@@ -429,9 +429,9 @@ check("F4 切到「今日」→ 预览变成日报且范围收窄",
 dlg._radios["week"].setChecked(True)
 pump(30)
 check("F5 切回「本周」→ 预览恢复周报", dlg._text.toPlainText().startswith("# 周报"))
-check("F6 三个输出按钮文案正确",
+check("F6 三个输出按钮文案正确（另存为已图标化：emoji 前缀剥除，图标走 IconButton）",
       dlg._copy_btn.text() == "📋 复制到剪贴板"
-      and dlg._save_btn.text() == "💾 另存为 .md…"
+      and dlg._save_btn.text() == "另存为 .md…"
       and dlg._vault_btn.text() == "🗂 写入 Obsidian vault")
 check("F7 vault 未配置 → 写入按钮置灰且给出原因",
       not dlg._vault_btn.isEnabled() and "设置" in dlg._vault_btn.toolTip(),

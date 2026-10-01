@@ -6,22 +6,23 @@
   A 真实 plugins/ 目录扫到 ai-assistant：动作进注册表、热键生效且
     **不进悬浮球菜单**（menu=false）、manifest page 字段解析、
     create_page 返回真实页面、派生 ctx 带 network 能力
-  B 纯函数层：format_* / build_request（cloud/local 双模式校验 + 旧配置
-    迁移）/ parse_reply / build_system_prompt（规则库追加，停用/空/脏跳过）
-    / 动作协议 parse_actions（合法动作分级、编造 id 与未知 op 丢弃、
-    坏 JSON 整块不执行、超上限截断、混合批次只丢非法条）
-  C 真实 AiChatPage：构造不崩、欢迎气泡、设置卡显隐、快捷指令经桥
-    发出（假桥捕获）、Enter 发送 / Shift+Enter 换行、保存并测试连接
-    反馈（✓/✗ + 按钮复位）、本地服务状态跟随（ready → 切本地模式 /
-    stopped → 回落云端）、云端/本地选择入口互斥高离、
-    规则库入口（展开编辑 → 保存落盘 → 对话注入生效规则、停用不注入、
-    后端设置保存不冲掉规则）、
+  B 纯函数层：format_* / build_request（cloud/local 双模式校验 + 旧后端键
+    被白名单合并忽略）/ parse_reply / build_system_prompt（规则库追加，
+    停用/空/脏跳过）/ 动作协议 parse_actions（合法动作分级、编造 id 与
+    未知 op 丢弃、坏 JSON 整块不执行、超上限截断、混合批次只丢非法条）
+  C 真实 AiChatPage（2026-10-01 口径对齐：后端收归设置页「AI 总配置」，
+    页面零后端配置 UI，经 ctx.ai 实时读参数快照 + 订阅本地服务广播）：
+    构造不崩、欢迎气泡、页面无残留后端 UI、快捷指令经桥发出（假桥捕获）、
+    Enter 发送 / Shift+Enter 换行、ctx.ai 监听（构造即订阅 / 销毁即退订 /
+    ready 广播 → 快捷停止钮出现 / stopped → 隐藏 / 停止走 ctx.ai.stop_local）、
+    参数实时直读（设置页改后端下一发即生效）、本地未就绪拦截、
+    规则库入口（展开编辑 → 保存落盘 → 对话注入生效规则、停用不注入）、
     气泡宽度/高度协调（sizeHint 塌缩与截字回归钉子）、
     「存为笔记」右键菜单（菜单项可点 / 已存置灰、气泡内无常驻按钮）、
     数据操控全链路（授权才下发协议、add 直接执行、改删弹确认卡、
     点执行真落库并带撤销按钮、撤销恢复内容、取消零改动、
     未授权动作如实拒绝）、
-    页面销毁退订本地服务 listener、配置落盘 data_dir
+    页面销毁退订 ctx.ai listener、插件配置零后端键
   E 页面注入链路：register_plugin_page（索引 10+ / 幂等）、
     show_plugin_page（切页 / 未知 key 拒绝）、last_page_index 不写插件页
   F 页面注销 / 重建链路：unregister_plugin_page（按钮摘除 / 占位补槽 /
@@ -49,7 +50,7 @@ sys.path.insert(0, BASE)
 
 from PyQt6.QtCore import Qt, QEvent               # noqa: E402
 from PyQt6.QtWidgets import (                     # noqa: E402
-    QApplication, QFrame, QLabel, QPushButton, QScrollArea,
+    QApplication, QFrame, QLabel, QPushButton,
 )
 from PyQt6.QtGui import QFontDatabase, QKeyEvent  # noqa: E402
 
@@ -270,26 +271,28 @@ ff = plug.format_fragments(frags, 6000)
 check("B2 format_fragments 分类计数", "[link] 共 1 条" in ff and "[code] 共 2 条" in ff)
 check("B3 format_notes 空数据直说空", plug.format_notes([], 6000) == "（暂无笔记）")
 
+# —— 2026-10-01 口径对齐：后端字段已收归设置页「AI 总配置」——
+# 插件侧 build_request 的参数即 ctx.ai.params() 快照：
+# mode("local"/"cloud") / local_port / base_url / api_key / model / local_ready
 url, headers, body = plug.build_request(
-    {"backend_mode": "local", "local_port": 11434},
+    {"mode": "local", "local_port": 8095},
     [{"role": "user", "content": "hi"}])
 check("B4 build_request 本地模式：URL/无 Authorization/模型名 local",
-      url == "http://127.0.0.1:11434/v1/chat/completions"
+      url == "http://127.0.0.1:8095/v1/chat/completions"
       and "Authorization" not in headers and body["model"] == "local")
 url2, h2, _ = plug.build_request(
-    {"backend_mode": "cloud", "cloud_base_url": "https://api.deepseek.com/v1",
-     "cloud_api_key": "sk-1", "cloud_model": "m"}, [])
+    {"mode": "cloud", "base_url": "https://api.deepseek.com/v1",
+     "api_key": "sk-1", "model": "m"}, [])
 check("B5 build_request 云端带 Bearer",
       url2.endswith("/chat/completions") and h2["Authorization"] == "Bearer sk-1")
-bad = plug.build_request(
-    {"backend_mode": "cloud", "cloud_base_url": "", "cloud_model": ""}, [])
-check("B6 build_request 空配置被拦", bad[0] is None and "云端地址" in bad[2])
+bad = plug.build_request({"mode": "cloud", "base_url": "", "model": ""}, [])
+check("B6 build_request 空配置被拦", bad[0] is None and "后端地址为空" in bad[2])
 bad2 = plug.build_request(
-    {"backend_mode": "cloud", "cloud_base_url": "ftp://x",
-     "cloud_model": "m"}, [])
+    {"mode": "cloud", "base_url": "ftp://x", "model": "m"}, [])
 check("B7 build_request 拒非 http scheme", bad2[0] is None)
 
-# B7b 旧配置迁移：旧单后端键 → cloud_*；被旧版缺陷写成本地地址的跳过
+# B7b 旧配置键（backend_mode / cloud_* / local_*）已收归设置页：插件
+# config.json 里残留的旧键被 load_config 的「白名单合并」直接忽略，不再迁移
 class _Log:
     def warning(self, *a, **k):
         pass
@@ -298,16 +301,15 @@ _mig_dir = os.path.join(data_dir, "mig_test")
 os.makedirs(_mig_dir, exist_ok=True)
 with open(os.path.join(_mig_dir, "config.json"), "w", encoding="utf-8") as f:
     json.dump({"base_url": "http://127.0.0.1:8093/v1", "api_key": "sk-old",
-               "model": "local"}, f)
+               "model": "local", "backend_mode": "cloud",
+               "cloud_base_url": "http://127.0.0.1:9/v1"}, f)
 _mig = plug.load_config(
     __import__("types").SimpleNamespace(data_dir=_mig_dir, logger=_Log()))
-check("B7b 旧配置迁移：本地 URL 跳过 / key 照搬 / model=local 跳过",
-      "127.0.0.1" not in _mig["cloud_base_url"]
-      and _mig["cloud_api_key"] == "sk-old"
-      and _mig["cloud_model"] == "deepseek-chat"
-      and _mig["backend_mode"] == "cloud",
-      str({k: _mig[k] for k in ("cloud_base_url", "cloud_api_key",
-                                "cloud_model", "backend_mode")}))
+_stale = {"backend_mode", "cloud_base_url", "cloud_api_key", "cloud_model",
+          "base_url", "api_key", "model"} & set(_mig)
+check("B7b 旧后端键被白名单合并忽略（不迁移、不进配置、零残留）",
+      not _stale and _mig == plug.DEFAULT_CONFIG,
+      f"残留={sorted(_stale)} keys={sorted(_mig)}")
 
 rep, err = plug.parse_reply({"ok": True, "status": 200,
                              "body": json.dumps(
@@ -315,7 +317,7 @@ rep, err = plug.parse_reply({"ok": True, "status": 200,
 check("B8 parse_reply 提取 content", rep == "答复" and err is None)
 _, err401 = plug.parse_reply({"ok": False, "status": 401, "body": "",
                               "error": "HTTP 401"})
-check("B9 parse_reply 401 提示本地推理", err401 and "本地推理" in err401)
+check("B9 parse_reply 401 提示去设置页检查 key", err401 and "AI 总配置" in err401)
 _, err404 = plug.parse_reply({"ok": False, "status": 404, "body": "",
                               "error": "HTTP 404"})
 check("B10 parse_reply 404 提示地址", err404 and "地址" in err404)
@@ -448,6 +450,32 @@ def fake_bridge(url, headers, body, timeout, on_done):
     return True
 
 
+# 假 AI 总配置 providers（2026-10-01 口径：后端收归设置页，页面经 ctx.ai
+# 实时读快照 + 订阅本地服务广播）。改 _ai_params 即模拟「设置页改配置」。
+# 默认本地已就绪：C5-C7 的首发请求走本地端口（key 空 → 不带 Authorization）。
+_ai_params = {"mode": "local", "base_url": "http://127.0.0.1:8080/v1",
+              "api_key": "sk-test", "model": "verify-model",
+              "local_port": 8095, "local_ready": True}
+_ai_listeners = []          # 页面构造时经 ctx.ai.add_listener 注册
+_stop_calls = [0]           # 快捷「停止模型服务」→ ctx.ai.stop_local 调用数
+
+
+def _fake_add_listener(fn):
+    _ai_listeners.append(fn)
+    return True
+
+
+def _fake_remove_listener(fn):
+    if fn in _ai_listeners:
+        _ai_listeners.remove(fn)
+    return True
+
+
+def _fake_stop_local():
+    _stop_calls[0] += 1
+    return True
+
+
 page_ctx = PluginContext(
     logger=_logger, config=config.as_dict(),
     show_toast=lambda *a, **k: None,
@@ -455,8 +483,15 @@ page_ctx = PluginContext(
     data_dir_base=os.path.join(data_dir, "plugins"),
     parent_window=lambda: win,
     http_post_async=fake_bridge,
+    ai_providers={
+        "is_attached": lambda pid: True,
+        "params": lambda: dict(_ai_params),
+        "add_listener": _fake_add_listener,
+        "remove_listener": _fake_remove_listener,
+        "stop_local": _fake_stop_local,
+    },
 ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID),
-             ["network", "write"])
+             ["network", "write", "ai"])
 
 page = plug.AiChatPage(page_ctx)
 check("C1 页面构造不崩（真实 MainWindow host）", page is not None)
@@ -472,26 +507,9 @@ check("C2b 欢迎气泡文字完整（对齐项 wordWrap 高度已按实际宽�
       f"minH={_welcome_lab.minimumHeight() if _welcome_lab else '?'} "
       f"needH={_welcome_lab.heightForWidth(_welcome_lab.width()) if _welcome_lab else '?'}")
 
-check("C3 设置卡默认收起", not page._settings_card.isVisible())
-page._toggle_settings()
-pump()
-check("C4 设置卡可展开（动态显隐给了 parent，不崩）",
-      page._settings_card.isVisible())
-# ---- 后端设置卡纵向滚动兜底（2026-09-27 用户反馈：窗口矮时被挤瘪）----
-card_scroll = page._settings_card.findChild(QScrollArea)
-check("C4b 设置卡内容套 QScrollArea 且 widgetResizable",
-      card_scroll is not None and card_scroll.widgetResizable())
-check("C4c 设置卡高度上限 430（超出卡内滚动，不挤消息流）",
-      page._settings_card.maximumHeight() == 430)
-# 模拟矮窗口：页面压到 360 高 → 卡片被布局压缩，纵向滚动条必须可用
-page.resize(480, 360)
-pump(50)
-sb_max = card_scroll.verticalScrollBar().maximum()
-check("C4d 矮窗口下设置卡内容可纵向滚动",
-      sb_max > 0,
-      f"sb_max={sb_max} card_h={page._settings_card.height()}")
-page.resize(1000, 700)
-page._toggle_settings()
+check("C3 页面零后端配置 UI（后端收归设置页「AI 总配置」，页面只剩聊天/规则）",
+      not hasattr(page, "_settings_card") and not hasattr(page, "_url_edit")
+      and not hasattr(page, "_save_and_test"))
 
 # ---- 快捷指令 ----
 page.send_quick("tasks", "请总结我的任务")
@@ -528,45 +546,16 @@ check("C11 Shift+Enter 只换行不发送",
       and "\n" in page._input.toPlainText())
 page._input.clear()
 
-# ---- 保存并测试连接（用户要求：确定按钮 + 反馈）----
-page._status.clear()
-page._save_and_test()
-pump(50)
-check("C12 保存并测试：探活请求 max_tokens=1",
-      captured and captured[-1]["body"].get("max_tokens") == 1)
-check("C13 保存并测试：成功反馈 ✓ + 按钮复位可点",
-      "✓" in page._status.text()
-      and page._save_btn.isEnabled()
-      and page._save_btn.text() == "保存并测试连接",
-      page._status.text())
-
-# ---- 失败反馈（桥返回失败 → ✗ + 错误提示）----
-captured_fail = []
-
-
-def failing_bridge(url, headers, body, timeout, on_done):
-    on_done({"ok": False, "status": 401, "body": "",
-             "error": "HTTP 401", "url": url})
-    return True
-
-
-page._ctx._http_post_async = failing_bridge     # 临时换假桥
-page._save_and_test()
-pump(50)
-check("C14 保存并测试：失败反馈 ✗ + 提示 + 按钮复位",
-      "✗" in page._status.text() and page._save_btn.isEnabled())
-page._ctx._http_post_async = fake_bridge        # 换回来
-
-# ---- 本地服务状态机（不真启动：假路径 → error）----
-plug.LOCAL_SERVER.start(page_ctx, "no-such.exe", "no-such.gguf", 8093)
-check("C15 本地服务启动校验：假 exe 路径 → error 状态",
-      plug.LOCAL_SERVER.status == "error"
-      and "程序不存在" in plug.LOCAL_SERVER.detail,
-      f"{plug.LOCAL_SERVER.status}/{plug.LOCAL_SERVER.detail}")
-listeners_n0 = len(plug.LOCAL_SERVER._listeners)
+# ---- 本地服务状态跟随（2026-10-01 口径：后端收归设置页，页面只「听」广播）----
+# 「保存并测试连接」已随配置移进设置页（由 verify_ai_backend.py 覆盖）；页面
+# 侧保留的是「订阅宿主广播 + 快捷停止 + 参数实时直读」，用假 provider 验证。
+check("C15 页面构造即订阅宿主本地服务状态（ctx.ai.add_listener）",
+      len(_ai_listeners) == 1,          # 此时只有 page（page2 在 C16 后创建）
+      f"listeners={len(_ai_listeners)}")
+listeners_n0 = len(_ai_listeners)
 page.destroyed.emit()          # 触发退订（真实销毁路径的等价操作）
-listeners_n1 = len(plug.LOCAL_SERVER._listeners)
-check("C16 页面销毁退订本地服务 listener（防死引用累积）",
+listeners_n1 = len(_ai_listeners)
+check("C16 页面销毁退订 ctx.ai listener（防死引用累积）",
       listeners_n1 == listeners_n0 - 1,
       f"{listeners_n0} -> {listeners_n1}")
 
@@ -578,44 +567,59 @@ page2.show()
 # 滚动条压窄 14px，宽度基准漂移会让断言随机翻车（2026-09-28 实测）。
 page2.resize(1000, 860)
 pump()
-plug.LOCAL_SERVER.port = 8093     # 模拟 start 成功后的状态（假路径未走到赋值）
-plug.LOCAL_SERVER._emit("ready", "本地服务就绪（127.0.0.1:8093）")
+for _fn in list(_ai_listeners):
+    _fn("ready", "本地服务就绪（127.0.0.1:8093）")
 pump()
-check("C17 ready → 按钮变「停止」+ 自动切本地模式（云端字段不动）",
-      page2._local_btn.text() == "停止本地服务"
-      and page2._cfg["backend_mode"] == "local"
-      and page2._mode_local_btn.isChecked()
-      and not page2._mode_cloud_btn.isChecked()
-      and page2._cfg["cloud_base_url"] != "",
-      f"{page2._local_btn.text()}/mode={page2._cfg['backend_mode']}")
-check("C17b ready → 快捷行出现「⏹ 停止模型服务」（主界面直接可停）",
-      page2._stop_model_btn.isVisible(),
-      page2._stop_model_btn.text())
-plug.LOCAL_SERVER._emit("stopped", "")   # 复位，别污染后面
-check("C17c stopped → 停止按钮隐藏（不占聊天界面空间）",
+check("C17 ready 广播 → 快捷行出现「⏹ 停止模型服务」+ 状态行反馈",
+      page2._stop_model_btn.isVisible() and "就绪" in page2._status.text(),
+      f"visible={page2._stop_model_btn.isVisible()} "
+      f"status={page2._status.text()}")
+page2._stop_model_btn.click()
+pump()
+check("C17b 快捷停止走 ctx.ai.stop_local（插件不自己管进程）",
+      _stop_calls[0] >= 1, f"stop_calls={_stop_calls[0]}")
+for _fn in list(_ai_listeners):
+    _fn("stopped", "")   # 复位，别污染后面
+pump()
+check("C17c stopped 广播 → 停止按钮隐藏（不占聊天界面空间）",
       not page2._stop_model_btn.isVisible())
-check("C17d 本地停止 → 自动回落云端（双配置互不覆盖）",
-      page2._cfg["backend_mode"] == "cloud"
-      and page2._mode_cloud_btn.isChecked()
-      and page2._mode_local_btn.isChecked() is False,
-      f"mode={page2._cfg['backend_mode']}")
 
-# ---- 云端/本地选择入口（2026-09-28 用户建议）----
-page2._switch_mode("local")
+# 参数直读是**实时**的：改 providers 快照（=用户在设置页改配置），
+# 下一发请求即用新值，页面无需重建
+_n_live = len(captured)
+_ai_params.update({"mode": "cloud", "base_url": "http://127.0.0.1:9/v1"})
+page2._input.setPlainText("参数实时性")
+page2._on_send_clicked()
 pump(50)
-check("C17e 选本地（服务未就绪）→ 模式落盘 + 展开设置卡引导启动",
-      page2._cfg["backend_mode"] == "local"
-      and page2._mode_local_btn.isChecked()
-      and page2._settings_card.isVisible()
-      and "启动" in page2._status.text(),
-      f"mode={page2._cfg['backend_mode']} status={page2._status.text()}")
-page2._switch_mode("cloud")
+check("C17d 设置页改后端 → 下一发请求即用新地址（params 每次实时读）",
+      len(captured) == _n_live + 1
+      and captured[-1]["url"].startswith("http://127.0.0.1:9/v1"),
+      captured[-1]["url"] if captured else "无请求")
+_ai_params.update({"mode": "local", "base_url": "http://127.0.0.1:8080/v1",
+                   "local_ready": True})   # 还原本地
+
+# 本地模式未就绪：只提示、绝不发出注定失败的请求
+_ai_params.update({"mode": "local", "local_ready": False})
+_n_gate = len(captured)
+page2._input.setPlainText("本地未就绪")
+page2._on_send_clicked()
 pump(50)
-page2._settings_card.setVisible(False)
-check("C17f 选云端 → 模式切回 + 高亮跟随",
-      page2._cfg["backend_mode"] == "cloud"
-      and page2._mode_cloud_btn.isChecked(),
-      f"mode={page2._cfg['backend_mode']}")
+_hints_gate = [w for w in page2._stream_host.findChildren(QFrame)
+               if w.objectName() == "chatBubbleHint"]
+check("C17e 本地未就绪：请求被拦（桥零调用）+ 提示气泡引导去设置页",
+      len(captured) == _n_gate and len(_hints_gate) >= 1
+      and any("设置" in lb.text()
+              for w in _hints_gate for lb in w.findChildren(QLabel)),
+      f"captured={len(captured)} hints={len(_hints_gate)}")
+_ai_params.update({"mode": "local", "local_ready": True})   # 还原本地就绪
+page2._clear_chat()   # 清掉上面两组探针气泡，别污染后面 C20 的计数断言
+pump()
+# ★ _clear_chat 的 deleteLater 是**延迟**删除：布局项立刻摘除（C18 的
+#   count() 断言即时成立），但行容器 QWidget 仍挂在 _stream_host 下，
+#   findChildren 能摸到"幽灵卡" —— 这里显式冲一次 DeferredDelete，
+#   后面 C20/C26 系列按 findChildren 数卡才不会被探针残骸污染。
+_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+_app.processEvents()
 
 # ---- 左右气泡（2026-09-28 用户要求：一左一右对话式）----
 page2.add_bubble("你", "测试用户消息")
@@ -678,8 +682,10 @@ check("C27 长 AI 气泡高度覆盖全文（不截字）",
       >= _long_label.heightForWidth(_long_label.width()) - 2,
       f"h={_long_label.height() if _long_label else '?'} "
       f"need={_long_label.heightForWidth(_long_label.width()) if _long_label else '?'}")
+# 首张 AI 卡现为「对话已清空。」（_clear_chat 的收尾气泡，内容自然宽
+# ~100px）；塌缩护栏取自绘地板 40px 的 2 倍，不再绑某条具体文案的宽度
 check("C28 短 AI 气泡贴合内容（不塌缩成窄条、也不撑满）",
-      bool(_ai_now) and _ai_now[0].width() >= 120
+      bool(_ai_now) and _ai_now[0].width() >= 80
       and _ai_now[0].width() <= _long_card.width(),
       f"short={_ai_now[0].width() if _ai_now else '?'} long={_long_card.width()}")
 check("C29 AI 气泡内不再有常驻按钮（存为笔记已改右键菜单）",
@@ -740,36 +746,8 @@ check("C20c 回复到达 → 思考气泡拆除干净（计时器停 + busy 复�
       f"busy={page2._busy}")
 page2._ctx._http_post_async = fake_bridge        # 换回正常假桥
 
-# ---- 云端断开连接（2026-09-28 用户要求：云端要有启动/暂停式控制）----
-check("C23 断开按钮存在（与保存并测试并排）",
-      page2._disconnect_btn is not None
-      and page2._disconnect_btn.text() == "断开连接",
-      page2._disconnect_btn.text() if page2._disconnect_btn else "无")
-n_before_disc = len(captured)
-# 闸门只拦云端（本地 URL 不受影响）：先把后端临时指到云端再测
-_real_url = page2._url_edit.text()
-page2._url_edit.setText("https://api.deepseek.com/v1")
-page2._collect_settings()
-page2._cloud_active = False
-page2._input.setPlainText("断开后发不出去")
-page2._on_send_clicked()
-pump(50)
-_hints_after = [w for w in page2._stream_host.findChildren(QFrame)
-                if w.objectName() == "chatBubbleHint"]
-check("C24 断开后云端请求被拦（桥零调用 + 提示气泡 + 展开设置卡 + 状态行反馈）",
-      len(captured) == n_before_disc
-      and page2._settings_card.isVisible()
-      and len(_hints_after) >= 2      # C20 的测试提示气泡 + 本条拦截气泡
-      and "已断开" in page2._status.text(),
-      f"captured={len(captured)} hints={len(_hints_after)} "
-      f"status={page2._status.text()}")
-page2._save_and_test()
-pump(50)
-check("C25 探活成功 → 云端闸门自动恢复（可再发）",
-      page2._cloud_active is True and len(captured) == n_before_disc + 1,
-      f"active={page2._cloud_active} captured={len(captured)}")
-page2._url_edit.setText(_real_url)     # 恢复原配置，别污染 C19 落盘结论
-page2._collect_settings()
+# ----（C23-C25 云端断开闸门已随「后端收归设置页」移除：连接控制只在
+#      设置页做，插件页不再有断开/探活入口——由 verify_ai_backend.py 覆盖）----
 
 # ---- 规则库入口（2026-09-28 用户要求：入口让用户自己编辑，不写死）----
 check("C26 规则库按钮存在且卡片默认收起",
@@ -812,11 +790,8 @@ check("C30 对话请求 system 提示词：启用规则注入、停用规则不�
       and "回答保持简洁，不超过 200 字" in _sys_content
       and "这条保持停用" not in _sys_content,
       _sys_content[-100:])
-page2._collect_settings()
-check("C31 后端设置保存不冲掉规则（_collect_settings 携带 custom_rules）",
-      page2._cfg.get("custom_rules")
-      and page2._cfg["custom_rules"][0]["text"] == "回答保持简洁，不超过 200 字",
-      str(page2._cfg.get("custom_rules")))
+# （C31 旧「后端设置保存不冲掉规则」已随 _collect_settings 移除：
+#   规则落盘独立于后端配置，C29/C29b 已覆盖持久化）
 page2._toggle_rules()
 pump(50)
 check("C32 规则卡可收起（重开会从配置重建行）",
@@ -1002,6 +977,8 @@ _write_providers["knowledge"] = _add_knowledge
 
 
 def _mk_mgmt_ctx(caps):
+    # 动作链路页同样要走 ctx.ai（后端收归设置页后，发送闸门先查接入与参数）
+    caps = tuple(set(caps) | {"ai"})
     return PluginContext(
         logger=_logger, config=config.as_dict(),
         show_toast=lambda *a, **k: None, data=plugin_data,
@@ -1009,6 +986,13 @@ def _mk_mgmt_ctx(caps):
         parent_window=lambda: win, http_post_async=fake_bridge,
         write_providers=_write_providers,
         manage_providers=_mk_manage_providers(),
+        ai_providers={
+            "is_attached": lambda pid: True,
+            "params": lambda: dict(_ai_params),
+            "add_listener": _fake_add_listener,
+            "remove_listener": _fake_remove_listener,
+            "stop_local": _fake_stop_local,
+        },
     ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID), caps)
 
 
@@ -1267,17 +1251,17 @@ pump()
 check("C18 清空对话：历史与气泡都清（欢迎语重新出现）",
       page2._history == [] and page2._stream.count() == 2)
 
-page2._url_edit.setText("http://127.0.0.1:8080/v1")
-page2._key_edit.setText("sk-test")
-page2._model_edit.setText("qwen3-4b")
-page2._collect_settings()
+# 配置落盘口径（2026-10-01）：插件私有 config.json 只存聊天/规则等自有
+# 字段；后端键（mode/base_url/api_key/model/local_*/cloud_*/backend_mode）
+# 一律收归设置页「AI 总配置」，插件侧不落盘
 cfg_path = os.path.join(page_ctx.data_dir, "config.json")
 stored = json.load(open(cfg_path, encoding="utf-8"))
-check("C19 配置落盘 data_dir/config.json（云端键 + 模式键齐备）",
-      stored["cloud_base_url"] == "http://127.0.0.1:8080/v1"
-      and stored["cloud_api_key"] == "sk-test"
-      and stored["cloud_model"] == "qwen3-4b"
-      and "backend_mode" in stored, str(stored))
+_BACKEND_KEYS = {"backend_mode", "cloud_base_url", "cloud_api_key",
+                 "cloud_model", "mode", "base_url", "api_key", "model",
+                 "local_port", "local_ready"}
+check("C19 插件配置零后端键（后端收归设置页 AI 总配置）",
+      not (_BACKEND_KEYS & set(stored)),
+      f"残留={sorted(_BACKEND_KEYS & set(stored))} keys={sorted(stored)}")
 page2.deleteLater()
 page.deleteLater()
 
@@ -1380,12 +1364,19 @@ for theme in ("light", "dark"):
         http_post_async=fake_bridge,
         write_providers=_write_providers,
         manage_providers=_mk_manage_providers(),
+        ai_providers={
+            "is_attached": lambda pid: True,
+            "params": lambda: dict(_ai_params),
+            "add_listener": _fake_add_listener,
+            "remove_listener": _fake_remove_listener,
+            "stop_local": _fake_stop_local,
+        },
     ).for_plugin(PLUGIN_ID, os.path.join(plugins_dir, PLUGIN_ID),
-                 ["network", "write", "manage"])
+                 ["network", "write", "manage", "ai"])
     page_t = plug.AiChatPage(ctx_t)
     # 真实时序：先注入主窗口（reparent 到 QSS 作用域内）再显示页面；
     # 反过来先 show 会让页面先成为无 QSS 祖先的顶层窗口，离屏下样式残留
-    page_t._toggle_settings()          # 展开设置卡：截图信息量更足
+    page_t._toggle_rules()             # 展开规则卡：截图信息量更足
     win_t.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page_t)
     win_t.show_plugin_page(PAGE_KEY)
     pump(300)
@@ -1399,7 +1390,7 @@ for theme in ("light", "dark"):
         saved.append(theme)
     # 第二批截图：数据操控卡（结果卡 + 确认卡 + 撤销按钮）——2026-09-28 新 UI，
     # 必须真出图人工核对双主题（仅靠断言看不出配色/截断问题）
-    page_t._toggle_settings()          # 收起设置卡，让消息流占满可视区
+    page_t._toggle_rules()             # 收起规则卡，让消息流占满可视区
     pump(120)
     _feed(page_t, '好的，已建好任务。\n```actions\n'
           '{"actions":[{"op":"add_task","title":"整理本周会议纪要"}]}\n```')
