@@ -27,6 +27,8 @@ except ImportError:
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
+from PyQt6.QtCore import QProcess                 # noqa: E402
+
 from src.plugin_api import (                       # noqa: E402
     AiBackendFacade, KNOWN_CAPABILITIES, PluginContext,
 )
@@ -34,7 +36,7 @@ from src.config import (                           # noqa: E402
     DEFAULT_CONFIG, _CONFIG_TYPES, _CONFIG_RANGES,
 )
 from src.ai_server import (                        # noqa: E402
-    AiServerManager, build_launch_args, ST_ERROR,
+    AiServerManager, build_launch_args, sanitize_ctx_size, ST_ERROR,
 )
 
 
@@ -184,6 +186,8 @@ def test_config_defaults_have_ai_keys():
     assert DEFAULT_CONFIG["ai_local_server_exe"] == ""
     assert DEFAULT_CONFIG["ai_local_gguf"] == ""
     assert DEFAULT_CONFIG["ai_local_port"] == 8095
+    assert DEFAULT_CONFIG["ai_local_thinking"] is False
+    assert DEFAULT_CONFIG["ai_local_ctx_size"] == 16384
     assert DEFAULT_CONFIG["ai_plugins"] == []
 
 
@@ -192,12 +196,17 @@ def test_config_types_have_ai_keys():
                 "ai_cloud_model", "ai_local_server_exe", "ai_local_gguf"):
         assert _CONFIG_TYPES[key] is str, key
     assert _CONFIG_TYPES["ai_local_port"] is int
+    assert _CONFIG_TYPES["ai_local_thinking"] is bool
+    assert _CONFIG_TYPES["ai_local_ctx_size"] is int
     assert _CONFIG_TYPES["ai_plugins"] is list
 
 
 def test_config_range_has_ai_local_port():
     lo, hi = _CONFIG_RANGES["ai_local_port"]
     assert lo == 1024 and hi == 65535
+    lo, hi = _CONFIG_RANGES["ai_local_ctx_size"]
+    assert lo == 2048 and hi == 131072
+    assert "ai_local_thinking" not in _CONFIG_RANGES     # bool 不进 RANGES
 
 
 # ====================================================================
@@ -208,7 +217,35 @@ def test_build_launch_args():
     assert args[0] == "-m" and "C:/m.gguf" in args
     assert "--port" in args and "8095" in args
     assert "-ngl" in args and "99" in args
-    assert "-c" in args and "8192" in args
+    assert "-c" in args and "16384" in args
+    # 默认关思维链：--reasoning off（★实测 budget 0 不被 Qwen3.5 模板遵循）
+    i = args.index("--reasoning")
+    assert args[i + 1] == "off"
+
+
+def test_build_launch_args_thinking_on():
+    on = build_launch_args("C:/m.gguf", 8095, thinking=True)
+    assert "--reasoning" not in on          # 开思考：不传任何 reasoning 旗标
+    assert "-c" in on and "16384" in on
+    assert on[:5] == build_launch_args("C:/m.gguf", 8095)[:5]  # 其余一致
+
+
+def test_build_launch_args_ctx_clamped():
+    def ctx_of(**kw):
+        args = build_launch_args("m", 1, **kw)
+        return args[args.index("-c") + 1]   # 默认尾部追加思维链旗标，按下标取
+
+    assert ctx_of(ctx_size=100) == "2048"
+    assert ctx_of(ctx_size=999999) == "131072"
+    assert ctx_of(ctx_size="abc") == "16384"
+    assert ctx_of(ctx_size=None) == "16384"
+
+
+def test_sanitize_ctx_size_bounds():
+    assert sanitize_ctx_size(8192) == 8192
+    assert sanitize_ctx_size("32768") == 32768
+    assert sanitize_ctx_size(0) == 2048
+    assert sanitize_ctx_size([]) == 16384
 
 
 def test_server_listener_add_remove_and_immediate_sync():
@@ -260,6 +297,28 @@ def test_server_start_without_post_fn_sets_error():
     assert "探活" in srv.detail
 
 
+def test_server_restart_when_not_running_starts_directly():
+    srv = AiServerManager()
+    srv.restart(lambda *_: True, "Z:/no_such_exe.exe", "Z:/no.gguf", 8095)
+    assert srv.status == ST_ERROR        # 未运行 → pending 被直接消费进 start
+    assert srv._pending is None
+    assert srv._proc is None             # 未产生子进程
+
+
+def test_server_restart_overrides_pending_and_guards():
+    srv = AiServerManager()
+    srv._proc = object()                 # 模拟运行中 → restart 只挂 pending
+    srv.stop = lambda: None              # 屏蔽真实停止（object 无 terminate）
+    srv.restart(lambda *_: True, "a.exe", "a.gguf", 8095, 32768, True)
+    assert srv._pending is not None and srv._pending[4] == 32768
+    srv.restart(lambda *_: True, "b.exe", "b.gguf", 8096, 65536, False)
+    assert srv._pending[1] == "b.exe"    # 重复调用以后一次参数为准
+    srv._proc = None
+    srv._launch_pending()                # 手动消费：无进程则放行启动
+    assert srv._pending is None
+    assert srv.status == ST_ERROR        # b.exe 不存在 → error 路径不抛
+
+
 def test_facade_stop_local_denied_without_capability():
     logger = _CaptureLogger()
     called = []
@@ -287,6 +346,95 @@ def test_server_stop_without_process_is_safe():
     srv = AiServerManager()
     srv.stop()                                # 不抛异常即可
     assert srv.status == "stopped"
+
+
+# ---------------- 2026-10-01 修复回归：强杀定时器误杀新实例 ----------------
+class _FakeProc:
+    """duck-typing QProcess：记录 terminate/kill 调用，可指定 state()"""
+
+    def __init__(self, state):
+        self._state = state
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+    def state(self):
+        return self._state
+
+
+def test_stop_kill_timer_tracks_old_instance(monkeypatch):
+    """stop() 的 3s 强杀定时器只盯**当时那个实例**。
+
+    旧实例 3s 内退出 → restart 拉起新实例 → 定时器到点时绝不能
+    kill 掉新实例（2026-10-01 修复前判 self._proc，会误杀）。
+    """
+    captured = {}
+
+    class _T:
+        @staticmethod
+        def singleShot(ms, fn):
+            captured["ms"] = ms
+            captured["fn"] = fn
+
+    monkeypatch.setattr("src.ai_server.QTimer", _T)
+    srv = AiServerManager()
+    old = _FakeProc(QProcess.ProcessState.Running)
+    srv._proc = old
+    srv.stop()
+    assert old.terminated is True
+    assert captured["ms"] == 3000
+    # 旧实例快速退出（finished → _proc=None），restart 拉起新实例
+    old._state = QProcess.ProcessState.NotRunning
+    new = _FakeProc(QProcess.ProcessState.Running)
+    srv._proc = new
+    captured["fn"]()                          # 过期定时器到点
+    assert new.killed is False                # 新实例安然无恙
+    # 对照场景：旧实例 3s 后仍在运行 → 仍要被强杀
+    srv2 = AiServerManager()
+    stubborn = _FakeProc(QProcess.ProcessState.Running)
+    srv2._proc = stubborn
+    srv2.stop()
+    captured["fn"]()
+    assert stubborn.killed is True
+    # 新实例 running 中直接 stop → 再到点只对新实例本身操作
+    srv3 = AiServerManager()
+    cur = _FakeProc(QProcess.ProcessState.Running)
+    srv3._proc = cur
+    srv3.stop()
+    captured["fn"]()
+    assert cur.killed is True
+
+
+def test_error_occurred_failed_to_start_resets_state_machine():
+    """FailedToStart 不发 finished → 必须就地清 _proc，否则 start()
+    被「已在运行」守卫拒绝，状态机永久卡死（2026-10-01 修复前行为）。"""
+    from types import SimpleNamespace
+
+    srv = AiServerManager()
+    got = []
+    srv.add_listener(lambda s, d: got.append((s, d)))
+    srv._proc = object()
+    srv._timer = SimpleNamespace(stop=lambda: None, deleteLater=lambda: None)
+    srv._on_error_occurred(QProcess.ProcessError.FailedToStart)
+    assert srv._proc is None
+    assert srv.running is False
+    assert srv.status == ST_ERROR
+    assert "启动失败" in srv.detail
+    # 守卫确实解除：start 不再报「已在启动/运行中」（exe 不存在走另一分支）
+    srv.start(lambda *a: None, "C:/definitely-not-here.exe", "C:/no.gguf", 8095)
+    assert "已在启动" not in srv.detail
+    # 非 FailedToStart（如 Crashed）：等 finished 清理，_proc 不动
+    srv2 = AiServerManager()
+    marker = object()
+    srv2._proc = marker
+    srv2._on_error_occurred(QProcess.ProcessError.Crashed)
+    assert srv2._proc is marker
+    assert srv2.status == ST_ERROR
 
 
 if __name__ == "__main__":

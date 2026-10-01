@@ -167,9 +167,9 @@ check("B1 合法插件动作已进注册表", registry.get("demo.pick") is not N
 check("B2 动作元信息来自 manifest（hotkey/menu）",
       registry.get("demo.pick").hotkey == "Ctrl+Alt+C"
       and registry.get("demo.pick").menu is True)
-check("D1 .fpplug 自动解压后加载",
-      registry.get("zipped.act") is not None
-      and os.path.isfile(os.path.join(plugins_dir, "06-zipped", "plugin.py")))
+check("D1 plugins/ 下残留 .fpplug 不再自动解压（双目录模型：安装走商店显式入口）",
+      registry.get("zipped.act") is None
+      and not os.path.isdir(os.path.join(plugins_dir, "06-zipped")))
 check("D2 解压后保留原 .fpplug 文件",
       os.path.isfile(os.path.join(plugins_dir, "06-zipped.fpplug")))
 check("C1 抢已占热键者让位（大小写+空格归一后同一入口）",
@@ -181,8 +181,9 @@ check("C2 抢核心热键者让位",
 check("C3 requires 不合规插件被拒",
       "04-netty" not in ids and registry.get("netty.pick") is None
       and any("白名单" in m and "requests" in m for m in warns()))
-check("C4 坏插件不影响其他插件（02/03 导入成功但动作被跳过，04 被拒）",
-      ids == ["01-demo", "02-rival", "03-thief", "05-boom", "06-zipped"],
+check("C4 坏插件不影响其他插件（02/03 导入成功但动作被跳过，04 被拒，"
+      ".fpplug 不自动加载）",
+      ids == ["01-demo", "02-rival", "03-thief", "05-boom"],
       f"{ids}")
 check("F0 run() 抛异常被兜住", registry.trigger("boom.act", ctx) is False
       and any("已隔离" in m for m in warns()))
@@ -198,19 +199,28 @@ ball.set_action_registry(registry, ctx)
 texts = [a.text() for a in ball._menu.actions()]
 print(f"    菜单项：{texts}", flush=True)
 
-expected = ["🖥  打开主窗口", "", "🍅 开始专注", "", "屏幕取色", "压缩包动作",
+# v2026-10-01 分组收纳：插件动作收进「🧩 插件功能」子菜单（用户拍板，
+# Win11「新建 >」同款层级）——一级菜单里插件段只剩一个子菜单项
+expected = ["🖥  打开主窗口", "", "🍅 开始专注", "", "🧩 插件功能",
             "", "✂ 截图钉屏", "", "退出程序"]
-check("E1 插件动作插在「打开主窗口」与「退出程序」之间", texts == expected,
+check("E1 插件功能子菜单插在「打开主窗口」与「退出程序」之间", texts == expected,
       f"{texts}")
 check("E2 退出程序固定垫底，截图钉屏插在它之前",
       texts[-1] == "退出程序" and texts[-3] == "✂ 截图钉屏",
       f"{texts[-4:]}")
+_submenu = next((a.menu() for a in ball._menu.actions()
+                 if a.text() == "🧩 插件功能"), None)
+check("E2b 子菜单真实存在且收纳全部插件动作",
+      _submenu is not None
+      and [a.text() for a in _submenu.actions()] == ["屏幕取色"],
+      f"{[a.text() for a in _submenu.actions()] if _submenu else None}")
 
 # 基线（无插件）与设计一致：打开主窗口 | 🍅 开始专注 | 截图钉屏 | 退出程序
 baseline = ["🖥  打开主窗口", "", "🍅 开始专注", "", "✂ 截图钉屏", "", "退出程序"]
 
 # 通过菜单 QAction 真触发插件 run()
-action_item = [a for a in ball._menu.actions() if a.text() == "屏幕取色"]
+action_item = [a for a in _submenu.actions() if a.text() == "屏幕取色"] \
+    if _submenu else []
 check("E3 能找到插件菜单项", len(action_item) == 1)
 action_item[0].trigger()
 mod = sys.modules.get("floatpulse_plugin_01_demo")
@@ -229,7 +239,8 @@ check("E6 运行时追加项回调可正常触发", _extra_calls == [1])
 n = loader.deactivate()
 ball.refresh_plugin_menu()
 after_off = [a.text() for a in ball._menu.actions()]
-check("F1 deactivate 摘掉全部插件动作", n == 3, f"摘除 {n}")
+check("F1 deactivate 摘掉全部插件动作（demo.pick + boom.act，"
+      ".fpplug 动作已不存在）", n == 2, f"摘除 {n}")
 check("F2 菜单回到无插件基线", after_off == baseline, f"{after_off}")
 
 loader.activate()
