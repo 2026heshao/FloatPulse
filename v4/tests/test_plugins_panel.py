@@ -380,7 +380,7 @@ class TestDisabledPersistence:
 
 
 # ====================================================================
-# 使用说明 md：探测 / 摘要提取 / 卡片展示
+# 使用说明 md：探测 / 卡面摘要不上卡（2026-10-01 用户拍板，详情看 md）
 # ====================================================================
 class TestUsageDoc:
     def test_find_usage_prefers_chinese_name(self, tmp_path):
@@ -393,34 +393,10 @@ class TestUsageDoc:
         (d / "使用说明.md").write_text("# b", encoding="utf-8")
         assert find_usage_file(str(d)).endswith("使用说明.md")
 
-    def test_summary_skips_headings_and_tables(self, tmp_path):
-        from src.plugins_panel import usage_summary
-        p = tmp_path / "使用说明.md"
-        p.write_text(
-            "# 标题\n\n## 怎么用\n"
-            "| a | b |\n|---|---|\n"
-            "- **一键汇总**任务与碎片，生成 `Markdown` 草稿。\n"
-            "\n后续段落",
-            encoding="utf-8")
-        s = usage_summary(str(p))
-        assert s.startswith("一键汇总")
-        assert "**" not in s and "`" not in s and "|" not in s
-        assert "后续段落" not in s                      # 只取第一段
-
-    def test_summary_truncates_long_lines(self, tmp_path):
-        from src.plugins_panel import usage_summary, USAGE_SUMMARY_MAX
-        p = tmp_path / "使用说明.md"
-        p.write_text("很" * 300, encoding="utf-8")
-        s = usage_summary(str(p))
-        assert len(s) == USAGE_SUMMARY_MAX + 1          # 截断 + 省略号
-        assert s.endswith("…")
-
-    def test_summary_missing_file_returns_empty(self, tmp_path):
-        from src.plugins_panel import usage_summary
-        assert usage_summary(str(tmp_path / "不存在.md")) == ""
-
-    def test_card_shows_usage_summary(self, qapp, tmp_path):
-        from PyQt6.QtWidgets import QLabel
+    def test_card_hides_usage_summary_but_keeps_button(self, qapp, tmp_path):
+        """包内有使用说明 md：卡面**不**展示「📖 摘要」（与描述重复），
+        但「查看使用说明」按钮仍在——详情走程序内 md 查看器"""
+        from PyQt6.QtWidgets import QLabel, QPushButton
         from src.plugins_panel import PluginsPanel
         d = tmp_path / "demo"
         d.mkdir()
@@ -432,11 +408,10 @@ class TestUsageDoc:
         panel = PluginsPanel(_FakeHost(loader=_FakeLoader([lp])))
         card = _plugin_cards(panel)[0]
         texts = " ".join(lbl.text() for lbl in card.findChildren(QLabel))
-        assert "选定范围后一键汇总" in texts
-        # 按钮文案更新为「查看使用说明」
-        btn_texts = " ".join(b.text() for b in card.findChildren(
-            __import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton))
-        assert "查看使用说明" in btn_texts
+        assert "选定范围后一键汇总" not in texts       # 摘要不再上卡
+        assert "📖" not in texts
+        btn_texts = " ".join(b.text() for b in card.findChildren(QPushButton))
+        assert "查看使用说明" in btn_texts              # 按钮保留
 
     def test_card_without_usage_doc_has_no_summary(self, qapp, tmp_path):
         from PyQt6.QtWidgets import QLabel

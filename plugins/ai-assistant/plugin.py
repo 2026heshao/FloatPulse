@@ -470,6 +470,9 @@ ACTION_OPS = {
     "update_fragment": "manage", "delete_fragment": "manage",
     "update_note": "manage", "delete_note": "manage",
     "update_knowledge": "manage", "delete_knowledge": "manage",
+    # 唯一无 id 的 manage 级动作：一键清空全部任务（2026-10-01 用户实测
+    # 「将任务清空」时模型只能编造逐条 delete_task 编号被护栏全跳过）
+    "clear_tasks": "manage",
 }
 MAX_ACTIONS = 10          # 单轮动作数上限：防模型刷屏式输出
 
@@ -511,8 +514,12 @@ ACTION_PROTOCOL = (
     "（每段至少 4 个字，过短会被拒绝）\n"
     "- update_knowledge{id,content} / delete_knowledge{id} —— 知识库的 id "
     "就是它方括号里的编号\n"
+    "- clear_tasks{} —— 一键清空**全部**任务（无参数；危险操作，会弹确认卡）\n"
     "规则：①只在用户明确要求改动时输出动作；②不确定是哪条记录就先问，"
     "不要猜；③一次最多 10 条；④动作块之外照常用文字说明你做了什么。"
+    "⑤清空/批量删除全部任务用 clear_tasks{}（不要逐条编造 delete_task）；"
+    "⑥文字说明必须与动作一致——动作被跳过或失败时如实说明未完成，"
+    "**禁止声称已删除/已清空**。"
 )
 
 
@@ -548,6 +555,9 @@ def describe_action(op: str, args: dict, snapshot: dict | None) -> str:
     if op == "add_knowledge":
         head = " ".join(str(args.get("content") or "").split())[:24]
         return f"往知识库追加一段「{head}」"
+    if op == "clear_tasks":
+        n = len(snap.get("tasks") or [])
+        return f"【清空】全部任务（当前 {n} 条，不可单条挑拣）"
     if op == "complete_task":
         return f"把{_label(_OP_TARGET[op])}标记为已完成"
     if op == "reopen_task":
@@ -703,7 +713,8 @@ def parse_actions(text: str, snapshot: dict | None = None):
             args.pop("id", None)
             need = "title" if op in ("add_task", "add_note") else "content"
             val = args.get(need)
-            if not isinstance(val, str) or not val.strip():
+            if op != "clear_tasks" and (
+                    not isinstance(val, str) or not val.strip()):
                 errors.append(f"{op} 缺少有效的 {need}，跳过")
                 continue
         for key, val in list(args.items()):
@@ -1602,6 +1613,25 @@ class AiChatPage(QWidget):
                 if token > 0:
                     return True, f"已删除 {desc}", token
                 return False, f"删除失败：{desc}", 0
+            if op == "clear_tasks":
+                # 逐条删除拿撤销令牌：清空 N 条 = N 个令牌，结果卡仍可一键恢复。
+                # 现取现删（不用校验时的旧快照——确认卡弹着期间数据可能已变），
+                # 单条失败不影响其余，如实报告成功/失败数。
+                tasks = self._snapshot().get("tasks") or []
+                ids = [t.get("task_id") for t in tasks
+                       if isinstance(t.get("task_id"), int)]
+                if not ids:
+                    return True, "任务列表本来就是空的，无需清空", []
+                deleted, tokens = 0, []
+                for tid in ids:
+                    token = m.delete_task(tid)
+                    if token > 0:
+                        deleted += 1
+                        tokens.append(token)
+                if deleted == len(ids):
+                    return True, f"已清空全部任务（{deleted} 条）", tokens
+                return deleted > 0, (f"清空未完成：成功 {deleted}/{len(ids)} 条"
+                                     "（其余失败，详见 app.log）"), tokens
         except Exception as exc:               # noqa: BLE001 - 单条失败不影响其余
             return False, f"{op} 执行异常：{exc!r}", 0
         return False, f"未知动作：{op}", 0
@@ -1616,7 +1646,9 @@ class AiChatPage(QWidget):
         for act in _order_actions(actions):
             ok, msg, token = self._run_action(act)
             lines.append(("✅ " if ok else "✗ ") + msg)
-            if token:
+            if isinstance(token, list):
+                tokens.extend(token)          # clear_tasks：N 条 = N 个令牌
+            elif token:
                 tokens.append(token)
         self._add_result_card(lines, tokens)
 

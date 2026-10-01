@@ -27,9 +27,16 @@ import time
 
 from PyQt6.QtCore import QProcess, QTimer
 
+from src.logger import get_logger
+
 # 探活间隔 / 总超时（秒）
 PROBE_INTERVAL_MS = 2500
 PROBE_TIMEOUT_S = 90
+
+# 本地模型上下文长度（llama-server -c）：设置页档位 8K/16K/32K/64K，
+# 硬边界在此收敛（config._CONFIG_RANGES 同口径，这里兜底防脏值直通命令行）
+CTX_MIN, CTX_MAX = 2048, 131072
+DEFAULT_CTX_SIZE = 16384
 
 # 状态机取值（与插件侧 LocalServerManager 口径一致）
 ST_STOPPED = "stopped"
@@ -72,14 +79,32 @@ def sync_loopback_allowlist(cfg) -> int:
     return registered
 
 
-def build_launch_args(gguf: str, port: int) -> list:
+def sanitize_ctx_size(val) -> int:
+    """上下文长度收敛：非整数回默认，越界 clamp 到 [CTX_MIN, CTX_MAX]"""
+    try:
+        ctx = int(val)
+    except (TypeError, ValueError):
+        return DEFAULT_CTX_SIZE
+    return max(CTX_MIN, min(CTX_MAX, ctx))
+
+
+def build_launch_args(gguf: str, port: int, ctx_size: int = DEFAULT_CTX_SIZE,
+                      thinking: bool = False) -> list:
     """llama-server 启动参数（纯函数，便于验证）
 
-    -ngl 99 全量显卡卸载、-c 8192 上下文——与 ai-assistant /
-    CodeDrill 同款实测参数。
+    -ngl 99 全量显卡卸载、-c 上下文长度（默认 16K，越界自动收敛）——
+    与 ai-assistant / CodeDrill 同款实测参数。
+    thinking=False 追加 ``--reasoning off`` 显式关闭思维链。★实测
+    b10690 + Qwen3.5：``--reasoning-budget 0`` 不被模板遵循（照样吐完整
+    思维链、content 为空），``--reasoning off`` 才是真开关——同题实测
+    直答 0.3s/14 tokens vs 思维链 5.7s/384 tokens 仍未出答案（2026-10-01）。
     """
-    return ["-m", str(gguf), "--host", "127.0.0.1",
-            "--port", str(int(port)), "-ngl", "99", "-c", "8192"]
+    args = ["-m", str(gguf), "--host", "127.0.0.1",
+            "--port", str(int(port)), "-ngl", "99",
+            "-c", str(sanitize_ctx_size(ctx_size))]
+    if not thinking:
+        args += ["--reasoning", "off"]
+    return args
 
 
 def assign_to_job(pid: int) -> bool:
@@ -160,6 +185,9 @@ class AiServerManager:
         self._deadline = 0.0         # 探活总超时（time.monotonic 秒）
         self._busy_probe = False     # 上一次探活未返回
         self.port = 0
+        self.ctx_size = DEFAULT_CTX_SIZE   # 最近一次启动所用参数（变化检测用）
+        self.thinking = False
+        self._pending = None         # restart 待启动参数元组（旧实例退出后消费）
         self.status = ST_STOPPED     # stopped / starting / ready / error
         self.detail = ""
         self._listeners = []         # callable(status, detail)
@@ -189,11 +217,12 @@ class AiServerManager:
         for fn in list(self._listeners):
             try:
                 fn(status, detail)
-            except Exception:         # noqa: BLE001 - 回调异常不反噬
-                pass
+            except Exception as e:    # noqa: BLE001 - 回调异常不反噬
+                get_logger().warning(f"AI 状态订阅者回调异常: {e}")
 
     # ---- 启动 ----
-    def start(self, post_fn, exe: str, gguf: str, port: int):
+    def start(self, post_fn, exe: str, gguf: str, port: int,
+              ctx_size: int = DEFAULT_CTX_SIZE, thinking: bool = False):
         """拉起 llama-server 并开始探活；文件不存在等失败只置 error 不抛"""
         if self._proc is not None:
             self._emit(ST_STARTING, "服务已在启动/运行中")
@@ -210,15 +239,17 @@ class AiServerManager:
             return
         self._post_fn = post_fn
         self.port = int(port)
+        self.ctx_size = sanitize_ctx_size(ctx_size)
+        self.thinking = bool(thinking)
 
         proc = QProcess()
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyRead.connect(self._drain_output)     # 防管道积压卡死
         proc.started.connect(lambda: assign_to_job(proc.processId()))
         proc.finished.connect(self._on_finished)
-        proc.errorOccurred.connect(
-            lambda err: self._emit(ST_ERROR, f"进程错误：{err}"))
-        proc.start(exe, build_launch_args(gguf, self.port))
+        proc.errorOccurred.connect(self._on_error_occurred)
+        proc.start(exe, build_launch_args(gguf, self.port,
+                                          self.ctx_size, self.thinking))
         self._proc = proc
         self._emit(ST_STARTING,
                    f"启动中…（首次加载模型可能需要几十秒）端口 {self.port}")
@@ -276,8 +307,8 @@ class AiServerManager:
             self._proc.readAll()          # 诊断暂不落盘，仅防积压
 
     def _on_finished(self, code, _status):
-        self._stop_probe()
         was = self._proc
+        self._stop_probe()
         self._proc = None
         if self.status == ST_READY:
             self._emit(ST_STOPPED, "本地服务已停止")
@@ -286,20 +317,63 @@ class AiServerManager:
         else:
             self._emit(ST_ERROR, f"本地服务异常退出（code={code}）"
                                  f"——常见原因：显存不足 / 端口被占 / gguf 损坏")
-        del was
+        # 在 finished 信号发射途中不能直接丢最后一个引用（可能 C++ 对象
+        # 被析构导致 wrapped-object-deleted）；排队销毁才是安全时机
+        if was is not None:
+            was.deleteLater()
+        if self._pending is not None:
+            # restart 流程：旧实例已退场，稍候以新参数拉起（给句柄释放留缓冲）
+            QTimer.singleShot(300, self._launch_pending)
 
     # ---- 停止 ----
     def stop(self):
         if self._proc is None:
             self._emit(ST_STOPPED, "本地服务未在运行")
             return
-        self._proc.terminate()
-        QTimer.singleShot(3000, self._kill_if_alive)    # 3s 不退才强杀
+        proc = self._proc
+        proc.terminate()
+        # 强杀定时器必须盯住**这个旧实例**：若它在 3s 内退出、restart
+        # 随即拉起新实例，旧写法判 self._proc 会把新实例误杀
+        def _kill_this():
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.kill()
+        QTimer.singleShot(3000, _kill_this)   # 3s 不退才强杀
 
-    def _kill_if_alive(self):
-        if self._proc is not None and self._proc.state() != \
-                QProcess.ProcessState.NotRunning:
-            self._proc.kill()
+    def _on_error_occurred(self, err):
+        """进程错误（exe 缺失 → FailedToStart 等）。
+
+        FailedToStart 后进程不会再发 finished——必须就地清掉 _proc 并
+        停探活，否则 start() 永远被「已在运行」守卫拒绝，状态机卡死。
+        """
+        self._stop_probe()
+        if err == QProcess.ProcessError.FailedToStart:
+            self._proc = None
+            self._emit(ST_ERROR, f"进程启动失败（{err}）"
+                                 f"——检查 exe / 模型路径与权限")
+            get_logger().warning("llama-server FailedToStart，已复位状态机")
+        else:
+            self._emit(ST_ERROR, f"进程错误：{err}")
+
+    # ---- 平滑重启 ----
+    def restart(self, post_fn, exe: str, gguf: str, port: int,
+                ctx_size: int = DEFAULT_CTX_SIZE, thinking: bool = False):
+        """以新参数重启本地服务（设置页改参专用）。
+
+        运行中：先 stop，等旧实例真正退出（finished → ST_STOPPED/ST_ERROR）
+        再以新参数拉起——terminate() 在 Windows 上对无窗口控制台程序可能
+        迟迟不生效（靠 3s 强杀兜底），固定延迟猜不准，状态驱动才可靠。
+        未运行：直接以新参数 start。重复调用以后一次参数为准。
+        """
+        self._pending = (post_fn, exe, gguf, port, ctx_size, thinking)
+        if self._proc is None:
+            self._launch_pending()
+        else:
+            self.stop()
+
+    def _launch_pending(self):
+        pend, self._pending = self._pending, None
+        if pend and self._proc is None:
+            self.start(*pend)     # 期间被手动拉起则丢弃 pending，防双启
 
     @property
     def running(self) -> bool:

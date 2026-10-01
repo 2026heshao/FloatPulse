@@ -60,10 +60,33 @@ CAP_LABELS = {
     "manage": "🛠 改删数据", "ai": "🧠 AI 总配置",
 }
 
-# 插件包内使用说明文件约定（按优先级探测）
+# 能力徽章短文案（2026-10-01 卡片降噪：卡面只放短词，完整语义进悬停提示）
+CAP_BADGES = {
+    "network": "🌐 网络", "write": "✍ 写入",
+    "manage": "🛠 改删", "ai": "🧠 AI",
+}
+
+# 能力徽章悬停提示（完整语义；manage 蕴含 write、ai 由设置页勾选授权）
+CAP_TIPS = {
+    "network": "该插件在 manifest 里声明了 network 能力，"
+               "可经宿主网络桥发起联网请求（app.log 可审计）",
+    "write": "该插件在 manifest 里声明了 write 能力，"
+             "可经宿主桥新增碎片 / 任务 / 笔记（只能新增，"
+             "不能修改或删除已有数据）",
+    "manage": "该插件在 manifest 里声明了 manage 能力，"
+              "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
+              "笔记（同时具备 write 的只增权限）；删除可由插件"
+              "侧发起撤销，每次操作记入 app.log",
+    "ai": "该插件在 manifest 里声明了 ai 能力，可接入设置页"
+          "「AI 总配置」共用云端 / 本地后端——是否接入由你在"
+          "设置页下拉框勾选决定（勾选 = 授权）",
+}
+
+# 插件包内使用说明文件约定（按优先级探测；「查看使用说明」按钮用）
 USAGE_FILENAMES = ("使用说明.md", "README.md")
-# 卡片上显示的使用说明摘要最大长度（用户要求：简短一两句话）
-USAGE_SUMMARY_MAX = 90
+# 卡片描述在卡面上最多显示的字符数（超出截断加省略号，全文进悬停提示；
+# 双列卡宽下 48 字约一行半——介绍看一眼定位即可，详情看使用说明 md）
+DESC_MAX = 48
 # 已装插件卡片双列网格的最小容器宽度：低于此值回落单列。
 # 依据实测（带主题 QSS，light/dark 一致）：最宽卡片（启停 + 打开目录 +
 # 查看使用说明 + 卸载四按钮行）最小宽 368px，两列需容器 ≥ 2×368 + 间距
@@ -92,41 +115,20 @@ class _CardsScroll(QScrollArea):
         self._panel._reflow_cards(self.viewport().width())
 
 
+def clip_text(text: str, max_len: int) -> str:
+    """超长截断加省略号（纯文本处理；全文由调用方挂进悬停提示）"""
+    text = (text or "").strip()
+    if len(text) <= max_len:
+        return text
+    return text[:max_len].rstrip() + "…"
+
+
 def find_usage_file(plugin_dir: str) -> str:
     """探测插件包内的使用说明文件，返回完整路径（找不到返回空串）"""
     for name in USAGE_FILENAMES:
         path = os.path.join(plugin_dir or "", name)
         if os.path.isfile(path):
             return path
-    return ""
-
-
-def usage_summary(path: str, max_len: int = USAGE_SUMMARY_MAX) -> str:
-    """从使用说明 md 提取一句话摘要（卡片展示用）。
-
-    规则：跳过 # 标题行 / 表格 / 空行 / 列表符号，取第一条正文文字，
-    超长截断加省略号；读失败返回空串（不阻塞渲染）。
-    """
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                text = line.strip()
-                if not text:
-                    continue
-                if text.startswith("#"):
-                    continue
-                if text.startswith("|"):
-                    continue                       # markdown 表格行
-                # 去掉常见 markdown 修饰：列表符 / 引用符 / 加粗星号
-                text = text.lstrip("-*> ").strip()
-                if not text:
-                    continue
-                text = text.replace("**", "").replace("`", "")
-                if len(text) > max_len:
-                    text = text[:max_len].rstrip() + "…"
-                return text
-    except (OSError, UnicodeDecodeError):
-        pass
     return ""
 
 
@@ -499,11 +501,16 @@ class PluginsPanel(QWidget):
 
         manifest = getattr(lp, "manifest", {}) or {}
 
-        # ---- 标题行：名称 + 版本 + 状态标签 + id ----
+        # ---- 标题行：名称 + 版本（弱化小字）+ 状态标签 + id ----
         head = QHBoxLayout()
-        name = QLabel(f"{lp.name}  v{lp.version}")
+        head.setSpacing(6)
+        name = QLabel(lp.name)
         name.setObjectName("pluginCardTitle")
         head.addWidget(name)
+
+        ver = QLabel(f"v{lp.version}")
+        ver.setObjectName("pluginCardId")
+        head.addWidget(ver)
 
         status = self._status_of(lp)
         if status is not None:
@@ -518,26 +525,25 @@ class PluginsPanel(QWidget):
         v.addLayout(head)
 
         # ---- 描述行：manifest.description > 类 docstring 首行 ----
+        # 卡面最多 DESC_MAX 字（双列卡宽下约一行半，一眼扫完），
+        # 超长截断加省略号，全文进悬停提示（2026-10-01 卡片降噪；
+        # 用户反馈：介绍看一眼定位即可，详细用法点「查看使用说明」看 md）。
         desc = (manifest.get("description") or "").strip()
         if not desc:
             doc = getattr(type(lp.plugin), "__doc__", "") or ""
             desc = doc.strip().splitlines()[0].strip() if doc.strip() else ""
         if desc:
-            desc_label = QLabel(desc)
+            desc_label = QLabel(clip_text(desc, DESC_MAX))
             desc_label.setObjectName("pluginCardDesc")
             desc_label.setWordWrap(True)
+            if len(desc) > DESC_MAX:
+                desc_label.setToolTip(desc)
             v.addWidget(desc_label)
 
-        # ---- 使用说明摘要行：来自插件包内 使用说明.md / README.md ----
-        usage_path = find_usage_file(lp.path)
-        if usage_path:
-            summary = usage_summary(usage_path)
-            if summary:
-                usage_label = QLabel(f"📖 {summary}")
-                usage_label.setObjectName("pluginCardUsage")
-                usage_label.setWordWrap(True)
-                usage_label.setToolTip("摘自插件包内使用说明，点下方按钮查看全文")
-                v.addWidget(usage_label)
+        # ---- 使用说明摘要不上卡（2026-10-01 用户拍板）----
+        # 描述与「📖 摘自 md 的摘要」两段都在介绍「这插件是干嘛的」，重复；
+        # 详细用法本来就有点下方「查看使用说明」按钮（程序内渲染 md），
+        # 卡面不再重复展示——需要详情时按一次按钮就能看到全文。
 
         # ---- 动作级告警（热键被占 / 未声明等）----
         for warn in list(getattr(lp, "warnings", []) or []):
@@ -566,59 +572,31 @@ class PluginsPanel(QWidget):
             row.addStretch()
             v.addLayout(row)
         if not actions:
-            no_act = QLabel("·  （无注册动作）")
-            no_act.setObjectName("pluginCardDesc")
+            no_act = QLabel("（无注册动作）")
+            no_act.setObjectName("pluginActionTag")   # 弱化灰，不与描述抢层级
             v.addWidget(no_act)
 
-        # ---- 依赖 + 能力（可换行）与操作按钮，拆成两行 ----
-        # 原单行「依赖 + 能力 + 按钮」全宽下已接近极限（ai-assistant 四能力
-        # + 四按钮 ≈ 1000px，超出最小窗口的全宽），双列后每列更窄必然溢出。
-        # 拆行后：元信息行自动折行，按钮行右对齐——单双列都放得下。
+        # ---- 能力徽章行 + 卡片悬停详情（2026-10-01 卡片降噪）----
+        # 能力：一排胶囊徽章（🌐 网络 / ✍ 写入 / 🛠 改删 / 🧠 AI），
+        # 完整语义在徽章悬停提示里；依赖是开发者信息，不再占卡面行，
+        # 连同被截断的描述全文一起挂进**卡片整体悬停提示**（悬停卡面
+        # 空白处可见——QToolTip 沿父链找最近的有提示的控件）。
         requires = list(manifest.get("requires", []) or [])
         caps = list(manifest.get("capabilities", []) or [])
-        if requires or caps:
-            meta = QVBoxLayout()
-            meta.setContentsMargins(0, 0, 0, 0)
-            meta.setSpacing(2)
-            # 依赖是开发者信息,不再单独占一行:有能力行时并入其 tooltip
-            # (悬停可见,观感降噪;无能力行时仍保留独立行不丢信息)
-            if caps:
-                # 能力声明可视化（2026-09-27 权限模型）：network / write / manage / ai。
-                # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据 /
-                # 可接入 AI 总配置」，是声明式权限的最小可见性。
-                cap_labels = {
-                    "network": "🌐 网络访问", "write": "✍ 写入数据",
-                    "manage": "🛠 改删数据", "ai": "🧠 AI 总配置"}
-                cap_tips = {
-                    "network": "该插件在 manifest 里声明了 network 能力，"
-                               "可经宿主网络桥发起联网请求（app.log 可审计）",
-                    "write": "该插件在 manifest 里声明了 write 能力，"
-                             "可经宿主桥新增碎片 / 任务 / 笔记（只能新增，"
-                             "不能修改或删除已有数据）",
-                    "manage": "该插件在 manifest 里声明了 manage 能力，"
-                              "可经宿主桥修改 / 完成 / 删除已有的碎片、任务、"
-                              "笔记（同时具备 write 的只增权限）；删除可由插件"
-                              "侧发起撤销，每次操作记入 app.log",
-                    "ai": "该插件在 manifest 里声明了 ai 能力，可接入设置页"
-                          "「AI 总配置」共用云端 / 本地后端——是否接入由你在"
-                          "设置页下拉框勾选决定（勾选 = 授权）",
-                }
-                cap = QLabel("能力: " + "、".join(
-                    cap_labels.get(c, c) for c in caps))
-                cap.setObjectName("pluginCardId")
-                cap.setWordWrap(True)
-                tips = ["；\n".join(
-                    cap_tips.get(c, "") for c in caps).strip("；\n")]
-                if requires:
-                    tips.append("依赖: " + "、".join(requires))
-                cap.setToolTip("\n\n".join(t for t in tips if t))
-                meta.addWidget(cap)
-            v.addLayout(meta)
-            if requires and not caps:
-                req = QLabel("依赖: " + "、".join(requires))
-                req.setObjectName("pluginCardId")
-                req.setWordWrap(True)
-                v.addWidget(req)
+        card_tips = []
+        if requires:
+            card_tips.append("依赖: " + "、".join(requires))
+        if desc and len(desc) > DESC_MAX:
+            card_tips.append("简介: " + desc)
+        if card_tips:
+            card.setToolTip("\n\n".join(card_tips))
+        if caps:
+            cap_row = QHBoxLayout()
+            cap_row.setSpacing(6)
+            for c in caps:
+                cap_row.addWidget(self._make_cap_badge(c))
+            cap_row.addStretch()
+            v.addLayout(cap_row)
 
         # ---- 操作按钮行（右对齐，与原视觉一致）----
         bottom = QHBoxLayout()
@@ -657,6 +635,13 @@ class PluginsPanel(QWidget):
         v.addLayout(bottom)
         return card
 
+    def _make_cap_badge(self, cap: str) -> QLabel:
+        """能力胶囊徽章：短文案上卡面，完整语义进悬停提示（三卡共用）"""
+        lab = QLabel(CAP_BADGES.get(cap, CAP_LABELS.get(cap, cap)))
+        lab.setObjectName("pluginCapBadge")
+        lab.setToolTip(CAP_TIPS.get(cap, ""))
+        return lab
+
     def _make_store_card(self, entry) -> QWidget:
         """商店里一个可安装包的卡片：名称 + 版本 + 状态 + 描述 + 安装按钮。
 
@@ -675,13 +660,18 @@ class PluginsPanel(QWidget):
         installed = bool(getattr(entry, "installed", False))
         plugin_id = getattr(entry, "plugin_id", "") or ""
 
-        # ---- 标题行：名称 + 版本 + 状态标签 + id ----
+        # ---- 标题行：名称 + 版本（弱化小字）+ 状态标签 + id ----
         head = QHBoxLayout()
+        head.setSpacing(6)
         title_text = getattr(entry, "name", "") or getattr(entry, "filename", "")
         version = getattr(entry, "version", "") or ""
-        name = QLabel(f"{title_text}  v{version}" if version else title_text)
+        name = QLabel(title_text)
         name.setObjectName("pluginStoreTitle")
         head.addWidget(name)
+        if version:
+            ver = QLabel(f"v{version}")
+            ver.setObjectName("pluginCardId")
+            head.addWidget(ver)
 
         if not usable:
             tag = QLabel("包不合法")
@@ -718,18 +708,19 @@ class PluginsPanel(QWidget):
             el.setWordWrap(True)
             v.addWidget(el)
 
-        # ---- 元信息行（能力 + 源包名）：单独一行，不跟按钮抢横向空间 ----
+        # ---- 能力徽章行 + 元信息行：徽章化能力，热键/体积/包名保持文字 ----
         caps = list((getattr(entry, "manifest", None) or {}).get(
             "capabilities", []) or [])
-        fname = getattr(entry, "filename", "")
-        meta_parts = []
         if caps:
-            meta_parts.append("能力: " + "、".join(
-                CAP_LABELS.get(c, c) for c in caps))
+            cap_row = QHBoxLayout()
+            cap_row.setSpacing(6)
+            for c in caps:
+                cap_row.addWidget(self._make_cap_badge(c))
+            cap_row.addStretch()
+            v.addLayout(cap_row)
+        fname = getattr(entry, "filename", "")
         if fname:
-            meta_parts.append(f"包: {fname}")
-        if meta_parts:
-            meta = QLabel("　".join(meta_parts))
+            meta = QLabel(f"包: {fname}")
             meta.setObjectName("pluginCardId")
             meta.setWordWrap(True)
             v.addWidget(meta)
@@ -1422,9 +1413,13 @@ class PluginStoreDialog(GlassDialog):
         v.setSpacing(6)
 
         head = QHBoxLayout()
-        name = QLabel(f"{it['name']}  v{it['version']}")
+        head.setSpacing(6)
+        name = QLabel(it["name"])
         name.setObjectName("pluginStoreTitle")
         head.addWidget(name)
+        ver = QLabel(f"v{it['version']}")
+        ver.setObjectName("pluginCardId")
+        head.addWidget(ver)
         tag = QLabel("远程")
         tag.setObjectName("pluginStoreBadge")
         head.addWidget(tag)
@@ -1435,15 +1430,23 @@ class PluginStoreDialog(GlassDialog):
         v.addLayout(head)
 
         if it["description"]:
-            dl = QLabel(it["description"])
+            dl = QLabel(clip_text(it["description"], DESC_MAX))
             dl.setObjectName("pluginCardDesc")
             dl.setWordWrap(True)
+            if len(it["description"].strip()) > DESC_MAX:
+                dl.setToolTip(it["description"])
             v.addWidget(dl)
 
-        meta_parts = []
+        # 能力徽章行（与已装卡片/商店卡同款）
         if it["capabilities"]:
-            meta_parts.append("能力: " + "、".join(
-                CAP_LABELS.get(c, c) for c in it["capabilities"]))
+            cap_row = QHBoxLayout()
+            cap_row.setSpacing(6)
+            for c in it["capabilities"]:
+                cap_row.addWidget(self._make_cap_badge(c))
+            cap_row.addStretch()
+            v.addLayout(cap_row)
+
+        meta_parts = []
         if it["hotkeys"]:
             meta_parts.append("热键: " + " ".join(it["hotkeys"]))
         meta_parts.append(f"{it['size'] / 1024:.1f} KB")

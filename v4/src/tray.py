@@ -72,6 +72,7 @@ class TrayController:
                                   close_all）
         """
         menu = QMenu()
+        self._tray_menu = menu   # setContextMenu 不接管所有权，必须自持引用
         act_main = menu.addAction("显示 / 隐藏主窗口")
         act_ball = menu.addAction("显示 / 隐藏悬浮球")
 

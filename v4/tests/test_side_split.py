@@ -103,17 +103,28 @@ def test_clamp_bounds(win):
 
 
 def test_restore_from_config():
-    """config.side_bar_width=220 → 启动即用 220（不是默认 168）"""
+    """config.side_bar_width=220 → 启动即用 220（不是默认 168）
+
+    非法值双层防护（2026-10-01 起三件套声明该键，校验前移到配置层）：
+      1. 配置层 set() 拒绝越界/类型错误 → 内存保持上一个合法值；
+      2. UI 层 _clamped_side_width() 兜底夹取（防旧版 json / 手改文件
+         绕过 set 直塞脏值）。
+    """
     tmp = tempfile.mkdtemp(prefix="fp_split_restore_")
     config = ConfigManager(os.path.join(tmp, "config.json"))
-    config.set("side_bar_width", 220)
+    assert config.set("side_bar_width", 220)
     config.save()
     w = _build_window(config)
     assert w._side_bar.width() == 220
-    # 非法值：越界大数 / 非数字字符串 → 回退夹取/默认
-    config.set("side_bar_width", 99999)
+    # 配置层：越界大数 / 非数字字符串 → set 拒绝，内存保持 220
+    assert config.set("side_bar_width", 99999) is False
+    assert w._clamped_side_width() == 220
+    assert config.set("side_bar_width", "abc") is False
+    assert w._clamped_side_width() == 220
+    # UI 层兜底：脏值直塞内存（模拟旧版本落盘 / 手改 json）仍被夹取
+    config._config["side_bar_width"] = 99999
     assert w._clamped_side_width() == MainWindow.SIDE_BAR_MAX_W
-    config.set("side_bar_width", "abc")
+    config._config["side_bar_width"] = "abc"
     assert w._clamped_side_width() == MainWindow.SIDE_BAR_WIDTH
     w.close()
     w.deleteLater()

@@ -24,6 +24,8 @@ from ctypes import wintypes
 
 from PyQt6.QtCore import QAbstractNativeEventFilter
 
+from src.logger import get_logger
+
 try:
     _user32 = ctypes.windll.user32
     _IS_WINDOWS = True
@@ -164,7 +166,11 @@ class GlobalHotkeyManager(QAbstractNativeEventFilter):
                 if msg.message == WM_HOTKEY:
                     entry = self._hotkeys.get(int(msg.wParam))
                     if entry is not None:
-                        entry[0]()
+                        try:
+                            entry[0]()
+                        except Exception as e:   # noqa: BLE001 - 回调 bug 不阻断事件流
+                            # 回调异常必须留痕，否则表现为「热键按了没反应」无从排查
+                            get_logger().warning(f"热键回调异常: {e}")
             except Exception:
                 pass  # 消息解析失败不阻断事件流
         return False, 0

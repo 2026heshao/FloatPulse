@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import QApplication
 from src.fragment_manager import (
     FragmentManager,
 )
+from src.logger import get_logger
 
 # 剪贴板图片 MIME → 落盘扩展名（md.hasImage() 为假时的兜底路径）
 _IMAGE_MIME_EXTS = {
@@ -276,8 +277,8 @@ class ClipboardMonitor(QObject):
             fid = self._fm.add_clipboard_text(content, source="剪贴板")
             self._trim_if_needed()
             self.fragment_added.emit(fid)
-        except Exception:
-            pass
+        except Exception as e:        # noqa: BLE001 - 捕获失败不中断监听，但留痕
+            get_logger().warning(f"剪贴板文本碎片写入失败: {e}")
 
     def _add_path_fragment(self, path: str):
         """添加路径碎片"""
@@ -286,8 +287,8 @@ class ClipboardMonitor(QObject):
             self._trim_if_needed()
             self.fragment_added.emit(fid)
             self.path_detected.emit(path)
-        except Exception:
-            pass
+        except Exception as e:        # noqa: BLE001 - 捕获失败不中断监听，但留痕
+            get_logger().warning(f"剪贴板路径碎片写入失败: {e}")
 
     # ---------------- 图片捕获（Y2） ----------------
     def _capture_images_enabled(self) -> bool:

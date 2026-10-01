@@ -73,11 +73,16 @@ class TestOpTable:
         for op in ("complete_task", "reopen_task", "update_task",
                    "delete_task", "update_fragment", "delete_fragment",
                    "update_note", "delete_note",
-                   "update_knowledge", "delete_knowledge"):
+                   "update_knowledge", "delete_knowledge",
+                   "clear_tasks"):
             assert plug.ACTION_OPS[op] == "manage"
 
     def test_every_manage_op_needs_id_and_add_ops_do_not(self, plug):
+        # clear_tasks 是唯一例外：manage 级但作用于全集，无需 id
         for op in plug.ACTION_OPS:
+            if op == "clear_tasks":
+                assert op not in plug._OP_TARGET
+                continue
             assert (op in plug._OP_TARGET) == (plug.ACTION_OPS[op] == "manage")
 
     def test_knowledge_targets_resolve_by_num(self, plug):
@@ -124,6 +129,16 @@ class TestParseActions:
             _block({"op": "drop_database", "id": 3}), SNAP)
         assert acts == []
         assert any("未知动作" in e for e in errs)
+
+    def test_clear_tasks_needs_no_id(self, plug):
+        """clear_tasks 无参数也合法（2026-10-01 清空任务编造编号问题的修复）"""
+        clean, acts, errs = plug.parse_actions(
+            "好的。\n" + _block({"op": "clear_tasks"}), SNAP)
+        assert errs == []
+        assert len(acts) == 1
+        assert acts[0]["op"] == "clear_tasks"
+        assert acts[0]["level"] == "manage"
+        assert clean == "好的。"
 
     def test_broken_json_executes_nothing(self, plug):
         _, acts, errs = plug.parse_actions(
@@ -393,6 +408,11 @@ class TestDescribe:
         desc = plug.describe_action("delete_task", {"id": 42}, {})
         assert "42" in desc
 
+    def test_clear_tasks_desc_counts_snapshot(self, plug):
+        desc = plug.describe_action("clear_tasks", {}, SNAP)
+        assert "清空" in desc and "2 条" in desc
+        assert "**" not in desc          # QLabel 不渲染 Markdown
+
 
 # ---------------- E. 提示词 ----------------
 class TestPrompt:
@@ -409,3 +429,104 @@ class TestPrompt:
         prompt = plug.build_system_prompt(None, can_manage=True)
         for op in plug.ACTION_OPS:
             assert op in prompt
+
+    def test_protocol_forbids_fabricated_success(self, plug):
+        """2026-10-01 实测：模型谎报「已清空」但动作全被跳过——协议必须明令禁止"""
+        prompt = plug.build_system_prompt(None, can_manage=True)
+        assert "禁止声称已删除" in prompt
+        assert "clear_tasks{}" in prompt
+
+
+# ---------------- F. 执行层：clear_tasks（无 QApplication，桩替身） ----------------
+class _FakeManage:
+    def __init__(self, fail_ids=()):
+        self.fail_ids = set(fail_ids)
+        self.deleted = []
+        self.tokens = []
+
+    def delete_task(self, tid):
+        if tid in self.fail_ids:
+            return 0
+        token = tid * 10
+        self.deleted.append(tid)
+        self.tokens.append(token)
+        return token
+
+
+class _FakeData:
+    def tasks(self):
+        return [{"task_id": 3, "title": "甲"}, {"task_id": 7, "title": "乙"},
+                {"task_id": 9, "title": "丙"}]
+
+    def fragments(self):
+        return []
+
+    def notes(self):
+        return []
+
+    def knowledge(self):
+        return []
+
+
+class _FakeCtx:
+    def __init__(self, fail_ids=()):
+        self.manage = _FakeManage(fail_ids)
+        self.data = _FakeData()
+        self.write = None                   # clear 分支不碰 write，占位即可
+
+
+def _fake_page(plug, ctx, cards=None):
+    """只绑定真方法的轻量替身：绝不实例化 QWidget（无需 QApplication）"""
+    import types
+    from types import SimpleNamespace
+    page = SimpleNamespace()
+    page._ctx = ctx
+    page._snapshot = types.MethodType(plug.AiChatPage._snapshot, page)
+    page._run_action = types.MethodType(plug.AiChatPage._run_action, page)
+    page._execute_and_report = types.MethodType(
+        plug.AiChatPage._execute_and_report, page)
+    page._add_result_card = types.MethodType(
+        lambda self, lines, toks: cards.append((list(lines), list(toks))),
+        page) if cards is not None else None
+    return page
+
+
+class TestRunActionClearTasks:
+    def test_clear_all_returns_token_list(self, plug):
+        page = _fake_page(plug, _FakeCtx())
+        ok, msg, tokens = page._run_action(
+            {"op": "clear_tasks", "args": {}, "desc": "清空全部任务"})
+        assert ok is True
+        assert "3 条" in msg
+        assert tokens == [30, 70, 90]        # 每条一个撤销令牌
+        assert page._ctx.manage.deleted == [3, 7, 9]
+
+    def test_clear_partial_failure_reports_honestly(self, plug):
+        page = _fake_page(plug, _FakeCtx(fail_ids={7}))
+        ok, msg, tokens = page._run_action(
+            {"op": "clear_tasks", "args": {}})
+        assert ok is True                    # 部分成功也算成功，但如实报告
+        assert "2/3" in msg
+        assert tokens == [30, 90]
+
+    def test_clear_empty_list_is_honest_noop(self, plug):
+        ctx = _FakeCtx()
+        ctx.data = _FakeData()
+        page = _fake_page(plug, ctx)
+        page._snapshot = lambda: {"tasks": []}
+        ok, msg, tokens = page._run_action(
+            {"op": "clear_tasks", "args": {}})
+        assert ok is True
+        assert "空" in msg
+        assert tokens == []
+
+    def test_execute_and_report_extends_tokens(self, plug):
+        """_execute_and_report 必须把 list 令牌逐个收集（否则清空后没法撤销）"""
+        cards = []
+        page = _fake_page(plug, _FakeCtx(), cards)
+        page._execute_and_report(
+            [{"op": "clear_tasks", "args": {}, "desc": "清空全部任务",
+              "level": "manage"}])
+        lines, tokens = cards[0]
+        assert tokens == [30, 70, 90]
+        assert any("已清空全部任务" in ln for ln in lines)
