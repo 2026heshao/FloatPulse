@@ -124,7 +124,12 @@ class SnipOverlay(QWidget):
     def _selection(self) -> QRect:
         if self._origin is None or self._pos is None:
             return QRect()
-        return QRect(self._origin, self._pos).normalized()
+        # 与拖拽方向无关：取两角包围盒（QRect(p1,p2) 的右下角是含端点语义，
+        # 直接 normalized() 会让「反向拖」比「正向拖」差 1px 的裁剪范围）
+        return QRect(QPoint(min(self._origin.x(), self._pos.x()),
+                            min(self._origin.y(), self._pos.y())),
+                     QPoint(max(self._origin.x(), self._pos.x()),
+                            max(self._origin.y(), self._pos.y()))).normalized()
 
     def paintEvent(self, _event):
         p = QPainter(self)
