@@ -494,8 +494,8 @@ class PluginsPanel(QWidget):
         card = QFrame()
         card.setObjectName("pluginCard")
         v = QVBoxLayout(card)
-        v.setContentsMargins(16, 12, 16, 12)
-        v.setSpacing(6)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(7)
 
         manifest = getattr(lp, "manifest", {}) or {}
 
@@ -580,11 +580,8 @@ class PluginsPanel(QWidget):
             meta = QVBoxLayout()
             meta.setContentsMargins(0, 0, 0, 0)
             meta.setSpacing(2)
-            if requires:
-                req = QLabel("依赖: " + "、".join(requires))
-                req.setObjectName("pluginCardId")
-                req.setWordWrap(True)
-                meta.addWidget(req)
+            # 依赖是开发者信息,不再单独占一行:有能力行时并入其 tooltip
+            # (悬停可见,观感降噪;无能力行时仍保留独立行不丢信息)
             if caps:
                 # 能力声明可视化（2026-09-27 权限模型）：network / write / manage / ai。
                 # 让用户看到「这个插件会联网 / 能往你的数据里写东西 / 能改删数据 /
@@ -610,10 +607,18 @@ class PluginsPanel(QWidget):
                     cap_labels.get(c, c) for c in caps))
                 cap.setObjectName("pluginCardId")
                 cap.setWordWrap(True)
-                cap.setToolTip("；\n".join(
-                    cap_tips.get(c, "") for c in caps).strip("；\n"))
+                tips = ["；\n".join(
+                    cap_tips.get(c, "") for c in caps).strip("；\n")]
+                if requires:
+                    tips.append("依赖: " + "、".join(requires))
+                cap.setToolTip("\n\n".join(t for t in tips if t))
                 meta.addWidget(cap)
             v.addLayout(meta)
+            if requires and not caps:
+                req = QLabel("依赖: " + "、".join(requires))
+                req.setObjectName("pluginCardId")
+                req.setWordWrap(True)
+                v.addWidget(req)
 
         # ---- 操作按钮行（右对齐，与原视觉一致）----
         bottom = QHBoxLayout()
@@ -639,7 +644,8 @@ class PluginsPanel(QWidget):
             bottom.addWidget(readme_btn)
 
         uninstall_btn = IconButton("trash", text="卸载", icon_size=14,
-                                   object_name="secondaryBtn")
+                                   object_name="dangerBtn",
+                                   off_color="danger", hover_color="#FFFFFF")
         uninstall_btn.setToolTip("删除插件目录并摘掉它的动作 / 热键 / 菜单项；"
                                  "插件私有数据（float_data/plugins/）会保留")
         uninstall_btn.clicked.connect(

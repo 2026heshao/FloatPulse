@@ -23,13 +23,17 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QFileDialog,
     QStackedWidget, QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import QRectF, QSize, Qt
+from PyQt6.QtCore import (
+    QEasingCurve, QObject, QRunnable, QRectF, QSize, Qt, QThreadPool,
+    QVariantAnimation, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor, QImageReader, QPainter, QPainterPath, QPen, QPixmap,
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
 from src.controls import EmptyState, IconButton, PageTitle
+from src import motion
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）
 EXT_ICON = {
@@ -40,6 +44,61 @@ EXT_ICON = {
     ".py": "🐍", ".js": "📜", ".json": "📋", ".html": "🌐",
 }
 
+# 缩略图缓存哨兵:_PENDING=后台生成中(画占位图),False=确认不可预览。
+# 与 QPixmap 同存一个 dict,用 object() 保证不会和任何合法值撞车。
+_PENDING = object()
+
+
+def _decode_image_thumb(path: str, out_w: int, out_h: int):
+    """在工作线程解码并裁切缩略图(QImage 线程安全;QPixmap 只能主线程建)。
+
+    与旧同步路径同参数同产物:解码期按 2 倍目标缩放大图 → Smooth 缩放
+    到目标 → 居中裁切。失败返回 None(调用方落 False 哨兵防反复重读)。
+    """
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    tw, th = out_w * 2, out_h * 2
+    if size.isValid() and size.width() > 0 and size.height() > 0:
+        scale = max(tw / size.width(), th / size.height())
+        if scale < 1.0:   # 大图在解码期先缩，避免整图载入内存
+            reader.setScaledSize(QSize(int(size.width() * scale),
+                                       int(size.height() * scale)))
+    raw = reader.read()
+    if raw.isNull():
+        return None
+    img = raw.scaled(out_w, out_h,
+                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
+    x = (img.width() - out_w) // 2
+    y = (img.height() - out_h) // 2
+    return img.copy(x, y, out_w, out_h)
+
+
+class _ThumbSignals(QObject):
+    """工作线程 → 主线程 的到货信号(跨线程 emit 自动 Queued)。"""
+
+    ready = pyqtSignal(int, int, object)     # asset_id, epoch, QImage|None
+
+
+class _ThumbJob(QRunnable):
+    """线程池里的解码任务:只做纯计算,结果经信号回主线程。"""
+
+    def __init__(self, asset_id, epoch, path, w, h, signals):
+        super().__init__()
+        self._asset_id, self._epoch = asset_id, epoch
+        self._path, self._w, self._h = path, w, h
+        self._signals = signals
+
+    def run(self):
+        img = None
+        try:
+            if self._path and os.path.exists(self._path):
+                img = _decode_image_thumb(self._path, self._w, self._h)
+        except (OSError, ValueError, RuntimeError):
+            img = None
+        self._signals.ready.emit(self._asset_id, self._epoch, img)
+
 
 class _AssetThumbDelegate(QStyledItemDelegate):
     """素材网格单元：圆角缩略图 + 文件名 + 大小·时间（可视化改造核心）"""
@@ -48,10 +107,12 @@ class _AssetThumbDelegate(QStyledItemDelegate):
     THUMB_RATIO = 100 / 152  # 高/宽比，沿用原 152x100 的视觉比例
     PAD = 10          # 格内左右留白
 
-    def __init__(self, host, thumb_cache: dict, parent=None):
+    def __init__(self, host, thumb_cache: dict, loader=None, parent=None):
         super().__init__(parent)
         self._host = host
-        self._thumbs = thumb_cache   # asset_id -> QPixmap | False（False=读取失败）
+        self._thumbs = thumb_cache   # id -> QPixmap | False | _PENDING
+        self._loader = loader        # 未命中回调(面板的异步派发);None=旧同步路径
+        self._fade_values = {}       # asset_id -> 0.0~1.0(淡入进度,面板维护)
         config = getattr(host, "_config", None)
         init_w = (int(config.get("asset_thumb_size", self.DEFAULT_THUMB_W))
                   if config is not None else self.DEFAULT_THUMB_W)
@@ -72,33 +133,37 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         return get_colors(theme)
 
     # ---------------- 缩略图 ----------------
+    def _decode_sync(self, asset):
+        """旧同步解码路径(仅 loader=None 的独立使用场景;面板管线不走这里)。"""
+        pix = None
+        img = _decode_image_thumb(asset.stored_path, self.THUMB_W, self.THUMB_H)
+        if img is not None:
+            pix = QPixmap.fromImage(img)
+        return pix
+
     def _thumb(self, asset):
-        """惰性生成缩略图；返回 None 表示无法预览（非图片/读取失败）"""
+        """取缩略图:命中即回;未命中画占位并(图片时)转后台生成。
+
+        ★ 本方法在 paint() 里跑——**绝不在这里解码**(首开/滚动的卡顿
+        根因)。未命中先落 _PENDING 占位(本帧画类型图标),由 loader
+        派发后台线程,到货后入缓存 + 淡入 + 单格局部重绘。
+        loader=None 时保持旧同步路径(无面板管线的独立使用场景)。
+        """
         cached = self._thumbs.get(asset.asset_id)
         if cached is not None:
-            return cached if cached is not False else None
-        pix = None
+            return cached if (cached is not False
+                              and cached is not _PENDING) else None
         if (asset.is_image and asset.stored_path
                 and os.path.exists(asset.stored_path)):
-            reader = QImageReader(asset.stored_path)
-            reader.setAutoTransform(True)
-            size = reader.size()
-            tw2, th2 = self.THUMB_W * 2, self.THUMB_H * 2
-            if size.isValid() and size.width() > 0 and size.height() > 0:
-                scale = max(tw2 / size.width(), th2 / size.height())
-                if scale < 1.0:   # 大图在解码期先缩，避免整图载入内存
-                    reader.setScaledSize(QSize(int(size.width() * scale),
-                                               int(size.height() * scale)))
-            raw = reader.read()
-            if not raw.isNull():
-                img = raw.scaled(self.THUMB_W, self.THUMB_H,
-                                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                                 Qt.TransformationMode.SmoothTransformation)
-                x = (img.width() - self.THUMB_W) // 2
-                y = (img.height() - self.THUMB_H) // 2
-                pix = QPixmap.fromImage(img.copy(x, y, self.THUMB_W, self.THUMB_H))
-        self._thumbs[asset.asset_id] = pix if pix is not None else False
-        return pix
+            if self._loader is None:
+                pix = self._decode_sync(asset)
+                self._thumbs[asset.asset_id] = pix if pix is not None else False
+                return pix
+            self._thumbs[asset.asset_id] = _PENDING
+            self._loader(asset)
+            return None
+        self._thumbs[asset.asset_id] = False   # 非图片/文件失效:不可预览
+        return None
 
     # ---------------- 绘制 ----------------
     def sizeHint(self, option, index) -> QSize:
@@ -137,10 +202,13 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         # ---- 缩略图 / 类型图标 ----
         pix = self._thumb(asset) if exists else None
         if pix is not None:
+            fade = self._fade_values.get(asset.asset_id)
             painter.save()
             clip = QPainterPath()
             clip.addRoundedRect(trect, 8, 8)
             painter.setClipPath(clip)
+            if fade is not None and fade < 1.0:
+                painter.setOpacity(max(0.0, float(fade)))   # 到货淡入
             painter.drawPixmap(trect.toRect(), pix)
             painter.restore()
             painter.setPen(QPen(QColor(colors["hair"]), 1))
@@ -207,6 +275,16 @@ class AssetsPanel(QWidget):
         self._host = host
         self._temp_asset_manager = host._temp_asset_manager
         self._thumb_cache = {}
+        # ---- 异步缩略图管线(丝滑化):paint 永不解码 ----
+        self._pending = set()        # 在途 asset_id(防重复派发)
+        self._epoch = 0              # 缩略图尺寸代际(变尺寸后旧结果按代作废)
+        self._valid_ids = set()
+        self._items_by_id = {}
+        self._fade_anims = {}
+        self._signals = _ThumbSignals(self)
+        self._signals.ready.connect(self._on_thumb_ready)
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)   # 解码不抢满核,给 UI 留流畅度
         self._build_ui()
 
     def _build_ui(self):
@@ -266,7 +344,8 @@ class AssetsPanel(QWidget):
         self._asset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._asset_list.customContextMenuRequested.connect(self._on_context_menu)
         self._asset_list.itemDoubleClicked.connect(self._on_double_click)
-        self._thumb_delegate = _AssetThumbDelegate(self._host, self._thumb_cache)
+        self._thumb_delegate = _AssetThumbDelegate(
+            self._host, self._thumb_cache, loader=self._request_thumb)
         self._asset_list.setItemDelegate(self._thumb_delegate)
         self._sync_scroll_step()
         self._stack.addWidget(self._asset_list)
@@ -286,6 +365,75 @@ class AssetsPanel(QWidget):
         self._empty_state.apply_theme(getattr(self._host, "current_theme",
                                               None))
 
+    # ---- 异步缩略图管线(丝滑化核心)----
+    def _request_thumb(self, asset):
+        """delegate 未命中回调:派发后台解码(防重;文件已失就地判负)。"""
+        aid = asset.asset_id
+        if aid in self._pending:
+            return
+        self._pending.add(aid)
+        if not (asset.stored_path and os.path.exists(asset.stored_path)):
+            self._thumb_cache[aid] = False
+            self._pending.discard(aid)
+            self._update_cell(aid)
+            return
+        self._pool.start(_ThumbJob(aid, self._epoch, asset.stored_path,
+                                   self._thumb_delegate.THUMB_W,
+                                   self._thumb_delegate.THUMB_H,
+                                   self._signals))
+
+    def _on_thumb_ready(self, asset_id: int, epoch: int, img):
+        """后台解码到货(主线程):入缓存 + 淡入 + 单格局部重绘。"""
+        self._pending.discard(asset_id)
+        if epoch != self._epoch or asset_id not in self._valid_ids:
+            return                      # 尺寸换代 / 素材已删:结果作废
+        if img is None:
+            self._thumb_cache[asset_id] = False   # 读取失败哨兵,防反复重读
+        else:
+            self._thumb_cache[asset_id] = QPixmap.fromImage(img)
+            self._begin_fade(asset_id)
+        self._update_cell(asset_id)
+
+    def _begin_fade(self, asset_id: int):
+        """到货淡入(140ms OutCubic);reduce_motion 开 → 0ms 瞬显。"""
+        ms = motion.duration(140, 1.0)
+        if ms <= 0:
+            self._thumb_delegate._fade_values.pop(asset_id, None)
+            return
+        old = self._fade_anims.pop(asset_id, None)
+        if old is not None:
+            old.stop()
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(ms)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.valueChanged.connect(
+            lambda v, aid=asset_id: self._on_fade_tick(aid, v))
+        anim.finished.connect(
+            lambda aid=asset_id: self._on_fade_done(aid))
+        self._thumb_delegate._fade_values[asset_id] = 0.0
+        self._fade_anims[asset_id] = anim
+        anim.start()
+
+    def _on_fade_tick(self, asset_id: int, value):
+        self._thumb_delegate._fade_values[asset_id] = float(value)
+        self._update_cell(asset_id)
+
+    def _on_fade_done(self, asset_id: int):
+        self._thumb_delegate._fade_values.pop(asset_id, None)
+        self._fade_anims.pop(asset_id, None)
+        self._update_cell(asset_id)
+
+    def _update_cell(self, asset_id: int):
+        """单格局部重绘(到货/淡入每帧),不惊动整页。"""
+        item = self._items_by_id.get(asset_id)
+        if item is None:
+            return
+        rect = self._asset_list.visualItemRect(item)
+        if rect.isValid():
+            self._asset_list.viewport().update(rect)
+
     # ---- 缩略图尺寸（设置项联动）----
     def _sync_scroll_step(self):
         """纵向滚动步长 = 约 1/3 行（Qt 默认按一整行走，跨度太大不便细看）"""
@@ -299,7 +447,13 @@ class AssetsPanel(QWidget):
         if size == self._thumb_delegate.THUMB_W:
             return
         self._thumb_delegate.set_thumb_size(size)
+        self._epoch += 1            # 在途结果按代际作废(防旧尺寸回填)
+        self._pending.clear()
         self._thumb_cache.clear()
+        self._thumb_delegate._fade_values.clear()
+        for anim in self._fade_anims.values():
+            anim.stop()
+        self._fade_anims.clear()
         self._sync_scroll_step()
         self.refresh()
 
@@ -313,11 +467,16 @@ class AssetsPanel(QWidget):
         assets = self._temp_asset_manager.get_all_assets()
         # 清理已删除素材的缩略图缓存
         valid_ids = {a.asset_id for a in assets}
+        self._valid_ids = valid_ids
         for key in list(self._thumb_cache):
             if key not in valid_ids:
                 del self._thumb_cache[key]
+        for key in list(self._thumb_delegate._fade_values):
+            if key not in valid_ids:
+                del self._thumb_delegate._fade_values[key]
 
         self._asset_list.clear()
+        self._items_by_id = {}
         for a in assets:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, a)            # Asset 对象（delegate 用）
@@ -329,6 +488,7 @@ class AssetsPanel(QWidget):
                 f"添加时间: {a.added_time}\n"
                 f"存储路径: {a.stored_path}")
             self._asset_list.addItem(item)
+            self._items_by_id[a.asset_id] = item
 
         count = self._temp_asset_manager.count()
         max_assets = self._temp_asset_manager._max_assets

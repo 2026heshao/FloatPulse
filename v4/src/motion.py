@@ -27,14 +27,15 @@ UI 强化方案 A1（2026-09-30）：全仓 26 处 ``setDuration`` + 35 处缓�
 import math
 
 # ---- 时长 token（毫秒）：语义化档位，新增动效一律从这里取，禁止再写字面量 ----
-# base / slow / stagger 的取值与 main_window 既有 NAV_DROP_MS /
-# NAV_GROUP_EXPAND_MS / NAV_GROUP_STAGGER_MS 一致，便于后续就地替换。
+# base / slow / stagger 是全局语义档；main_window 的 NAV_GROUP_* 系列已于
+# 2026-10-01 独立调优（220/170/12）并与这里解耦 —— 全局档仍服务其余动效，
+# 侧栏本地常量只服务侧栏自身的丝滑度，两边数值不再要求一致。
 MOTION = {
     "instant": 0,      # 无动画（调用侧据此跳过动画注册 / 直接落终态）
     "fast": 120,       # 悬停 / 按下等即时反馈
     "base": 180,       # 通用位移、淡入（= NAV_DROP_MS）
-    "slow": 280,       # 展开 / 折叠（= NAV_GROUP_EXPAND_MS）
-    "stagger": 18,     # 逐条错峰步长（= NAV_GROUP_STAGGER_MS）
+    "slow": 280,       # 展开 / 折叠等长过渡（侧栏分组已解耦：220/170）
+    "stagger": 18,     # 逐条错峰步长（侧栏分组已解耦：12）
 }
 
 # ---- 缓动名（Qt ``QEasingCurve.Type`` 的成员名）----
