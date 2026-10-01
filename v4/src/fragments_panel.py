@@ -877,20 +877,25 @@ class FragmentsPanel(QWidget):
             f"碎片已存为新笔记：\n{note.title if note else ''}")
 
     def _to_sticky(self, fragment_id: int):
-        """碎片 → 新笔记 → 直接钉成桌面便签（复用 _to_note_id，不另写转换）"""
-        note_id = self._to_note_id(fragment_id)
-        if note_id is None:
-            return
+        """碎片 → 直接钉成桌面便签（锚定碎片本身，内容写回碎片）。
+
+        2026-10-01 用户拍板取消自动收录：钉便签**不再转存新笔记**，
+        笔记库不被污染；「💾 存为笔记」仍是显式的独立入口。
+        """
         manager = self._host.sticky_manager
         if manager is None:
             QMessageBox.information(self, "提示", "便签功能尚未就绪。")
             return
-        ok, reason = manager.open(note_id)
+        ok, reason = manager.open_fragment(fragment_id)
         if ok:
             self._host.show_toast("📌 已钉为桌面便签")
         elif reason == "limit":
             self._host.show_toast(
                 f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+        elif reason == "missing":
+            self._host.show_toast("碎片已不存在")
+        else:
+            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
 
     def _to_knowledge(self, fragment_id: int):
         """将碎片内容追加到知识库 docx 末尾"""

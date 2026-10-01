@@ -416,7 +416,10 @@ class SearchIndex:
     def search(self, query, top_n: int = 20, kind=None):
         """返回 ``[Hit, ...]``（按分数降序，分数相同按标题稳定排序）
 
-        ``kind`` 给定时只在该数据源内检索（UI 的分类筛选）。
+        ``kind`` 给定时只在该数据源内检索（UI 的分类筛选）；也接受
+        数据源标识的集合（list/tuple/set/frozenset，v1.1.0 多选范围
+        过滤）——分数在**全库**上算好之后才按范围排除，所以多选的排序
+        与不过滤时逐条一致。
         """
         empty = []
         qterms = self._tk.terms(query)
@@ -424,6 +427,13 @@ class SearchIndex:
             return empty
         if not self._finalized:
             self.finalize()
+
+        allowed = None
+        if kind is not None:
+            if isinstance(kind, (list, tuple, set, frozenset)):
+                allowed = {str(k) for k in kind}
+            else:
+                allowed = {str(kind)}
 
         # 查询项去重但保留顺序（命中项列表给 UI 展示，顺序要稳定）
         uniq = []
@@ -453,7 +463,7 @@ class SearchIndex:
         hits = []
         for uid, score in scores.items():
             kind_, title, text, _dl = self._docs[uid]
-            if kind is not None and kind_ != kind:
+            if allowed is not None and kind_ not in allowed:
                 continue
             snippet, spans, matched = make_snippet(
                 text, [t for t in uniq if uid in self._postings.get(t, ())])

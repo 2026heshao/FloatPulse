@@ -1,10 +1,18 @@
 {
   "id": "ai-text-workshop",
   "name": "AI 文本工坊",
-  "version": "1.4.0",
+  "version": "1.5.1",
   "entry": "plugin.py",
-  "requires": ["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
-  "capabilities": ["network", "write", "ai"],
+  "requires": [
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets"
+  ],
+  "capabilities": [
+    "network",
+    "write",
+    "ai"
+  ],
   "page": {
     "title": "✂ 文本工坊"
   },

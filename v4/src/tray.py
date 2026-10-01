@@ -5,7 +5,7 @@
 ====================================================================
 职责：托盘图标创建/常驻、左键点击行为、右键菜单构建（主窗口显隐 /
 悬浮球显隐 / 便签子菜单 / 退出）、气泡提示（首次收进托盘提示、config
-损坏重置告知、上次会话异常退出告知）。任务提醒调度、版本更新检查、
+损坏重置告知）。任务提醒调度、版本更新检查、
 番茄钟气泡等业务接线仍留在装配处（knowledge_ball.main），经
 show_message() 发托盘气泡——本类只做托盘本体，不持有业务数据。
 
@@ -151,12 +151,13 @@ class TrayController:
         self._config.save()
         get_logger().info("首次收进托盘提示已展示（tray_hint_shown → True）")
 
-    def notify_startup_once(self, prev_abnormal: bool):
-        """启动一次性告知（顺序与原实现一致）：
+    def notify_startup_once(self):
+        """启动一次性告知：config.json 损坏重置 → 托盘警示。
 
-        1.1 config.json 损坏重置 → 托盘警示（损坏文件已由 ConfigManager
-            备份为 .corrupt.bak，这里只负责告知）；
-        3.2 上次会话可能异常退出 → 托盘警示（一次性，不落 config）。
+        损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
+        （3.2 的「上次可能异常退出」气泡已按用户要求移除——开发场景
+        强杀退出是常态，判定恒真、每次必弹成噪音；日志里的 [会话]
+        成对标记仍可人工排障。）
         """
         if getattr(self._config, "load_reset_reason", None) == "corrupt":
             self.show_message(
@@ -165,9 +166,3 @@ class TrayController:
                 "原文件备份为 float_data/config.json.corrupt.bak。",
                 QSystemTrayIcon.MessageIcon.Warning, 8000)
             get_logger().warning("[启动] config.json 损坏，已回退默认配置并托盘提示用户")
-        if prev_abnormal:
-            self.show_message(
-                "上次可能异常退出",
-                "如遇问题可把 float_data/app.log 提供给开发者",
-                QSystemTrayIcon.MessageIcon.Warning, 8000)
-            get_logger().warning("[启动] 检测到上次会话可能异常退出，已托盘提示")

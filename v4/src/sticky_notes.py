@@ -6,10 +6,13 @@
 允许把任意笔记或任务同时钉成 N 个独立桌面便签浮窗（可拖动、可缩放、
 位置持久化、跟随主题）。关闭便签 = 取消钉住（不删数据）。
 
-便签锚点分两种（Sticky.kind）：
+便签锚点分三种（Sticky.kind）：
   - "note"：正文 = note.content，保存写回 notes.json
   - "task"：正文 = task.note（任务备注），保存写回 schedule.json；
             标题栏下有截止日徽章（overdue 红 / today 主色），右键可标记完成
+  - "fragment"：正文 = fragment.content，保存写回 fragments.json——
+            碎片直钉不转存笔记（2026-10-01 用户拍板取消自动收录）；
+            碎片无标题字段，标题取内容前 20 字、无重命名入口
 
 设计要点：
   1. 几何数据（位置/尺寸/透明度/置顶）存独立文件 float_data/stickies.json，
@@ -31,12 +34,13 @@
 """
 
 import os
+import re
 from datetime import datetime
 
 from src.json_store import save_records
 
 from PyQt6.QtCore import QObject, QPoint, QRect, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QKeySequence, QPainter, QShortcut
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QPushButton, QTextEdit, QVBoxLayout, QWidget,
@@ -56,12 +60,14 @@ from src.task_manager import task_state, format_relative_deadline
 class Sticky:
     """单条便签几何记录的数据载体。
 
-    kind="note" 时 note_id 存笔记 id；kind="task" 时存任务 task_id。
+    kind="note" 时 note_id 存笔记 id；kind="task" 时存任务 task_id；
+    kind="fragment" 时存碎片 fragment_id（便签直接锚定碎片、内容写回
+    碎片——钉便签不经过笔记转存，不污染笔记库）。
     （字段名沿用 note_id 是为了 stickies.json 旧数据零迁移——旧记录
     无 kind 键，from_dict 自动落 "note"，语义完全一致。）
     """
 
-    KINDS = ("note", "task")
+    KINDS = ("note", "task", "fragment")
 
     def __init__(self, sticky_id, note_id, x, y, w, h,
                  opacity=100, always_on_top=True, created_at="",
@@ -112,14 +118,18 @@ class StickyStore:
     note_ids: 可调用对象，返回当前存在的全部 note_id 集合——
               _load() 的孤儿清理与 purge_orphans 都以它为准。
     task_ids: 同上，任务锚点的合法 id 集合（None = 不支持任务便签）。
+    fragment_ids: 同上，碎片锚点的合法 id 集合（None = 不支持碎片便签）。
     """
 
-    def __init__(self, json_path: str, note_ids=None, task_ids=None):
+    def __init__(self, json_path: str, note_ids=None, task_ids=None,
+                 fragment_ids=None):
         self._json_path = json_path
         self._stickies = []                  # 内存记录列表
         self._next_id = 1
         self._note_ids = note_ids if callable(note_ids) else (lambda: set())
         self._task_ids = task_ids if callable(task_ids) else None
+        self._fragment_ids = (fragment_ids if callable(fragment_ids)
+                              else None)
         self._load()
 
     # ---------------- 持久化 ----------------
@@ -213,10 +223,13 @@ class StickyStore:
         valid_note = {int(n) for n in (self._note_ids() or set())}
         valid_task = ({int(t) for t in (self._task_ids() or set())}
                       if self._task_ids is not None else set())
+        valid_frag = ({int(f) for f in (self._fragment_ids() or set())}
+                      if self._fragment_ids is not None else set())
         before = len(self._stickies)
         self._stickies = [
             s for s in self._stickies
             if (s.note_id in valid_task if s.kind == "task"
+                else s.note_id in valid_frag if s.kind == "fragment"
                 else s.note_id in valid_note)
         ]
         return before - len(self._stickies)
@@ -225,6 +238,28 @@ class StickyStore:
 # ====================================================================
 # 视图层：单个便签浮窗
 # ====================================================================
+def _css_color(text, fallback: QColor) -> QColor:
+    """把 theme 里的 CSS 颜色串转成真 QColor（手绘面板用）。
+
+    QColor 构造器不认函数式 rgba() 串——而 theme token 恰好两种写法
+    都有：``glass_fill="rgba(255, 255, 255, 224)"``（alpha 0-255）与
+    ``primary_border="rgba(91, 192, 190, 0.30)"``（alpha 比例）。解析
+    3~4 个数值分量；第 4 参 >1 按 0-255、≤1 按比例。解析失败返回
+    fallback（不猜、不静默画黑）。
+    """
+    nums = re.findall(r"\d+\.?\d*", str(text))
+    if len(nums) >= 3:
+        r, g, b = (int(float(v)) for v in nums[:3])
+        color = QColor(r, g, b)
+        if len(nums) >= 4:
+            a = float(nums[3])
+            alpha = int(round(a * 255)) if a <= 1 else int(round(a))
+            color.setAlpha(max(0, min(255, alpha)))
+        return color
+    color = QColor(str(text))
+    return color if color.isValid() else fallback
+
+
 class _StickyGrip(QWidget):
     """右下角缩放抓手（只负责光标形状与热区提示，事件由窗口统一处理）"""
 
@@ -250,13 +285,14 @@ class _StickyGrip(QWidget):
 
 
 class StickyNoteWindow(QWidget):
-    """单个桌面便签浮窗（kind="note" 笔记便签 / kind="task" 任务便签）。
+    """单个桌面便签浮窗（kind="note" 笔记 / "task" 任务 / "fragment" 碎片）。
 
     交互：
       - 顶部 26px 标题栏拖动移动；右侧 ✕ 关闭（=取消钉住）
       - 右下角抓手等比例缩放（delta = max(dx, dy)，与 CardWindow 同思路）
       - 正文 QTextEdit 编辑后 NOTE_AUTOSAVE_INTERVAL_MS(800ms) 防抖自动保存
-        （笔记便签写回 note.content；任务便签写回 task.note，即任务备注）
+        （笔记便签写回 note.content；任务便签写回 task.note，即任务备注；
+        碎片便签写回 fragment.content）
       - 任务便签额外：标题栏下方截止日徽章（按 task_state 着色，show 时刷新），
         右键菜单多「✔ 标记完成/取消完成」
       - 右键菜单：标题重命名 / 置顶开关 / 透明度三档 / 删除并关闭 / 取消钉住
@@ -272,6 +308,27 @@ class StickyNoteWindow(QWidget):
 
     TITLE_H = 26
     MIN_W, MIN_H = 220, 160
+    RADIUS = 10                       # 圆角半径（主窗面板 12 / 卡片 10 的取小档）
+    # paintEvent 手绘底色（apply_theme 前的兜底；QColor 纯数据类可类级持有）
+    _fill_color = QColor(255, 255, 255, 230)
+    _border_color = QColor(120, 120, 120, 80)
+
+    def paintEvent(self, _event):
+        """圆角玻璃面板本体（与主窗/卡片窗同语言）。
+
+        刻意手绘而非窗口 QSS background：WA_TranslucentBackground 顶层窗
+        的本体 QSS 背景在渲染管线里不可靠（offscreen grab 实测整窗透明，
+        被 E1 护栏抓住）；CardWindow 同样为画阴影走 paintEvent——本项目
+        对「translucent 顶层窗本体」的既定路线就是手绘。子控件（标题栏/
+        编辑器）保持透明融入本体，仅以分隔线分层。
+        """
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(self._border_color, 1))
+        p.setBrush(self._fill_color)
+        p.drawRoundedRect(0, 0, self.width() - 1, self.height() - 1,
+                          self.RADIUS, self.RADIUS)
+        p.end()
 
     def __init__(self, note, store, theme: str, kind: str = "note"):
         super().__init__(None)
@@ -290,6 +347,10 @@ class StickyNoteWindow(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # 玻璃圆角容器（与主窗/卡片窗同语言）：translucent 让四角真透明，
+        # 圆角面板由 paintEvent 手绘——窗口本体 QSS 背景对 translucent
+        # 顶层窗在渲染管线里不可靠（offscreen 实测整窗透明，E1 护栏抓住）
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(False)
 
         self._build_ui()
@@ -329,10 +390,11 @@ class StickyNoteWindow(QWidget):
         th.addWidget(self._title_label, 1)
         close_btn = IconButton("close", size=22, icon_size=11,
                                object_name="stickyClose",
-                               off_color="on_primary", hover_color="on_primary",
+                               off_color="text_secondary", hover_color="danger",
                                tooltip="关闭便签")
-        # 便签走本地样式表（on_primary 墨色），图标就地带色；换主题由
-        # apply_theme 的 findChildren 兜底重取
+        # 便签标题栏现为透明玻璃（见 apply_theme），关闭钮随主题取
+        # text_secondary，悬停变 danger；换主题由 apply_theme 的
+        # findChildren 兜底重取
         close_btn.apply_theme(self._theme)
         close_btn.clicked.connect(self.request_close.emit)
         th.addWidget(close_btn)
@@ -411,9 +473,11 @@ class StickyNoteWindow(QWidget):
         return self._kind
 
     def anchor_id(self) -> int:
-        """锚点 id（笔记 note_id / 任务 task_id）"""
+        """锚点 id（笔记 note_id / 任务 task_id / 碎片 fragment_id）"""
         if self._kind == "task":
             return int(self._note.task_id)
+        if self._kind == "fragment":
+            return int(self._note.fragment_id)
         return int(self._note.note_id)
 
     def note_id(self) -> int:
@@ -422,6 +486,10 @@ class StickyNoteWindow(QWidget):
 
     # ---------------- 锚点内容读写 ----------------
     def _anchor_title(self) -> str:
+        if self._kind == "fragment":
+            # 碎片无标题字段：取内容压平后的前 20 字当标题（随内容刷新）
+            text = (self._note.content or "").strip().replace("\n", " ")
+            return text[:20]
         return self._note.title or ""
 
     def _anchor_content(self) -> str:
@@ -433,7 +501,7 @@ class StickyNoteWindow(QWidget):
         if self._kind == "task":
             self._note.note = text
         else:
-            self._note.content = text
+            self._note.content = text   # Note.content / Fragment.content 同名字段
 
     def _refresh_task_chip(self):
         """截止日徽章：✔ 已完成 / 📅 相对截止（overdue 红 / today 主色 / 其他灰）"""
@@ -458,7 +526,8 @@ class StickyNoteWindow(QWidget):
 
     def title_text(self) -> str:
         return self._anchor_title() or ("便签" if self._kind == "note"
-                                        else "任务")
+                                        else "任务" if self._kind == "task"
+                                        else "碎片")
 
     # ---------------- 保存 ----------------
     def _on_text_changed(self):
@@ -514,33 +583,27 @@ class StickyNoteWindow(QWidget):
     def apply_theme(self, theme_name: str):
         self._theme = theme_name
         colors = get_colors(theme_name)
-        title_bg = QColor(str(colors.get("primary_deep", "#3D9E9C")))
-        self._title_bg = title_bg
-        grip_color = QColor(str(colors.get("on_primary", "#1B2B33")))
-        grip_color.setAlpha(140)
+        # 本体（paintEvent 手绘圆角面板）
+        self._fill_color = _css_color(
+            colors.get("glass_fill"), QColor(255, 255, 255, 224))
+        self._border_color = _css_color(
+            colors.get("primary_border"), QColor(120, 120, 120, 80))
+        grip_color = QColor(str(colors.get("text_secondary", "#666666")))
+        grip_color.setAlpha(150)
         self._grip._dot_color = grip_color.name()
+        # QSS 只管子控件：标题文字色 + 1px 分隔线、编辑器透明融入本体。
+        # （QSS 的 rgba() 串只在此处使用——QSS 解析器认它，QColor 不认，
+        #  本体色必须走 _css_color 解析后交给 paintEvent。）
+        # 替换早期「teal 实底标题栏 + 直角实底窗」朴素画风（用户可见变更）
         self.setStyleSheet(f"""
-            StickyNoteWindow {{
-                background: {colors.get('card_bg_solid', '#FFFFFF')};
-                border: 1px solid {colors.get('primary_border', '#888')};
-            }}
             QWidget#stickyTitle {{
-                color: {colors.get('on_primary', '#1B2B33')};
+                color: {colors.get('text', '#2C3E50')};
                 font-size: 12px;
                 background: transparent;
-            }}
-            QPushButton#stickyClose {{
-                color: {colors.get('on_primary', '#1B2B33')};
-                background: transparent;
-                border: none;
-                font-size: 13px;
-            }}
-            QPushButton#stickyClose:hover {{
-                background: rgba(255, 255, 255, 60);
-                border-radius: 4px;
+                border-bottom: 1px solid {colors.get('primary_border', '#888888')};
             }}
             QTextEdit {{
-                background: {colors.get('card_bg_solid', '#FFFFFF')};
+                background: transparent;
                 color: {colors.get('text', '#2C3E50')};
                 border: none;
                 font-size: 13px;
@@ -548,9 +611,7 @@ class StickyNoteWindow(QWidget):
                 selection-background-color: {colors.get('primary_a30', '#88CCCB')};
             }}
         """)
-        self._title_bar.setStyleSheet(
-            f"background: {title_bg.name()};")
-        self._grip.update()
+        self.update()
         # P1：关闭钮是自绘位图，颜色不在 QSS 管辖内
         for btn in self.findChildren(IconButton):
             btn.apply_theme(theme_name)
@@ -614,7 +675,8 @@ class StickyNoteWindow(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_menu_qss(self._theme))
 
-        act_rename = menu.addAction("✏️ 标题重命名...")
+        act_rename = (None if self._kind == "fragment"   # 碎片无标题字段
+                      else menu.addAction("✏️ 标题重命名..."))
         act_toggle = None
         if self._kind == "task":
             done = bool(getattr(self._note, "done", False))
@@ -635,10 +697,11 @@ class StickyNoteWindow(QWidget):
         act_unpin = menu.addAction("▢ 取消钉住")
         act_delete = menu.addAction(
             "🗑 删除任务并关闭" if self._kind == "task"
+            else "🗑 删除碎片并关闭" if self._kind == "fragment"
             else "🗑 删除笔记并关闭")
         action = menu.exec(global_pos)
 
-        if action == act_rename:
+        if act_rename is not None and action == act_rename:
             self._rename_dialog()
         elif act_toggle is not None and action == act_toggle:
             if self._toggle_cb:
@@ -730,10 +793,11 @@ class StickyNoteManager(QObject):
     task_data_changed = pyqtSignal()  # 任务便签内容/完成态变更（宿主刷新任务页）
 
     def __init__(self, note_manager, store: StickyStore, theme: str = "light",
-                 parent=None, task_manager=None):
+                 parent=None, task_manager=None, fragment_manager=None):
         super().__init__(parent)
         self._note_manager = note_manager
         self._task_manager = task_manager    # None = 任务便签不可用
+        self._fragment_manager = fragment_manager  # None = 碎片便签不可用
         self._store = store
         self._theme = theme
         self._windows = {}       # sticky_id -> StickyNoteWindow（存活窗口）
@@ -827,6 +891,38 @@ class StickyNoteManager(QObject):
         self._register_window(win, sticky)
         return True, "ok"
 
+    def open_fragment(self, fragment_id: int):
+        """打开（或复用）指定碎片的桌面便签（fragment_manager 未注入 → "unsupported"）。
+
+        碎片便签**直接锚定碎片**、内容写回碎片——不经过笔记转存
+        （2026-10-01 用户拍板：钉便签不再自动收录进笔记管理）。
+        reason: "ok" / "limit" / "missing" / "unsupported"
+        """
+        if self._fragment_manager is None:
+            return False, "unsupported"
+        fid = int(fragment_id)
+        w = self.window_for("fragment", fid)
+        if w is not None:
+            w.raise_()
+            w.activateWindow()
+            return True, "ok"
+
+        if self.count() >= self.MAX_STICKIES:
+            return False, "limit"
+
+        frag = self._fragment_manager.get_fragment(fid)
+        if frag is None:
+            return False, "missing"
+
+        sticky = self._store.get_by_anchor("fragment", fid)
+        win = StickyNoteWindow(frag, self._store, self._theme, kind="fragment")
+        win.set_update_callback(
+            lambda text, n=fid: bool(self._fragment_manager.update_fragment(
+                n, content=text)))
+        # 碎片无标题字段 → 不注入 rename 回调（窗口已隐藏重命名入口）
+        self._register_window(win, sticky)
+        return True, "ok"
+
     def _register_window(self, win: StickyNoteWindow, sticky):
         """open/open_task 共用：回调外的信号接线 + 几何 + 入表 + 显示"""
         win.request_close.connect(lambda w=win: self._on_window_close(w))
@@ -915,10 +1011,12 @@ class StickyNoteManager(QObject):
         win.close_as_sticky()
 
     def _on_window_delete(self, win: StickyNoteWindow):
-        """菜单「删除并关闭」：先删锚点数据（笔记/任务）再关窗"""
+        """菜单「删除并关闭」：先删锚点数据（笔记/任务/碎片）再关窗"""
         try:
             if win.kind() == "task":
                 self._task_manager.delete_task(win.anchor_id())
+            elif win.kind() == "fragment":
+                self._fragment_manager.delete_fragment(win.anchor_id())
             else:
                 self._note_manager.delete_note(win.anchor_id())
         except Exception:
@@ -946,6 +1044,9 @@ class StickyNoteManager(QObject):
             if w.kind() == "task":
                 gone = self._task_manager is None or \
                     self._task_manager.get_task(w.anchor_id()) is None
+            elif w.kind() == "fragment":
+                gone = self._fragment_manager is None or \
+                    self._fragment_manager.get_fragment(w.anchor_id()) is None
             else:
                 gone = self._note_manager.get_note(w.anchor_id()) is None
             if gone:

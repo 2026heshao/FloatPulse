@@ -15,6 +15,11 @@ AI 文本工坊  -  FloatPulse 外置插件（ai-text-workshop）
 结果可复制、可存为碎片、可存为笔记，提取出的待办可直接写入任务
 列表——别家的文本工具处理完就结束了，这里的结果直接进应用数据链路。
 
+结果历史与指令收藏（v1.5.0，W1/W2）：
+  成功动作自动进「🕘 历史」（存插件私有目录 history.json，最近 20 条），
+  关页不再丢结果——点历史条目填回结果区，可编辑/复制/再落库；
+  常用自定义指令「★ 收藏指令」存成按钮（10 条上限），点击填入输入框。
+
 AI 后端（2026-09-29 起收归宿主，本插件**零配置**）：
   后端参数全部来自设置页「🧠 AI 总配置」（云端 / 本地 + 接入插件
   下拉框），经 ``ctx.ai.params()`` 实时读取——设置页改完即刻生效。
@@ -34,15 +39,17 @@ AI 后端（2026-09-29 起收归宿主，本插件**零配置**）：
 """
 
 import json
+import os
 import re
+import uuid
+from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QPlainTextEdit, QPushButton,
-    QVBoxLayout, QWidget, QLineEdit,
+    QApplication, QFrame, QHBoxLayout, QMenu, QPlainTextEdit, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget, QLineEdit,
 )
-
 from src.plugin_api import BallAction, BallPlugin, PluginContext
 from src.plugin_ui import (
     flash_button, make_hint_label, make_section_label,
@@ -230,6 +237,112 @@ def first_line_title(text: str, maxlen: int = 40) -> str:
 
 
 # ====================================================================
+# 结果历史 + 自定义指令收藏（v1.5.0，W1/W2）
+# 存插件私有目录 history.json：动作结果可回看/再落库（关页即丢是
+# v1.4 最大的使用痛点），常用自定义指令可收藏成按钮。上限刻意收紧
+# ——历史条目里结果截 6000 字、源文摘要只留 120 字，防文件膨胀。
+# ====================================================================
+HISTORY_FILE = "history.json"
+HISTORY_LIMIT = 20      # 最多保留的历史条数（丢最旧）
+PRESET_LIMIT = 10       # 最多收藏的自定义指令条数（丢最旧）
+HISTORY_RESULT_CHARS = 6000   # 单条历史保留的结果字符数
+HISTORY_SRC_CHARS = 120       # 历史条目里的源文摘要字符数（只做辨识）
+PRESET_CHARS = 200            # 单条收藏指令的字符数
+
+
+def _store_now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def sanitize_workshop_store(raw) -> dict:
+    """history.json 消毒：脏数据宽容降级（坏条目整条丢弃，绝不抛）"""
+    store = {"history": [], "presets": []}
+    if not isinstance(raw, dict):
+        return store
+    history = []
+    for h in raw.get("history") or []:
+        if not isinstance(h, dict):
+            continue
+        result = str(h.get("result") or "")[:HISTORY_RESULT_CHARS]
+        if not result.strip():
+            continue
+        history.append({
+            "ts": str(h.get("ts") or "")[:32],
+            "key": str(h.get("key") or "")[:40],
+            "label": str(h.get("label") or "")[:40] or "动作",
+            "instruction": str(h.get("instruction") or "")[:PRESET_CHARS],
+            "source": str(h.get("source") or "")[:HISTORY_SRC_CHARS],
+            "result": result,
+        })
+    store["history"] = history[:HISTORY_LIMIT]
+    presets = []
+    seen = set()
+    for p in raw.get("presets") or []:
+        if not isinstance(p, dict):
+            continue
+        text = str(p.get("text") or "").strip()[:PRESET_CHARS]
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        presets.append({"id": str(p.get("id") or "")[:40] or uuid.uuid4().hex[:12],
+                        "text": text})
+    store["presets"] = presets[:PRESET_LIMIT]
+    return store
+
+
+def load_workshop_store(ctx) -> dict:
+    """读历史存档；文件缺失/写坏只降级为空档，原文件保留供抢救"""
+    path = (os.path.join(ctx.data_dir, HISTORY_FILE)
+            if getattr(ctx, "data_dir", "") else "")
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return sanitize_workshop_store(json.load(f))
+        except (OSError, ValueError):
+            pass
+    return sanitize_workshop_store(None)
+
+
+def save_workshop_store(ctx, store: dict) -> bool:
+    """写历史存档（临时文件 + os.replace 原子替换）；失败只告警不抛"""
+    path = (os.path.join(ctx.data_dir, HISTORY_FILE)
+            if getattr(ctx, "data_dir", "") else "")
+    if not path:
+        return False
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(store, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        logger = getattr(ctx, "logger", None)
+        if logger is not None:
+            try:
+                logger.warning(f"[AI 文本工坊] 历史存档写入失败：{exc}")
+            except Exception:               # noqa: BLE001
+                pass
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def fmt_history_ts(ts: str, today: str = "") -> str:
+    """存档时间戳 → 短展示（今天显示 HH:MM，往年今天显示 M-D）"""
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return ""
+    today = today or _store_now()[:10]
+    if ts[:10] == today:
+        return dt.strftime("%H:%M")
+    return f"{dt.month}-{dt.day}"
+
+
+# ====================================================================
 # 工坊页面（嵌入主窗口导航；create_page 返回它）
 # ====================================================================
 class AiWorkshopPage(QWidget):
@@ -249,13 +362,15 @@ class AiWorkshopPage(QWidget):
         super().__init__()
         self._ctx = ctx
         self._busy = False
+        # 结果历史 + 指令收藏（W1/W2）：插件私有目录 history.json
+        self._store = load_workshop_store(ctx)
+        self._pending_meta = None   # 在途请求元信息（成功后落历史）
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # 整页滚动兜底：窗口偏矮时出滚动条而不是挤压控件（实测踩过的坑）
-        from PyQt6.QtWidgets import QScrollArea
         self._page_scroll = QScrollArea(self)
         self._page_scroll.setWidgetResizable(True)
         self._page_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -290,7 +405,48 @@ class AiWorkshopPage(QWidget):
             self._action_btns[key] = btn
             action_row.addWidget(btn)
         action_row.addStretch(1)
+        # 「🕘 历史」开关（W1）：展开/收起历史卡
+        self._history_btn = QPushButton("🕘 历史", self)
+        self._history_btn.setObjectName("secondaryBtn")
+        self._history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._history_btn.setToolTip("最近 20 次动作结果，点击可回看再利用")
+        self._history_btn.clicked.connect(self._toggle_history)
+        action_row.addWidget(self._history_btn)
         lay.addLayout(action_row)
+
+        # ---- 历史卡（W1）：默认收起；行按钮点击=结果填回结果区 ----
+        self._history_card = QFrame(self)
+        self._history_card.setObjectName("glassCard")
+        hc = QVBoxLayout(self._history_card)
+        hc.setContentsMargins(16, 12, 16, 12)
+        hc.setSpacing(6)
+        hist_head = QHBoxLayout()
+        hist_head.addWidget(make_section_label("最近结果"))
+        hist_head.addWidget(make_hint_label("点击一条填回结果区（可编辑/复制/落库）；右键删除该条"))
+        hist_head.addStretch(1)
+        self._hist_clear_btn = QPushButton("🗑 清空历史", self)
+        self._hist_clear_btn.setObjectName("secondaryBtn")
+        self._hist_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hist_clear_btn.clicked.connect(self._clear_history)
+        hist_head.addWidget(self._hist_clear_btn)
+        hc.addLayout(hist_head)
+        self._hist_empty = make_hint_label("还没有历史：执行一次动作后自动记录")
+        hc.addWidget(self._hist_empty)
+        self._hist_body = QWidget(self._history_card)
+        self._hist_lay = QVBoxLayout(self._hist_body)
+        self._hist_lay.setContentsMargins(0, 0, 0, 0)
+        self._hist_lay.setSpacing(4)
+        hc.addWidget(self._hist_body)
+        self._history_scroll = QScrollArea(self._history_card)
+        self._history_scroll.setWidgetResizable(True)
+        self._history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._history_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._history_scroll.setWidget(self._hist_body)
+        self._history_scroll.setMaximumHeight(220)
+        hc.addWidget(self._history_scroll)
+        self._history_card.setVisible(False)
+        lay.addWidget(self._history_card)
 
         # ---- 自定义指令行 ----
         custom_row = QHBoxLayout()
@@ -305,7 +461,21 @@ class AiWorkshopPage(QWidget):
         self._custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom_btn.clicked.connect(self._run_custom)
         custom_row.addWidget(self._custom_btn)
+        self._fav_btn = QPushButton("★ 收藏指令", self)
+        self._fav_btn.setObjectName("secondaryBtn")
+        self._fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fav_btn.setToolTip(
+            "把输入框里的指令收藏成按钮（右键收藏按钮可删除）")
+        self._fav_btn.clicked.connect(self._save_preset)
+        custom_row.addWidget(self._fav_btn)
         lay.addLayout(custom_row)
+
+        # ---- 收藏指令行（W2）：点按钮=填入输入框，右键=删除该收藏 ----
+        self._preset_widget = QWidget(self)
+        self._preset_lay = QHBoxLayout(self._preset_widget)
+        self._preset_lay.setContentsMargins(0, 0, 0, 0)
+        self._preset_lay.setSpacing(6)
+        lay.addWidget(self._preset_widget)
 
         # ---- 原文区（可编辑，头部带「带入剪贴板」手动入口） ----
         src_card = QFrame(self)
@@ -376,6 +546,9 @@ class AiWorkshopPage(QWidget):
         else:
             self._tasks_btn.setEnabled(False)
             self._tasks_btn.setToolTip("先执行「✅ 提取待办」，识别到行动项后可用")
+
+        self._refresh_presets()                 # 收藏按钮行（W2）
+        self._refresh_history()                 # 历史卡空态/行（W1）
 
     # ---------------- showEvent：切页带入剪贴板 + 接入态刷新 ----------------
     def showEvent(self, event):
@@ -463,13 +636,29 @@ class AiWorkshopPage(QWidget):
             self._status.setText(
                 "宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动")
             return
+        src_text = self._src_edit.toPlainText()
         url, headers, body, err = build_request(
-            params, instruction, self._src_edit.toPlainText(),
-            MAX_SOURCE_CHARS)
+            params, instruction, src_text, MAX_SOURCE_CHARS)
         if url is None:
             self._status.setText(err)
             return
-        self._set_busy(True, "处理中…（模型响应通常几秒）")
+        # 在途元信息：成功后落历史（W1）。label 供历史行辨识；
+        # src 只留 120 字摘要做辨识，正文不进存档（隐私口径同日志）。
+        label = dict((k, lbl) for k, lbl, _i in WORK_ACTIONS).get(key, "自定义")
+        src = src_text.strip()[:HISTORY_SRC_CHARS]
+        self._pending_meta = {
+            "key": key, "label": label,
+            "instruction": instruction if from_custom else "",
+            "source": src,
+        }
+        # W3：源文超长会在 build_request 里按上限截断——处理中就明说，
+        # 别等用户对比结果才发现被砍（截断标注在请求文本末尾，模型可见）
+        if len(src_text.strip()) > MAX_SOURCE_CHARS:
+            busy_text = (f"处理中…（源文超 {MAX_SOURCE_CHARS} 字，"
+                         "已按上限截断发送；模型响应通常几秒）")
+        else:
+            busy_text = "处理中…（模型响应通常几秒）"
+        self._set_busy(True, busy_text)
         self._logger_action(key)
         ok = self._ctx.http_post_json_async(
             url, headers, body, timeout=REQUEST_TIMEOUT_S,
@@ -487,10 +676,30 @@ class AiWorkshopPage(QWidget):
 
     def _on_reply(self, result: dict, key: str, from_custom: bool):
         self._set_busy(False)
+        meta = self._pending_meta or {}
+        self._pending_meta = None
         reply, err = parse_reply(result)
         if err:
             self._status.setText(err)
             return
+        self._apply_result(reply, key)
+        # 历史存档（W1）：只记成功动作
+        self._record_history(meta.get("key") or key,
+                             meta.get("label") or "动作",
+                             meta.get("instruction") or "",
+                             meta.get("source") or "", reply)
+        if key == "extract_tasks":
+            count = len(parse_task_lines(reply))
+            self._status.setText(
+                f"✓ 识别到 {count} 条行动项" + (
+                    "，点「✅ 转任务」写入任务列表" if count else ""))
+        else:
+            self._status.setText(f"✓ 完成，共 {len(reply)} 字")
+        if from_custom:
+            self._custom_edit.clear()
+
+    def _apply_result(self, reply: str, key: str):
+        """结果填进结果区并刷新「转任务」可用态（正常回复 / 历史回填共用）"""
         self._result_edit.setPlainText(reply)
         self._copy_btn.setEnabled(True)
         if key == "extract_tasks":
@@ -500,15 +709,9 @@ class AiWorkshopPage(QWidget):
                 self._tasks_btn.setToolTip(
                     f"把识别到的 {count} 条行动项写入任务列表"
                     if count else "未识别到行动项")
-            self._status.setText(
-                f"✓ 识别到 {count} 条行动项" + (
-                    "，点「✅ 转任务」写入任务列表" if count else ""))
         else:
             if self._can_write():
                 self._tasks_btn.setEnabled(False)
-            self._status.setText(f"✓ 完成，共 {len(reply)} 字")
-        if from_custom:
-            self._custom_edit.clear()
 
     def _set_busy(self, busy: bool, text: str = ""):
         self._busy = busy
@@ -524,6 +727,151 @@ class AiWorkshopPage(QWidget):
             if busy:
                 self._tasks_btn.setEnabled(False)
         self._status.setText(text)
+
+    # ---------------- 结果历史 + 指令收藏（W1/W2） ----------------
+    @staticmethod
+    def _hist_preview(text: str, limit: int = 60) -> str:
+        """历史行预览：首个非空行，剥 Markdown 标记后截断"""
+        for ln in str(text or "").splitlines():
+            ln = ln.strip().strip("#*-> ").strip()
+            if ln:
+                return ln[:limit] + ("…" if len(ln) > limit else "")
+        return "（空结果）"
+
+    def _toggle_history(self):
+        """展开/收起历史卡（每次展开都按存档重建行）"""
+        will_show = not self._history_card.isVisible()
+        if will_show:
+            self._refresh_history()
+        self._history_card.setVisible(will_show)
+
+    def _refresh_history(self):
+        """按存档重建历史行（点击=填回结果区，右键=删除该条）"""
+        for row in getattr(self, "_hist_rows", []):
+            self._hist_lay.removeWidget(row)
+            row.deleteLater()
+        self._hist_rows = []
+        entries = self._store["history"]
+        self._hist_empty.setVisible(not entries)
+        self._hist_body.setVisible(bool(entries))
+        self._history_scroll.setVisible(bool(entries))
+        for i, h in enumerate(entries):
+            ts = fmt_history_ts(h.get("ts") or "")
+            head = f"[{h.get('label') or '动作'}{' ' + ts if ts else ''}]"
+            preview = self._hist_preview(h.get("result") or "")
+            btn = QPushButton(f"{head} {preview}", self._hist_body)
+            btn.setObjectName("secondaryBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(str(h.get("result") or "")[:400])
+            btn.clicked.connect(
+                lambda _checked=False, idx=i: self._use_history(idx))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, idx=i: self._history_item_menu(b, idx, pos))
+            self._hist_lay.addWidget(btn)
+            self._hist_rows.append(btn)
+
+    def _history_item_menu(self, btn, idx: int, pos):
+        menu = QMenu(self)
+        act = menu.addAction("🗑 删除这条历史")
+        act.triggered.connect(lambda: self._delete_history(idx))
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _use_history(self, idx: int):
+        """历史条目 → 结果区（可编辑/复制/落库；转任务按内容重新判定）"""
+        if idx < 0 or idx >= len(self._store["history"]):
+            return
+        h = self._store["history"][idx]
+        self._apply_result(str(h.get("result") or ""), h.get("key") or "")
+        src = str(h.get("source") or "")
+        self._status.setText("✓ 已从历史填入结果（可编辑/复制/落库）"
+                             + (f"｜源文摘要：{src}" if src else ""))
+
+    def _delete_history(self, idx: int):
+        if idx < 0 or idx >= len(self._store["history"]):
+            return
+        del self._store["history"][idx]
+        save_workshop_store(self._ctx, self._store)
+        self._refresh_history()
+
+    def _clear_history(self):
+        if not self._store["history"]:
+            return
+        self._store["history"] = []
+        save_workshop_store(self._ctx, self._store)
+        self._refresh_history()
+        self._status.setText("✓ 历史已清空")
+
+    def _record_history(self, key: str, label: str, instruction: str,
+                        source: str, result: str):
+        """成功动作落历史（最前插入，超限丢最旧）并落盘"""
+        self._store["history"].insert(0, {
+            "ts": _store_now(), "key": key, "label": label,
+            "instruction": str(instruction or "")[:PRESET_CHARS],
+            "source": str(source or "")[:HISTORY_SRC_CHARS],
+            "result": str(result or "")[:HISTORY_RESULT_CHARS]})
+        self._store["history"] = self._store["history"][:HISTORY_LIMIT]
+        save_workshop_store(self._ctx, self._store)
+        if self._history_card.isVisible():
+            self._refresh_history()
+
+    def _save_preset(self):
+        """把输入框当前指令收藏成按钮（去重、上限丢最旧）"""
+        text = self._custom_edit.text().strip()
+        if not text:
+            self._status.setText("先在输入框写好指令，再点「★ 收藏指令」")
+            return
+        presets = self._store["presets"]
+        if any(p["text"] == text for p in presets):
+            self._status.setText("这条指令已在收藏里")
+            return
+        presets.insert(0, {"id": uuid.uuid4().hex[:12], "text": text})
+        self._store["presets"] = presets[:PRESET_LIMIT]
+        save_workshop_store(self._ctx, self._store)
+        self._refresh_presets()
+        self._status.setText("✓ 已收藏：点下方按钮即可填入，右键按钮可删除")
+
+    def _refresh_presets(self):
+        """按存档重建收藏按钮行（无收藏时整行隐藏）"""
+        while self._preset_lay.count():
+            item = self._preset_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        presets = self._store["presets"]
+        self._preset_widget.setVisible(bool(presets))
+        for p in presets:
+            text = str(p.get("text") or "")
+            btn = QPushButton(f"★ {text[:16]}" + ("…" if len(text) > 16 else ""),
+                              self._preset_widget)
+            btn.setObjectName("secondaryBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"{text}\n\n点击填入输入框（可改后执行）；右键删除收藏")
+            btn.clicked.connect(
+                lambda _checked=False, t=text: self._use_preset(t))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, pid=p["id"]: self._preset_menu(b, pid, pos))
+            self._preset_lay.addWidget(btn)
+        self._preset_lay.addStretch(1)
+
+    def _preset_menu(self, btn, pid: str, pos):
+        menu = QMenu(self)
+        act = menu.addAction("🗑 删除这条收藏")
+        act.triggered.connect(lambda: self._delete_preset(pid))
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _use_preset(self, text: str):
+        """收藏指令填入输入框（不自动执行，改完再跑）"""
+        self._custom_edit.setText(text)
+        self._custom_edit.setFocus()
+        self._status.setText("✓ 已填入收藏指令，可修改后执行")
+
+    def _delete_preset(self, pid: str):
+        self._store["presets"] = [p for p in self._store["presets"]
+                                  if p.get("id") != pid]
+        save_workshop_store(self._ctx, self._store)
+        self._refresh_presets()
 
     # ---------------- 结果出口 ----------------
     def _result_text(self) -> str:
@@ -620,7 +968,7 @@ class WorkshopAction(BallAction):
 class AiTextWorkshopPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 文本工坊"
-    version = "1.4.0"
+    version = "1.5.1"
 
     def create_actions(self, ctx) -> list:
         return [WorkshopAction()]

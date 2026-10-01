@@ -1,7 +1,7 @@
 {
   "id": "ai-assistant",
   "name": "AI 助手",
-  "version": "1.8.0",
+  "version": "1.11.0",
   "entry": "plugin.py",
   "requires": [
     "PyQt6.QtCore",
@@ -17,7 +17,7 @@
   "page": {
     "title": "🤖 AI 助手"
   },
-  "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，规则库自定义 AI 行为",
+  "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，多会话记录重启不丢，可导出 Markdown，支持自定义快捷指令与规则库",
   "actions": [
     {
       "id": "ai-assistant.chat",

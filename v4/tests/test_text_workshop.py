@@ -308,6 +308,82 @@ def test_first_line_title_empty_fallback():
     assert plugin_mod.first_line_title("   ") == "AI 文本工坊结果"
 
 
+# ====================================================================
+# 结果历史 + 指令收藏（v1.5.0，W1/W2）· 纯逻辑层
+# ====================================================================
+def _tmp_ctx(tmp_path):
+    import types
+    return types.SimpleNamespace(
+        data_dir=str(tmp_path),
+        logger=types.SimpleNamespace(warning=lambda *a, **k: None))
+
+
+def test_store_sanitize_drops_dirty_and_keeps_valid(tmp_path):
+    raw = {"history": [
+        "junk",                                          # 非 dict
+        {"result": "   "},                               # 空结果
+        {"key": "summarize", "label": "📌 总结要点",
+         "ts": "2026-10-01T10:00:00", "source": "src",
+         "instruction": "", "result": "要点"},
+    ], "presets": [
+        {"id": "p1", "text": "改成三条文案"},
+        {"text": "改成三条文案"},                        # 重复 → 丢
+        {"text": "   "},                                 # 空文本 → 丢
+        "junk",
+    ]}
+    st = plugin_mod.sanitize_workshop_store(raw)
+    assert len(st["history"]) == 1
+    assert st["history"][0]["result"] == "要点"
+    assert [p["id"] for p in st["presets"]] == ["p1"]
+
+
+def test_store_sanitize_caps(tmp_path):
+    hist = [{"result": f"r{i}", "ts": f"2026-01-{i:02d}T00:00:00"}
+            for i in range(plugin_mod.HISTORY_LIMIT + 6)]
+    presets = [{"text": f"指令{i}"} for i in range(plugin_mod.PRESET_LIMIT + 6)]
+    st = plugin_mod.sanitize_workshop_store({"history": hist,
+                                             "presets": presets})
+    assert len(st["history"]) == plugin_mod.HISTORY_LIMIT
+    # 存档语义：条目按「最新在前」插入，消毒保留前 N 条（= 丢最旧）
+    assert st["history"][0]["result"] == "r0"
+    assert len(st["presets"]) == plugin_mod.PRESET_LIMIT
+    # 收藏指令与结果分别截断
+    st2 = plugin_mod.sanitize_workshop_store({
+        "history": [{"result": "长" * 9999}],
+        "presets": [{"text": "长" * 9999}]})
+    assert len(st2["history"][0]["result"]) == plugin_mod.HISTORY_RESULT_CHARS
+    assert len(st2["presets"][0]["text"]) == plugin_mod.PRESET_CHARS
+
+
+def test_store_roundtrip_and_corrupt_degrade(tmp_path):
+    ctx = _tmp_ctx(tmp_path)
+    st = plugin_mod.sanitize_workshop_store(
+        {"history": [{"key": "polish_email", "label": "✉ 润色成邮件",
+                      "ts": "2026-10-01T09:30:00", "result": "主题：你好"}],
+         "presets": [{"id": "p1", "text": "翻译并保留语气"}]})
+    assert plugin_mod.save_workshop_store(ctx, st) is True
+    loaded = plugin_mod.load_workshop_store(ctx)
+    assert loaded["history"][0]["result"] == "主题：你好"
+    assert loaded["presets"][0]["text"] == "翻译并保留语气"
+    # 写坏 → 空档 + 原文件保留
+    from pathlib import Path
+    Path(ctx.data_dir, plugin_mod.HISTORY_FILE).write_text("{bad",
+                                                           encoding="utf-8")
+    assert plugin_mod.load_workshop_store(ctx) == {
+        "history": [], "presets": []}
+    assert Path(ctx.data_dir, plugin_mod.HISTORY_FILE).read_text(
+        encoding="utf-8") == "{bad"
+
+
+def test_fmt_history_ts_today_and_older():
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    assert plugin_mod.fmt_history_ts(f"{today}T09:05:00") == "09:05"
+    assert plugin_mod.fmt_history_ts("2026-01-05T09:05:00") == "1-5"
+    assert plugin_mod.fmt_history_ts("garbage") == ""
+    assert plugin_mod.fmt_history_ts("") == ""
+
+
 if __name__ == "__main__":
     import traceback
     fails = 0

@@ -856,3 +856,92 @@ class TestEnsureSchedulerIdempotent:
             assert s1._ctx is ctx2               # 但上下文要换成最新的
         finally:
             rt._STATE.update(saved)
+
+
+# ====================================================================
+# J 每 N 周规则（v1.1.0，R1）
+# ====================================================================
+class TestNWeekly:
+    def test_fires_on_selected_weekdays_every_n_weeks(self, rt):
+        # 锚点 2026-09-28（周一）为第 0 周；每 2 周周一触发
+        rule = {"kind": "nweekly", "title": "复盘", "time": "09:00",
+                "weekdays": [0], "interval_weeks": 2,
+                "anchor_date": "2026-09-28"}
+        assert rt.rule_fires_on(rule, date(2026, 9, 28)) is True    # 第 0 周
+        assert rt.rule_fires_on(rule, date(2026, 10, 5)) is False   # 第 1 周
+        assert rt.rule_fires_on(rule, date(2026, 10, 12)) is True   # 第 2 周
+        assert rt.rule_fires_on(rule, date(2026, 10, 13)) is False  # 非周一
+
+    def test_week_index_aligned_to_monday(self, rt):
+        # 锚点在周三：同周的周五与**下周一**不能算同一个"周"
+        rule = {"kind": "nweekly", "title": "x", "time": "09:00",
+                "weekdays": [0, 2], "interval_weeks": 2,
+                "anchor_date": "2026-09-30"}       # 周三
+        assert rt.rule_fires_on(rule, date(2026, 10, 2)) is False  # 周五=第0周非周三
+        # 下周一（10-06）是第 1 周 → 不触发；第 2 周周一（10-13 的下周一=10-12? 注意锚点周三，第0周=09-28~10-04）
+        assert rt.rule_fires_on(rule, date(2026, 10, 5)) is False   # 第1周周一
+        assert rt.rule_fires_on(rule, date(2026, 10, 12)) is True   # 第2周周一
+        assert rt.rule_fires_on(rule, date(2026, 10, 14)) is True   # 第2周周三
+
+    def test_before_anchor_never_fires(self, rt):
+        rule = {"kind": "nweekly", "title": "x", "time": "09:00",
+                "weekdays": [0], "interval_weeks": 1,
+                "anchor_date": "2026-09-28"}
+        assert rt.rule_fires_on(rule, date(2026, 9, 21)) is False
+
+    def test_validate_ok_and_defaults(self, rt):
+        raw = {"kind": "nweekly", "title": "隔周复盘", "time": "10:00",
+               "weekdays": [0, 4], "interval_weeks": 2}
+        rule, err = rt.validate_rule(raw)
+        assert rule is not None and err == ""
+        assert rule["weekdays"] == [0, 4]
+        assert rule["interval_weeks"] == 2
+        # 锚点自动 = 创建当周的周一
+        anchor = rt.as_date(rule["anchor_date"])
+        assert anchor.weekday() == 0
+
+    def test_validate_rejects_bad_weeks_and_days(self, rt):
+        base = {"kind": "nweekly", "title": "x", "time": "09:00",
+                "weekdays": [0], "interval_weeks": 2}
+        rule, err = rt.validate_rule(dict(base, interval_weeks=0))
+        assert rule is None and "1–52" in err
+        rule, err = rt.validate_rule(dict(base, interval_weeks=53))
+        assert rule is None and "1–52" in err
+        rule, err = rt.validate_rule(dict(base, weekdays=[]))
+        assert rule is None and "至少" in err
+
+    def test_editing_keeps_anchor_no_drift(self, rt):
+        raw = {"kind": "nweekly", "title": "x", "time": "09:00",
+               "weekdays": [0], "interval_weeks": 2,
+               "anchor_date": "2026-06-01"}
+        rule, _ = rt.validate_rule(raw)
+        assert rule["anchor_date"] == "2026-06-01"   # 显式锚点不被改写
+
+    def test_format_rule(self, rt):
+        rule = {"kind": "nweekly", "time": "09:00", "weekdays": [0, 2],
+                "interval_weeks": 2}
+        text = rt.format_rule(rule)
+        assert "每 2 周" in text and "周一" in text and "周三" in text
+
+    def test_next_fire_skips_off_weeks(self, rt):
+        now = datetime(2026, 9, 28, 10, 0)           # 周一 10:00（09:00 已过）
+        rule = {"kind": "nweekly", "title": "x", "time": "09:00",
+                "weekdays": [0], "interval_weeks": 2,
+                "anchor_date": "2026-09-28", "enabled": True}
+        nxt = rt.next_fire_at(rule, now)
+        assert nxt == datetime(2026, 10, 12, 9, 0)   # 第 2 周周一
+
+    def test_pending_day_catch_up(self, rt):
+        rule = {"kind": "nweekly", "title": "x", "time": "09:00",
+                "weekdays": [0], "interval_weeks": 2,
+                "anchor_date": "2026-09-28", "enabled": True,
+                "last_fired": ""}
+        # 昨天周一（第 2 周）09:00 已到点而没生成 → 补最近一次 = 昨天
+        now2 = datetime(2026, 10, 13, 10, 0)
+        assert rt.pending_day(rule, now2) == date(2026, 10, 12)
+
+    def test_manifest_kinds_description(self, rt):
+        assert "nweekly" in rt.KINDS
+        assert dict(rt.KIND_LABELS)["nweekly"] == "每 N 周（隔周…）"
+
+

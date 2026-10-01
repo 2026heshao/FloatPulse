@@ -15,6 +15,12 @@ AI 助手  -  FloatPulse 外置插件（ai-assistant）
   - manifest 声明 ``"capabilities": ["ai"]`` → 经 ``ctx.ai`` 实时读取
     设置页「🧠 AI 总配置」
 
+会话持久化（v1.9.0，A1）：
+  成功问答轮次存进插件私有目录 ``sessions.json``（原子写、单会话 100
+  条 / 全局 15 个会话上限），重启恢复上次会话；页顶下拉可切换历史
+  会话、＋新开、🗑删除（最后一条=清空内容）。提示类气泡与动作结果卡
+  不落档，恢复只重现问答主线。
+
 功能：读应用内任务 / 碎片 / 笔记的只读快照，交给 OpenAI 兼容接口做
 总结、分类与问答。
 
@@ -36,19 +42,23 @@ AI 后端（2026-09-29 起收归宿主，本插件**零配置**）：
 """
 
 import json
+import math
 import os
+import uuid
+from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QFontMetrics, QPainter
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
+from src import motion
 from src.controls import IconButton
 from src.plugin_api import BallAction, BallPlugin, PluginContext
-from src.plugin_ui import make_hint_label
+from src.plugin_ui import PluginDialog, make_hint_label
 
 PLUGIN_ID = "ai-assistant"
 PAGE_KEY = f"plugin:{PLUGIN_ID}"       # 主窗口页面 key（与 loader 约定一致）
@@ -60,7 +70,15 @@ DEFAULT_CONFIG = {
     # 规则库：[{"text": 规则文本, "enabled": 是否启用}, ...]，随 config.json
     # 落盘，已启用规则由 build_system_prompt 追加到系统提示词末尾
     "custom_rules": [],
+    # 自定义快捷指令（v1.10.0 A3）：["指令文本", ...]，点击直接发给 AI
+    # （不附加应用内数据），随 config.json 落盘
+    "custom_quick": [],
 }
+
+# 自定义快捷指令上限（A3）：与内置 4 条并列展示，多了会把快捷行撑爆
+CUSTOM_QUICK_LIMIT = 6
+CUSTOM_QUICK_CHARS = 200    # 单条指令文本的最大字符数
+CUSTOM_QUICK_LABEL = 18     # 按钮文案截断长度（超出显示省略号）
 
 SYSTEM_PROMPT = (
     "你是办公工具 FloatPulse 内置的 AI 助手。用户可能把应用内的任务、"
@@ -105,6 +123,186 @@ def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
 # 上下文历史最多保留的条数（role 消息条数，防 token 无限膨胀）
 MAX_HISTORY = 12
 
+# ---------------- 会话持久化（2026-10-01 A1） ----------------
+# 对话成功轮次存进插件私有目录 sessions.json：重启可恢复、支持多会话
+# 切换。上限刻意收紧——会话存档是「防丢」不是「全量导出」，防文件膨胀。
+SESSIONS_FILE = "sessions.json"
+SESSION_LIMIT = 15        # 最多保留的会话数（按最近活跃丢最旧）
+SESSION_MSG_LIMIT = 100   # 单会话最多保留的消息条数（丢最旧，保持成对）
+SESSION_MSG_CHARS = 6000  # 单条消息落盘的最大字符数（快捷指令数据块较大）
+
+WELCOME_TEXT = (
+    "我在。点快捷指令让我读应用内数据做总结，或直接输入问题。\n"
+    "AI 后端在 设置 → 🧠 AI 总配置 管理（云端 / 本地一次配置，"
+    "所有 AI 插件共用）；「📐 规则库」可写入你的长期偏好，"
+    "我每次对话都会遵守。")
+
+
+def _session_now() -> str:
+    """会话存档用的时间戳（秒精度本地时间，仅用于排序与展示）"""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _fresh_session() -> dict:
+    """新建一个空会话记录"""
+    now = _session_now()
+    return {"id": uuid.uuid4().hex[:12], "title": "新会话",
+            "created_at": now, "updated_at": now, "messages": []}
+
+
+def session_title_from(text: str) -> str:
+    """由首条用户消息取会话标题（首个非空行，截 24 字）"""
+    for ln in str(text or "").splitlines():
+        ln = ln.strip()
+        if ln:
+            return ln[:24]
+    return "新会话"
+
+
+def sanitize_sessions(raw) -> dict:
+    """会话存档消毒：脏数据**宽容降级**（坏会话/坏消息整条丢弃，绝不抛）。
+
+    与 RuleStore 同立场：存档文件是唯一数据，任何结构意外都按「没有」
+    处理；角色必须是 user/assistant、内容非空、逐条截断到上限，
+    最后按最近活跃排序截断到 SESSION_LIMIT。
+    """
+    store = {"version": 1, "current_id": "", "sessions": []}
+    if not isinstance(raw, dict):
+        return store
+    sessions = []
+    for s in raw.get("sessions") or []:
+        if not isinstance(s, dict):
+            continue
+        msgs = []
+        for m in s.get("messages") or []:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = str(m.get("content") or "")[:SESSION_MSG_CHARS]
+            if not content.strip():
+                continue
+            msgs.append({"role": role, "content": content,
+                         "display": str(m.get("display")
+                                        or "")[:SESSION_MSG_CHARS]})
+        if not msgs:
+            continue
+        sid = str(s.get("id") or "")[:40]
+        if not sid:
+            continue
+        sessions.append({
+            "id": sid,
+            "title": str(s.get("title") or "").strip()[:60] or "会话",
+            "created_at": str(s.get("created_at") or "")[:32],
+            "updated_at": str(s.get("updated_at") or "")[:32],
+            "messages": msgs[-SESSION_MSG_LIMIT:],
+        })
+    # id 去重（撞 id 保先出现的）；按最近活跃降序，截到上限
+    seen, uniq = set(), []
+    for s in sessions:
+        if s["id"] not in seen:
+            seen.add(s["id"])
+            uniq.append(s)
+    uniq.sort(key=lambda s: s["updated_at"], reverse=True)
+    store["sessions"] = uniq[:SESSION_LIMIT]
+    cur = str(raw.get("current_id") or "")
+    if cur not in {s["id"] for s in store["sessions"]}:
+        cur = store["sessions"][0]["id"] if store["sessions"] else ""
+    store["current_id"] = cur
+    return store
+
+
+def load_sessions(ctx) -> dict:
+    """读会话存档；文件缺失/写坏只降级为空档，原文件保留供手工抢救"""
+    path = os.path.join(ctx.data_dir, SESSIONS_FILE) if ctx.data_dir else ""
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return sanitize_sessions(json.load(f))
+        except (OSError, ValueError) as exc:
+            try:
+                ctx.logger.warning(f"[AI 助手] 会话存档读取失败，按空档启动"
+                                   f"（原文件保留）：{exc}")
+            except Exception:               # noqa: BLE001 - 日志不可用不反噬
+                pass
+    return sanitize_sessions(None)
+
+
+def save_sessions(ctx, store: dict) -> bool:
+    """写会话存档（临时文件 + os.replace 原子替换）；失败只告警不抛"""
+    path = os.path.join(ctx.data_dir, SESSIONS_FILE) if ctx.data_dir else ""
+    if not path:
+        return False
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(store, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        try:
+            ctx.logger.warning(f"[AI 助手] 会话存档写入失败：{exc}")
+        except Exception:                   # noqa: BLE001
+            pass
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+# ---------------- 会话导出（v1.10.0 A2）/ 自定义指令（A3） ----------------
+_EXPORT_BAD_CHARS = '\\/:*?"<>|\r\n\t'   # Windows 文件名非法字符 + 控制空白
+
+
+def safe_export_name(title: str) -> str:
+    """会话标题 → 安全的导出文件名主干（非法字符替换、截断、空回退）"""
+    name = "".join("_" if ch in _EXPORT_BAD_CHARS else ch
+                   for ch in str(title or "")).strip().strip(".")[:40]
+    if not name or set(name) <= {"_"}:   # 全是替换符 = 没有可读内容
+        return "会话"
+    return name
+
+
+def session_to_markdown(session: dict) -> str:
+    """会话存档 → Markdown 文本（导出用；纯函数不碰 UI）。
+
+    用户消息优先用 display（界面文案，快捷指令不带数据块），
+    AI 消息用 content；空内容跳过。文件末尾恒以单个换行收尾。
+    """
+    sess = session if isinstance(session, dict) else {}
+    title = str(sess.get("title") or "").strip() or "会话"
+    msgs = [m for m in sess.get("messages") or []
+            if isinstance(m, dict) and str(m.get("content") or "").strip()]
+    lines = [f"# AI 助手会话：{title}", "",
+             f"> 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+             f" ｜ 消息 {len(msgs)} 条", ""]
+    for m in msgs:
+        role = "你" if m.get("role") == "user" else "AI"
+        if m.get("role") == "user":
+            body = (str(m.get("display") or "").strip()
+                    or str(m.get("content") or "").strip())
+        else:
+            body = str(m.get("content") or "").strip()
+        lines += ["---", "", f"**{role}：**", "", body, ""]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def sanitize_custom_quick(raw) -> list:
+    """自定义快捷指令消毒：非字符串/空文本丢弃、截断、去重、上限裁剪"""
+    items, seen = [], set()
+    for item in raw if isinstance(raw, (list, tuple)) else []:
+        text = str(item or "").strip()[:CUSTOM_QUICK_CHARS]
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+        if len(items) >= CUSTOM_QUICK_LIMIT:
+            break
+    return items
+
 
 # ====================================================================
 # 配置读写（插件私有目录 data_dir/config.json）
@@ -125,6 +323,8 @@ def load_config(ctx) -> dict:
                         cfg[key] = stored[key]
         except (OSError, ValueError) as exc:
             ctx.logger.warning(f"[AI 助手] 配置读取失败，用默认值：{exc}")
+    # 自定义指令直接进 UI 重建，读入时就消毒（脏数据宽容降级）
+    cfg["custom_quick"] = sanitize_custom_quick(cfg.get("custom_quick"))
     return cfg
 
 
@@ -632,9 +832,145 @@ class BubbleLabel(QLabel):
             self.setMinimumHeight(need)
 
 
+class ThinkingDots(QWidget):
+    """「思考中」三点自绘动画（v1.11.0）：连续弹跳波，零字体依赖。
+
+    替换 2026-09-28 版的 ``●○`` 字符帧——几何符号在 msyh 下有豆腐块风险
+    （项目铁律：图形一律自绘），且 4 帧轮换观感生硬。三点按正弦相位做
+    **垂直弹跳 + 透明度呼吸**（33ms/帧 ≈ 30fps，周期 900ms，三点各差 1/3
+    相位）；颜色取宿主主题 ``$primary`` 并订阅 theme_changed 跟随换色；
+    **减弱动效开启时不启动计时器**，静止显示三点（透明度呈阶梯状，仍可读）。
+    """
+
+    PERIOD_MS = 900          # 一个完整波形的周期
+    TICK_MS = 33             # ~30fps
+    DOT_R = 3.4              # 点半径（px）
+    GAP = 13.0               # 相邻点中心间距（px）
+    BOUNCE = 3.0             # 弹跳幅度（px）
+    _IDLE_PHASE = 0.125      # 静止模式下的相位（三点透明度呈阶梯，不呆板）
+
+    def __init__(self, ctx=None, parent=None):
+        super().__init__(parent)
+        self._ctx = ctx
+        self._phase_ms = int(self.PERIOD_MS * self._IDLE_PHASE)
+        self._color = self._resolve_color()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TICK_MS)
+        self._timer.timeout.connect(self._tick)
+        self._subscribe_theme()
+        self.setFixedSize(
+            int(self.GAP * 2 + self.DOT_R * 2 + 8),
+            int(self.DOT_R * 2 + self.BOUNCE * 2 + 6))
+        if not motion.reduce_motion():
+            self._timer.start()
+
+    # ---------------- 主题取色 ----------------
+    def _resolve_color(self) -> QColor:
+        """宿主主题 $primary；拿不到时用 light 主色兜底（不画黑）"""
+        try:
+            from src.theme import get_colors
+            theme = "light"
+            win = self._host()
+            t = getattr(win, "current_theme", None)
+            if t in ("light", "dark"):
+                theme = t
+            c = (get_colors(theme) or {}).get("primary")
+            if isinstance(c, str) and c.startswith("#") and len(c) in (4, 7):
+                return QColor(c)
+        except Exception:                     # noqa: BLE001 - 取不到就用兜底
+            pass
+        return QColor("#27787A")
+
+    def _host(self):
+        getter = getattr(self._ctx, "parent_window", None) if self._ctx \
+            else None
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:                     # noqa: BLE001
+            return None
+
+    def _subscribe_theme(self):
+        """主题切换跟随（IconButton/PageTitle 同款 callable 守卫）"""
+        try:
+            sig = getattr(self._host(), "theme_changed", None)
+            if sig is not None and callable(getattr(sig, "connect", None)):
+                sig.connect(self._on_theme_changed)
+        except Exception:                     # noqa: BLE001 - 订阅失败只影响配色
+            pass
+
+    def _on_theme_changed(self, *_args):
+        self._color = self._resolve_color()
+        self.update()
+
+    # ---------------- 动画 ----------------
+    def _tick(self):
+        self._phase_ms = (self._phase_ms + self.TICK_MS) % self.PERIOD_MS
+        self.update()
+
+    def stop(self):
+        """停止动画（拆除气泡时调；双保险，控件销毁本会带走计时器）"""
+        self._timer.stop()
+
+    def is_animating(self) -> bool:
+        return self._timer.isActive()
+
+    def phase_ms(self) -> int:
+        """当前波形相位（ms）；测试与 verify 用"""
+        return self._phase_ms
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        base_y = self.height() / 2.0 + self.BOUNCE / 2.0
+        x0 = (self.width() - self.GAP * 2) / 2.0
+        painter.setPen(Qt.PenStyle.NoPen)
+        for i in range(3):
+            ph = ((self._phase_ms / self.PERIOD_MS) + i / 3.0) % 1.0
+            wave = max(0.0, math.sin(ph * 2.0 * math.pi))   # 只取正半周
+            color = QColor(self._color)
+            color.setAlphaF(min(1.0, 0.35 + 0.65 * wave))
+            painter.setBrush(color)
+            r = self.DOT_R
+            painter.drawEllipse(
+                QPointF(x0 + i * self.GAP, base_y - wave * self.BOUNCE),
+                r, r)
+
+
 # ====================================================================
 # 主页面（嵌入主窗口导航；create_page 返回它）
 # ====================================================================
+class QuickAddDialog(PluginDialog):
+    """「添加自定义快捷指令」小对话框（A3）：单行输入，回车或按钮提交
+
+    继承 PluginDialog（铁律：插件弹窗必须走它）；text() 供调用方取
+    已清洗文本。测试可单独构造（ctx 传 None 走默认主题），不 exec。
+    """
+
+    def __init__(self, ctx=None, parent=None):
+        super().__init__(ctx, title="添加快捷指令",
+                         subtitle=f"最多 {CUSTOM_QUICK_LIMIT} 条，随插件配置保存",
+                         parent=parent, size=(440, 190))
+        hint = QLabel("指令会作为你的消息直接发给 AI（不附加应用内数据）。")
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("指令内容，如：帮我把下面这段话改通顺")
+        self.edit.returnPressed.connect(self.accept)
+        self.body_layout.addWidget(hint)
+        self.body_layout.addWidget(self.edit)
+        self.add_footer([
+            ("取消", "secondaryBtn", self.reject),
+            ("添加", "primaryBtn", self.accept),
+        ])
+        self.edit.setFocus()
+
+    def text(self) -> str:
+        """清洗后的输入文本（去首尾空白）"""
+        return self.edit.text().strip()
+
+
 class AiChatPage(QWidget):
     """聊天页：规则库卡（收起）+ 消息流 + 快捷指令 + 输入区 + 状态行
 
@@ -647,16 +983,27 @@ class AiChatPage(QWidget):
         self._cfg = load_config(ctx)
         self._history = []          # 成功轮次 [{"role","content"}, ...]
         self._pending_user = ""     # 在途请求的用户消息（成功后落进历史）
+        self._pending_display = ""  # 在途请求的界面文案（气泡/会话存档用）
         self._busy = False
-        # 思考动画（2026-09-28 用户要求）：请求在途时消息流里挂一张
-        # 「打字中」气泡，三点做往返波；回复到达（或失败）即拆掉。
-        # QSS：chatBubbleThinking / chatThinkingDots（theme.py）
-        self._think_timer = QTimer(self)
-        self._think_timer.setInterval(180)
-        self._think_timer.timeout.connect(self._tick_thinking)
+        # 会话持久化（A1）：多会话存档 + 重启恢复。self._session 永远指向
+        # _store["sessions"] 里的一条（聊天页至少有一个会话，删到最后一条
+        # = 清空内容而非删除）。
+        self._store = load_sessions(ctx)
+        if not self._store["sessions"]:
+            s = _fresh_session()
+            self._store["sessions"] = [s]
+            self._store["current_id"] = s["id"]
+        cur = next((s for s in self._store["sessions"]
+                    if s["id"] == self._store["current_id"]),
+                   self._store["sessions"][0])
+        self._store["current_id"] = cur["id"]
+        self._session = cur
+        # 思考动画（2026-09-28 用户要求；v1.11.0 起为自绘三点连续波）：
+        # 请求在途时消息流里挂一张「打字中」气泡，回复到达（或失败）即拆掉。
+        # 气泡造型 QSS：chatBubbleThinking（theme.py）；三点由 ThinkingDots
+        # 自绘（颜色取主题 $primary、跟随 theme_changed、reduce_motion 静止）
         self._think_bubble = None       # 在途气泡 QFrame（无在途时为 None）
-        self._think_label = None        # 三点 QLabel（动画帧写给它）
-        self._think_phase = 0
+        self._think_dots = None         # 自绘三点控件（ThinkingDots）
         # 已存为笔记的回复文本（气泡右键菜单据此显示「已存为笔记」并禁用）
         self._noted_texts = set()
         # 最近一张待确认卡（改删动作等用户点「执行」；测试与调试用引用）
@@ -731,6 +1078,37 @@ class AiChatPage(QWidget):
         root.addWidget(self._rules_card)
         self._rules_card.setVisible(False)
 
+        # ---- 会话栏（A1）：下拉切换 + 新开 + 删除 ----
+        sess_row = QHBoxLayout()
+        sess_row.setSpacing(6)
+        self._session_combo = QComboBox(self)
+        self._session_combo.setObjectName("chatSessionCombo")
+        self._session_combo.setToolTip(
+            "切换历史会话（对话记录存在插件私有目录，重启不丢）")
+        self._session_combo.currentIndexChanged.connect(self._on_session_combo)
+        sess_row.addWidget(self._session_combo, 1)
+        self._session_new_btn = IconButton("plus", icon_size=14,
+                                           object_name="secondaryBtn",
+                                           parent=self, tooltip="新开一个会话")
+        self._session_new_btn.clicked.connect(
+            lambda _checked=False: self._new_session())
+        sess_row.addWidget(self._session_new_btn)
+        self._session_del_btn = IconButton("trash", icon_size=14,
+                                           object_name="secondaryBtn",
+                                           parent=self, tooltip="删除当前会话")
+        self._session_del_btn.clicked.connect(
+            lambda _checked=False: self._delete_session())
+        sess_row.addWidget(self._session_del_btn)
+        # 导出当前会话（A2）：Markdown 文件（utf-8 + LF），选路径后落盘
+        self._session_export_btn = IconButton("save", icon_size=14,
+                                              object_name="secondaryBtn",
+                                              parent=self,
+                                              tooltip="导出当前会话为 Markdown 文件")
+        self._session_export_btn.clicked.connect(
+            lambda _checked=False: self._export_session())
+        sess_row.addWidget(self._session_export_btn)
+        root.addLayout(sess_row)
+
         # ---- 消息流（滚动区）----
         self._stream_host = QWidget(self)
         self._stream = QVBoxLayout(self._stream_host)
@@ -753,6 +1131,13 @@ class AiChatPage(QWidget):
             btn.clicked.connect(lambda _=False, k=kind, p=prompt:
                                 self.send_quick(k, p))
             quick_row.addWidget(btn)
+        # 自定义快捷指令（A3）：动态区 + 「＋」添加，位于内置指令与
+        # stretch 之间；内容由 _rebuild_custom_quick 按 config 重建
+        self._custom_quick_host = QWidget(self)
+        custom_lay = QHBoxLayout(self._custom_quick_host)
+        custom_lay.setContentsMargins(0, 0, 0, 0)
+        custom_lay.setSpacing(8)
+        quick_row.addWidget(self._custom_quick_host)
         quick_row.addStretch()
         # 停止模型服务（仅本地服务运行中显示）：聊天主界面直接可停，
         # 不必展开后端设置卡——用户反馈「连接后一直跑在后台」没有顺手的停止入口
@@ -794,11 +1179,9 @@ class AiChatPage(QWidget):
 
         self._input.submit_requested.connect(self._on_send_clicked)
 
-        self.add_bubble(
-            "AI", "我在。点快捷指令让我读应用内数据做总结，或直接输入问题。\n"
-                  "AI 后端在 设置 → 🧠 AI 总配置 管理（云端 / 本地一次配置，"
-                  "所有 AI 插件共用）；「📐 规则库」可写入你的长期偏好，"
-                  "我每次对话都会遵守。")
+        self._refresh_session_combo()
+        self._rebuild_stream_from_session()
+        self._rebuild_custom_quick()
 
         # 宿主本地服务状态跟随（ctx.ai 订阅 AI_SERVER 广播；UI 线程回调；
         # add_listener 内部会立即回放当前状态，新页面按钮/显隐自动对齐）
@@ -806,6 +1189,227 @@ class AiChatPage(QWidget):
         # 页面销毁时退订，避免 _listeners 里累积已销毁页面的死引用
         self.destroyed.connect(
             lambda: self._ctx.ai.remove_listener(self._on_local_status))
+
+    # ---------------- 会话管理（A1） ----------------
+    def _refresh_session_combo(self):
+        """下拉框按存档重建（条目=最近活跃降序）；期间屏蔽信号防回环"""
+        combo = self._session_combo
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            for s in self._store["sessions"]:
+                combo.addItem(s["title"], s["id"])
+            idx = combo.findData(self._session["id"])
+            combo.setCurrentIndex(max(0, idx))
+        finally:
+            combo.blockSignals(False)
+
+    def _on_session_combo(self, index: int):
+        """下拉切换会话：切存档指针、重建消息流（在途请求期间拒绝）"""
+        if self._busy:
+            self._refresh_session_combo()      # 回弹到当前会话
+            self._status.setText("正在处理上一条…，稍后再切换会话")
+            return
+        sid = self._session_combo.itemData(index)
+        if not sid or sid == self._session["id"]:
+            return
+        target = next((s for s in self._store["sessions"]
+                       if s["id"] == sid), None)
+        if target is None:
+            self._refresh_session_combo()
+            return
+        self._session = target
+        self._store["current_id"] = sid
+        save_sessions(self._ctx, self._store)
+        self._rebuild_stream_from_session()
+
+    def _new_session(self):
+        """新开会话（旧的保留在存档里，可随时切回）"""
+        if self._busy:
+            self._status.setText("正在处理上一条…，稍后再开新会话")
+            return
+        s = _fresh_session()
+        self._store["sessions"].insert(0, s)
+        self._store["sessions"] = self._store["sessions"][:SESSION_LIMIT]
+        self._store["current_id"] = s["id"]
+        self._session = s
+        save_sessions(self._ctx, self._store)
+        self._refresh_session_combo()
+        self._rebuild_stream_from_session()
+
+    def _delete_session(self):
+        """删除当前会话；只剩最后一条时清空内容而非删除（页内恒有会话）"""
+        if self._busy:
+            self._status.setText("正在处理上一条…，稍后再删会话")
+            return
+        if len(self._store["sessions"]) <= 1:
+            self._session["messages"] = []
+            self._session["title"] = "新会话"
+            self._session["updated_at"] = _session_now()
+            save_sessions(self._ctx, self._store)
+            self._refresh_session_combo()
+            self._rebuild_stream_from_session()
+            return
+        self._store["sessions"] = [
+            s for s in self._store["sessions"]
+            if s["id"] != self._session["id"]]
+        self._session = self._store["sessions"][0]
+        self._store["current_id"] = self._session["id"]
+        save_sessions(self._ctx, self._store)
+        self._refresh_session_combo()
+        self._rebuild_stream_from_session()
+
+    def _rebuild_stream_from_session(self):
+        """按当前会话存档重建消息流（启动恢复 / 切换 / 新建共用）。
+
+        气泡显示用 display（用户侧界面文案，快捷指令不带数据块），
+        模型上下文用 content；提示类气泡（连接引导 / 动作结果卡）不
+        落档，恢复后只重现问答主线。
+        """
+        self._history = []
+        self._pending_user = ""
+        self._pending_display = ""
+        self._hide_thinking()
+        while self._stream.count() > 1:          # 留着末尾 stretch
+            item = self._stream.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for m in self._session["messages"]:
+            if m["role"] == "user":
+                self.add_bubble("你", m.get("display") or m["content"])
+            else:
+                self.add_bubble("AI", m["content"])
+            self._history.append({"role": m["role"], "content": m["content"]})
+        self._history = self._history[-MAX_HISTORY:]
+        if not self._session["messages"]:
+            self.add_bubble("AI", WELCOME_TEXT)
+
+    def _persist_turn(self, user_content: str, user_display: str,
+                      assistant_text: str):
+        """成功轮次写进当前会话存档并落盘（标题/活跃时间/上限裁剪同步）"""
+        sess = self._session
+        sess["messages"].append({"role": "user", "content": user_content,
+                                 "display": user_display})
+        sess["messages"].append({"role": "assistant",
+                                 "content": assistant_text,
+                                 "display": assistant_text})
+        if len(sess["messages"]) > SESSION_MSG_LIMIT:
+            sess["messages"] = sess["messages"][-SESSION_MSG_LIMIT:]
+            if len(sess["messages"]) % 2:       # 保持问答成对
+                sess["messages"] = sess["messages"][1:]
+        if sess["title"] in ("", "新会话"):
+            sess["title"] = session_title_from(user_display)
+        sess["updated_at"] = _session_now()
+        # 按最近活跃排序后裁掉最旧会话；当前会话刚活跃必然幸存
+        self._store["sessions"].sort(
+            key=lambda s: s["updated_at"], reverse=True)
+        self._store["sessions"] = self._store["sessions"][:SESSION_LIMIT]
+        self._store["current_id"] = self._session["id"]
+        save_sessions(self._ctx, self._store)
+        self._refresh_session_combo()
+
+    # ---------------- 会话导出（A2） ----------------
+    def _export_session(self):
+        """当前会话 → Markdown 文件（QFileDialog 选路径，utf-8 + LF）"""
+        if not (self._session.get("messages") or []):
+            self._status.setText("当前会话还没有可导出的内容")
+            return
+        default = safe_export_name(self._session.get("title") or "") + ".md"
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出会话为 Markdown", default, "Markdown 文档 (*.md)")
+        if not path:
+            return                              # 用户取消：静默返回
+        if not path.lower().endswith(".md"):
+            path += ".md"
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(session_to_markdown(self._session))
+        except OSError as exc:
+            self._status.setText(f"导出失败：{exc}")
+            return
+        self._status.setText(f"已导出：{path}")
+        try:
+            self._ctx.show_toast("会话已导出为 Markdown 文件")
+        except Exception:                       # noqa: BLE001 - 提示失败不反噬
+            pass
+
+    # ---------------- 自定义快捷指令（A3） ----------------
+    def _rebuild_custom_quick(self):
+        """按 config 重建自定义指令按钮 + 「＋」添加按钮（整组重建）"""
+        lay = self._custom_quick_host.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for prompt in self._cfg.get("custom_quick") or []:
+            label = prompt[:CUSTOM_QUICK_LABEL] + \
+                ("…" if len(prompt) > CUSTOM_QUICK_LABEL else "")
+            btn = QPushButton(label, self._custom_quick_host)
+            btn.setObjectName("secondaryBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"自定义指令：{prompt}\n点击直接发送；右键删除")
+            btn.clicked.connect(
+                lambda _=False, p=prompt: self._send_custom_quick(p))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, p=prompt: self._custom_quick_menu(b, p, pos))
+            lay.addWidget(btn)
+        plus = IconButton("plus", icon_size=14,
+                          object_name="secondaryBtn",
+                          parent=self._custom_quick_host,
+                          tooltip=f"添加自定义快捷指令"
+                                  f"（最多 {CUSTOM_QUICK_LIMIT} 条）")
+        plus.clicked.connect(lambda _checked=False: self._add_custom_quick())
+        lay.addWidget(plus)
+
+    def _send_custom_quick(self, prompt: str):
+        """自定义指令点击：作为用户消息直接发送（不附加应用内数据）"""
+        if self._busy:
+            self._status.setText("正在处理上一条…")
+            return
+        self._dispatch(prompt, None, prompt)
+
+    def _custom_quick_menu(self, btn, prompt: str, pos):
+        """自定义指令右键菜单：删除该条（从 config 移除并落盘重建）"""
+        menu = QMenu(self)
+        act = menu.addAction(f"🗑 删除「{prompt[:CUSTOM_QUICK_LABEL]}」")
+        act.triggered.connect(lambda: self._remove_custom_quick(prompt))
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _remove_custom_quick(self, prompt: str):
+        """删除一条自定义指令（按文本匹配，重名只删一条）"""
+        items = [p for p in self._cfg.get("custom_quick") or []
+                 if p != prompt]
+        self._cfg = {**self._cfg, "custom_quick": items}
+        if save_config(self._ctx, self._cfg):
+            self._rebuild_custom_quick()
+            self._status.setText("已删除自定义指令")
+        else:
+            self._status.setText("删除失败（配置写入失败，详见 app.log）")
+
+    def _add_custom_quick(self):
+        """弹小对话框添加一条自定义指令；超上限/空文本拦截并提示"""
+        current = self._cfg.get("custom_quick") or []
+        if len(current) >= CUSTOM_QUICK_LIMIT:
+            self._status.setText(
+                f"自定义指令已达上限（{CUSTOM_QUICK_LIMIT} 条），"
+                "先右键删除一条")
+            return
+        dlg = QuickAddDialog(self._ctx, parent=self.window())
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        text = dlg.text().strip()[:CUSTOM_QUICK_CHARS]
+        if not text:
+            self._status.setText("指令内容为空，未添加")
+            return
+        self._cfg = {**self._cfg, "custom_quick": current + [text]}
+        if save_config(self._ctx, self._cfg):
+            self._rebuild_custom_quick()
+            self._status.setText(f"已添加自定义指令（共 {len(current) + 1} 条）")
+        else:
+            self._status.setText("添加失败（配置写入失败，详见 app.log）")
 
     def add_bubble(self, role: str, text: str):
         """往消息流追加一张左右气泡（2026-09-28 用户要求：一左一右对话式）。
@@ -1131,10 +1735,7 @@ class AiChatPage(QWidget):
         bar = self._scroll.verticalScrollBar()
         QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
-    # ---------------- 思考动画（2026-09-28 用户要求） ----------------
-    # 三点往返波（亮点位 L→R 再 R→L，无生硬跳变）；纯文本帧不写死颜色，
-    # 颜色由 QSS 的 chatThinkingDots 出（主色，随主题走）
-    _THINK_FRAMES = ("●  ○  ○", "○  ●  ○", "○  ○  ●", "○  ●  ○")
+    # ---------------- 思考动画（2026-09-28 用户要求；v1.11.0 自绘化） ----------------
 
     def _show_thinking(self):
         """消息流里挂一张「打字中」气泡（AI 侧靠左；重复调用幂等）"""
@@ -1144,28 +1745,20 @@ class AiChatPage(QWidget):
         card.setObjectName("chatBubbleThinking")
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 10, 14, 10)
-        self._think_label = QLabel(self._THINK_FRAMES[0])
-        self._think_label.setObjectName("chatThinkingDots")
-        lay.addWidget(self._think_label)
+        self._think_dots = ThinkingDots(self._ctx)
+        lay.addWidget(self._think_dots)
         self._think_bubble = card
-        self._think_phase = 0
-        self._think_timer.start()
         # 与 add_bubble 同款：插到末尾 stretch 之前，保证贴在最底部
         self._stream.insertWidget(
             self._stream.count() - 1, card, 0, Qt.AlignmentFlag.AlignLeft)
         self._scroll_to_bottom()
 
-    def _tick_thinking(self):
-        """动画帧推进（180ms/帧，_THINK_FRAMES 循环）"""
-        if self._think_label is not None:
-            self._think_phase = (self._think_phase + 1) % len(self._THINK_FRAMES)
-            self._think_label.setText(self._THINK_FRAMES[self._think_phase])
-
     def _hide_thinking(self):
-        """拆掉思考气泡（计时器停 + 先摘出布局再销毁，消息流计数立即回落）"""
-        self._think_timer.stop()
-        card, self._think_bubble, self._think_label = (
-            self._think_bubble, None, None)
+        """拆掉思考气泡（动画计时器随控件 stop/销毁；消息流计数立即回落）"""
+        card, dots, self._think_bubble, self._think_dots = (
+            self._think_bubble, self._think_dots, None, None)
+        if dots is not None:
+            dots.stop()
         if card is not None:
             self._stream.removeWidget(card)
             card.setParent(None)   # 立即摘出视觉树（removeWidget 只动布局不动父级）
@@ -1241,6 +1834,7 @@ class AiChatPage(QWidget):
         self._set_busy(True, "思考中…")
         self._show_thinking()
         self._pending_user = user_content
+        self._pending_display = display_text
         ok = self._ctx.http_post_json_async(
             url, headers, body, timeout=120.0, on_done=self._on_reply)
         if not ok:
@@ -1272,7 +1866,11 @@ class AiChatPage(QWidget):
                               "content": body or "（已按要求操作应用数据）"})
         if len(self._history) > MAX_HISTORY:
             self._history = self._history[-MAX_HISTORY:]
+        # 会话存档（A1）：同一内容落盘，供重启恢复 / 多会话切换
+        self._persist_turn(self._pending_user, self._pending_display,
+                           body or "（已按要求操作应用数据）")
         self._pending_user = ""
+        self._pending_display = ""
         if action_errs:
             self.add_bubble("提示", "以下动作未被执行：\n- "
                                     + "\n- ".join(action_errs))
@@ -1407,15 +2005,20 @@ class AiChatPage(QWidget):
         self._status.setText(text)
 
     def _clear_chat(self):
+        """清空当前会话（A1 语义：只清内容，会话本身保留在存档里）"""
         self._history = []
         self._pending_user = ""
+        self._pending_display = ""
+        self._session["messages"] = []
+        self._session["updated_at"] = _session_now()
+        save_sessions(self._ctx, self._store)
         self._hide_thinking()                   # 在途气泡也得一起拆
         while self._stream.count() > 1:          # 留着末尾 stretch
             item = self._stream.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        self.add_bubble("AI", "对话已清空。")
+        self.add_bubble("AI", "当前会话已清空。")
 
 
 # ====================================================================
@@ -1441,7 +2044,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.8.0"
+    version = "1.11.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]

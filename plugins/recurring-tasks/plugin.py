@@ -45,8 +45,9 @@ from datetime import date, datetime, timedelta
 
 from PyQt6.QtCore import QObject, Qt, QTime, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QScrollArea, QTimeEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTimeEdit,
+    QVBoxLayout, QWidget,
 )
 
 from src.plugin_api import BallAction, BallPlugin
@@ -69,13 +70,15 @@ KIND_DAILY = "daily"
 KIND_WEEKLY = "weekly"
 KIND_MONTHLY = "monthly"
 KIND_INTERVAL = "interval"
-KINDS = (KIND_DAILY, KIND_WEEKLY, KIND_MONTHLY, KIND_INTERVAL)
+KIND_NWEEKLY = "nweekly"      # 每 N 周（隔周周一这类），v1.1.0
+KINDS = (KIND_DAILY, KIND_WEEKLY, KIND_MONTHLY, KIND_INTERVAL, KIND_NWEEKLY)
 
 KIND_LABELS = (
     (KIND_DAILY, "每天"),
     (KIND_WEEKLY, "每周（选星期几）"),
     (KIND_MONTHLY, "每月（选几号）"),
     (KIND_INTERVAL, "每 N 天"),
+    (KIND_NWEEKLY, "每 N 周（隔周…）"),
 )
 KIND_LABEL = dict(KIND_LABELS)
 
@@ -186,6 +189,51 @@ def rule_fires_on(rule, day: date) -> bool:
         if anchor is None or n <= 0 or day < anchor:
             return False
         return (day - anchor).days % n == 0
+    if kind == KIND_NWEEKLY:
+        # 每 N 周 + 星期几多选：以 anchor_date 所在的「周一开头的周」为第
+        # 0 周期，week_index % N == 0 的周里的选中星期几触发。
+        # 周索引按周一对齐（不能按 (day-anchor).days//7 算——锚点在周三时，
+        # 下周一会被算进同一个"周"）。
+        anchor = as_date(rule.get("anchor_date"))
+        n = int(rule.get("interval_weeks") or 0)
+        if anchor is None or n <= 0 or day < anchor:
+            return False
+        if day.weekday() not in (rule.get("weekdays") or []):
+            return False
+        week0 = anchor - timedelta(days=anchor.weekday())
+        week1 = day - timedelta(days=day.weekday())
+        return (week1 - week0).days // 7 % n == 0
+    return False
+
+
+def rule_fires(rule, day: date) -> bool:
+    """规则在 ``day`` 「原始触发」且未被周末顺延挪走（R2，v1.2.0）。
+
+    ``shift_weekend`` 关闭（老规则缺省）= 与 ``rule_fires_on`` 完全一致，
+    **老规则零变化**；开启时周六 / 日的触发日被挪到下周一，周末本身不再算数。
+    """
+    if not rule_fires_on(rule, day):
+        return False
+    if not rule.get("shift_weekend"):
+        return True
+    return day.weekday() < 5
+
+
+def rule_fires_shifted(rule, day: date) -> bool:
+    """开启顺延后 ``day`` 是否为「实际生成日」：自身触发，或由上周末顺延而来。
+
+    顺延目标**只有周一**：周六 → 下周一（+2 天），周日 → 下周一（+1 天）。
+    两个周末日顺延到同一个周一也没关系：``pending_day`` 用
+    ``last_fired >= due`` 做幂等，同一天只会生成一条任务（撞车自动合并）。
+    """
+    if rule_fires(rule, day):
+        return True
+    if not rule.get("shift_weekend") or day.weekday() != 0:
+        return False
+    for back in (1, 2):                       # 昨天=周日 / 前天=周六
+        src = day - timedelta(days=back)
+        if src.weekday() >= 5 and rule_fires_on(rule, src):
+            return True
     return False
 
 
@@ -209,14 +257,14 @@ def latest_fired_day(rule, now: datetime, lookback_days: int = SEARCH_DAYS):
         return None
     today = now.date()
     start = rule_start(rule)
-    if rule_fires_on(rule, today) and (now.hour, now.minute) >= hm \
+    if rule_fires_shifted(rule, today) and (now.hour, now.minute) >= hm \
             and (start is None or _moment_at(today, hm) >= start):
         return today
     day = today - timedelta(days=1)
     for _ in range(lookback_days):
         if start is not None and _moment_at(day, hm) < start:
             return None                    # 再往前都早于规则创建，不算错过
-        if rule_fires_on(rule, day):
+        if rule_fires_shifted(rule, day):
             return day
         day -= timedelta(days=1)
     return None
@@ -247,7 +295,7 @@ def next_fire_at(rule, now: datetime):
         return None
     day = now.date()
     for _ in range(SEARCH_DAYS + 1):          # 含今天
-        if rule_fires_on(rule, day):
+        if rule_fires_shifted(rule, day):
             candidate = datetime.combine(day, datetime.min.time()).replace(
                 hour=hm[0], minute=hm[1])
             if candidate > now:
@@ -270,6 +318,14 @@ def deadline_for(rule, fire_day: date) -> str:
 
 def format_rule(rule) -> str:
     """规则的中文摘要（列表里一行说清「什么时候、干什么」）"""
+    text = _format_rule_core(rule)
+    if rule.get("shift_weekend"):
+        text += "（周末顺延到下周一）"
+    return text
+
+
+def _format_rule_core(rule) -> str:
+    """format_rule 的主体（shift_weekend 后缀在外面统一追加）"""
     hm = format_hm(rule.get("time")) or "--:--"
     kind = rule.get("kind")
     if kind == KIND_DAILY:
@@ -288,6 +344,12 @@ def format_rule(rule) -> str:
         anchor = as_date(rule.get("anchor_date"))
         base = f"每 {n} 天 {hm}"
         return f"{base}（自 {anchor.isoformat()} 起）" if anchor else base
+    if kind == KIND_NWEEKLY:
+        n = int(rule.get("interval_weeks") or 0)
+        days = sorted(set(rule.get("weekdays") or []))
+        text = "、".join(f"周{WEEKDAY_LABELS[d]}" for d in days if 0 <= d <= 6)
+        head = f"每 {n} 周"
+        return f"{head} {text} {hm}" if text else f"{head} {hm}"
     return f"未知规则类型 {kind!r}"
 
 
@@ -343,6 +405,9 @@ def validate_rule(raw):
         # 会让该规则永远不为过去补跑，而且每次启动水位都在变；缺省留空 =
         # 不设下限，行为与老版本一致。
         "created_at": str(raw.get("created_at") or "").strip(),
+        # 周末顺延（R2）：周六 / 日的触发日挪到下周一生成；缺省 False，
+        # 老规则没有这个键 = 行为与从前完全一致
+        "shift_weekend": bool(raw.get("shift_weekend", False)),
     }
 
     if kind == KIND_WEEKLY:
@@ -356,6 +421,27 @@ def validate_rule(raw):
             if d not in days:
                 days.append(d)
         out["weekdays"] = sorted(days)
+
+    elif kind == KIND_NWEEKLY:
+        raw_days = raw.get("weekdays")
+        if not isinstance(raw_days, (list, tuple)) or not raw_days:
+            return None, "每 N 周规则至少要选一个星期几"
+        days = []
+        for d in raw_days:
+            if not isinstance(d, int) or isinstance(d, bool) or not 0 <= d <= 6:
+                return None, f"星期几取值非法（0=周一 … 6=周日）：{d!r}"
+            if d not in days:
+                days.append(d)
+        out["weekdays"] = sorted(days)
+        n = raw.get("interval_weeks")
+        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 52:
+            return None, f"间隔周数必须在 1–52 之间：{n!r}"
+        # 锚点 = 创建当周（周一开头）；编辑保留原锚点，周期不漂移
+        anchor = (as_date(raw.get("anchor_date"))
+                  or datetime.now().date() - timedelta(
+                      days=datetime.now().weekday()))
+        out["interval_weeks"] = n
+        out["anchor_date"] = anchor.isoformat()
 
     elif kind == KIND_MONTHLY:
         raw_days = raw.get("monthdays")
@@ -385,6 +471,14 @@ def validate_rule(raw):
 
     last = as_date(raw.get("last_fired"))
     out["last_fired"] = last.isoformat() if last else ""
+    # 最近一次生成记录（R4）：编辑 / 导入时透传——out 是白名单重建，
+    # 不在这里显式搬运的话，编辑一次规则就会把「上次生成的任务」冲掉
+    last_task = raw.get("last_task")
+    if isinstance(last_task, dict):
+        out["last_task"] = {
+            "title": str(last_task.get("title") or "")[:MAX_TITLE],
+            "at": str(last_task.get("at") or "")[:32],
+        }
     return out, ""
 
 
@@ -401,6 +495,38 @@ def normalize_rules(raw_list):
             errors.append(f"规则数超过上限 {MAX_RULES}，其余已忽略")
             break
     return rules, errors
+
+
+def import_rules(existing, raw_data):
+    """把外部 JSON 并进现有规则（R3，v1.2.0）：逐条校验 + rule_id 去重。
+
+    返回 ``(merged, added, skipped, bad)``：merged 是合并后的完整列表
+    （原列表不被修改）；rule_id 与现有或本批撞车 → 跳过（现役优先，
+    不覆盖用户已经在跑的规则）；坏条目只计数。上限 MAX_RULES 照守。
+    """
+    if isinstance(raw_data, dict):
+        raw_list = raw_data.get("rules")
+    elif isinstance(raw_data, list):
+        raw_list = raw_data
+    else:
+        raw_list = None
+    merged = [dict(r) for r in existing or []]
+    known = {r.get("rule_id") for r in merged}
+    added = skipped = bad = 0
+    for item in raw_list or []:
+        rule, _err = validate_rule(item)
+        if rule is None:
+            bad += 1
+            continue
+        if rule["rule_id"] in known:
+            skipped += 1
+            continue
+        known.add(rule["rule_id"])
+        merged.append(rule)
+        added += 1
+        if len(merged) >= MAX_RULES:
+            break
+    return merged, added, skipped, bad
 
 
 # ====================================================================
@@ -572,7 +698,7 @@ class RuleScheduler(QObject):
                 continue
             if self._failed_marks.get(rule.get("rule_id")) == day.isoformat():
                 continue                          # 这一天已经试过且失败过
-            ok, detail = self._fire(rule, day)
+            ok, detail = self._fire(rule, day, now)
             if ok:
                 created.append((rule, detail, day.isoformat()))
             else:
@@ -583,8 +709,9 @@ class RuleScheduler(QObject):
             self.save()
         return created
 
-    def _fire(self, rule, fire_day: date):
+    def _fire(self, rule, fire_day: date, now: datetime | None = None):
         """生成一条任务并推进 ``last_fired``。返回 ``(ok, task_id 或原因)``"""
+        now = now or datetime.now()
         if self._ctx is None:
             return False, "插件上下文不可用"
         deadline = deadline_for(rule, fire_day)
@@ -598,6 +725,12 @@ class RuleScheduler(QObject):
                            "或宿主未开放数据写入）")
         # 成功才推进 last_fired —— 幂等的锚点
         rule["last_fired"] = fire_day.isoformat()
+        # 最近一次生成记录（R4）：给页面卡片显示「上次生成了哪条任务」。
+        # 标题取生成那一刻的规则标题——之后改了规则标题也不会混淆历史。
+        rule["last_task"] = {
+            "title": rule.get("title", ""),
+            "at": now.strftime("%Y-%m-%d %H:%M"),
+        }
         self.fired.emit(f"已生成任务「{rule.get('title', '')}」"
                         f"（{fire_day.isoformat()} 的周期）")
         self._info(f"生成任务 #{task_id}：{rule.get('title')} "
@@ -768,6 +901,21 @@ class RuleDialog(PluginDialog):
         ir.addStretch(1)
         pv.addWidget(self._interval_row)
 
+        # —— 每 N 周（v1.1.0）：间隔周数 + 复用上面那排星期勾选
+        self._nweeks_row = QWidget()
+        nr = QHBoxLayout(self._nweeks_row)
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.setSpacing(6)
+        nr.addWidget(make_section_label("间隔周数"))
+        self._nweeks = QLineEdit()
+        self._nweeks.setPlaceholderText("1–52，如 2（= 隔周）")
+        self._nweeks.setFixedWidth(90)
+        nr.addWidget(self._nweeks)
+        nr.addWidget(make_hint_label(
+            "从本周期（创建那周）起算，勾选的星期几到点各生成一条"))
+        nr.addStretch(1)
+        pv.addWidget(self._nweeks_row)
+
         form.addWidget(self._param_box)
 
         # 截止日策略
@@ -781,6 +929,17 @@ class RuleDialog(PluginDialog):
         row3.addWidget(make_hint_label("只影响生成出来的任务，不影响触发时刻"))
         row3.addStretch(1)
         form.addLayout(row3)
+
+        # 周末顺延（R2）：周六 / 日的触发日挪到下周一
+        shift_row = QHBoxLayout()
+        self._shift = QCheckBox("周末触发日顺延到下周一（休息日不生成任务）")
+        self._shift.setToolTip(
+            "勾选后，落在周六 / 日的触发日改到下一个周一的同一时刻生成；"
+            "多个周末日顺延到同一个周一也只生成一条任务")
+        self._shift.toggled.connect(self._refresh_preview)
+        shift_row.addWidget(self._shift)
+        shift_row.addStretch(1)
+        form.addLayout(shift_row)
 
         body.addWidget(card)
 
@@ -802,7 +961,8 @@ class RuleDialog(PluginDialog):
         ])
 
         self._kind.currentIndexChanged.connect(self._on_kind_changed)
-        for w in (self._title, self._note, self._month_edit, self._interval):
+        for w in (self._title, self._note, self._month_edit, self._interval,
+                  self._nweeks):
             w.textChanged.connect(self._refresh_preview)
         self._time.timeChanged.connect(self._refresh_preview)
         for cb in self._week_checks:
@@ -812,9 +972,10 @@ class RuleDialog(PluginDialog):
 
     def _on_kind_changed(self, *_args):
         kind = self._kind.currentData()
-        self._week_row.setVisible(kind == KIND_WEEKLY)
+        self._week_row.setVisible(kind in (KIND_WEEKLY, KIND_NWEEKLY))
         self._month_row.setVisible(kind == KIND_MONTHLY)
         self._interval_row.setVisible(kind == KIND_INTERVAL)
+        self._nweeks_row.setVisible(kind == KIND_NWEEKLY)
         self._refresh_preview()
 
     # ---------------- 数据 <-> 控件 ----------------
@@ -837,9 +998,12 @@ class RuleDialog(PluginDialog):
             self._month_edit.setText(",".join(str(d) for d in rule["monthdays"]))
         if rule.get("interval_days"):
             self._interval.setText(str(rule["interval_days"]))
+        if rule.get("interval_weeks"):
+            self._nweeks.setText(str(rule["interval_weeks"]))
         idx = self._due.findData(rule.get("due_days", -1))
         if idx >= 0:
             self._due.setCurrentIndex(idx)
+        self._shift.setChecked(bool(rule.get("shift_weekend", False)))
         self._on_kind_changed()
         self._refresh_preview()
 
@@ -851,6 +1015,7 @@ class RuleDialog(PluginDialog):
             "kind": self._kind.currentData(),
             "time": self._time.time().toString("HH:mm"),
             "due_days": self._due.currentData(),
+            "shift_weekend": self._shift.isChecked(),
             "enabled": True,
         }
         if self._editing:
@@ -858,12 +1023,15 @@ class RuleDialog(PluginDialog):
             raw["created_at"] = self._editing.get("created_at")
             raw["last_fired"] = self._editing.get("last_fired", "")
             raw["enabled"] = self._editing.get("enabled", True)
+            # 「上次生成记录」透传：编辑不改历史（validate_rule 会搬运）
+            if isinstance(self._editing.get("last_task"), dict):
+                raw["last_task"] = self._editing.get("last_task")
         else:
             # 新建：记下创建时刻，作为「补跑」的下限——不给创建之前的日子
             # 补生成任务（否则 10:00 建一条「每天 08:00」会立刻冒出一条昨天的）
             raw["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         kind = raw["kind"]
-        if kind == KIND_WEEKLY:
+        if kind in (KIND_WEEKLY, KIND_NWEEKLY):
             raw["weekdays"] = [i for i, cb in enumerate(self._week_checks)
                                if cb.isChecked()]
         elif kind == KIND_MONTHLY:
@@ -872,6 +1040,13 @@ class RuleDialog(PluginDialog):
             raw["interval_days"] = self._parse_interval()
             anchor = as_date((self._editing or {}).get("anchor_date"))
             raw["anchor_date"] = (anchor or datetime.now().date()).isoformat()
+        if kind == KIND_NWEEKLY:
+            raw["interval_weeks"] = self._parse_nweeks()
+            anchor = as_date((self._editing or {}).get("anchor_date"))
+            if anchor is None:
+                today = datetime.now().date()
+                anchor = today - timedelta(days=today.weekday())
+            raw["anchor_date"] = anchor.isoformat()
         return raw
 
     def _parse_month_days(self):
@@ -892,6 +1067,13 @@ class RuleDialog(PluginDialog):
 
     def _parse_interval(self):
         text = self._interval.text().strip()
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return None
+
+    def _parse_nweeks(self):
+        text = self._nweeks.text().strip()
         try:
             return int(text)
         except (TypeError, ValueError):
@@ -972,6 +1154,18 @@ class CycleTasksPage(QWidget):
         check_btn.setToolTip("不等 60s 轮询，马上按规则检查一次")
         check_btn.clicked.connect(self._on_check_now)
         toolbar.addWidget(check_btn)
+
+        export_btn = QPushButton("📤 导出规则")
+        export_btn.setObjectName("secondaryBtn")
+        export_btn.setToolTip("把全部规则导出成 JSON 文件（备份 / 换机用）")
+        export_btn.clicked.connect(self._on_export)
+        toolbar.addWidget(export_btn)
+
+        import_btn = QPushButton("📥 导入规则")
+        import_btn.setObjectName("secondaryBtn")
+        import_btn.setToolTip("从导出的 JSON 文件并入规则（重复 rule_id 自动跳过）")
+        import_btn.clicked.connect(self._on_import)
+        toolbar.addWidget(import_btn)
 
         self._state_label = QLabel("")
         self._state_label.setObjectName("hintLabel")
@@ -1069,7 +1263,17 @@ class CycleTasksPage(QWidget):
 
         last = rule.get("last_fired") or "从未生成"
         note = rule.get("note") or ""
-        meta = QLabel(f"上次生成：{last}" + (f"　备注：{note}" if note else ""))
+        # R4：上次生成的任务标题 + 时刻（生成那一刻的规则标题，改标题不混淆历史）
+        last_task = rule.get("last_task") or {}
+        task_title = str(last_task.get("title") or "").strip()
+        task_at = str(last_task.get("at") or "").strip()
+        meta_bits = [f"上次生成：{last}"]
+        if task_title:
+            meta_bits.append("任务「" + task_title + "」"
+                             + (f"（{task_at}）" if task_at else ""))
+        if note:
+            meta_bits.append(f"备注：{note}")
+        meta = QLabel("　".join(meta_bits))
         meta.setObjectName("pluginCardId")
         meta.setWordWrap(True)
         v.addWidget(meta)
@@ -1156,6 +1360,67 @@ class CycleTasksPage(QWidget):
         else:
             self._toast("没有到点的规则（或今天已经生成过）")
         self._refresh_host_tasks()
+
+    # ---------------- 导出 / 导入（R3） ----------------
+    def _on_export(self):
+        """全部规则 → JSON 文件（QFileDialog 选路径，utf-8 + LF）"""
+        rules = self._scheduler.rules()
+        if not rules:
+            self._toast("还没有可导出的规则")
+            return
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "导出周期任务规则", "周期任务规则.json", "JSON 文件 (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        payload = {
+            "version": SCHEMA_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "rules": rules,
+        }
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            self._toast(f"导出失败：{exc}")
+            return
+        self._toast(f"已导出 {len(rules)} 条规则")
+
+    def _read_json_file(self, path):
+        """读导入文件 → JSON 对象；读取失败 toast 并返回 None"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError) as exc:
+            self._toast(f"读取失败：{exc}")
+            return None
+
+    def _on_import(self):
+        """从 JSON 文件并入规则：逐条校验、rule_id 去重（现役优先）"""
+        path, _sel = QFileDialog.getOpenFileName(
+            self, "导入周期任务规则", "", "JSON 文件 (*.json)")
+        if not path:
+            return
+        data = self._read_json_file(path)
+        if data is None:
+            return
+        merged, added, skipped, bad = import_rules(
+            self._scheduler.rules(), data)
+        if added == 0 and skipped == 0 and bad == 0:
+            self._toast("文件里没有可导入的规则")
+            return
+        parts = [f"新增 {added} 条"]
+        if skipped:
+            parts.append(f"跳过重复 {skipped} 条")
+        if bad:
+            parts.append(f"坏数据 {bad} 条")
+        if added:
+            self._scheduler.set_rules(merged)
+            if not self._scheduler.save():
+                self._toast("⚠ 规则已生效，但写入磁盘失败（重启后会丢失）")
+            self.reload_rules()
+        self._toast("导入完成：" + "，".join(parts))
 
     # ---------------- 调度器信号 ----------------
     def _on_fired(self, text):
@@ -1274,7 +1539,7 @@ def _fallback_dialog(ctx, holder):
 class RecurringTasksPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "周期任务"
-    version = "1.0.0"
+    version = "1.2.0"
 
     def create_actions(self, ctx):
         return [ManageRulesAction(), CheckNowAction()]

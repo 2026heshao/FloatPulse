@@ -22,6 +22,7 @@
 ====================================================================
 """
 
+import json
 import os
 import re
 from datetime import date, datetime, timedelta
@@ -29,8 +30,9 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import QDate, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QDateEdit, QFileDialog, QHBoxLayout,
-    QLabel, QMessageBox, QPlainTextEdit, QRadioButton, QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QDateEdit, QFileDialog,
+    QHBoxLayout, QLabel, QMenu, QMessageBox, QPlainTextEdit, QRadioButton,
+    QVBoxLayout, QWidget,
 )
 
 from src.plugin_api import BallAction, BallPlugin
@@ -74,6 +76,13 @@ TEMP_NOTE_TITLE = "📌 临时笔记"
 VAULT_ROOT_NAME = "FloatPulse"
 VAULT_SUBDIR = "报告"
 
+# ---------------- 导出历史（v1.2.0，P3） ----------------
+# 最近导出的文件记进插件私有目录（重启不丢）；「🕘 最近导出」菜单一键
+# 回访。上限收紧：它是「快速回访」不是「导出日志」。
+EXPORTS_FILE = "exports.json"
+EXPORT_LIMIT = 10          # 最多保留的导出记录（最新在前，丢最旧）
+EXPORT_PATH_CHARS = 500    # 单条路径的最大字符数
+
 _ILLEGAL_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f\x7f]')
 _RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -81,6 +90,98 @@ _RESERVED_NAMES = frozenset(
     | {f"LPT{i}" for i in range(1, 10)}
 )
 _WEEKDAY_CN = ("一", "二", "三", "四", "五", "六", "日")
+
+# ---------------- AI 润色（v1.1.0，P1） ----------------
+POLISH_TIMEOUT_S = 90.0
+MAX_DRAFT_CHARS = 8000        # 送润色的草稿上限（超长截断并标注）
+TEMPERATURE = 0.4
+
+POLISH_SYSTEM_PROMPT = (
+    "你是办公工具 FloatPulse 的周报润色助手。规则：\n"
+    "1. 只输出润色后的周报本身——不要解释、不要开场白、不要包代码块；\n"
+    "2. 保留原文的 Markdown 结构与全部事实（任务名、日期、数量），"
+    "绝不虚构原文没有的工作内容；\n"
+    "3. 语气专业、简洁，适合直接提交给上级；用简体中文。"
+)
+
+POLISH_PROMPT = (
+    "请把下面的周报草稿润色成一份可以直接提交的正式周报：\n"
+    "- 保留原有事实与数字，把流水账整理成有条理的汇报；\n"
+    "- 可以按「本周完成 / 进行中 / 下周计划」重组段落，缺的段落不要编；\n"
+    "- 篇幅与原文相当，不要注水。"
+)
+
+
+def build_polish_request(params: dict, draft: str):
+    """AI 总配置参数 + 草稿 → (url, headers, body, 错误文案)
+
+    成功时错误文案为空串；失败时前三个返回值都是 None。
+    与 ai-text-workshop 的 build_request 同一参数契约（mode / base_url /
+    api_key / model / local_port），OpenAI 兼容 /chat/completions 非流式。
+    """
+    params = params if isinstance(params, dict) else {}
+    mode = str(params.get("mode") or "cloud")
+    if mode == "local":
+        try:
+            port = int(params.get("local_port") or 8095)
+        except (TypeError, ValueError):
+            port = 8095
+        base = f"http://127.0.0.1:{port}/v1"
+        model = "local"
+        key = ""
+    else:
+        base = str(params.get("base_url") or "").strip().rstrip("/")
+        model = str(params.get("model") or "").strip()
+        key = str(params.get("api_key") or "").strip()
+        if not base:
+            return None, None, None, "后端地址为空：到 设置 → 🧠 AI 总配置 填写"
+        if not model:
+            return None, None, None, "模型名为空：到 设置 → 🧠 AI 总配置 填写"
+    if not (base.startswith("http://") or base.startswith("https://")):
+        return None, None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
+    text = str(draft or "").strip()
+    if not text:
+        return None, None, None, "草稿为空：先选好时间范围生成草稿"
+    if len(text) > MAX_DRAFT_CHARS:
+        text = text[:MAX_DRAFT_CHARS] + f"\n…（超长已截断，原始 {len(text)} 字符）"
+    url = f"{base}/chat/completions"
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": POLISH_SYSTEM_PROMPT},
+            {"role": "user",
+             "content": f"{POLISH_PROMPT}\n\n=== 周报草稿 ===\n{text}"},
+        ],
+        "temperature": TEMPERATURE,
+        "stream": False,
+    }
+    return url, headers, body, ""
+
+
+def parse_ai_reply(result: dict):
+    """网络桥结果 → (回复文本, None) 或 (None, 错误文案)"""
+    if not result.get("ok"):
+        err = str(result.get("error") or "未知错误")
+        detail = (result.get("body") or "").strip()[:200]
+        hint = ""
+        if "HTTP 401" in err or "HTTP 403" in err:
+            hint = "（key 缺失或无效？到 设置 → 🧠 AI 总配置 检查）"
+        elif "HTTP 404" in err:
+            hint = "（地址或模型名不对？地址应以 /v1 结尾）"
+        elif "timed out" in err.lower() or "timeout" in err.lower():
+            hint = "（模型首次加载较慢，可重试一次）"
+        elif "refused" in err.lower():
+            hint = "（端口没有服务在听——本地服务没启动，或端口号不对）"
+        return None, f"请求失败：{err}{hint}" + (f"\n{detail}" if detail else "")
+    try:
+        data = json.loads(result.get("body") or "")
+        reply = data["choices"][0]["message"]["content"]
+        return str(reply).strip(), None
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        return None, f"响应格式不符合 OpenAI 协议：{exc!r}"
 
 
 # ====================================================================
@@ -153,6 +254,71 @@ def _timestamp(created_at) -> str:
     return text
 
 
+# ---------------- 导出历史存档（P3） ----------------
+def sanitize_exports(raw) -> list:
+    """导出历史消毒：脏条目丢弃、路径截断、去重（保最新）、上限裁剪"""
+    items, seen = [], set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()[:EXPORT_PATH_CHARS]
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        items.append({"path": path,
+                      "at": str(item.get("at") or "")[:16]})
+        if len(items) >= EXPORT_LIMIT:
+            break
+    return items
+
+
+def load_exports(ctx) -> list:
+    """读导出历史；文件缺失 / 写坏降级为空表（原文件保留）"""
+    data_dir = getattr(ctx, "data_dir", None)
+    path = os.path.join(data_dir, EXPORTS_FILE) if data_dir else ""
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return sanitize_exports(json.load(f))
+        except (OSError, ValueError):
+            pass
+    return []
+
+
+def save_exports(ctx, items) -> bool:
+    """写导出历史（临时文件 + os.replace 原子替换）；失败只返回 False"""
+    data_dir = getattr(ctx, "data_dir", None)
+    path = os.path.join(data_dir, EXPORTS_FILE) if data_dir else ""
+    if not path:
+        return False
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(sanitize_exports(items), f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def record_export(ctx, path, at=None) -> bool:
+    """记一笔导出：同路径提到最前（不重复）、截上限、落盘"""
+    text = str(path or "").strip()[:EXPORT_PATH_CHARS]
+    if not text:
+        return False
+    items = load_exports(ctx)
+    items = [it for it in items if it["path"] != text]
+    stamp = (at or datetime.now()).strftime("%Y-%m-%d %H:%M")
+    items.insert(0, {"path": text, "at": stamp})
+    return save_exports(ctx, items[:EXPORT_LIMIT])
+
+
 def resolve_range(key, today, custom_start=None, custom_end=None):
     """把范围选择解析为 ``(start, end, label)``
 
@@ -175,8 +341,19 @@ def resolve_range(key, today, custom_start=None, custom_end=None):
     return today, today, "今日"
 
 
+def normalize_include(include) -> dict:
+    """段落开关归一化（P2）：None = 全开（与旧版逐字节一致）；脏值忽略"""
+    base = {"done": True, "open": True, "fragments": True,
+            "notes": True, "pomodoro": True}
+    if isinstance(include, dict):
+        for key in base:
+            if key in include:
+                base[key] = bool(include[key])
+    return base
+
+
 def build_report(tasks, fragments, notes, pomodoro, start, end, *,
-                 label="", now=None) -> str:
+                 label="", now=None, include=None) -> str:
     """按区间拼装 Markdown 草稿（纯函数，便于验证）
 
     :param tasks: 任务快照列表（dict，字段见 task_manager.Task.to_dict）
@@ -186,6 +363,9 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
     :param start, end: 区间（date，含两端）
     :param label: 区间中文名（"今日" / "本周" …）
     :param now: 生成时刻（默认系统当前时间；注入便于测试）
+    :param include: 段落开关（P2，v1.2.0）：{"done","open","fragments",
+      "notes","pomodoro"} → bool；None / 缺键 = True（向后兼容）。
+      关掉的段落整段不输出；统计行只列保留段落的计数。
     """
     now = now or datetime.now()
     today = now.date()
@@ -281,12 +461,21 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
                    f"{remaining // 60:02d}:{remaining % 60:02d}）"
 
     # ---- 组装 ----
-    data_line = (f"> 数据：已完成任务 {len(done_rows)}"
-                 f" ｜ 未完成 {len(open_rows)}"
-                 f" ｜ 碎片 {frag_total} ｜ 笔记 {len(note_rows)}")
-    if missing_time:
+    inc = normalize_include(include)
+    data_parts = []
+    if inc["done"]:
+        data_parts.append(f"已完成任务 {len(done_rows)}")
+    if inc["open"]:
+        data_parts.append(f"未完成 {len(open_rows)}")
+    if inc["fragments"]:
+        data_parts.append(f"碎片 {frag_total}")
+    if inc["notes"]:
+        data_parts.append(f"笔记 {len(note_rows)}")
+    data_line = ("> 数据：" + " ｜ ".join(data_parts) if data_parts
+                 else "> 数据：（各段落均已关闭，只输出标题）")
+    if inc["done"] and missing_time:
         data_line += f" ｜ 完成时间缺失 {len(missing_time)}（见文末）"
-    if undated_done:
+    if inc["done"] and undated_done:
         data_line += f" ｜ 无日期已完成 {len(undated_done)}（见文末）"
     head = [
         f"# {title_kind} {span}",
@@ -298,72 +487,79 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
         "",
     ]
 
-    body = ["## ✅ 已完成任务（%d）" % len(done_rows), ""]
-    if done_rows:
-        for r in done_rows:
-            extra = f" ｜ {r['note']}" if r["note"] else ""
-            body.append(f"- [x] {r['title']} ｜ "
-                        f"{r['when'].isoformat()} 完成{extra}")
-    else:
-        body.append("_（本区间没有已完成的任务）_")
-    body.append("")
-
-    body += ["## 🔄 未完成任务（逾期 / 本周期到期）（%d）" % len(open_rows), ""]
-    if open_rows:
-        for r in open_rows:
-            rel = f" ｜ {r['rel']}" if r["rel"] else ""
-            body.append(f"- [ ] {r['title']}{rel}")
-    else:
-        body.append("_（没有逾期或本区间内到期的未完成任务）_")
-    body.append("")
-
-    body += ["## 🧩 本周期碎片（%d）" % frag_total, ""]
-    if frag_total:
-        ordered = [c for c in CATEGORY_ORDER if buckets.get(c)]
-        ordered += [c for c in sorted(buckets) if c not in CATEGORY_ORDER]
-        for cat in ordered:
-            label_cn = CATEGORY_LABEL.get(cat, OTHER_CATEGORY)
-            body.append(f"### {label_cn}（{len(buckets[cat])}）")
-            body.append("")
-            for f in sorted(buckets[cat],
-                            key=lambda x: str(x.get("created_at") or "")):
-                src = one_line(f.get("source"), 24) or "未知来源"
-                body.append(f"- {one_line(f.get('content'), 80)}"
-                            f"（{src} ｜ {_timestamp(f.get('created_at'))}）")
-            body.append("")
-    else:
-        body.append("_（本区间没有新碎片）_")
+    body = []
+    if inc["done"]:
+        body += ["## ✅ 已完成任务（%d）" % len(done_rows), ""]
+        if done_rows:
+            for r in done_rows:
+                extra = f" ｜ {r['note']}" if r["note"] else ""
+                body.append(f"- [x] {r['title']} ｜ "
+                            f"{r['when'].isoformat()} 完成{extra}")
+        else:
+            body.append("_（本区间没有已完成的任务）_")
         body.append("")
 
-    body += ["## 📝 本周期更新的笔记（%d）" % len(note_rows), ""]
-    if note_rows:
-        for _, title in note_rows:
-            body.append(f"- {title}")
-    else:
-        body.append("_（本区间没有笔记更新）_")
-    body.append("")
+    if inc["open"]:
+        body += ["## 🔄 未完成任务（逾期 / 本周期到期）（%d）" % len(open_rows),
+                 ""]
+        if open_rows:
+            for r in open_rows:
+                rel = f" ｜ {r['rel']}" if r["rel"] else ""
+                body.append(f"- [ ] {r['title']}{rel}")
+        else:
+            body.append("_（没有逾期或本区间内到期的未完成任务）_")
+        body.append("")
 
-    body += [
-        "## 🍅 专注统计",
-        "",
-        f"- 本周期已完成任务累计专注 **{done_sessions}** 次",
-        f"- 未完成任务累计专注 **{open_sessions}** 次",
-        f"- 全部任务累计专注 **{all_sessions}** 次",
-        f"- 当前番茄钟：{state_cn}",
-        "",
-        "> 说明：番茄计数取自任务的累计字段（focus_sessions），"
-        "是**按任务累计**而非时间区间统计。",
-        "",
-    ]
+    if inc["fragments"]:
+        body += ["## 🧩 本周期碎片（%d）" % frag_total, ""]
+        if frag_total:
+            ordered = [c for c in CATEGORY_ORDER if buckets.get(c)]
+            ordered += [c for c in sorted(buckets) if c not in CATEGORY_ORDER]
+            for cat in ordered:
+                label_cn = CATEGORY_LABEL.get(cat, OTHER_CATEGORY)
+                body.append(f"### {label_cn}（{len(buckets[cat])}）")
+                body.append("")
+                for f in sorted(buckets[cat],
+                                key=lambda x: str(x.get("created_at") or "")):
+                    src = one_line(f.get("source"), 24) or "未知来源"
+                    body.append(f"- {one_line(f.get('content'), 80)}"
+                                f"（{src} ｜ {_timestamp(f.get('created_at'))}）")
+                body.append("")
+        else:
+            body.append("_（本区间没有新碎片）_")
+            body.append("")
+
+    if inc["notes"]:
+        body += ["## 📝 本周期更新的笔记（%d）" % len(note_rows), ""]
+        if note_rows:
+            for _, title in note_rows:
+                body.append(f"- {title}")
+        else:
+            body.append("_（本区间没有笔记更新）_")
+        body.append("")
+
+    if inc["pomodoro"]:
+        body += [
+            "## 🍅 专注统计",
+            "",
+            f"- 本周期已完成任务累计专注 **{done_sessions}** 次",
+            f"- 未完成任务累计专注 **{open_sessions}** 次",
+            f"- 全部任务累计专注 **{all_sessions}** 次",
+            f"- 当前番茄钟：{state_cn}",
+            "",
+            "> 说明：番茄计数取自任务的累计字段（focus_sessions），"
+            "是**按任务累计**而非时间区间统计。",
+            "",
+        ]
 
     tail = []
-    if missing_time:
+    if inc["done"] and missing_time:
         tail += ["", "---", "",
                  "※ 以下任务已完成但缺少完成时间，按截止日/创建日归入本区间：", ""]
         for r in missing_time:
             tail.append(f"- [x] {r['title']} ｜ 归入日 {r['when'].isoformat()} ※")
         tail.append("")
-    if undated_done:
+    if inc["done"] and undated_done:
         tail += ["", "---", "",
                  "※ 以下任务已完成，但没有任何可解析的日期，无法归入任何区间：", ""]
         for title in undated_done:
@@ -397,6 +593,8 @@ class ReportDialog(PluginDialog):
         # 基类已把 ctx 存进 self._plugin_ctx；这里沿用本插件惯用的 _ctx 名字
         self._ctx = ctx
         self._today = date.today()
+        self._polish_busy = False      # AI 润色在途（防重复点击）
+        self._last_generated = ""      # 最近一次按范围生成的原文（覆盖确认用）
         self._build_ui()
         self._regenerate()
 
@@ -454,6 +652,15 @@ class ReportDialog(PluginDialog):
         head = QHBoxLayout()
         head.setSpacing(8)
         head.addWidget(make_section_label("草稿预览"))
+        # 段落开关（P2）：任务（完成+未完成）/ 碎片 / 笔记；专注统计恒保留。
+        # 勾选即时重生成——预览内容就是导出内容，开关效果所见即所得。
+        self._inc_tasks = QCheckBox("任务")
+        self._inc_frag = QCheckBox("碎片")
+        self._inc_notes = QCheckBox("笔记")
+        for cb in (self._inc_tasks, self._inc_frag, self._inc_notes):
+            cb.setChecked(True)
+            cb.setToolTip("取消勾选后，报告里不再包含这一段落")
+            head.addWidget(cb)
         head.addWidget(make_hint_label("可直接编辑，导出的是当前内容"))
         head.addStretch(1)
         pc.addLayout(head)
@@ -476,12 +683,15 @@ class ReportDialog(PluginDialog):
         # vault 未配置 → 置灰并说明原因（不弹窗、不阻断其它按钮）
         vault_ready = bool(self._vault_path())
         created = self.add_footer([
+            ("🕘 最近导出", "secondaryBtn", self._show_recent),
             ("关闭", "secondaryBtn", self.accept),
             ("📋 复制到剪贴板", "secondaryBtn", self._do_copy),
+            ("🧠 AI 润色", "secondaryBtn", self._do_polish),
             ("另存为 .md…", "secondaryBtn", self._do_save_as, "save"),
             ("🗂 写入 Obsidian vault", "primaryBtn", self._do_vault),
         ])
-        self._close_btn, self._copy_btn, self._save_btn, self._vault_btn = created
+        (self._recent_btn, self._close_btn, self._copy_btn,
+         self._polish_btn, self._save_btn, self._vault_btn) = created
         if not vault_ready:
             self._vault_btn.setEnabled(False)
             self._vault_btn.setToolTip(
@@ -494,6 +704,10 @@ class ReportDialog(PluginDialog):
             rb.toggled.connect(self._on_range_changed)
         self._from.dateChanged.connect(self._regenerate)
         self._to.dateChanged.connect(self._regenerate)
+        # 段落开关（P2）：必须在三个勾选框**都建好后**再接信号——
+        # 接好后 setChecked 才不会在半初始化状态触发 _regenerate
+        for cb in (self._inc_tasks, self._inc_frag, self._inc_notes):
+            cb.toggled.connect(self._regenerate)
 
     # ---------------- 范围与生成 ----------------
     def _current_key(self) -> str:
@@ -516,6 +730,14 @@ class ReportDialog(PluginDialog):
             custom_end = self._to.date().toPyDate()
         return resolve_range(key, self._today, custom_start, custom_end)
 
+    def _include(self) -> dict:
+        """三勾选 → build_report 的段落开关（任务勾选同时控制完成/未完成）"""
+        return {"done": self._inc_tasks.isChecked(),
+                "open": self._inc_tasks.isChecked(),
+                "fragments": self._inc_frag.isChecked(),
+                "notes": self._inc_notes.isChecked(),
+                "pomodoro": True}
+
     def _regenerate(self, *_args):
         start, end, label = self._range()
         data = self._ctx.data
@@ -528,12 +750,86 @@ class ReportDialog(PluginDialog):
         else:
             tasks, fragments, notes, pomodoro = [], [], [], {}
         text = build_report(tasks, fragments, notes, pomodoro,
-                            start, end, label=label)
+                            start, end, label=label, include=self._include())
         if not data.sources():
             text += ("\n> ⚠ 宿主未注入任何数据源，以上内容为空"
                      "（需要 tasks / fragments / notes）。\n")
         self._text.setPlainText(text)
+        self._last_generated = text
         self._status.setText(f"已生成：{start.isoformat()} ~ {end.isoformat()}")
+
+    # ---------------- AI 润色（v1.1.0，P1） ----------------
+    def _attached_params(self):
+        """AI 总配置参数（唯一后端来源）；未接入返回 None（同 AI 插件口径）"""
+        try:
+            if self._ctx.has_capability("ai") and self._ctx.ai.is_attached():
+                params = self._ctx.ai.params()
+                if params:
+                    return params
+        except Exception:                     # noqa: BLE001 - 读取失败按未接入
+            pass
+        return None
+
+    def _do_polish(self):
+        """把当前预览内容交给 AI 润色，结果回填预览区。
+
+        手动编辑过的草稿（与最近生成原文不一致）先弹确认再覆盖——
+        润色是「整段替换」，不能悄悄毁掉用户手改的内容。
+        """
+        if self._polish_busy:
+            self._status.setText("正在润色上一份…")
+            return
+        draft = self._text.toPlainText().strip()
+        if not draft:
+            self._status.setText("草稿为空：先选好时间范围生成草稿")
+            return
+        params = self._attached_params()
+        if params is None:
+            self._status.setText(
+                "尚未接入 AI：到 设置 → 🧠 AI 总配置 配好云端或本地后端，"
+                "并在「接入插件」里勾选本插件")
+            return
+        if params.get("mode") == "local" and not params.get("local_ready"):
+            self._status.setText("宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动")
+            return
+        if draft != self._last_generated.strip():
+            answer = QMessageBox.question(
+                self, "覆盖手动编辑？",
+                "当前草稿有手动编辑，AI 润色会整段替换预览内容。\n\n"
+                "（原文随时可改时间范围重新生成找回）是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self._status.setText("已取消 AI 润色")
+                return
+        url, headers, body, err = build_polish_request(params, draft)
+        if url is None:
+            self._status.setText(err)
+            return
+        self._polish_busy = True
+        self._polish_btn.setEnabled(False)
+        self._status.setText("AI 润色中…（模型响应通常几秒）")
+        self._ctx.logger.info(f"[{PLUGIN_ID}] AI 润色：草稿 {len(draft)} 字")
+        ok = self._ctx.http_post_json_async(
+            url, headers, body, timeout=POLISH_TIMEOUT_S,
+            on_done=self._on_polish_reply)
+        if not ok:
+            self._on_polish_reply({"ok": False, "error": "网络桥拒绝请求"})
+
+    def _on_polish_reply(self, result: dict):
+        self._polish_busy = False
+        self._polish_btn.setEnabled(True)
+        text, err = parse_ai_reply(result)
+        if err:
+            self._status.setText(err)
+            return
+        if not text:
+            self._status.setText("⚠ AI 返回了空结果，预览未改动")
+            return
+        self._text.setPlainText(text)
+        self._last_generated = text          # 润色稿成为新基准
+        self._status.setText("✅ AI 润色完成，已替换预览"
+                             "（原文可改时间范围重新生成找回）")
 
     # ---------------- 输出动作 ----------------
     def _vault_path(self) -> str:
@@ -568,6 +864,7 @@ class ReportDialog(PluginDialog):
         if not path.lower().endswith(".md"):
             path += ".md"
         if self._write_file(path):
+            record_export(self._ctx, path)     # P3：记入最近导出
             self._status.setText(f"✅ 已保存：{path}")
 
     def _do_vault(self):
@@ -588,7 +885,46 @@ class ReportDialog(PluginDialog):
                 self._status.setText("已取消写入")
                 return
         if self._write_file(path):
+            record_export(self._ctx, path)     # P3：vault 写入也算导出
             self._status.setText(f"✅ 已写入 vault：{path}")
+
+    # ---------------- 最近导出（P3） ----------------
+    def _show_recent(self):
+        """「🕘 最近导出」菜单：最近导出的文件 → 点击打开所在文件夹"""
+        menu = QMenu(self)
+        items = load_exports(self._ctx)
+        if not items:
+            empty = menu.addAction("（还没有导出记录）")
+            empty.setEnabled(False)
+        for it in items:
+            name = os.path.basename(it["path"]) or it["path"]
+            act = menu.addAction(f"📂 {name}（{it['at'] or '时间未知'}）")
+            act.setToolTip(it["path"])
+            act.triggered.connect(
+                lambda _=False, p=it["path"]: self._open_export(p))
+        if items:
+            menu.addSeparator()
+            clear = menu.addAction("🗑 清空导出记录")
+            clear.triggered.connect(self._clear_exports)
+        menu.exec(self._recent_btn.mapToGlobal(
+            self._recent_btn.rect().bottomLeft()))
+
+    def _open_export(self, path: str):
+        """打开一条导出记录所在的文件夹（资源管理器）"""
+        folder = os.path.dirname(path) or path
+        if not os.path.isdir(folder):
+            self._status.setText(f"⚠ 文件所在文件夹不存在：{folder}")
+            return
+        try:
+            os.startfile(folder)               # Windows 资源管理器
+        except OSError as exc:
+            self._status.setText(f"⚠ 打开文件夹失败：{exc}")
+
+    def _clear_exports(self):
+        if save_exports(self._ctx, []):
+            self._status.setText("已清空导出记录")
+        else:
+            self._status.setText("清空失败（数据目录不可用）")
 
     def _write_file(self, path: str) -> bool:
         try:
@@ -632,7 +968,7 @@ class DraftReportAction(BallAction):
 class WeeklyReportPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "日报 / 周报草稿"
-    version = "1.0.0"
+    version = "1.2.0"
 
     def create_actions(self, ctx):
         return [DraftReportAction()]

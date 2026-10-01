@@ -24,17 +24,25 @@ Launcher）：本插件**只索引宿主自己的数据**，不碰文件系统�
   2. **结果用 QTextBrowser 渲染 HTML 而不是 QLabel 拼控件**：宿主 QLabel
      不渲染 Markdown，高亮只能靠拼多个控件或自绘；QTextBrowser 支持
      HTML 子集，一个控件就能把「命中处加粗着色」做对，代码量也最小。
+
+v1.1.0 增强：
+  - K1 范围过滤：搜索框下五个数据源勾选（默认全开=与旧版同路径），
+    在全库分数算好后按范围排除 → 勾选即时生效、排序与不过滤一致
+  - K2 跳转自愈：碎片/笔记跳转前先模拟目标页的子串过滤（与宿主面板
+    同口径），必空（bigram 交叉召回）则只切页显示全部并 toast 说明
 ====================================================================
 """
 
 import html
 import importlib.util
+import json
 import os
 import sys
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QTextBrowser, QVBoxLayout, QWidget,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+    QTextBrowser, QVBoxLayout, QWidget,
 )
 
 from src.controls import IconButton
@@ -80,6 +88,13 @@ KIND_LABEL = {
 # 不会被系统浏览器抢走。
 RESULT_SCHEME = "fp-result"
 
+# ---------------- 搜索历史（K3，v1.2.0） ----------------
+# 最近搜索词存插件私有目录（重启不丢）；输入框为空时在下方显示「最近」行。
+# 上限刻意收紧：历史是「快速重搜」不是「搜索日志」，防文件无限膨胀。
+HISTORY_FILE = "search_history.json"
+HISTORY_LIMIT = 10         # 最多保留的搜索词（最新在前，丢最旧）
+HISTORY_CHARS = 60         # 单条搜索词的最大字符数
+
 # 富文本里的强调色**不能靠 QSS**：QTextBrowser 的 setHtml 只认行内样式，
 # 所以颜色必须由插件自己按主题注入。取不到主题色时的兜底值。
 _ACCENT_FALLBACK = {"light": "#27787A", "dark": "#6FFFE9"}
@@ -124,6 +139,56 @@ def _host_window(ctx):
         return getter()
     except Exception:                             # noqa: BLE001
         return None
+
+
+# ---------------- 搜索历史存档（K3） ----------------
+def sanitize_history(raw) -> list:
+    """搜索历史消毒：非字符串/空白丢弃、截断、去重（保先出现）、上限裁剪"""
+    items, seen = [], set()
+    for item in raw if isinstance(raw, (list, tuple)) else []:
+        text = str(item or "").strip()[:HISTORY_CHARS]
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        items.append(text)
+        if len(items) >= HISTORY_LIMIT:
+            break
+    return items
+
+
+def load_history(ctx) -> list:
+    """读搜索历史；文件缺失/写坏降级为空表，原文件保留供手工抢救"""
+    data_dir = getattr(ctx, "data_dir", None)
+    path = os.path.join(data_dir, HISTORY_FILE) if data_dir else ""
+    if path and os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return sanitize_history(json.load(f))
+        except (OSError, ValueError):
+            pass
+    return []
+
+
+def save_history(ctx, items) -> bool:
+    """写搜索历史（临时文件 + os.replace 原子替换）；失败只返回 False"""
+    data_dir = getattr(ctx, "data_dir", None)
+    path = os.path.join(data_dir, HISTORY_FILE) if data_dir else ""
+    if not path:
+        return False
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(sanitize_history(items), f,
+                      ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
 
 
 # ====================================================================
@@ -286,6 +351,49 @@ def pick_jump_keyword(matched, fallback=""):
     return max(items, key=len) if items else str(fallback or "").strip()
 
 
+def target_filter_matches(kind, keyword, data):
+    """预判「把关键词带进目标面板后，子串过滤是否还有内容」（K2 自愈）。
+
+    碎片 / 笔记两类跳转会把关键词写进目标页搜索框做**原样子串过滤**
+    （碎片：content/source；笔记：title/content，均不分大小写——与
+    宿主面板实现同口径）。但检索召回可能来自 bigram 交叉命中（查询词
+    与原文用词不同），这种关键词带过去过滤必然为空，表现为「跳过去
+    列表是空的」。这里用同一份只读快照**模拟同样的过滤**：空 → 调用
+    侧改跳「空关键词」（= 只切页显示全部）并说明原因。
+
+    返回 True（有匹配）/ False（必为空）/ None（该 kind 不带关键词，
+    不适用）。``data`` 读取失败一律 None（宁多带一次关键词也不误判）。
+    """
+    kw = str(keyword or "").strip().lower()
+    if not kw:
+        return True                      # 空关键词 = 不过滤
+    if kind == "fragment":
+        try:
+            frags = data.fragments() or []
+        except Exception:                 # noqa: BLE001
+            return None
+        for f in frags:
+            if not isinstance(f, dict):
+                continue
+            if kw in str(f.get("content") or "").lower() \
+                    or kw in str(f.get("source") or "").lower():
+                return True
+        return False
+    if kind == "note":
+        try:
+            notes = data.notes() or []
+        except Exception:                 # noqa: BLE001
+            return None
+        for n in notes:
+            if not isinstance(n, dict):
+                continue
+            if kw in str(n.get("title") or "").lower() \
+                    or kw in str(n.get("content") or "").lower():
+                return True
+        return False
+    return None
+
+
 # ====================================================================
 # 动作
 # ====================================================================
@@ -331,6 +439,8 @@ class SearchPage(QWidget):
         self._docs = 0
         # 渲染顺序的命中列表：锚点 href 里存的是它的下标，点击时靠它反查
         self._hits = []
+        # 搜索历史（K3）：最新在前，存插件私有目录
+        self._history = load_history(ctx)
         self._build_ui()
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -384,6 +494,31 @@ class SearchPage(QWidget):
         bar.addWidget(self._rebuild_btn)
         root.addLayout(bar)
 
+        # ---- 最近搜索行（K3）：输入框为空时显示，点击重搜、右键删单条 ----
+        self._recent_row = QWidget(self)
+        recent_lay = QHBoxLayout(self._recent_row)
+        recent_lay.setContentsMargins(0, 0, 0, 0)
+        recent_lay.setSpacing(6)
+        root.addWidget(self._recent_row)
+        self._rebuild_recent()
+
+        # ---- 范围行（K1）：五个数据源勾选，默认全开 ----
+        # 全开时 search 走「不过滤」原路径（与旧版逐条一致）；在索引层
+        # 之后按范围排除，勾选切换即时生效，无需重建索引。
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        filter_row.addWidget(make_hint_label("范围"))
+        self._kind_checks = {}
+        for kind_key, label in KIND_LABEL.items():
+            chk = QCheckBox(label)
+            chk.setChecked(True)
+            chk.setToolTip("只在勾选的数据源里出结果（索引始终覆盖全部）")
+            chk.toggled.connect(self._on_kind_toggled)
+            self._kind_checks[kind_key] = chk
+            filter_row.addWidget(chk)
+        filter_row.addStretch(1)
+        root.addLayout(filter_row)
+
         self._stat = QLabel("正在建立索引…")
         self._stat.setObjectName("hintLabel")
         root.addWidget(self._stat)
@@ -436,7 +571,17 @@ class SearchPage(QWidget):
 
     # ---------------- 搜索 ----------------
     def _on_text_changed(self, _text):
+        self._sync_recent_visible()               # 有输入就藏「最近」行
         self._debounce.start()                    # 去抖，避免每敲一个字搜一次
+
+    def _on_kind_toggled(self, _checked=False):
+        """勾选变化 → 立即重搜（结果层过滤，无需重建索引）"""
+        if self._input.text().strip():
+            self._run_search()
+
+    def _selected_kinds(self):
+        """勾选的数据源列表；全开 = []（search 不过滤，与旧路径一致）"""
+        return [k for k, chk in self._kind_checks.items() if chk.isChecked()]
 
     def _run_search(self):
         query = self._input.text().strip()
@@ -444,9 +589,20 @@ class SearchPage(QWidget):
             self._hits = []
             self._view.setHtml("")
             self._empty.setVisible(True)
+            self._sync_recent_visible()
             return
+        kinds = self._selected_kinds()
+        if not kinds:
+            # 一个源都不勾 = 范围为空，直接给空结果（不发检索）
+            self._hits = []
+            self._empty.setVisible(True)
+            self._view.setHtml("")
+            self._stat.setText("没有勾选任何数据源 ｜ 至少勾选一个再搜")
+            return
+        kind_arg = kinds if len(kinds) < len(KIND_LABEL) else None
         try:
-            hits = self._index.search(query, top_n=MAX_RESULTS)
+            hits = self._index.search(query, top_n=MAX_RESULTS,
+                                      kind=kind_arg)
         except Exception as exc:                  # noqa: BLE001
             self._hits = []
             self._stat.setText(f"⚠ 检索失败：{exc!r}")
@@ -456,11 +612,100 @@ class SearchPage(QWidget):
         self._hits = hits
         self._empty.setVisible(not hits)
         self._view.setHtml(render_results_html(hits, query, self._accent))
+        self._remember_history(query)             # K3：有效检索记入历史
+        scope = ""
+        if kind_arg is not None:
+            labels = " / ".join(KIND_LABEL[k] for k in kinds)
+            scope = f" ｜ 范围：{labels}"
         if hits:
             self._stat.setText(f"命中 {len(hits)} 条（最多显示 {MAX_RESULTS} 条）"
-                               f" ｜ 索引 {self._docs} 条")
+                               f" ｜ 索引 {self._docs} 条{scope}")
         else:
-            self._stat.setText(f"没有匹配「{query}」的内容 ｜ 索引 {self._docs} 条")
+            self._stat.setText(f"没有匹配「{query}」的内容 ｜ 索引 {self._docs} 条"
+                               f"{scope}")
+
+    # ---------------- 最近搜索（K3） ----------------
+    def _remember_history(self, word: str):
+        """有效检索后记入历史：去重插前、截断、落盘、重建「最近」行"""
+        word = str(word or "").strip()[:HISTORY_CHARS]
+        if not word:
+            return
+        if word in self._history:
+            self._history.remove(word)
+        self._history.insert(0, word)
+        self._history = self._history[:HISTORY_LIMIT]
+        save_history(self._ctx, self._history)
+        self._rebuild_recent()
+        self._sync_recent_visible()
+
+    def _rebuild_recent(self):
+        """按历史重建「最近」行（标签 + 词按钮们 + 清空）；无历史整行隐藏"""
+        lay = self._recent_row.layout()
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self._history:
+            self._recent_row.setVisible(False)   # 无历史整行隐藏
+            return
+        cap = QLabel("最近", self._recent_row)
+        cap.setObjectName("hintLabel")
+        lay.addWidget(cap)
+        for word in self._history:
+            btn = QPushButton(word, self._recent_row)
+            btn.setObjectName("secondaryBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"重新搜索「{word}」\n右键可删除这条历史")
+            btn.clicked.connect(
+                lambda _=False, w_=word: self._search_from_history(w_))
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, b=btn, w_=word: self._history_menu(b, w_, pos))
+            lay.addWidget(btn)
+        clear = QPushButton("清空", self._recent_row)
+        clear.setObjectName("secondaryBtn")
+        clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear.setToolTip("清空全部搜索历史")
+        clear.clicked.connect(lambda _=False: self._clear_history())
+        lay.addWidget(clear)
+        lay.addStretch(1)
+
+    def _sync_recent_visible(self):
+        """「最近」行只在输入框为空且有历史时显示"""
+        self._recent_row.setVisible(
+            bool(self._history) and not self._input.text().strip())
+
+    def _search_from_history(self, word: str):
+        """点历史词：顶到最前并落盘 → 填入输入框（去抖后自动重搜）"""
+        if word in self._history:
+            self._history.remove(word)
+        self._history.insert(0, word)
+        self._history = self._history[:HISTORY_LIMIT]
+        save_history(self._ctx, self._history)
+        self._input.setText(word)     # textChanged → 去抖 → _run_search
+
+    def _history_menu(self, btn, word: str, pos):
+        """历史词右键菜单：删除单条"""
+        menu = QMenu(self)
+        act = menu.addAction(f"🗑 删除「{word}」")
+        act.triggered.connect(lambda: self._remove_history(word))
+        menu.exec(btn.mapToGlobal(pos))
+
+    def _remove_history(self, word: str):
+        """删除一条历史并落盘重建"""
+        if word in self._history:
+            self._history.remove(word)
+            save_history(self._ctx, self._history)
+        self._rebuild_recent()
+        self._sync_recent_visible()
+
+    def _clear_history(self):
+        """清空全部历史并落盘"""
+        self._history = []
+        save_history(self._ctx, self._history)
+        self._rebuild_recent()
+        self._sync_recent_visible()
 
     # ---------------- 跳转 ----------------
     def _on_anchor(self, url):
@@ -491,6 +736,13 @@ class SearchPage(QWidget):
             except (IndexError, ValueError):
                 num = None
         keyword = pick_jump_keyword(hit.matched, self._input.text())
+        # K2 跳转自愈：碎片/笔记的目标页按「原样子串」过滤关键词，而
+        # 检索召回可能来自 bigram 交叉命中——那种关键词带过去必然过滤
+        # 为空。先模拟过滤：必空 → 只切页（空关键词=显示全部）并说明。
+        if target_filter_matches(hit.kind, keyword, self._ctx.data) is False:
+            self._toast("命中来自字符相关性，目标页按该词过滤不到——"
+                        "已切到该页并显示全部内容")
+            keyword = ""
         try:
             if not jump(hit.kind, keyword, num):
                 self._toast("这条结果没有对应的面板，无法跳转")
@@ -522,7 +774,7 @@ class SearchPage(QWidget):
 class KbSearchPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "站内搜索"
-    version = "1.0.0"
+    version = "1.2.0"
 
     def create_actions(self, ctx):
         return [OpenSearchAction()]

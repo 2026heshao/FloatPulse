@@ -8,7 +8,7 @@
   4. 右键菜单结构：主窗口 / 悬浮球 / 📌 便签子菜单 / 分隔线 / 退出程序；
      便签子菜单 aboutToShow 时按注入数据源重建
   5. 首次收进托盘提示只发一次（tray_hint_shown 落盘防重复）
-  6. 启动一次性告知：config 损坏 → 警示；上次异常退出 → 警示（顺序不变）
+  6. 启动一次性告知：config 损坏 → 警示
 
 offscreen 运行；showMessage 一律打桩，绝不弹真实气泡。
 """
@@ -253,21 +253,21 @@ def test_notify_hidden_to_tray_skipped_when_shown(qapp):
     assert cfg.save_count == 0
 
 
-def test_notify_startup_once_corrupt_then_abnormal(qapp):
-    """启动告知顺序：config 损坏在前、上次异常退出在后（与原实现一致）"""
+def test_notify_startup_once_corrupt_only(qapp):
+    """config 损坏 → 单条「设置已重置」警示（异常退出气泡已移除）"""
     mw = _FakeMainWindow()
     cfg = _FakeConfig(load_reset_reason="corrupt")
     tray = _make_tray(qapp, mw, cfg)
-    tray.notify_startup_once(prev_abnormal=True)
+    tray.notify_startup_once()
     titles = [m[0] for m in tray._messages]
-    assert titles == ["设置已重置", "上次可能异常退出"]
+    assert titles == ["设置已重置"]
     assert "config.json.corrupt.bak" in tray._messages[0][1]
 
 
 def test_notify_startup_once_clean_session_silent(qapp):
-    """正常会话（无损坏、无异常退出）→ 零气泡"""
+    """正常会话（无损坏）→ 零气泡"""
     mw = _FakeMainWindow()
     cfg = _FakeConfig(load_reset_reason=None)
     tray = _make_tray(qapp, mw, cfg)
-    tray.notify_startup_once(prev_abnormal=False)
+    tray.notify_startup_once()
     assert tray._messages == []
