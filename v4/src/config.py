@@ -60,6 +60,8 @@
                           引导」会置回 False，向导关闭时再落 True）
   - ui_scale:             界面缩放百分比（85-150，默认 100；只缩放全局字号
                           不缩放 px 布局，见 theme.scaled_font_pt）
+  - window_opacity:       主窗口不透明度百分比（50-100，默认 100；低于 100
+                          时窗口整体半透明，见 main_window._apply_window_opacity）
 ====================================================================
 """
 
@@ -101,6 +103,7 @@ DEFAULT_CONFIG = {
     # ===== 首启引导 / 界面缩放（成熟化 3.4 / 3.5）=====
     "first_run_done":       False,        # 已完成三步欢迎向导（onboarding.should_show 判定）
     "ui_scale":             100,          # 界面缩放百分比（85-150，只缩放全局字号）
+    "window_opacity":       100,          # 主窗口不透明度百分比（50-100，100=不透明）
     # ===== 更新检查（2.3 被动提示；只查不下载，失败静默）=====
     "auto_check_updates":   True,         # 启动后每天最多静默检查一次新版本
     "last_update_check":    "",           # 最近一次检查日期 "YYYY-MM-DD"（空=从未检查）
@@ -129,6 +132,7 @@ DEFAULT_CONFIG = {
     # 左栏当前**已展开**的分组集合（多组可同时展开；空列表 = 全部折叠）
     # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
     "nav_expanded_groups":  ["workbench"],
+    "side_bar_width":       168,          # 侧栏宽度（像素；不声明则 _load 不读，拖宽重启即丢）
     # ===== AI 总配置（2026-09-29 设置页「🧠 AI 总配置」，插件单一真相源）=====
     # 插件声明 capabilities=["ai"] 且被用户在设置页下拉框勾选接入后，
     # 经 ctx.ai.params() 实时读取——各 AI 插件不再各自维护一份后端配置。
@@ -139,6 +143,8 @@ DEFAULT_CONFIG = {
     "ai_local_server_exe":  "",           # llama-server.exe 路径
     "ai_local_gguf":        "",           # .gguf 模型路径
     "ai_local_port":        8095,         # 避开 AI 助手 8093 / 文本工坊 8094 / Ollama 11434
+    "ai_local_thinking":    False,        # 本地模型思维链开关（关=--reasoning off）
+    "ai_local_ctx_size":    16384,        # 本地模型上下文长度（llama-server -c，默认 16K）
     "ai_plugins":           [],           # 接入总配置的插件 id 列表（设置页多选）
     # ===== 数据 schema 版本（系统保留键，非用户设置）=====
     # config.json 结构变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移；
@@ -172,6 +178,7 @@ _CONFIG_TYPES = {
     "tray_hint_shown":      bool,
     "first_run_done":       bool,
     "ui_scale":             int,
+    "window_opacity":       int,
     "auto_check_updates":   bool,
     "last_update_check":    str,
     "latest_known_version": str,
@@ -192,6 +199,7 @@ _CONFIG_TYPES = {
     "export_fragments":     bool,
     "export_tasks":         bool,
     "ball_size":            int,
+    "side_bar_width":       int,
     "hide_on_fullscreen":   bool,
     "fragment_preview_visible": bool,
     "clipboard_capture_images": bool,
@@ -204,6 +212,8 @@ _CONFIG_TYPES = {
     "ai_local_server_exe":  str,
     "ai_local_gguf":        str,
     "ai_local_port":        int,
+    "ai_local_thinking":    bool,
+    "ai_local_ctx_size":    int,
     "ai_plugins":           list,
     "schema_version":       int,
 }
@@ -232,13 +242,21 @@ _CONFIG_RANGES = {
     "last_page_index":      (0, LAST_PAGE_INDEX_MAX),
     # 悬浮球球体直径：与设置页 Stepper 范围 48-88 保持一致
     "ball_size":            (48, 88),
+    # 侧栏拖动范围：与 main_window.SIDE_BAR_MIN_W / MAX_W（140-280）保持一致
+    "side_bar_width":       (140, 280),
     # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
     "pomodoro_focus_minutes": (1, 120),
     "pomodoro_break_minutes": (1, 60),
     # 界面缩放百分比：与设置页「界面缩放」下拉档位（85/100/115/130/150）一致
     "ui_scale":             (85, 150),
+    # 主窗口不透明度：与设置页「窗口透明度」Stepper 范围 50-100（每档 5%）一致；
+    # 下限 50 保证文字仍可读（Qt windowOpacity 为 0 时窗口不可点击）
+    "window_opacity":       (50, 100),
     # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
     "ai_local_port":        (1024, 65535),
+    # 本地模型上下文长度：llama-server -c 硬边界（越界由 ai_server.sanitize_ctx_size
+    # 再收敛一次；bool 不进 RANGES，ai_local_thinking 无需数值范围）
+    "ai_local_ctx_size":    (2048, 131072),
 }
 
 # 枚举类配置的取值白名单（类型是 str 但合法值有限）：加载与 set 同口径，
@@ -388,9 +406,9 @@ class ConfigManager:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self._json_path)
-        except OSError:
-            # 写盘失败不崩溃
-            pass
+        except OSError as exc:
+            # 写盘失败不崩溃，但必须留痕（磁盘满/权限问题导致设置丢失可排查）
+            get_logger().warning("config.json 写盘失败：%s", exc)
 
     # ---------------- 读写接口 ----------------
     def get(self, key: str, default=None):

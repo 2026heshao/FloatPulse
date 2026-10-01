@@ -572,11 +572,6 @@ QLabel#pluginCardDesc {
     color: $text;
     font-size: 12px;
 }
-QLabel#pluginCardUsage {
-    color: $text_secondary;
-    font-size: 11px;
-    font-style: italic;
-}
 QTextBrowser#usageViewer {
     background-color: transparent;
     color: $text;
@@ -685,6 +680,16 @@ QLabel#pluginStoreBadge {
     padding: 1px 6px;
     border: 1px solid $primary_a30;
     border-radius: 6px;
+}
+/* 能力胶囊徽章（🌐 网络 / ✍ 写入 / 🛠 改删 / 🧠 AI）：
+   淡主色底中性字，完整语义在悬停提示；与 pluginStoreBadge 同族淡主色 */
+QLabel#pluginCapBadge {
+    color: $secondary_text;
+    background-color: $primary_a12;
+    font-size: 11px;
+    padding: 1px 7px;
+    border: 1px solid $primary_a30;
+    border-radius: 7px;
 }
 
 /* ---- AI 助手页面：左右对话气泡 ---- */

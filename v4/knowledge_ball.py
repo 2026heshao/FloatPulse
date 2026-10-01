@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QTimer, QPropertyAnimation, QEasingCurve,
-    QRectF, QSequentialAnimationGroup, pyqtProperty, pyqtSignal,
+    QRectF, QSequentialAnimationGroup, pyqtProperty, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QFontMetrics, QPen, QAction, QCursor,
@@ -668,9 +668,11 @@ class FloatingBall(QWidget):
     def _rebuild_context_menu(self):
         """按当前注册表重建右键菜单。
 
-        顺序：打开主窗口 → [番茄钟项] → [插件动作] → 运行时追加项 → 退出程序。
+        顺序：打开主窗口 → [番茄钟项] → [插件功能子菜单] → 运行时追加项 → 退出程序。
         「退出程序」固定垫底（2026-09-27 用户要求）；
         截图钉屏等追加项保持插在退出程序之前。
+        插件动作自 2026-10-01 起收进「🧩 插件功能」子菜单（Win11「新建 >」
+        同款层级，用户拍板）：一级菜单不再随安装插件数量线性变长。
         """
         self._menu.clear()
 
@@ -688,19 +690,23 @@ class FloatingBall(QWidget):
                 act.triggered.connect(callback)
                 self._menu.addAction(act)
 
-        # 插件动作（注册表数据驱动：menu=True 且启用中的动作）
+        # 插件功能子菜单（注册表数据驱动：menu=True 且启用中的动作）。
+        # 子菜单显式套同一份 QSS（与托盘便签子菜单同款做法，确保玻璃观感一致）
         plugin_actions = (self._action_registry.menu_actions()
                           if self._action_registry is not None else [])
         if plugin_actions:
             self._menu.addSeparator()
+            plugin_menu = QMenu("🧩 插件功能", self._menu)
+            plugin_menu.setStyleSheet(get_menu_qss(self._theme))
             for act in plugin_actions:
-                qa = QAction(act.title or act.id, self._menu)
+                qa = QAction(act.title or act.id, plugin_menu)
                 icon_path = getattr(act, "icon_path", None)
                 if icon_path and os.path.isfile(icon_path):
                     qa.setIcon(QIcon(icon_path))
                 qa.triggered.connect(
                     lambda _checked=False, aid=act.id: self._trigger_action(aid))
-                self._menu.addAction(qa)
+                plugin_menu.addAction(qa)
+            self._menu.addMenu(plugin_menu)
 
         # 运行时追加项（add_context_action，如截图钉屏）
         for entry in self._extra_context_actions:
@@ -3497,12 +3503,28 @@ def main():
 
     _wakeup_stop = {"flag": False}
 
+    class _WakeupBridge(QObject):
+        """跨线程信号桥：后台线程 emit → 自动排队（QueuedConnection）到主线程。
+
+        后台线程里 QTimer.singleShot 永不触发（无线程事件循环驱动，
+        2026-10-01 探针实测 FIRED=False）——第二实例唤醒曾因此静默失效，
+        必须经主线程 QObject 的信号槽切回。
+        """
+
+        woke_up = pyqtSignal()    # ★ 信号必须是类属性（漏写=AttributeError）
+
+        def show_windows(self):
+            _on_wakeup_signal()
+
+    _wakeup_bridge = _WakeupBridge()
+    _wakeup_bridge.woke_up.connect(_wakeup_bridge.show_windows)
+
     def _wakeup_worker():
-        """后台线程：阻塞等待唤醒事件，收到后切回主线程处理"""
+        """后台线程：阻塞等待唤醒事件，收到后经信号桥切回主线程处理"""
         while not _wakeup_stop["flag"]:
             if singleton.wait_for_signal(lambda: _wakeup_stop["flag"]):
                 # 切回 Qt 主线程执行窗口显示
-                QTimer.singleShot(0, _on_wakeup_signal)
+                _wakeup_bridge.woke_up.emit()
 
     _wakeup_thread = threading.Thread(target=_wakeup_worker, daemon=True)
     _wakeup_thread.start()

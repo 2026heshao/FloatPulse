@@ -286,6 +286,19 @@ class SettingsPanel(QWidget):
                 "85–130% 观感最佳",
                 self._set_ui_scale)
 
+        # 窗口透明度：步进器只存 50-100 的整数百分比（存 0 会让窗口整窗
+        # 不可点击，Qt windowOpacity=0 时命中测试直接穿透），每档 5%；
+        # 改动即时生效（直调主窗 _apply_window_opacity，不走全量主题刷新）
+        self._set_window_opacity = Stepper(
+            50, 100, int(self._config.get("window_opacity", 100)),
+            suffix="%", step=5)
+        self._set_window_opacity.valueChanged.connect(
+            self._on_window_opacity_changed)
+        add_row(gv, "窗口透明度",
+                "主窗口整体不透明度，每档 5%，改动即时生效；"
+                "100% = 不透明，越低越透（悬浮球不受影响）",
+                self._set_window_opacity)
+
         # anim_speed 存浮点（0.5~2.0），Stepper 内部用整数 50~200，
         # divisor=100 / decimals=1 → 显示「1.3」，对外仍发内部整数。
         init_speed = self._config.get("anim_speed", 1.0)
@@ -645,6 +658,32 @@ class SettingsPanel(QWidget):
             gv, "本地端口", "宿主本地服务端口（默认 8095，避开插件自管端口）",
             self._ai_port)
 
+        # 思考模式 / 上下文长度：仅本地后端生效（纯 llama-server 启动参数，
+        # 经 ctx.ai.params() 契约对插件不可见——插件无感，无需迁移）
+        self._ai_thinking = QComboBox()
+        self._ai_thinking.addItem("关（响应更快）", False)
+        self._ai_thinking.addItem("开（输出思维链）", True)
+        self._ai_thinking.setCurrentIndex(
+            1 if bool(self._config.get("ai_local_thinking", False)) else 0)
+        self._ai_thinking.setFixedWidth(160)
+        self._ai_row_thinking = add_row(
+            gv, "思考模式",
+            "本地模型是否先输出思维链再回答；关=更快更省，仅对本地后端生效",
+            self._ai_thinking)
+
+        self._ai_ctx = QComboBox()
+        for label, val in (("8K", 8192), ("16K", 16384),
+                           ("32K", 32768), ("64K", 65536)):
+            self._ai_ctx.addItem(label, val)
+        _ctx_idx = self._ai_ctx.findData(
+            int(self._config.get("ai_local_ctx_size", 16384) or 16384))
+        self._ai_ctx.setCurrentIndex(_ctx_idx if _ctx_idx >= 0 else 1)
+        self._ai_ctx.setFixedWidth(160)
+        self._ai_row_ctx = add_row(
+            gv, "上下文长度",
+            "本地模型单次对话可用的上下文窗口；越大越占显存，仅对本地后端生效",
+            self._ai_ctx)
+
         local_ctl = QWidget()
         local_row = QHBoxLayout(local_ctl)
         local_row.setContentsMargins(0, 0, 0, 0)
@@ -976,6 +1015,11 @@ class SettingsPanel(QWidget):
             sp = self._config.get("anim_speed", 1.0)
             self._set_anim_speed.setValue(int(round(max(0.5, min(2.0, sp)) * 100)))
             self._set_anim_speed.blockSignals(False)
+        if hasattr(self, '_set_window_opacity'):
+            self._set_window_opacity.blockSignals(True)
+            self._set_window_opacity.setValue(
+                int(self._config.get("window_opacity", 100)))
+            self._set_window_opacity.blockSignals(False)
         if hasattr(self, '_set_reduce_motion'):
             self._set_reduce_motion.blockSignals(True)
             self._set_reduce_motion.setChecked(
@@ -1329,7 +1373,7 @@ class SettingsPanel(QWidget):
     def _ai_apply_mode_ui(self):
         """当前 ai_backend_mode 反映到模式按钮，并**只显示对应配置区**：
 
-        云端模式 → 云端地址/Key/模型；本地模式 → 程序/模型/端口/本地服务。
+        云端模式 → 云端地址/Key/模型；本地模式 → 程序/模型/端口/思考/上下文/本地服务。
         分隔线登记在 _row_sep 里，随所属行一起显隐——只藏行不藏线的话，
         卡片里会留下一串悬空横线撑出空档（拆页后 AI 独占一页尤其明显）。
         """
@@ -1340,6 +1384,7 @@ class SettingsPanel(QWidget):
             (self._ai_row_url, not local), (self._ai_row_key, not local),
             (self._ai_row_model, not local), (self._ai_row_exe, local),
             (self._ai_row_gguf, local), (self._ai_row_port, local),
+            (self._ai_row_thinking, local), (self._ai_row_ctx, local),
             (self._ai_row_local, local),
         ):
             row.setVisible(show)
@@ -1376,6 +1421,8 @@ class SettingsPanel(QWidget):
             "ai_local_server_exe": self._ai_exe.text().strip(),
             "ai_local_gguf": self._ai_gguf.text().strip(),
             "ai_local_port": port,
+            "ai_local_thinking": bool(self._ai_thinking.currentData()),
+            "ai_local_ctx_size": int(self._ai_ctx.currentData() or 16384),
         }
 
     def _on_ai_save_test(self):
@@ -1387,9 +1434,7 @@ class SettingsPanel(QWidget):
         # 本地端点（llama-server / 回环 base_url）登记进插件桥回环白名单（1.5 配套）
         sync_loopback_allowlist(self._config)
         if cfg["ai_backend_mode"] == "local":
-            self._ai_status.setText("配置已保存，正在拉起本地服务…")
-            AI_SERVER.start(self._ai_poster(), cfg["ai_local_server_exe"],
-                            cfg["ai_local_gguf"], cfg["ai_local_port"])
+            self._ai_start_local(cfg)
             return
         base = cfg["ai_cloud_base_url"].rstrip("/")
         model = cfg["ai_cloud_model"]
@@ -1428,6 +1473,28 @@ class SettingsPanel(QWidget):
             hint = "（端口没有服务在听）"
         self._ai_status.setText(f"✗ 连接失败：{err}{hint}")
 
+    def _ai_start_local(self, cfg: dict):
+        """落盘后拉起 / 平滑重启本地服务（保存并测试、手动启动共用入口）。
+
+        运行中且思考/上下文/端口参数有变 → 停旧实例后自动以新参数重启
+        （时序由 AI_SERVER.restart 状态驱动，不靠固定延迟猜）；未变则不打断。
+        """
+        start_args = (self._ai_poster(), cfg["ai_local_server_exe"],
+                      cfg["ai_local_gguf"], cfg["ai_local_port"],
+                      cfg["ai_local_ctx_size"], cfg["ai_local_thinking"])
+        if not AI_SERVER.running:
+            self._ai_status.setText("配置已保存，正在拉起本地服务…")
+            AI_SERVER.start(*start_args)
+            return
+        changed = (AI_SERVER.port != int(cfg["ai_local_port"])
+                   or AI_SERVER.ctx_size != int(cfg["ai_local_ctx_size"])
+                   or bool(AI_SERVER.thinking) != bool(cfg["ai_local_thinking"]))
+        if not changed:
+            self._ai_status.setText("✓ 配置已保存（服务运行中，参数未变，无需重启）")
+            return
+        self._ai_status.setText("参数已变更，正在重启本地服务…")
+        AI_SERVER.restart(*start_args)
+
     def _on_ai_local_toggle(self):
         """启动 / 停止宿主本地 AI 服务（先落盘当前字段再启动）"""
         if AI_SERVER.running:
@@ -1437,8 +1504,7 @@ class SettingsPanel(QWidget):
         for key, val in cfg.items():
             self._config.set(key, val)
         self._config.save()
-        AI_SERVER.start(self._ai_poster(), cfg["ai_local_server_exe"],
-                        cfg["ai_local_gguf"], cfg["ai_local_port"])
+        self._ai_start_local(cfg)
 
     def _on_ai_local_status(self, status: str, detail: str):
         """宿主 AI 服务状态广播 → 按钮文案 + 状态行"""
@@ -1590,6 +1656,9 @@ class SettingsPanel(QWidget):
         if getattr(self._host, "_page_assets", None) is not None:
             self._host._page_assets.apply_thumb_size(
                 self._config.get("asset_thumb_size", 128))
+        apply_op = getattr(self._host, "_apply_window_opacity", None)
+        if callable(apply_op):
+            apply_op()                            # 窗口透明度回 100% 不透明
         self._host.quick_capture_changed.emit()  # 热键/开关可能被重置，重注册
         self._host.screenshot_changed.emit()     # 截图热键/开关同理
         self._host.plugins_changed.emit(
@@ -1625,6 +1694,16 @@ class SettingsPanel(QWidget):
             self._config.set("anim_speed", speed)
             self._config.save()
         self._host.anim_speed_changed.emit(speed)
+
+    def _on_window_opacity_changed(self, value: int):
+        """窗口透明度步进：即时持久化并直调主窗应用（不广播，仅主窗消费）"""
+        value = int(value)
+        if value != int(self._config.get("window_opacity", 100)):
+            self._config.set("window_opacity", value)
+            self._config.save()
+        apply_op = getattr(self._host, "_apply_window_opacity", None)
+        if callable(apply_op):
+            apply_op()
 
     def _on_reduce_motion_changed(self, checked: bool):
         """减弱动效开关：即时持久化 + 翻转 motion 总闸（界面下一帧即瞬显）"""

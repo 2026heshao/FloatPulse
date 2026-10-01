@@ -835,22 +835,35 @@ class MainWindow(QWidget):
             btn = self._nav_group.button(self._stack.currentIndex())
         self._move_nav_indicator(btn, animate=False)
 
+    def _target_window_opacity(self):
+        """主窗口目标不透明度（0.5~1.0），来自配置 window_opacity 百分比"""
+        try:
+            pct = int(self._config.get("window_opacity", 100))
+        except (TypeError, ValueError):
+            pct = 100
+        return max(0.5, min(1.0, pct / 100.0))
+
+    def _apply_window_opacity(self):
+        """把配置里的窗口透明度应用到主窗（设置页步进 / 恢复默认时调用）"""
+        self.setWindowOpacity(self._target_window_opacity())
+
     def _play_entrance_animation(self):
-        """首次显示：淡入 + 10px 上移（网页级的进入观感，只播一次）"""
+        """首次显示：淡入 + 16px 上移（「浮起来」的品牌观感，只播一次）"""
         if self._entrance_played:
             return
         self._entrance_played = True
         end_pos = self.pos()
-        start_pos = QPoint(end_pos.x(), end_pos.y() + 10)
+        start_pos = QPoint(end_pos.x(), end_pos.y() + 16)
 
         fade = QPropertyAnimation(self, b"windowOpacity", self)
         fade.setDuration(200)
         fade.setStartValue(0.0)
-        fade.setEndValue(1.0)
+        # 淡入终点 = 配置的目标透明度（用户设了半透明时入场直接到位）
+        fade.setEndValue(self._target_window_opacity())
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         slide = QPropertyAnimation(self, b"pos", self)
-        slide.setDuration(260)
+        slide.setDuration(320)
         slide.setStartValue(start_pos)
         slide.setEndValue(end_pos)
         slide.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -2343,7 +2356,14 @@ class MainWindow(QWidget):
             self._lazy_warm_timer.stop()
             self._lazy_warm_timer = None
             return
-        self._ensure_page_built(self._lazy_pending.pop(0))
+        idx = self._lazy_pending.pop(0)
+        try:
+            self._ensure_page_built(idx)
+        except Exception as e:        # noqa: BLE001 - 单页预热失败不崩进程
+            # PyQt6 对槽内未捕获异常默认 qFatal 中止；预热是锦上添花，
+            # 失败留痕即可，页面首次真正切到时还会再走一次构建
+            from src.logger import get_logger
+            get_logger().warning(f"第 {idx} 页后台预热失败（切页时将重试）: {e}")
 
     @property
     def _page_fragments(self):
