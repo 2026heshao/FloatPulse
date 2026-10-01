@@ -478,7 +478,7 @@ class ReportDialog(PluginDialog):
         created = self.add_footer([
             ("关闭", "secondaryBtn", self.accept),
             ("📋 复制到剪贴板", "secondaryBtn", self._do_copy),
-            ("💾 另存为 .md…", "secondaryBtn", self._do_save_as),
+            ("另存为 .md…", "secondaryBtn", self._do_save_as, "save"),
             ("🗂 写入 Obsidian vault", "primaryBtn", self._do_vault),
         ])
         self._close_btn, self._copy_btn, self._save_btn, self._vault_btn = created

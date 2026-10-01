@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.app_paths import find_icon_file
+from src.controls import IconButton
 from src.glass import GlassPanel, draw_soft_shadow
 from src.theme import DEFAULT_THEME, get_colors, get_main_window_qss
 
@@ -158,12 +159,12 @@ class GlassDialog(QDialog):
 
         h.addStretch()
 
-        close_btn = QPushButton("×")
-        close_btn.setObjectName("iconBtn")
-        close_btn.setProperty("danger", "true")
-        close_btn.setToolTip("关闭")
-        close_btn.setFixedSize(36, 36)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn = IconButton("close", size=36, icon_size=16,
+                               object_name="iconBtn", danger=True, tooltip="关闭")
+        # 弹窗没有 theme_changed 信号可订阅 —— 构造完就地按当前主题取色
+        # （后续换主题由 apply_theme 的 findChildren 兜底）
+        close_btn.apply_theme(getattr(self._host, "current_theme", None)
+                              or DEFAULT_THEME)
         close_btn.clicked.connect(self.reject)
         h.addWidget(close_btn)
 
@@ -213,22 +214,42 @@ class GlassDialog(QDialog):
             qss = get_main_window_qss(theme)
         self._container.setStyleSheet(qss)
         self._container.apply_theme(get_colors(theme))
+        # P1：图标按钮的位图颜色不在 QSS 管辖内，显式重取色
+        # （基类 __init__ 末尾首次调用时子控件尚未创建 → findChildren 为空，
+        #   天然安全；子类重写并 super 调用时同样成立）
+        for btn in self.findChildren(IconButton):
+            btn.apply_theme(theme)
 
     # ---------------- 底部按钮区 ----------------
     def add_footer(self, buttons) -> list:
-        """底部按钮栏：buttons = [(文案, objectName 或 None, 槽函数), ...]
+        """底部按钮栏：buttons = [(文案, objectName 或 None, 槽函数
+        [, 图标名[, 常态图标色 spec]]), ...]
 
-        返回按钮列表（顺序与入参一致），便于调用方后续改文案/状态
-        （如复制按钮临时显示"已复制"）。
+        第 4 个元素（P1 新增，可选）是 icons.py 的图标名 —— 给了就创建
+        IconButton（「图标+文字」按钮，文案自净：不要自带 emoji 前缀），
+        不给保持纯文字 QPushButton，老调用点零变化。第 5 个元素可选，是
+        常态图标色 spec（token 名或 #RRGGBB）—— 主色底按钮（primaryBtn）
+        传 "on_primary" 让图标跟文字同色。返回按钮列表（顺序与入参一致），
+        便于调用方后续改文案/状态（如复制按钮临时显示"已复制"）。
         """
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addStretch()
         created = []
-        for text, obj_name, slot in buttons:
-            btn = QPushButton(text)
-            if obj_name:
-                btn.setObjectName(obj_name)
+        for entry in buttons:
+            text, obj_name, slot = entry[0], entry[1], entry[2]
+            icon_name = entry[3] if len(entry) > 3 else None
+            if icon_name:
+                btn = IconButton(icon_name, text=text, icon_size=14,
+                                 object_name=obj_name or None,
+                                 off_color=entry[4] if len(entry) > 4 else None,
+                                 hover_color=entry[4] if len(entry) > 4 else None)
+                btn.apply_theme(getattr(self._host, "current_theme", None)
+                                or DEFAULT_THEME)
+            else:
+                btn = QPushButton(text)
+                if obj_name:
+                    btn.setObjectName(obj_name)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             if slot is not None:
                 btn.clicked.connect(slot)

@@ -34,9 +34,10 @@ import sys
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextBrowser, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from src.controls import IconButton
 from src.plugin_api import BallAction, BallPlugin
 from src.plugin_ui import make_hint_label
 
@@ -376,9 +377,9 @@ class SearchPage(QWidget):
         self._input.returnPressed.connect(self._run_search)
         bar.addWidget(self._input, 1)
 
-        self._rebuild_btn = QPushButton("🔄 重建索引")
-        self._rebuild_btn.setObjectName("secondaryBtn")
-        self._rebuild_btn.setToolTip("数据变了（新记了笔记等）后点一下即可搜到最新内容")
+        self._rebuild_btn = IconButton("refresh", text="重建索引", icon_size=14,
+                                       object_name="secondaryBtn",
+                                       tooltip="数据变了（新记了笔记等）后点一下即可搜到最新内容")
         self._rebuild_btn.clicked.connect(lambda: self.rebuild_index(verbose=True))
         bar.addWidget(self._rebuild_btn)
         root.addLayout(bar)

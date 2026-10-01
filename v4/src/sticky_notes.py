@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 
 from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
+from src.controls import IconButton
 from src.theme import get_colors, get_menu_qss
 from src.app_paths import get_data_dir, get_screen_geometry
 from src.task_manager import task_state, format_relative_deadline
@@ -326,10 +327,13 @@ class StickyNoteWindow(QWidget):
         self._title_label = QLabel(self._elide_title())
         self._title_label.setObjectName("stickyTitle")
         th.addWidget(self._title_label, 1)
-        close_btn = QPushButton("✕")
-        close_btn.setObjectName("stickyClose")
-        close_btn.setFixedSize(22, 22)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn = IconButton("close", size=22, icon_size=11,
+                               object_name="stickyClose",
+                               off_color="on_primary", hover_color="on_primary",
+                               tooltip="关闭便签")
+        # 便签走本地样式表（on_primary 墨色），图标就地带色；换主题由
+        # apply_theme 的 findChildren 兜底重取
+        close_btn.apply_theme(self._theme)
         close_btn.clicked.connect(self.request_close.emit)
         th.addWidget(close_btn)
         v.addWidget(self._title_bar)
@@ -547,6 +551,9 @@ class StickyNoteWindow(QWidget):
         self._title_bar.setStyleSheet(
             f"background: {title_bg.name()};")
         self._grip.update()
+        # P1：关闭钮是自绘位图，颜色不在 QSS 管辖内
+        for btn in self.findChildren(IconButton):
+            btn.apply_theme(theme_name)
         self._refresh_task_chip()   # 徽章配色随主题（_chip None 时方法内部直返）
 
     # ---------------- 鼠标：拖动 / 缩放 ----------------

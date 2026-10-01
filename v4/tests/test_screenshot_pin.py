@@ -82,7 +82,16 @@ class TestSnipSelection:
         ov = _make_overlay(qapp)
         ov._origin = QPoint(200, 150)
         ov._pos = QPoint(80, 60)          # 终点在起点左上 → 需归一化
-        assert ov._selection() == QRect(80, 60, 120, 90)
+        # 两角均含端点（QRect(p1,p2) 语义）：80..200 宽 121
+        assert ov._selection() == QRect(80, 60, 121, 91)
+
+    def test_selection_direction_invariant(self, qapp):
+        """同一对角点正反拖选区一致（修复前反向拖差 1px）"""
+        ov = _make_overlay(qapp)
+        ov._origin, ov._pos = QPoint(80, 60), QPoint(200, 150)
+        forward = ov._selection()
+        ov._origin, ov._pos = QPoint(200, 150), QPoint(80, 60)
+        assert ov._selection() == forward
 
     def test_selection_empty_before_press(self, qapp):
         ov = _make_overlay(qapp)

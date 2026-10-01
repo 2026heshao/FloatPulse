@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
+from src.controls import EmptyState, IconButton, PageTitle
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）
 EXT_ICON = {
@@ -215,8 +216,7 @@ class AssetsPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("📎 临时素材")
-        title.setObjectName("pageTitle")
+        title = PageTitle("assets", "临时素材", self._host)
         header.addWidget(title)
         header.addStretch()
         self._asset_count_label = QLabel("共 0 条 / 上限 10")
@@ -239,15 +239,15 @@ class AssetsPanel(QWidget):
         open_folder_btn.clicked.connect(self._on_open_folder)
         toolbar.addWidget(open_folder_btn)
 
-        refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.setObjectName("secondaryBtn")
+        refresh_btn = IconButton("refresh", text="刷新", icon_size=14,
+                                 object_name="secondaryBtn")
         refresh_btn.clicked.connect(self.refresh)
         toolbar.addWidget(refresh_btn)
 
         toolbar.addStretch()
 
-        clear_btn = QPushButton("🗑 清空全部")
-        clear_btn.setObjectName("dangerBtn")
+        clear_btn = IconButton("trash", text="清空全部", icon_size=14,
+                               object_name="dangerBtn")
         clear_btn.clicked.connect(self._on_clear)
         toolbar.addWidget(clear_btn)
 
@@ -271,10 +271,10 @@ class AssetsPanel(QWidget):
         self._sync_scroll_step()
         self._stack.addWidget(self._asset_list)
 
-        empty = QLabel("暂无素材\n\n拖拽图片/文件到悬浮球即可自动收录")
-        empty.setObjectName("hintLabel")
-        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._stack.addWidget(empty)
+        self._empty_state = EmptyState(
+            "assets", "暂无素材",
+            "拖拽图片/文件到悬浮球即可自动收录\n素材默认保留 30 天，注意及时归档")
+        self._stack.addWidget(self._empty_state)
 
         v.addWidget(self._stack, 1)
 
@@ -282,6 +282,9 @@ class AssetsPanel(QWidget):
     def apply_theme(self):
         """主题切换后重绘（delegate 每帧动态取色，无需重建）"""
         self._asset_list.viewport().update()
+        # 空态图标是自绘位图，不在 QSS 管辖内（A3）
+        self._empty_state.apply_theme(getattr(self._host, "current_theme",
+                                              None))
 
     # ---- 缩略图尺寸（设置项联动）----
     def _sync_scroll_step(self):

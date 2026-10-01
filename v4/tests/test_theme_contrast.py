@@ -61,6 +61,16 @@ def _all_qss():
         yield theme, "menu", get_menu_qss(theme)
 
 
+# ★ 必须给显式短 id（2026-09-30，A4 焦点态时暴露）：
+#   pytest 会把「完整 nodeid」写进 PYTEST_CURRENT_TEST 环境变量，而 nodeid 里
+#   带着 parametrize id。原先直接把整份 QSS 当 id（几十 KB），QSS 一旦长过
+#   32767 字符就撞上 Windows 环境变量上限 → **测试 body 全过、teardown 却
+#   ValueError: the environment variable is longer than 32767 characters**。
+#   表象是「断言没问题却报 error」，极易误判成代码 bug。
+_QSS_CASES = list(_all_qss())
+_QSS_IDS = ["%s-%s" % (theme, name) for theme, name, _ in _QSS_CASES]
+
+
 def _rules(qss: str):
     """粗粒度切分 QSS 规则 -> (选择器, 声明体)"""
     for m in RULE_RE.finditer(qss):
@@ -121,7 +131,7 @@ def test_on_primary_is_dark_enough_for_light_primary():
 # ====================================================================
 # 2. 通用护栏：浅底不得压白字
 # ====================================================================
-@pytest.mark.parametrize("theme,qss_name,qss", list(_all_qss()))
+@pytest.mark.parametrize("theme,qss_name,qss", _QSS_CASES, ids=_QSS_IDS)
 def test_no_white_text_on_light_background(theme, qss_name, qss):
     """浅色实底 + 白字 = 必然看不清（本次 bug 的通用形态）"""
     offenders = []

@@ -46,7 +46,8 @@ PARAGRAPH_PREVIEW_LEN = 80
 NOTE_PREVIEW_LEN = 80
 
 # ---- 日程任务：勾选动画与撤销条（体感优化 A2 / A3）----
-# 勾选动画基准时长（毫秒）；实际时长 = 本值 / anim_speed（见各任务页）。
+# 勾选动画基准时长（毫秒）；实际时长 = motion.duration(本值, anim_speed)，
+# 缩放口径统一在 src/motion.py（UI 强化方案 A1）。
 CHECK_ANIM_MS = 150
 # 勾选框回弹峰值缩放：圆框按 1.0 → 1.15 → 1.0 做一次「回弹」。
 CHECK_BOUNCE_SCALE = 1.15

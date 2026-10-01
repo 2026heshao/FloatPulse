@@ -34,8 +34,10 @@ from src.fragment_classifier import (
 )
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
+from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import get_colors
+from src.controls import EmptyState, IconButton, PageTitle
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -218,61 +220,9 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
 
 
 # ====================================================================
-# 空状态（覆盖在列表之上，遮挡列表的空白区域但不遮边框）
+# 空状态：2026-10-01 起用 controls.EmptyState 通用组件（A3 通用化），
+# 自绘图标 + sectionLabel/hintLabel/secondaryBtn 的 QSS 契约原样保留。
 # ====================================================================
-class _EmptyState(QWidget):
-    """列表空态引导：区分「全空」与「筛选无结果」两种场景"""
-
-    def __init__(self, on_clear_filter):
-        super().__init__()
-        v = QVBoxLayout(self)
-        v.setContentsMargins(24, 24, 24, 24)
-        v.setSpacing(8)
-        v.addStretch()
-
-        self._icon = QLabel("🧩")
-        self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._icon.setStyleSheet("font-size: 34px;")
-        v.addWidget(self._icon)
-
-        self._title = QLabel("")
-        self._title.setObjectName("sectionLabel")
-        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        v.addWidget(self._title)
-
-        self._desc = QLabel("")
-        self._desc.setObjectName("hintLabel")
-        self._desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._desc.setWordWrap(True)
-        v.addWidget(self._desc)
-
-        self._action = QPushButton("清空筛选条件")
-        self._action.setObjectName("secondaryBtn")
-        self._action.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._action.clicked.connect(on_clear_filter)
-        self._action.setVisible(False)
-        row = QHBoxLayout()
-        row.addStretch()
-        row.addWidget(self._action)
-        row.addStretch()
-        v.addLayout(row)
-        v.addStretch()
-
-    def set_mode(self, mode: str):
-        """mode: 'empty'（池子为空） / 'no_result'（筛选或搜索无命中）"""
-        if mode == "empty":
-            self._icon.setText("🧩")
-            self._title.setText("还没有收集到碎片")
-            self._desc.setText(
-                "复制任意文本、拖入文件，或按 Ctrl+Alt+K 快速捕捉，\n"
-                "都会自动收集到这里")
-            self._action.setVisible(False)
-        else:
-            self._icon.setText("🔍")
-            self._title.setText("没有匹配的碎片")
-            self._desc.setText("类型、内容、关键词三个筛选条件放宽一些，\n"
-                               "或清空筛选条件查看全部碎片")
-            self._action.setVisible(True)
 
 
 # ====================================================================
@@ -330,8 +280,8 @@ class _PreviewPane(QWidget):
         btns.setSpacing(8)
         self._copy_btn = QPushButton("📋 复制")
         self._copy_btn.setObjectName("secondaryBtn")
-        self._edit_btn = QPushButton("✏️ 编辑")
-        self._edit_btn.setObjectName("secondaryBtn")
+        self._edit_btn = IconButton("edit", text="编辑", icon_size=14,
+                                    object_name="secondaryBtn")
         for b in (self._copy_btn, self._edit_btn):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             btns.addWidget(b)
@@ -388,6 +338,11 @@ class FragmentsPanel(QWidget):
         self._docx_manager = host._docx_manager
         self._nav_manager = host._nav_manager
         self._clipboard_monitor = host._clipboard_monitor
+        # 窗口化渲染状态（成熟化 3.6）：行描述符表 + 分块决策状态机
+        self._rows = None                  # 行描述符表（refresh 时重建）
+        self._row_pos = 0                  # 已建到的描述符下标
+        self._windowing = ListWindowing()  # 分块决策（首屏块大小/追加/重置）
+        self._building = False             # 重建中标志：屏蔽滚动触发的追加
         self._build_ui()
 
     # ---- UI 构建 ----
@@ -398,8 +353,7 @@ class FragmentsPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("🧩 碎片工作台")
-        title.setObjectName("pageTitle")
+        title = PageTitle("fragments", "碎片工作台", self._host)
         header.addWidget(title)
         header.addStretch()
         self._frag_count_label = QLabel("共 0 条")
@@ -453,8 +407,8 @@ class FragmentsPanel(QWidget):
         self._preview_btn.toggled.connect(self._on_preview_toggled)
         toolbar.addWidget(self._preview_btn)
 
-        refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.setObjectName("secondaryBtn")
+        refresh_btn = IconButton("refresh", text="刷新", icon_size=14,
+                                 object_name="secondaryBtn")
         refresh_btn.clicked.connect(lambda: self.refresh(preserve_view=True))
         toolbar.addWidget(refresh_btn)
         v.addLayout(toolbar)
@@ -475,13 +429,21 @@ class FragmentsPanel(QWidget):
         self._delegate = _MatchHighlightDelegate(self._frag_list)
         self._frag_list.setItemDelegate(self._delegate)
 
+        # 窗口化加载：滚动接近底部时追加下一块（≤FULL_THRESHOLD 行全量直建，
+        # 本回调里的 windowed 检查会让它直接跳过）
+        attach_scroll_loader(self._frag_list, self._extend_list_rows)
+
         # 列表 + 空态叠放（空态透明背景，列表边框就是容器边框）
         list_holder = QWidget()
         holder_grid = QGridLayout(list_holder)
         holder_grid.setContentsMargins(0, 0, 0, 0)
         holder_grid.addWidget(self._frag_list, 0, 0)
 
-        self._empty_state = _EmptyState(self._clear_filters)
+        self._empty_state = EmptyState(
+            "fragments", "还没有收集到碎片",
+            "复制任意文本、拖入文件，或按 Ctrl+Alt+K 快速捕捉，\n"
+            "都会自动收集到这里",
+            action_text="清空筛选条件", on_action=self._clear_filters)
         self._empty_state.setVisible(False)
         holder_grid.addWidget(self._empty_state, 0, 0)
 
@@ -520,8 +482,8 @@ class FragmentsPanel(QWidget):
 
         bottom.addStretch()
 
-        del_btn = QPushButton("🗑 删除选中")
-        del_btn.setObjectName("dangerBtn")
+        del_btn = IconButton("trash", text="删除选中", icon_size=14,
+                             object_name="dangerBtn")
         del_btn.clicked.connect(self._on_delete)
         bottom.addWidget(del_btn)
 
@@ -573,7 +535,16 @@ class FragmentsPanel(QWidget):
         if shown_count > 0:
             self._empty_state.setVisible(False)
             return
-        self._empty_state.set_mode("no_result" if has_filter else "empty")
+        if has_filter:
+            self._empty_state.set_state(
+                "search", "没有匹配的碎片",
+                "类型、内容、关键词三个筛选条件放宽一些，\n"
+                "或清空筛选条件查看全部碎片", show_action=True)
+        else:
+            self._empty_state.set_state(
+                "fragments", "还没有收集到碎片",
+                "复制任意文本、拖入文件，或按 Ctrl+Alt+K 快速捕捉，\n"
+                "都会自动收集到这里", show_action=False)
         # 与列表严格同尺寸（隐藏期间布局不会调整它的几何）
         self._empty_state.setGeometry(self._frag_list.geometry())
         self._empty_state.setVisible(True)
@@ -608,6 +579,9 @@ class FragmentsPanel(QWidget):
         finally:
             lst.setUpdatesEnabled(True)
         lst.viewport().update()
+        # 空态图标是自绘位图，同样不在 QSS 管辖内（A3）
+        self._empty_state.apply_theme(getattr(self._host, "current_theme",
+                                              None))
 
     # ---- 刷新入口（供 host.refresh_page 调用） ----
     def refresh(self, preserve_view: bool = True):
@@ -616,6 +590,9 @@ class FragmentsPanel(QWidget):
         preserve_view=True 时保留滚动位置与选中项 —— 删除/编辑后列表不会
         跳回顶部，可以接着操作下一条；搜索/筛选变化时传 False，结果集
         变化较大，回到顶部更符合预期。
+
+        渲染走窗口化（成熟化 3.6）：≤FULL_THRESHOLD(200) 行全量直建与旧
+        实现一致；超出则首屏只建 FIRST_CHUNK(120) 行，滚动接近底部续建。
         """
         ftype = self._frag_filter.currentData()
         cat = self._frag_category.currentData()
@@ -640,52 +617,35 @@ class FragmentsPanel(QWidget):
         scroll_value = self._frag_list.verticalScrollBar().value()
         selected_ids = set(self._get_selected_ids()) if preserve_view else set()
 
+        # 窗口化渲染（成熟化 3.6）：先把碎片序列展开成纯 Python 行描述符表
+        # （无 Qt 对象，几百条也只是微秒级），再按块建行——≤FULL_THRESHOLD 行
+        # 全量直建（与旧实现完全一致），超出则首屏只建 FIRST_CHUNK 行，
+        # 滚动接近底部经 _extend_list_rows 续建
+        rows = self._build_row_specs(fragments)
+
         # 重建期间屏蔽信号：避免 clear() 触发 selectionChanged 把预览面板闪空
+        self._building = True
         self._frag_list.blockSignals(True)
         self._frag_list.clear()
-
-        current_date = None
-        for f in fragments:
-            created = f.created_at or ""
-            date_part = created[:DATETIME_DATE_LEN] if len(created) >= DATETIME_DATE_LEN else created
-            time_part = created[DATETIME_TIME_START:DATETIME_TIME_START + DATETIME_TIME_LEN] if len(created) >= DATETIME_MIN_LEN else created[DATETIME_TIME_START:]
-
-            if date_part != current_date:
-                current_date = date_part
-                date_item = QListWidgetItem(f"📅  {date_part}")
-                date_item.setData(Qt.ItemDataRole.UserRole, None)
-                flags = date_item.flags()
-                date_item.setFlags(flags & ~Qt.ItemFlag.ItemIsSelectable
-                                   & ~Qt.ItemFlag.ItemIsEnabled)
-                date_item.setData(COLOR_TOKEN_ROLE, "primary")
-                date_item.setForeground(QColor(colors["primary"]))
-                f_font = date_item.font()
-                f_font.setBold(True)
-                date_item.setFont(f_font)
-                date_item.setSizeHint(QSize(0, 30))
-                self._frag_list.addItem(date_item)
-
-            preview_text = f.preview(FRAGMENT_PREVIEW_LEN)
-            # 内容与时间分开：时间存独立 role，由绘制代理右对齐固定显示
-            item = QListWidgetItem(f"   {preview_text}")
-            item.setData(Qt.ItemDataRole.UserRole, f.fragment_id)
-            item.setData(TIME_ROLE, time_part)
-            item.setData(CAT_ROLE, f.category)
-            if f.type in ("clipboard_path", "file_pickup"):
-                item.setData(COLOR_TOKEN_ROLE, "link")
-                item.setForeground(QColor(colors["link"]))
-            icon = TYPE_ICONS.get(f.type, "📄")
-            label = TYPE_LABELS.get(f.type, "未知")
-            cat_label = CATEGORY_LABELS.get(f.category, f.category)
-            tip_lines = [f"{icon} 类型: {label}", f"🏷 内容: {cat_label}"]
-            if f.source:
-                tip_lines.append(f"🔗 来源: {f.source}")
-            tip_lines.append(f"🕐 时间: {created}")
-            tip_lines.append(f"📝 内容:\n{f.content}")
-            item.setToolTip("\n".join(tip_lines))
-            self._frag_list.addItem(item)
-
-        self._frag_list.blockSignals(False)
+        self._rows = rows
+        self._row_pos = 0
+        try:
+            built_ids = set()
+            n = self._windowing.reset(len(rows))
+            built_ids = self._build_list_rows(n, colors)
+            # 保留选中项：被选碎片若落在未建区间，续建到全部包含——
+            # 「删除/合并后选中项保持」的语义不因窗口化而缩水
+            if preserve_view and selected_ids:
+                remaining = selected_ids - built_ids
+                while remaining:
+                    n = self._windowing.extend()
+                    if n == 0:
+                        break
+                    built_ids |= self._build_list_rows(n, colors)
+                    remaining = selected_ids - built_ids
+        finally:
+            self._building = False
+            self._frag_list.blockSignals(False)
 
         # 恢复选中项（仅仍存在的条目）
         if selected_ids:
@@ -711,6 +671,95 @@ class FragmentsPanel(QWidget):
                                  bool(keyword) or ftype != "all"
                                  or cat != "all")
         self._host.data_changed.emit("fragment")
+
+    # ---- 窗口化渲染：行描述符表 / 行工厂 / 分块建行 ----
+    def _build_row_specs(self, fragments) -> list:
+        """把筛选后的碎片序列展开成行描述符表（纯 Python，不建 Qt 对象）：
+
+        ("header", date_part) 日期分组行 / ("frag", fragment) 碎片行。
+        分组规则与旧内联实现一致：日期段变化处插一个组头。
+        """
+        rows = []
+        current_date = None
+        for f in fragments:
+            created = f.created_at or ""
+            date_part = (created[:DATETIME_DATE_LEN]
+                         if len(created) >= DATETIME_DATE_LEN else created)
+            if date_part != current_date:
+                current_date = date_part
+                rows.append(("header", date_part))
+            rows.append(("frag", f))
+        return rows
+
+    def _make_row_item(self, row, colors):
+        """把一条行描述符建成 QListWidgetItem（条目属性与旧内联实现一致）"""
+        if row[0] == "header":
+            date_item = QListWidgetItem(f"📅  {row[1]}")
+            date_item.setData(Qt.ItemDataRole.UserRole, None)
+            flags = date_item.flags()
+            date_item.setFlags(flags & ~Qt.ItemFlag.ItemIsSelectable
+                               & ~Qt.ItemFlag.ItemIsEnabled)
+            date_item.setData(COLOR_TOKEN_ROLE, "primary")
+            date_item.setForeground(QColor(colors["primary"]))
+            f_font = date_item.font()
+            f_font.setBold(True)
+            date_item.setFont(f_font)
+            date_item.setSizeHint(QSize(0, 30))
+            return date_item
+
+        f = row[1]
+        created = f.created_at or ""
+        time_part = (created[DATETIME_TIME_START:
+                             DATETIME_TIME_START + DATETIME_TIME_LEN]
+                     if len(created) >= DATETIME_MIN_LEN
+                     else created[DATETIME_TIME_START:])
+        preview_text = f.preview(FRAGMENT_PREVIEW_LEN)
+        # 内容与时间分开：时间存独立 role，由绘制代理右对齐固定显示
+        item = QListWidgetItem(f"   {preview_text}")
+        item.setData(Qt.ItemDataRole.UserRole, f.fragment_id)
+        item.setData(TIME_ROLE, time_part)
+        item.setData(CAT_ROLE, f.category)
+        if f.type in ("clipboard_path", "file_pickup"):
+            item.setData(COLOR_TOKEN_ROLE, "link")
+            item.setForeground(QColor(colors["link"]))
+        icon = TYPE_ICONS.get(f.type, "📄")
+        label = TYPE_LABELS.get(f.type, "未知")
+        cat_label = CATEGORY_LABELS.get(f.category, f.category)
+        tip_lines = [f"{icon} 类型: {label}", f"🏷 内容: {cat_label}"]
+        if f.source:
+            tip_lines.append(f"🔗 来源: {f.source}")
+        tip_lines.append(f"🕐 时间: {created}")
+        tip_lines.append(f"📝 内容:\n{f.content}")
+        item.setToolTip("\n".join(tip_lines))
+        return item
+
+    def _build_list_rows(self, count: int, colors) -> set:
+        """把行描述符表里接下来 count 行建成 item 追加进列表。
+
+        返回本次建入的碎片 id 集合（组头行无 id，不进集合），
+        供 refresh 的「保留选中项」续建判断使用。
+        """
+        built_ids = set()
+        for _ in range(count):
+            row = self._rows[self._row_pos]
+            self._row_pos += 1
+            self._frag_list.addItem(self._make_row_item(row, colors))
+            if row[0] == "frag":
+                built_ids.add(row[1].fragment_id)
+        return built_ids
+
+    def _extend_list_rows(self):
+        """滚动接近底部 → 追加下一块（attach_scroll_loader 的回调入口）。
+
+        重建中 / 未窗口化（小列表全量直建）/ 已建满时直接跳过。
+        """
+        if self._building or self._rows is None:
+            return
+        if not self._windowing.windowed:
+            return
+        n = self._windowing.extend()
+        if n > 0:
+            self._build_list_rows(n, get_colors(self._host.current_theme))
 
     # ---- 预览同步 ----
     def _sync_preview(self):

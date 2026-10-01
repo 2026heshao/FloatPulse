@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from src.controls import IconButton
 from src.plugin_api import BallAction, BallPlugin, PluginContext
 from src.plugin_ui import make_hint_label
 
@@ -699,18 +700,18 @@ class AiChatPage(QWidget):
         rules_outer.addLayout(self._rules_form)
 
         rules_btn_row = QHBoxLayout()
-        self._rule_add_btn = QPushButton("＋ 添加规则", self)
-        self._rule_add_btn.setObjectName("secondaryBtn")
-        self._rule_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rule_add_btn = IconButton("plus", text="添加规则", icon_size=14,
+                                        object_name="secondaryBtn", parent=self)
         # clicked 会把 checked=False 当首个位置参数传入 → 用 lambda 挡住，
         # 否则 _add_rule_row 的 text 形参吃进 False，凭空多出一行 "False"
         self._rule_add_btn.clicked.connect(
             lambda _checked=False: self._add_rule_row())
         rules_btn_row.addWidget(self._rule_add_btn)
         rules_btn_row.addStretch()
-        self._rule_save_btn = QPushButton("💾 保存规则", self)
-        self._rule_save_btn.setObjectName("primaryBtn")
-        self._rule_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rule_save_btn = IconButton("save", text="保存规则", icon_size=14,
+                                         object_name="primaryBtn", parent=self,
+                                         off_color="on_primary",
+                                         hover_color="on_primary")
         self._rule_save_btn.clicked.connect(self._save_rules)
         rules_btn_row.addWidget(self._rule_save_btn)
         rules_outer.addLayout(rules_btn_row)
@@ -1336,11 +1337,9 @@ class AiChatPage(QWidget):
         edit = QLineEdit(str(text))
         edit.setPlaceholderText("输入一条规则，如：回答保持简洁，不超过 200 字")
         edit.returnPressed.connect(self._save_rules)
-        del_btn = QPushButton("🗑", wrap)
-        del_btn.setObjectName("secondaryBtn")
+        del_btn = IconButton("trash", icon_size=16, object_name="secondaryBtn",
+                             parent=wrap, tooltip="删除这条规则")
         del_btn.setFixedWidth(40)
-        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        del_btn.setToolTip("删除这条规则")
         del_btn.clicked.connect(
             lambda _checked=False, w=wrap: self._remove_rule_row(w))
         row.addWidget(chk)

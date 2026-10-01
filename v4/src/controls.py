@@ -27,14 +27,16 @@
 """
 
 from PyQt6.QtCore import (
-    QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, pyqtSignal,
+    QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QVariantAnimation,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QDoubleValidator, QIntValidator,
     QPen,
 )
 from PyQt6.QtWidgets import (
-    QAbstractButton, QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget,
+    QAbstractButton, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QVBoxLayout, QWidget,
 )
 from PyQt6.QtCore import QPropertyAnimation
 
@@ -42,6 +44,7 @@ from src.app_paths import get_screen_geometry
 from src.constants import UNDO_BAR_MS
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.theme import DEFAULT_THEME, get_colors
+from src import icon_render
 
 
 class Stepper(QWidget):
@@ -75,10 +78,11 @@ class Stepper(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
 
-        # 字形：用 U+2212（真正的减号）+ ASCII 加号，配 17px/700（见 theme.py）。
-        # 实测全角「－」在雅黑下会掉成一条又短又淡的横线，全角「＋」又偏粗，
-        # 两者不匹配；这组在 30×30 按钮里最平衡（对比图见 docs/）。
-        self._btn_minus = self._make_btn("\u2212", "减小（可长按连续调整）")
+        # 字形：P1 起改自绘 minus / plus 图标（icons.py）。原先 U+2212/ASCII+
+        # 是在系统字体里挑"最平衡的一对"（全角 －/＋ 在雅黑下不是过淡就是过粗），
+        # 自绘后彻底摆脱字体差异 —— 缺字形环境与正常环境同一张脸，
+        # QSS #stepBtn 的 font-size/font-weight 自然失效（无害保留）。
+        self._btn_minus = self._make_btn("minus", "减小（可长按连续调整）")
         self._edit = QLineEdit(self._fmt(self._value))
         self._edit.setObjectName("stepValue")
         self._edit.setFixedSize(self.EDIT_WIDTH, self.BTN_SIZE)
@@ -88,7 +92,7 @@ class Stepper(QWidget):
                               % (self._fmt(self._min), self._fmt(self._max)))
         self._edit.editingFinished.connect(self._commit_edit)
         self._edit.returnPressed.connect(self._commit_edit)
-        self._btn_plus = self._make_btn("+", "增大（可长按连续调整）")
+        self._btn_plus = self._make_btn("plus", "增大（可长按连续调整）")
 
         self._suffix = QLabel(suffix)
         self._suffix.setObjectName("fieldLabel")
@@ -117,12 +121,13 @@ class Stepper(QWidget):
         self._sync_buttons()
 
     # ---------------- 内部 ----------------
-    def _make_btn(self, text: str, tip: str) -> QPushButton:
-        btn = QPushButton(text)
-        btn.setObjectName("stepBtn")
-        btn.setFixedSize(self.BTN_SIZE, self.BTN_SIZE)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(tip)
+    def _make_btn(self, icon_name: str, tip: str) -> "IconButton":
+        """± 钮：30×30 固定尺寸、objectName=stepBtn（QSS 契约保持）
+
+        （返回类型加引号：IconButton 定义在本文件更靠后处，注解延迟求值）
+        """
+        btn = IconButton(icon_name, size=self.BTN_SIZE, icon_size=13,
+                         object_name="stepBtn", tooltip=tip)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return btn
 
@@ -355,6 +360,16 @@ class ToggleSwitch(QAbstractButton):
             self._theme = theme
             self.update()
 
+    # ---------------- 焦点态（UI 强化方案 A4）----------------
+    def focusInEvent(self, event):
+        # 焦点环由 paintEvent 自绘（QSS 管不到 QAbstractButton 的自绘内容）
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.update()
+
     # ---------------- 内部 ----------------
     def _on_toggled(self, checked: bool):
         self._anim.stop()
@@ -396,6 +411,20 @@ class ToggleSwitch(QAbstractButton):
         p.setBrush(knob)
         p.drawEllipse(QPointF(x + self.KNOB / 2.0, h / 2.0),
                       self.KNOB / 2.0, self.KNOB / 2.0)
+
+        # 焦点环（A4）：控件尺寸固定 44×24 不能变，所以环**内缩**绘制，
+        # 不扩占位（扩了会让设置页每一行高 2px，牵动大量几何断言）。
+        # 环色用 $focus_ring 而不是 $primary —— 未选中态的轨道是
+        # $text_disabled（浅灰），$primary 压上去同样只有约 1.6:1。
+        if self.hasFocus():
+            ring_px = 1.6
+            inset = ring_px / 2.0
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(colors["focus_ring"]), ring_px))
+            p.drawRoundedRect(
+                QRectF(inset, inset, w - ring_px, h - ring_px),
+                (h - ring_px) / 2.0, (h - ring_px) / 2.0)
+            p.setPen(Qt.PenStyle.NoPen)
         p.end()
 
 
@@ -509,3 +538,346 @@ class ScreenToast(QWidget):
         p.setFont(f)
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
         p.end()
+
+
+# ====================================================================
+# 图标小部件（UI 强化方案 A2）
+# ====================================================================
+class IconLabel(QWidget):
+    """只画一个自绘图标的小部件（零文字，尺寸即图标尺寸）。
+
+    为什么不直接 ``QLabel.setPixmap``：那样得自己处理设备像素比，换主题
+    还要重新生成 pixmap 再 setPixmap；自绘只在 paintEvent 里取色，
+    ``set_color`` 后 update() 一次就够（跟随主题的成本从"重建资源"降到
+    "重画一次"）。
+    """
+
+    def __init__(self, name, size=18, color=None, parent=None):
+        super().__init__(parent)
+        self._name = name
+        self._size = int(size)
+        self._color = (QColor(color) if color is not None
+                       else QColor(140, 148, 166))
+        self.setFixedSize(self._size, self._size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    @property
+    def icon_name(self) -> str:
+        return self._name
+
+    @property
+    def color(self) -> QColor:
+        """当前取色（只读；换主题链路断言用）。"""
+        return QColor(self._color)
+
+    def set_icon_name(self, name):
+        self._name = name
+        self.update()
+
+    def set_color(self, color):
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        icon_render.paint_icon(
+            p, self._name, QRectF(0.0, 0.0, float(self._size), float(self._size)),
+            self._color)
+        p.end()
+
+
+class IconButton(QPushButton):
+    """自绘图标按钮（UI 强化方案 A2 的 P1 批次）：纯图标或「图标+文字」。
+
+    ★ 最重要的设计约束：**objectName 原样保留站点既有值**。QSS 里
+    ``#iconBtn`` / ``#cardCloseBtn`` / ``#stepBtn`` / ``#sideTabIconBtn`` /
+    ``#secondaryBtn`` 等契约（背景、悬停、按压、焦点环）全部继续由
+    theme.py 管辖，本类只负责「画哪个图标、当前用什么颜色」—— 也就是
+    QSS 的 ``color:`` 管不到的 QIcon 位图。
+
+    颜色三态（对应 QSS 的 color / :hover 色 / :checked 色）：
+      · 常态 ``off_color``   缺省 ``text_secondary``
+      · 悬停 ``hover_color`` 缺省 ``primary``（``danger=True`` 时 ``danger``）
+      · 选中 ``on_color``    缺省 ``primary``（checkable 按钮的 On 态位图）
+    取值可以是**主题 token 名**（"danger" —— 每次 refresh 按当前主题解析，
+    换主题自动跟随），也可以是 "#RRGGBB" 字面量（主题无关，如危险钮悬停
+    的白）。禁用态一律 ``text_disabled``（Stepper 到边界置灰同源）。
+
+    换主题：宿主带 ``theme_changed`` 信号就自动订阅（PageTitle 同款
+    ``callable`` 守卫）；没有信号的对话框/便签由宿主显式调
+    :meth:`apply_theme`，或接受构造时取色（短命对象，可接受）。
+    """
+
+    def __init__(self, icon_name, size=0, icon_size=16, object_name=None,
+                 host=None, tooltip="", text="", checkable=False,
+                 off_color=None, hover_color=None, on_color=None,
+                 danger=False, parent=None):
+        super().__init__(text, parent)
+        self._icon_name = icon_name
+        self._icon_size = max(4, int(icon_size))
+        self._host = host
+        self._off_spec = off_color or "text_secondary"
+        self._hover_spec = hover_color or ("danger" if danger else "primary")
+        self._on_spec = on_color or "primary"
+        self._theme_override = None
+        self._hovered = False
+        if object_name:
+            self.setObjectName(object_name)
+        if size:
+            # 纯图标钮（标题栏/侧 Tab/Stepper）：站点既有固定尺寸原样保留
+            self.setFixedSize(int(size), int(size))
+        if checkable:
+            self.setCheckable(True)
+        if danger:
+            # 与 QSS `QPushButton#iconBtn[danger="true"]:hover` 的属性选择器配套
+            self.setProperty("danger", "true")
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._refresh_icon()
+        # ★ 仅当 ``theme_changed`` 真的可 connect 时才订阅（PageTitle 同款）：
+        #   测试替身常写成 ``SimpleNamespace(theme_changed=...)``，属性存在
+        #   但没有 ``connect``，直接订阅会 AttributeError。
+        signal = getattr(host, "theme_changed", None)
+        if callable(getattr(signal, "connect", None)):
+            signal.connect(self._on_theme_changed)
+
+    # ---------------- 对外 ----------------
+    @property
+    def icon_name(self) -> str:
+        return self._icon_name
+
+    def set_icon_name(self, name):
+        """换图形（🌙/☀️、⛶/❐ 这类一钮两态的动态按钮用）。"""
+        self._icon_name = name
+        self._refresh_icon()
+
+    def apply_theme(self, theme=None):
+        """按主题重取图标颜色。宿主没有 ``theme_changed`` 信号时由宿主显式
+        调（GlassDialog.apply_theme / CardWindow._apply_style / 便签窗）。"""
+        if theme:
+            self._theme_override = theme
+        self._refresh_icon()
+
+    # ---------------- 内部 ----------------
+    @staticmethod
+    def _resolve(spec, colors):
+        """token 名 → 当前主题色值；其它（#RRGGBB / QColor）原样放行。"""
+        if isinstance(spec, str) and spec in colors:
+            return colors[spec]
+        return spec
+
+    def _refresh_icon(self):
+        theme = (self._theme_override
+                 or self._detect_theme() or DEFAULT_THEME)
+        colors = get_colors(theme)
+        off = self._resolve(self._off_spec, colors)
+        if self._hovered:
+            off = self._resolve(self._hover_spec, colors)
+        self.setIcon(icon_render.icon(
+            self._icon_name, self._icon_size, off,
+            on_color=self._resolve(self._on_spec, colors),
+            disabled_color=colors["text_disabled"]))
+
+    def _detect_theme(self):
+        """依次找：宿主的 ``_theme`` → 父控件链上最近窗口的 ``_theme``。
+
+        后一半是给"运行期动态创建、又没接宿主管线"的按钮兜底（插件页的
+        规则行删除钮等）：它们创建时沿着 parentWidget 向上爬，爬到主窗/
+        卡片窗/便签窗的 ``_theme`` 就立即取对配色，不必等下一次主题广播。
+        只认 "light"/"dark"，中途对象挂了同名属性也不误判。
+        """
+        if self._host is not None:
+            t = getattr(self._host, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+        w = self.parentWidget()
+        while w is not None:
+            t = getattr(w, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+            w = w.parentWidget()
+        return None
+
+    def _on_theme_changed(self, _theme=None):
+        self._refresh_icon()
+
+    # ---------------- 悬停变色 ----------------
+    # QSS 的 :hover 只能改 color:，管不到 QIcon 位图 —— 悬停时把 Off 态
+    # 位图换成 hover 色重设一次（pixmap 按「名称+尺寸+颜色」缓存，进出
+    # 各只付一次生成成本，之后是字典查找）。
+    def enterEvent(self, event):
+        self._hovered = True
+        self._refresh_icon()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self._refresh_icon()
+        super().leaveEvent(event)
+
+
+class EmptyState(QWidget):
+    """列表空态引导（UI 强化方案 A3）：自绘图标 + 标题 + 提示 + 可选动作钮。
+
+    两种用法：
+      ①普通部件进布局——fragments 的 holder_grid 叠放、assets 的 _stack
+      空态页、plugins 的外层 vbox；
+      ②:meth:`attach_to` 叠成列表控件的**覆盖层**——notes / tasks /
+      knowledge / 软件导航用这种：列表本体一行代码不动，不碰任何
+      ``itemAt(0)`` / ``count()`` 定值断言，也不进会被整体销毁重建的
+      布局（软件导航的 ``_clear_layout`` 会清空整张网格）。
+
+    QSS 契约沿用 fragments 旧版 ``_EmptyState``：标题 ``sectionLabel`` /
+    提示 ``hintLabel`` / 动作钮 ``secondaryBtn``；图标走 A2 自绘体系
+    （缺字形环境不再出豆腐块）。★内部**禁止**出现 ``pageTitle`` 字样 ——
+    verify_icons_render 的 H 段断言每页恰好一个 PageTitle。
+    """
+
+    def __init__(self, icon, title, hint, action_text=None, on_action=None,
+                 icon_size=40, object_name=None, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 24, 24, 24)
+        v.setSpacing(8)
+        v.addStretch()
+
+        icon_row = QHBoxLayout()
+        icon_row.addStretch()
+        self.icon_label = IconLabel(icon, icon_size)
+        icon_row.addWidget(self.icon_label)
+        icon_row.addStretch()
+        v.addLayout(icon_row)
+
+        self._title = QLabel(title)
+        self._title.setObjectName("sectionLabel")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(self._title)
+
+        self._desc = QLabel(hint)
+        self._desc.setObjectName("hintLabel")
+        self._desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._desc.setWordWrap(True)
+        v.addWidget(self._desc)
+
+        self._action = None
+        if action_text:
+            self._action = QPushButton(action_text)
+            self._action.setObjectName("secondaryBtn")
+            self._action.setCursor(Qt.CursorShape.PointingHandCursor)
+            if on_action is not None:
+                self._action.clicked.connect(on_action)
+            self._action.setVisible(False)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            btn_row.addWidget(self._action)
+            btn_row.addStretch()
+            v.addLayout(btn_row)
+
+        v.addStretch()
+        if object_name:
+            self.setObjectName(object_name)
+        # 无动作钮的覆盖层对鼠标全透明：盖在列表上时右键菜单/滚轮照常
+        # 落到列表本体（notes/tasks/knowledge 的空态没有可点的东西）
+        if self._action is None:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                              True)
+
+    # ---------------- 对外 ----------------
+    @property
+    def action(self):
+        """动作钮（fragments 旧版 ``_empty_state._action`` 契约的承接）"""
+        return self._action
+
+    def set_state(self, icon, title, hint, show_action=False):
+        """切换空态内容（如 fragments 的「全空」⇄「筛选无结果」两态）"""
+        self.icon_label.set_icon_name(icon)
+        self._title.setText(title)
+        self._desc.setText(hint)
+        if self._action is not None:
+            self._action.setVisible(show_action)
+
+    def attach_to(self, host):
+        """叠成 ``host``（列表控件/容器）的覆盖层：随其 resize 贴合。
+
+        初始隐藏，由调用方按数据有无显式 ``setVisible`` / ``raise_``。
+        """
+        self.setParent(host)
+        self.setGeometry(host.rect())
+        host.installEventFilter(self)
+        self.hide()
+        self.raise_()
+
+    def apply_theme(self, theme=None):
+        """图标取色跟主题（宿主 apply_theme 链里顺手调一次）。"""
+        self.icon_label.set_color(
+            get_colors(theme or DEFAULT_THEME)["text_placeholder"])
+
+    # ---------------- 内部 ----------------
+    def eventFilter(self, obj, event):
+        if (obj is self.parentWidget()
+                and event.type() == QEvent.Type.Resize):
+            self.setGeometry(self.parentWidget().rect())
+        return super().eventFilter(obj, event)
+
+
+class PageTitle(QWidget):
+    """页面标题：自绘图标 + 标题文字。
+
+    ★ 唯一的设计约束：**文字仍是 ``QLabel#pageTitle``**。图标是独立子控件，
+    不参与文字度量 —— 因此 ``theme.py`` 里 ``QLabel#pageTitle`` 的 QSS 与
+    所有既有几何/样式断言口径零变化（把标题换成"一个自绘整体"会同时改掉
+    文字度量与 QSS 命中，是没必要的风险）。
+
+    换主题：宿主带 ``theme_changed`` 信号就自动订阅（与 ``settings_panel``
+    订阅宿主信号同一范式）。★ 订阅用的是 **PageTitle 自身的绑定方法**而不是
+    lambda —— 绑定方法让 Qt 在本部件析构时自动断开；lambda 没有接收者上下文，
+    宿主活得比面板久时会在已析构对象上回调（段错误的经典成因）。
+    """
+
+    def __init__(self, icon_name, text, host=None, icon_size=18,
+                 spacing=8, parent=None):
+        super().__init__(parent)
+        self._host = host
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(spacing)
+        self.icon = IconLabel(icon_name, icon_size)
+        lay.addWidget(self.icon)
+        self.label = QLabel(text)
+        self.label.setObjectName("pageTitle")
+        lay.addWidget(self.label)
+        self.apply_theme()
+        # ★ 仅当 ``theme_changed`` 真的可 connect 时才订阅。
+        #   只判 ``is not None`` 不够：测试替身常写成
+        #   ``SimpleNamespace(theme_changed=SimpleNamespace(emit=...))`` —— 属性
+        #   存在但没有 ``connect``（2026-09-30 test_ui_scale.py 的三个 error
+        #   即此）。判 ``callable`` 连 ``connect=None`` 的形态也一并挡住。
+        #   与 settings_panel._on_ui_scale_changed 的 ``callable`` 守卫同口径。
+        signal = getattr(host, "theme_changed", None)
+        if callable(getattr(signal, "connect", None)):
+            signal.connect(self._on_theme_changed)
+
+    # ---- 便捷访问（省得调用方层层 .label）----
+    def text(self) -> str:
+        return self.label.text()
+
+    def set_text(self, text):
+        self.label.setText(text)
+
+    def set_icon_name(self, name):
+        self.icon.set_icon_name(name)
+
+    @property
+    def icon_name(self) -> str:
+        return self.icon.icon_name
+
+    # ---- 主题 ----
+    def _on_theme_changed(self, _theme=None):
+        self.apply_theme()
+
+    def apply_theme(self, theme=None):
+        """按主题重取图标颜色。宿主没有 ``theme_changed`` 信号时由调用方显式调
+        （例如 ``AppLauncherPage._apply_style()`` 已经在换主题时被宿主调用）。"""
+        theme = theme or getattr(self._host, "_theme", None) or DEFAULT_THEME
+        self.icon.set_color(get_colors(theme)["text"])

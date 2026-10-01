@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
 from src.glass_dialog import GlassDialog
 
 from src import plugin_market
+from src.controls import EmptyState, IconButton, PageTitle
 from src.plugin_net import make_async_getter, make_async_bytes_getter
 from src.update_checker import RELEASES_API_URL, check_headers
 
@@ -190,8 +191,7 @@ class PluginsPanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("🔌 插件中心")
-        title.setObjectName("pageTitle")
+        title = PageTitle("plugins", "插件中心", self._host)
         header.addWidget(title)
         header.addStretch()
         self._count_label = QLabel("共 0 个插件")
@@ -246,8 +246,8 @@ class PluginsPanel(QWidget):
         open_store_btn.clicked.connect(self._on_open_store_dialog)
         toolbar.addWidget(open_store_btn)
 
-        self._rescan_btn = QPushButton("🔄 重新扫描")
-        self._rescan_btn.setObjectName("secondaryBtn")
+        self._rescan_btn = IconButton("refresh", text="重新扫描", icon_size=14,
+                                      object_name="secondaryBtn")
         self._rescan_btn.setToolTip(
             "重新扫描插件安装目录与商店目录（不必重启程序）")
         self._rescan_btn.clicked.connect(self._on_rescan)
@@ -300,17 +300,16 @@ class PluginsPanel(QWidget):
         scroll.setWidget(container)
         v.addWidget(scroll, 1)
 
-        # ---- 空态提示（默认显示，refresh 时按有无插件切换）----
-        self._empty_label = QLabel(
-            "还没有安装任何插件\n\n"
-            "点上方「🏪 插件商店」，把插件包（.fpplug 压缩包，"
-            "或含 manifest.json 的文件夹）安装进来\n\n"
-            "也可以直接把插件文件夹放到插件安装目录后点「重新扫描」\n\n"
-            "插件包内建议放一份「使用说明.md」，卡片会自动显示其中的一句话摘要")
-        self._empty_label.setObjectName("pluginEmptyHint")
-        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setStyleSheet("padding: 40px;")
-        self._empty_label.setWordWrap(True)
+        # ---- 空态引导（A3 通用化，2026-10-01）----
+        # ★ objectName 用独立的 pluginEmptyState：QSS 里 QLabel#pluginEmptyHint
+        #   是商店弹窗那个 QLabel 空态的契约（verify_kb_search 断言 QSS 含该
+        #   选择器），不能动；本组件内部标签走 sectionLabel/hintLabel 通用样式。
+        # ★ 绝不能放进 _cards_layout —— 测试对卡片网格有精确占位断言。
+        self._empty_label = EmptyState(
+            "plugins", "还没有安装任何插件",
+            "点上方「插件商店」安装插件包（.fpplug）\n"
+            "或把插件文件夹放进安装目录后点「重新扫描」",
+            object_name="pluginEmptyState")
         v.addWidget(self._empty_label, 1)
 
         self.refresh()
@@ -639,8 +638,8 @@ class PluginsPanel(QWidget):
                 lambda _checked=False, p=readme: self._on_open_file(p))
             bottom.addWidget(readme_btn)
 
-        uninstall_btn = QPushButton("🗑 卸载")
-        uninstall_btn.setObjectName("secondaryBtn")
+        uninstall_btn = IconButton("trash", text="卸载", icon_size=14,
+                                   object_name="secondaryBtn")
         uninstall_btn.setToolTip("删除插件目录并摘掉它的动作 / 热键 / 菜单项；"
                                  "插件私有数据（float_data/plugins/）会保留")
         uninstall_btn.clicked.connect(
@@ -1215,7 +1214,7 @@ class PluginStoreDialog(GlassDialog):
         self.add_footer([
             ("📁 打开商店目录", "secondaryBtn",
              lambda _checked=False: self._panel._on_open_store_dir()),
-            ("🔄 刷新", "secondaryBtn", self.reload),
+            ("刷新", "secondaryBtn", self.reload, "refresh"),
             ("关闭", "primaryBtn", self.accept),
         ])
         self.reload()

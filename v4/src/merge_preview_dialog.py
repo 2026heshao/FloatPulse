@@ -73,7 +73,7 @@ class MergePreviewDialog(GlassDialog):
         # 按钮区
         btns = self.add_footer([
             ("📋 复制到剪贴板", "primaryBtn", None),
-            ("💾 存为笔记", "secondaryBtn", None),
+            ("存为笔记", "secondaryBtn", None, "save"),
             ("关闭", "secondaryBtn", self.reject),
         ])
         self._copy_btn, self._save_btn = btns[0], btns[1]

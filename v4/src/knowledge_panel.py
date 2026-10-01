@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, QTimer
 
 from src.constants import PARAGRAPH_PREVIEW_LEN
 from src.glass_dialog import GlassDialog
+from src.controls import EmptyState, IconButton, PageTitle
 
 # 搜索去抖毫秒数（与碎片页 SEARCH_DEBOUNCE_MS 同值；两面板各自本地定义，避免跨面板耦合）
 SEARCH_DEBOUNCE_MS = 250
@@ -39,8 +40,7 @@ class KnowledgePanel(QWidget):
 
         # ---- 顶部标题 + 计数 ----
         header = QHBoxLayout()
-        title = QLabel("📚 知识库")
-        title.setObjectName("pageTitle")
+        title = PageTitle("knowledge", "知识库", self._host)
         header.addWidget(title)
         header.addStretch()
         self._kb_count_label = QLabel("共 0 段")
@@ -52,7 +52,7 @@ class KnowledgePanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        add_btn = QPushButton("➕ 新增知识")
+        add_btn = IconButton("plus", text="新增知识", icon_size=14)
         add_btn.clicked.connect(self._on_append)
         toolbar.addWidget(add_btn)
 
@@ -61,8 +61,8 @@ class KnowledgePanel(QWidget):
         add_frag_btn.clicked.connect(self._on_add_to_fragments)
         toolbar.addWidget(add_frag_btn)
 
-        reload_btn = QPushButton("🔄 重新加载")
-        reload_btn.setObjectName("secondaryBtn")
+        reload_btn = IconButton("refresh", text="重新加载", icon_size=14,
+                                object_name="secondaryBtn")
         reload_btn.clicked.connect(self._on_reload)
         toolbar.addWidget(reload_btn)
 
@@ -98,6 +98,13 @@ class KnowledgePanel(QWidget):
         self._kb_list.customContextMenuRequested.connect(self._on_context_menu)
         self._kb_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         v.addWidget(self._kb_list, 1)
+
+        # ---- 空态引导（A3）：只有「整个知识库是空的」才显示；搜索无结果
+        # 仍走列表内的占位条目（两种"没有"语义不同，不混用）----
+        self._kb_empty = EmptyState(
+            "knowledge", "知识库还是空的",
+            "点上方「新增知识」写下第一段，\n或选中碎片后点「加入碎片池」随时复用")
+        self._kb_empty.attach_to(self._kb_list)
 
         # ---- 底部提示 ----
         hint = QLabel("双击段落：编辑 · 右键段落：编辑 / 删除 / 在此后新增 / 加入碎片池")
@@ -155,6 +162,11 @@ class KnowledgePanel(QWidget):
                 self._kb_list.addItem(placeholder)
         else:
             self._kb_count_label.setText(f"共 {len(paragraphs)} 段")
+        # 空态引导只认「整个库是空的」（A3）；有段落但搜索无命中走占位条目
+        self._kb_empty.setVisible(not paragraphs)
+        if not paragraphs:
+            self._kb_empty.setGeometry(self._kb_list.rect())
+            self._kb_empty.raise_()
         bar.setValue(min(scroll_value, bar.maximum()))
 
         if not recheck:
@@ -271,7 +283,7 @@ class KnowledgePanel(QWidget):
         dlg.body_layout.addWidget(edit, 1)
 
         btns = dlg.add_footer([
-            ("💾 保存", "primaryBtn", None),
+            ("保存", "primaryBtn", None, "save", "on_primary"),
             ("取消", "secondaryBtn", dlg.reject),
         ])
 
@@ -302,7 +314,7 @@ class KnowledgePanel(QWidget):
         dlg.body_layout.addWidget(edit, 1)
 
         btns = dlg.add_footer([
-            ("💾 保存", "primaryBtn", None),
+            ("保存", "primaryBtn", None, "save", "on_primary"),
             ("取消", "secondaryBtn", dlg.reject),
         ])
 
@@ -398,7 +410,7 @@ class KnowledgePanel(QWidget):
         dlg.body_layout.addWidget(edit, 1)
 
         btns = dlg.add_footer([
-            ("💾 保存", "primaryBtn", None),
+            ("保存", "primaryBtn", None, "save", "on_primary"),
             ("取消", "secondaryBtn", dlg.reject),
         ])
 

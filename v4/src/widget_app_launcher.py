@@ -63,6 +63,7 @@ from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPixmapCache
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
+from src.controls import EmptyState, IconButton, PageTitle
 
 
 # ====================================================================
@@ -557,9 +558,8 @@ class AppLauncherPage(QWidget):
         toolbar.setContentsMargins(16, 12, 16, 6)
         toolbar.setSpacing(10)
 
-        title = QLabel("🚀 软件导航")
-        title.setObjectName("pageTitle")
-        toolbar.addWidget(title)
+        self._page_title = PageTitle("apps", "软件导航", self)
+        toolbar.addWidget(self._page_title)
 
         self._count_label = QLabel("共 0 个")
         self._count_label.setObjectName("hintLabel")
@@ -606,10 +606,28 @@ class AppLauncherPage(QWidget):
         self._scroll.setWidget(self._grid_container)
         root.addWidget(self._scroll, 1)
 
+        # 空态引导（A3）：覆盖层叠在滚动区 viewport 上。★不能放进
+        # _grid_layout —— _render_cards 每次都 _clear_layout 整张网格；
+        # 也不挂 _grid_container（空网格时它只有一行边距高，会裁掉空态）
+        self._apps_empty = EmptyState(
+            "apps", "还没有常用软件",
+            "点上方「新增」把常用软件放进来，单击卡片直接启动")
+        self._apps_empty.attach_to(self._scroll.viewport())
+        self._apps_empty.setVisible(len(self.app_list) == 0)
+        if self._apps_empty.isVisible():
+            self._apps_empty.setGeometry(self._scroll.viewport().rect())
+            self._apps_empty.raise_()
+
     def _apply_style(self):
         """应用主题 QSS + 卡片/页面专用样式。"""
         qss = get_main_window_qss(self._theme)
         colors = get_colors(self._theme)
+        # 标题图标是自绘的（不在 QSS 管辖内），换主题必须显式重取色 ——
+        # 本页没有 theme_changed 订阅，宿主换主题时是改 self._theme 后调
+        # _apply_style()（见 main_window._apply_theme），所以接在这里。
+        page_title = getattr(self, "_page_title", None)
+        if page_title is not None:
+            page_title.apply_theme(self._theme)
         card_extra = f"""
         QWidget#gridContainer {{
             /* 不再垫实色面板：与其他页面一致，卡片直接浮在玻璃底上 */
@@ -732,8 +750,14 @@ class AppLauncherPage(QWidget):
                     AppLauncherPage._clear_layout(sub)
 
     def _update_count(self):
-        """更新顶部计数标签。"""
+        """更新顶部计数标签 + 空态引导显隐（A3）。"""
         self._count_label.setText(f"共 {len(self.app_list)} 个")
+        empty = getattr(self, "_apps_empty", None)
+        if empty is not None:
+            empty.setVisible(len(self.app_list) == 0)
+            if empty.isVisible():
+                empty.setGeometry(self._scroll.viewport().rect())
+                empty.raise_()
 
     # ================================ 事件重写 ================================
     def resizeEvent(self, event):
@@ -953,19 +977,19 @@ class AppManageDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self._add_btn = QPushButton("➕ 新增")
-        self._add_btn.setObjectName("secondaryBtn")
+        self._add_btn = IconButton("plus", text="新增", icon_size=14,
+                                   object_name="secondaryBtn")
         self._add_btn.clicked.connect(self._on_add)
         btn_row.addWidget(self._add_btn)
 
-        self._edit_btn = QPushButton("✏️ 编辑")
-        self._edit_btn.setObjectName("secondaryBtn")
+        self._edit_btn = IconButton("edit", text="编辑", icon_size=14,
+                                    object_name="secondaryBtn")
         self._edit_btn.clicked.connect(self._on_edit)
         self._edit_btn.setEnabled(False)
         btn_row.addWidget(self._edit_btn)
 
-        self._delete_btn = QPushButton("🗑 删除")
-        self._delete_btn.setObjectName("secondaryBtn")
+        self._delete_btn = IconButton("trash", text="删除", icon_size=14,
+                                     object_name="secondaryBtn")
         self._delete_btn.clicked.connect(self._on_delete)
         self._delete_btn.setEnabled(False)
         btn_row.addWidget(self._delete_btn)
