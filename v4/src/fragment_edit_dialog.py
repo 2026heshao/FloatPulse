@@ -44,7 +44,7 @@ class FragmentEditDialog(GlassDialog):
         body.addWidget(self._edit, 1)
 
         btns = self.add_footer([
-            ("💾 保存修改", "primaryBtn", None),
+            ("保存修改", "primaryBtn", None, "save", "on_primary"),
             ("取消", "secondaryBtn", self.reject),
         ])
         self._save_btn = btns[0]
