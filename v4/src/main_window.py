@@ -128,9 +128,14 @@ NAV_DROP_MS = 180
 # 侧栏分组展开/折叠动画（2026-09-29）：条目逐条做 maximumHeight 过渡，
 # 等价于 web 的 max-height 过渡；展开比折叠略长（展开要"长出来"，
 # 折叠要"收回去"，同长时收的过程会显得拖沓）。
-NAV_GROUP_EXPAND_MS = 280      # 展开时长
-NAV_GROUP_COLLAPSE_MS = 210    # 折叠时长
-NAV_GROUP_STAGGER_MS = 18      # 逐条错峰（stagger），最多叠加 4~5 条
+# 2026-10-01 丝滑度调优（离屏探针取证）：280/210/18 → 220/170/12，
+# 缓动 OutQuint→OutCubic —— OutQuint 对 39px 行高在 ~105ms 后余下
+# 175ms 只挪 1px，叠上 stagger 观感是"急起—长尾漂移"；OutCubic 220ms
+# 的静止尾巴 <1 帧。motion.MOTION 的 slow/stagger 是全局语义档，
+# 与这里的本地实现常量解耦（不再同值）。
+NAV_GROUP_EXPAND_MS = 220      # 展开时长
+NAV_GROUP_COLLAPSE_MS = 170    # 折叠时长
+NAV_GROUP_STAGGER_MS = 12      # 逐条错峰（stagger），最多叠加 4~5 条
 NAV_ARROW_MS = 240             # 箭头旋转时长
 
 
@@ -1388,6 +1393,26 @@ class MainWindow(QWidget):
         self._nav_group_anims = []
         self._apply_nav_visibility()
 
+    def _stop_nav_group_anims_keep_pose(self, group: str):
+        """停掉**指定组**的在飞动画，但不落终态、不刷显隐 —— 重定向起播专用。
+
+        与 ``_stop_nav_group_anims``（拖拽/重铺布局用，必须落终态）的区别：
+        这里只拆动画机，条目停在当前视觉姿态，交给随后的新动画接管；
+        别的组在飞的动画不动（多组可同开，A 组重定向不该打断 B 组）。
+        ``QAbstractAnimation.stop()`` 不发 finished，收尾钩子不会误触发；
+        组归属用动画对象上的动态属性 ``_nav_group`` 标记（见下）。
+        """
+        kept = []
+        for anim in list(self._nav_group_anims):
+            if anim.property("_nav_group") != group:
+                kept.append(anim)
+                continue
+            try:
+                anim.stop()
+            except RuntimeError:
+                pass
+        self._nav_group_anims = kept
+
     def _animate_nav_group(self, group: str, expand: bool):
         """展开/折叠某组的条目：逐条 maximumHeight 过渡（等价 web 的 max-height）。
 
@@ -1399,6 +1424,17 @@ class MainWindow(QWidget):
         逐条还额外送了一个 web 里很常见的 **stagger**：第 i 条延迟
         i×NAV_GROUP_STAGGER_MS 起步，收放时像"层层推开/卷起"，
         比整块同时缩放灵动得多。
+
+        ★ 2026-10-01 丝滑度重构（离屏探针三场景取证）：
+        1. 重定向代替打断：先 ``_stop_nav_group_anims_keep_pose``（本组
+           在飞动画停在当前姿态、别组不受影响），再从**当前视觉高度**
+           起播 —— 连续点击不再"啪"地跳回满高/0 再重放。
+        2. 先压高再显形：``setMaximumHeight(start_v)`` 必须先于
+           ``setVisible(True)``。反过来的话 stagger 延迟期与中断重播的
+           首帧都会以"未约束满高"亮出（探针 B/C 实锤的闪变来源）。
+        3. OutQuint→OutCubic + 时长收紧 280/210/18→220/170/12：39px 行高
+           下 OutQuint ~105ms 就走完 97%，余下 175ms 只挪 1px，观感是
+           "急起—长尾漂移"；OutCubic 220ms 的静止尾巴 <1 帧。
         """
         items = self._nav_group_item_widgets(group)
         hd = self._nav_group_headers.get(group)
@@ -1407,11 +1443,12 @@ class MainWindow(QWidget):
                             duration=self._nav_anim_ms(NAV_ARROW_MS))
         if not items:
             return
-        self._stop_nav_group_anims()
-        row_h = self._nav_row_height()
-        base_ms = NAV_GROUP_EXPAND_MS if expand else NAV_GROUP_COLLAPSE_MS
-        duration = self._nav_anim_ms(base_ms)
+        duration = self._nav_anim_ms(
+            NAV_GROUP_EXPAND_MS if expand else NAV_GROUP_COLLAPSE_MS)
         stagger = self._nav_anim_ms(NAV_GROUP_STAGGER_MS)
+        row_h = self._nav_row_height()
+        # 只停本组在飞动画且不落终态（重定向；别组的动画照飞）
+        self._stop_nav_group_anims_keep_pose(group)
         if duration <= 0:
             # 动画档位关闭：直接到终态（保持"0 动画"设置下的零延迟手感）
             for w in items:
@@ -1419,13 +1456,24 @@ class MainWindow(QWidget):
                 w.setVisible(expand)
             return
         parallel = QParallelAnimationGroup(self)
+        parallel.setProperty("_nav_group", group)
         for i, w in enumerate(items):
-            # 动画期间必须可见（可见性不参与动画，隐藏了就看不到"长出来"）
+            # 起播值 = 当前视觉高度：隐藏=0；可见且未约束=满行高；
+            # 在飞=被动画压住的当前 maximumHeight（重定向从半途续走）
+            if not w.isVisible():
+                cur = 0
+            else:
+                mh = w.maximumHeight()
+                cur = row_h if mh > row_h else int(mh)
+            start_v = max(0, min(cur, row_h))
+            # 动画期间必须可见（可见性不参与动画，隐藏了就看不到"长出来"），
+            # 但必须先把起点钉住再显形 —— 顺序不能反，否则满高闪一帧
+            w.setMaximumHeight(start_v)
             w.setVisible(True)
             prop = QPropertyAnimation(w, b"maximumHeight", self)
             prop.setDuration(duration)
-            prop.setEasingCurve(QEasingCurve.Type.OutQuint)
-            prop.setStartValue(0 if expand else max(row_h, w.height()))
+            prop.setEasingCurve(QEasingCurve.Type.OutCubic)
+            prop.setStartValue(start_v)
             prop.setEndValue(row_h if expand else 0)
             delay = stagger * i
             if delay > 0:

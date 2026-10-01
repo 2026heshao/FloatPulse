@@ -566,15 +566,15 @@ QLabel#pluginCardTitle {
 }
 QLabel#pluginCardId {
     color: $text_secondary;
-    font-size: 12px;
+    font-size: 11px;
 }
 QLabel#pluginCardDesc {
-    color: $text_secondary;
+    color: $text;
     font-size: 12px;
 }
 QLabel#pluginCardUsage {
     color: $text_secondary;
-    font-size: 12px;
+    font-size: 11px;
     font-style: italic;
 }
 QTextBrowser#usageViewer {
@@ -629,23 +629,26 @@ QLabel#pluginErrorHint {
 QLabel#pluginStatusOn {
     color: $success;
     font-size: 11px;
-    padding: 1px 6px;
+    font-weight: 600;
+    padding: 2px 8px;
     border: 1px solid $success;
-    border-radius: 6px;
+    border-radius: 8px;
 }
 QLabel#pluginStatusOff {
     color: $text_secondary;
     font-size: 11px;
-    padding: 1px 6px;
+    font-weight: 600;
+    padding: 2px 8px;
     border: 1px solid $panel_edge;
-    border-radius: 6px;
+    border-radius: 8px;
 }
 QLabel#pluginStatusWarn {
     color: $danger;
     font-size: 11px;
-    padding: 1px 6px;
+    font-weight: 600;
+    padding: 2px 8px;
     border: 1px solid $danger_border;
-    border-radius: 6px;
+    border-radius: 8px;
 }
 /* ---- 插件中心：失败区小标题 ---- */
 QLabel#pluginSectionLabel {

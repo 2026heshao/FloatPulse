@@ -43,8 +43,8 @@ from PyQt6.QtWidgets import (
     QFrame, QSizePolicy, QGridLayout, QSystemTrayIcon, QApplication,
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QDate, QPoint, QRect, QSize, pyqtSignal, QVariantAnimation,
-    QEasingCurve, QPropertyAnimation, QRectF, QMimeData, QEvent,
+    Qt, QTimer, QDate, QPoint, QSize, pyqtSignal, QVariantAnimation,
+    QEasingCurve, QPropertyAnimation, QRectF, QMimeData,
 )
 from PyQt6.QtGui import QColor, QAction, QDesktopServices, QPainter, QPixmap, QFontMetrics, QFont, QIcon, QDrag, QImageReader, QShortcut, QKeySequence
 from PyQt6.QtCore import QUrl
@@ -139,37 +139,6 @@ class _TabIndicator(NavIndicator):
     def get_indicator_y(self) -> int:
         """获取当前指示器 Y 位置"""
         return self.y()
-
-
-# ====================================================================
-# 转场画布：把合成好的位图按 1:1 画出来
-# ====================================================================
-class _TransitionCanvas(QWidget):
-    """页转场用的画布控件。
-
-    刻意不用 QLabel：`setScaledContents(True)` 会把位图按**逻辑尺寸**重采样，
-    在 1.25 倍缩放的屏幕上实测会在细笔画处留下约 1px 的差异（文字边缘发虚）。
-    这里直接 `drawPixmap(QPoint, QPixmap)`，遵循位图自带的 DPR 按 1:1 落像素。
-
-    自身不画任何背景（默认 autoFillBackground=False），因此位图的透明区会
-    露出下层真实玻璃 —— 这正是转场需要的效果。
-    """
-
-    def __init__(self, pixmap: QPixmap, parent=None):
-        super().__init__(parent)
-        self._pm = pixmap
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-
-    def set_pixmap(self, pixmap: QPixmap):
-        self._pm = pixmap
-        self.update()
-
-    def paintEvent(self, event):
-        if self._pm is None or self._pm.isNull():
-            return
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self._pm)
-        painter.end()
 
 
 # ====================================================================
@@ -1307,7 +1276,17 @@ class CardWindow(QWidget):
             refresher()
 
     def _switch_mode(self, mode: str):
-        """切换 Tab 模式（带水平滑入淡入淡出转场）"""
+        """切换 Tab 模式（即时切换，无页面转场）。
+
+        曾经做过快照合成式滑动转场（三代实现，两代翻车史见 git），最终移除：
+        转场期间真实 stack 停在源页索引且被隐藏，动画结束才 setCurrentIndex。
+        快速连点时本方法读到**过期的 currentIndex**，有两类错位：
+        ① 第二击点回转场源页 → idx==old_idx 走直切分支，旧转场 finished
+           稍后仍把 stack 设成旧目标页 → 选中键与页面永久错位；
+        ② 第二段转场从过期源页起跳 → 视觉跳变。
+        页面即切 + 指示器 260ms 滑动（NavIndicator）已足够跟手，
+        且同步切换从构造上杜绝「键与页错位」。
+        """
         if mode != "note":
             self._note_save_timer.stop()
         self._last_mode = mode
@@ -1324,16 +1303,8 @@ class CardWindow(QWidget):
         # 滑动指示器到目标位置
         self._move_indicator_to(idx)
 
-        old_idx = self._stack.currentIndex()
-
-        # 窗口尚未显示时 grab() 抓不到内容，直接切换不做转场
-        if idx != old_idx and self.isVisible():
-            # 先刷新新页内容，确保快照与真实页面一致
-            self._apply_mode_init(mode)
-            self._animate_page_transition(old_idx, idx)
-        else:
-            self._stack.setCurrentIndex(idx)
-            self._apply_mode_init(mode)
+        self._stack.setCurrentIndex(idx)
+        self._apply_mode_init(mode)
 
     def _apply_mode_init(self, mode: str):
         """模式切换标签的内容初始化（新页可见后调用）"""
@@ -1350,162 +1321,6 @@ class CardWindow(QWidget):
                 self._refresh_asset_page()
         elif mode == "app":
             self._refresh_app_page()
-
-    def _finalize_page_transition(self):
-        """清理上一次转场遗留的覆盖层，避免快速连续点击时叠加残留。"""
-        for label in getattr(self, "_trans_labels", []):
-            # 先隐藏再延迟删除，绝不 setParent(None)（会顶成独立窗口闪现黑框）
-            label.hide()
-            label.deleteLater()
-        self._trans_labels = []
-        for eff in getattr(self, "_trans_effects", []):
-            eff.deleteLater()
-        self._trans_effects = []
-        # 转场期间真实页面被隐藏（见 _animate_page_transition），这里必须恢复
-        stack = getattr(self, "_stack", None)
-        if stack is not None and not stack.isVisible():
-            stack.setVisible(True)
-        anim = getattr(self, "_page_transition_anim", None)
-        if anim is not None:
-            try:
-                anim.stop()
-            except Exception:
-                pass
-            anim.deleteLater()
-            self._page_transition_anim = None
-
-    def _page_content_snapshot(self, page, size: QSize) -> QPixmap:
-        """抓页面**内容**快照（背景透明，仅用于合成，不直接显示）。
-
-        页面本身是透明的（见 _apply_pages_background），所以这里拿到的是
-        「只有文字/控件、没有底」的位图，显示时必须让真实玻璃底透上来。
-        """
-        snap = page.grab()
-        # 页面几何已由 setCurrentIndex 同步到可见尺寸；万一偏大则裁到可见区
-        dpr = snap.devicePixelRatio() or 1.0
-        pw = int(round(size.width() * dpr))
-        ph = int(round(size.height() * dpr))
-        if snap.width() != pw or snap.height() != ph:
-            snap = snap.copy(QRect(0, 0, pw, ph))
-        return snap
-
-    def _animate_page_transition(self, old_idx: int, new_idx: int):
-        """
-        Tab 页左右推挤转场（内容层合成法，彻底无重影）。
-
-        ## 两版旧实现的坑（都已实测复现）
-
-        v1：只叠一层「新页快照」并让它从透明淡入 → 淡入期间旧页透上来。
-        v2：两层快照等位移推挤 → 仍有重影，原因有两个，都不是位移的问题：
-
-          · 页面是**透明**的（autoFillBackground=False，背景归 GlassPanel 管），
-            实测 `page.grab()` 里 88% 的像素 alpha=0；
-          · 而它下面露出的是**真实旧页**（stack 全程停在 old_idx，只在动画
-            结束才 setCurrentIndex）—— 于是新页的每处空白都透出旧页内容。
-
-        给快照垫一层玻璃底能堵住透明，但遮罩下方**已经有**一层真实玻璃，
-        两层叠加会把整块内容区刷成纯白（实测：静止 #F2F2F2 vs 末帧 #FFFFFF）。
-
-        ## 现在的做法
-
-        转场期间把真实页面（整个 QStackedWidget）**隐藏**，只留真实玻璃：
-
-          · 遮罩下方 = 真实玻璃 → 空白处露出的就是静止态该有的样子；
-          · 遮罩只放「页面内容」（透明底）→ 不会出现双层玻璃发白；
-          · 两页位移互补（old_off + new_off ≡ slide）→ 严丝合缝，无缝隙无重叠；
-          · 合成到单张画布、单个 QLabel 显示 → 只有一处重绘，比两个控件搬动更省。
-
-        数学上遮罩最终呈现 = 页面内容 over 真实玻璃，与静止态逐像素等价。
-        抓快照前先派发 DeferredDelete：列表刷新用 deleteLater()，未派发时
-        被淘汰的旧行仍挂在控件树上，会被一起画进快照。
-        """
-        self._finalize_page_transition()
-
-        stack = self._stack
-        if stack is None:
-            return
-        parent = stack.parentWidget()          # content_area
-        pos = stack.pos()
-        size = stack.size()
-        w, h = size.width(), size.height()
-        x0, y0 = pos.x(), pos.y()
-        if w <= 0 or h <= 0:
-            stack.setCurrentIndex(new_idx)
-            return
-
-        # 关键：先清掉待删除控件，保证快照内容干净
-        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-
-        old_page = stack.widget(old_idx)
-        new_page = stack.widget(new_idx)
-        if old_page is None or new_page is None:
-            stack.setCurrentIndex(new_idx)
-            return
-
-        # 旧页快照：此刻它正在显示，直接抓
-        old_snap = self._page_content_snapshot(old_page, size)
-        # 新页快照：内容已在 _switch_mode 里事先刷新；临时切过去抓，再切回来
-        # （setCurrentIndex 会同步把新页约束到可见尺寸并布局完毕）
-        stack.setCurrentIndex(new_idx)
-        new_snap = self._page_content_snapshot(new_page, size)
-        stack.setCurrentIndex(old_idx)
-
-        direction = 1 if new_idx > old_idx else -1   # 前进→新页从右滑入
-        slide = w                                    # 位移 = 整页宽，两页严丝合缝
-
-        dpr = self.devicePixelRatioF() or 1.0
-        canvas = QPixmap(int(round(w * dpr)), int(round(h * dpr)))
-        canvas.setDevicePixelRatio(dpr)
-        canvas.fill(Qt.GlobalColor.transparent)
-
-        # 裁剪容器：几何等于内容区，画布超出部分被裁掉，不会画到卡片留白上
-        clip_host = QWidget(parent)
-        clip_host.setGeometry(x0, y0, w, h)
-        clip_host.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        clip_host.show()
-        clip_host.raise_()
-
-        view = _TransitionCanvas(canvas, clip_host)
-        view.setGeometry(0, 0, w, h)
-        view.show()
-
-        self._trans_labels = [clip_host, view]
-        self._trans_effects = []
-
-        def _compose(t: float):
-            """按进度合成一帧：旧页 + 新页（位移互补，无缝隙无重叠）"""
-            moved = int(round(slide * t))
-            off_old = -direction * moved
-            off_new = direction * (slide - moved)
-            # 必须清空：画布复用，两页的空白区是半透明的，不清会与上一帧混色
-            canvas.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(canvas)
-            painter.setCompositionMode(
-                QPainter.CompositionMode.CompositionMode_SourceOver)
-            painter.drawPixmap(off_old, 0, old_snap)
-            painter.drawPixmap(off_new, 0, new_snap)
-            painter.end()
-            view.set_pixmap(canvas)
-
-        # 先铺好首帧，再隐藏真实页面 —— 中间不派发事件，屏幕不会闪
-        _compose(0.0)
-        stack.setVisible(False)
-
-        anim = QVariantAnimation(self)
-        anim.setDuration(260)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        def _on_finished():
-            stack.setCurrentIndex(new_idx)
-            self._finalize_page_transition()      # 内含恢复 stack 可见
-
-        anim.valueChanged.connect(_compose)
-        anim.finished.connect(_on_finished)
-        self._page_transition_anim = anim
-        self._trans_compose = _compose      # 供回归脚本逐帧驱动（check_transition.py）
-        anim.start()
 
     def _move_indicator_to(self, idx: int):
         """将选中指示器平滑滑动到指定 Tab 索引位置"""
