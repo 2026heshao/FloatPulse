@@ -22,7 +22,8 @@ import sys
 import tempfile
 import zipfile
 
-sys.path.insert(0, r"D:\桌面\AI Port\FloatPulse\v4")
+# v4/ 根目录按本文件位置推导（勿写死绝对路径：换机器/改目录名即失效）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

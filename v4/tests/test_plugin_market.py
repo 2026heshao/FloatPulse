@@ -19,12 +19,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-sys.path.insert(0, r"D:\桌面\AI Port\FloatPulse\v4")
+# v4/ 根目录按本文件位置推导（勿写死绝对路径：换机器/改目录名即失效）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import plugin_market as pm          # noqa: E402
 from src import net_guard                    # noqa: E402
 
-REPO_ROOT = r"D:\桌面\AI Port\FloatPulse"
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 # ---------------- 索引解析 ----------------
