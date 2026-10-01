@@ -115,6 +115,11 @@ def main() -> int:
 
     # ---------------- B. 设置页步进改值 → 即时生效 ----------------
     sp = win._page_settings._set_asset_thumb
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not panel._thumb_cache:
+        app.processEvents()
+        time.sleep(0.02)
+    assert panel._thumb_cache, "异步管线 3s 内未开始产出"
     cache_mark = "marked-for-invalidation"
     panel._thumb_cache[next(iter(panel._thumb_cache))] = cache_mark  # 塞标记
     sp.setValue(96)
@@ -126,6 +131,14 @@ def main() -> int:
         f"B. delegate 尺寸未更新: {dlg.THUMB_W}/{dlg.CELL_W}"
     assert cache_mark not in panel._thumb_cache.values(), "B. 缩略图缓存未清空"
     # 缓存按新尺寸重建（真 QPixmap 且宽度 == 96）
+    deadline = time.time() + 3.0
+    pix0 = None
+    while time.time() < deadline:
+        pix0 = panel._thumb_cache.get(temp_mgr.get_all_assets()[0].asset_id)
+        if isinstance(pix0, QPixmap) and not pix0.isNull() and pix0.width() == 96:
+            break
+        app.processEvents()
+        time.sleep(0.02)
     pix0 = panel._thumb_cache.get(temp_mgr.get_all_assets()[0].asset_id)
     assert isinstance(pix0, QPixmap) and not pix0.isNull() and pix0.width() == 96, \
         "B. 缓存未按新尺寸重建"
