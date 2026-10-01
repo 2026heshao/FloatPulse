@@ -217,10 +217,12 @@ check("A5 派生 ctx 带 network 能力",
       sub_ctx is not None and sub_ctx.has_capability("network"))
 check("A6 宿主桥已注入派生 ctx",
       sub_ctx is not None and sub_ctx._http_post_async is not None)
-check("A7 未声明的插件没有能力（weekly-report）",
+# A7（v1.2.0 周报润色起 weekly-report 声明了 network+ai，「未声明」反例
+# 换成真零能力的 kb-search：manifest capabilities 为空数组）
+check("A7 未声明的插件没有能力（kb-search 只读零能力）",
       all(not registry.context_of(f"{pid}.{suffix}").has_capability("network")
-          for pid in ("weekly-report",)
-          for suffix in ("draft",)
+          for pid in ("kb-search",)
+          for suffix in ("open",)
           if registry.context_of(f"{pid}.{suffix}") is not None))
 
 # 知识库只读快照：num 从 1 起（与知识库面板编号一致）+ 内容指纹
@@ -720,30 +722,29 @@ def deferred_bridge(url, headers, body, timeout, on_done):
 page2._ctx._http_post_async = deferred_bridge
 page2._input.setPlainText("在途测试")
 page2._on_send_clicked()
-pump(400)          # 跨 ≥2 个动画 tick（180ms/帧）
+pump(400)          # 跨 ≥12 个动画 tick（33ms/帧，v1.11.0 自绘三点）
 _think_cards = [w for w in page2._stream_host.findChildren(QFrame)
                 if w.objectName() == "chatBubbleThinking"]
-_think_txt = page2._think_label.text() if page2._think_label else ""
+_dots = page2._think_dots
 _think_item = _item_of(_think_cards[0]) if _think_cards else None
-check("C20b 请求在途 → 思考气泡挂进消息流（靠左）+ 计时器在跑 + 三点确实在动",
+check("C20b 请求在途 → 思考气泡挂进消息流（靠左）+ 自绘三点动画在跑且相位在推进",
       page2._busy and len(_think_cards) == 1
-      and page2._think_timer.isActive()
-      and _think_txt != page2._THINK_FRAMES[0]
+      and _dots is not None and _dots.is_animating()
+      and _dots.phase_ms() > 0
       and bool(_think_item.alignment() & Qt.AlignmentFlag.AlignLeft),
       f"busy={page2._busy} cards={len(_think_cards)} "
-      f"timer={page2._think_timer.isActive()} text={_think_txt!r}")
+      f"animating={_dots.is_animating() if _dots else None} "
+      f"phase={_dots.phase_ms() if _dots else None}")
 _deferred.pop()({"ok": True, "status": 200,
                  "body": json.dumps(
                      {"choices": [{"message": {"content": "回复到达"}}]})})
 pump()
 _still = [w for w in page2._stream_host.findChildren(QFrame)
           if w.objectName() == "chatBubbleThinking"]
-check("C20c 回复到达 → 思考气泡拆除干净（计时器停 + busy 复位 + 布局计数回落）",
-      len(_still) == 0 and not page2._think_timer.isActive()
-      and not page2._busy and page2._think_bubble is None
-      and page2._think_label is None,
-      f"still={len(_still)} timer={page2._think_timer.isActive()} "
-      f"busy={page2._busy}")
+check("C20c 回复到达 → 思考气泡拆除干净（动画停 + busy 复位 + 布局计数回落）",
+      len(_still) == 0 and not page2._busy
+      and page2._think_bubble is None and page2._think_dots is None,
+      f"still={len(_still)} busy={page2._busy}")
 page2._ctx._http_post_async = fake_bridge        # 换回正常假桥
 
 # ----（C23-C25 云端断开闸门已随「后端收归设置页」移除：连接控制只在

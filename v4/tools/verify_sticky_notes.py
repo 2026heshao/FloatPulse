@@ -124,9 +124,12 @@ app.processEvents()
 
 
 def title_pixel(win):
-    img = win._title_bar.grab().toImage()
-    # 取样点避开左侧标题文字与右侧关闭按钮，取标题栏中段空白
-    return img.pixelColor(int(img.width() * 0.55), img.height() // 2)
+    img = win.grab().toImage()
+    # 取样标题栏中段（避开左侧文字与右侧关闭钮）。便签已改为玻璃圆角
+    # 容器（标题栏透明融入 glass_fill），必须从**整窗** grab 取色才能
+    # 拿到真实合成底色——抓 _title_bar 本体只会得到透明底+分隔线，
+    # 两主题无差，E1 判据恒假
+    return img.pixelColor(int(img.width() * 0.55), 13)
 
 
 c_light = title_pixel(w_light)
@@ -220,6 +223,45 @@ manager_t.validate_open_windows()
 check("G10 删任务后便签自动关闭",
       manager_t.window_for("task", tid_today) is None)
 manager_t.close_all()
+
+# ================== H：碎片直钉（不自动收录笔记） ==================
+print("== H 碎片直钉便签 ==", flush=True)
+from src.fragment_manager import FragmentManager
+
+frag_mgr = FragmentManager(os.path.join(tmp, "fragments.json"))
+fid_pin = frag_mgr.add_fragment("text", "碎片直钉内容：钉成便签但别建笔记",
+                                source="probe")
+n_notes_before = len(note_manager.get_all_notes())
+
+store_f = StickyStore(
+    os.path.join(tmp, "stickies_f.json"),
+    note_ids=lambda: {n.note_id for n in note_manager.get_all_notes()},
+    fragment_ids=lambda: {f.fragment_id
+                          for f in frag_mgr.get_all_fragments()})
+manager_f = StickyNoteManager(note_manager, store_f, theme="light",
+                              fragment_manager=frag_mgr)
+
+ok, reason = manager_f.open_fragment(fid_pin)
+check("H1 碎片直钉成功", ok and reason == "ok", f"reason={reason}")
+check("H2 ★ 未自动收录进笔记管理",
+      len(note_manager.get_all_notes()) == n_notes_before,
+      f"notes={len(note_manager.get_all_notes())} before={n_notes_before}")
+wf = manager_f.window_for("fragment", fid_pin)
+check("H3 窗口 kind=fragment", wf is not None and wf.kind() == "fragment")
+check("H4 标题取内容前缀", wf.title_text().startswith("碎片直钉内容"),
+      f"title={wf.title_text()!r}")
+wf._editor.setPlainText("碎片内容被便签改过")
+QTest.qWait(1000)
+check("H5 编辑写回碎片",
+      frag_mgr.get_fragment(fid_pin).content == "碎片内容被便签改过",
+      f"content={frag_mgr.get_fragment(fid_pin).content!r}")
+check("H6 标题随内容刷新", wf.title_text().startswith("碎片内容被便签改过"),
+      f"title={wf.title_text()!r}")
+frag_mgr.delete_fragment(fid_pin)
+manager_f.validate_open_windows()
+check("H7 删碎片后便签自动关闭",
+      manager_f.window_for("fragment", fid_pin) is None)
+manager_f.close_all()
 
 # 清场
 manager.close_all()
