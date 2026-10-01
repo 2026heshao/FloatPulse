@@ -2319,14 +2319,9 @@ def main():
 
     # ---- 初始化日志系统（自动创建 float_data/app.log）----
     from src.logger import (init_logger, install_excepthook, get_logger,
-                            mark_session_start, mark_session_end,
-                            previous_session_abnormal)
+                            mark_session_start, mark_session_end)
     logger = init_logger(data_base, level=logging.INFO)
     install_excepthook()  # 替换全局异常钩子为带日志记录的版本
-    # 3.2 崩溃可感知：判定必须发生在本会话写「启动」标记**之前**——
-    # 否则读到的是当前会话的 start（无 end），永远误报。结果存到
-    # prev_abnormal，等托盘建好后（启动完成段）再提示。
-    prev_abnormal = previous_session_abnormal()
     mark_session_start()   # [会话] 启动 vX.Y.Z（与 aboutToQuit 的正常退出标记成对）
     logger.info("=" * 50)
     logger.info("程序启动")
@@ -2419,11 +2414,14 @@ def main():
         os.path.join(data_dir, "stickies.json"),
         note_ids=lambda: {n.note_id for n in note_manager.get_all_notes()},
         task_ids=lambda: {t.task_id for t in task_manager.get_all_tasks()},
+        fragment_ids=lambda: {f.fragment_id
+                              for f in fragment_manager.get_all_fragments()},
     )
     sticky_manager = StickyNoteManager(
         note_manager, sticky_store,
         theme=_resolved_theme,
-        task_manager=task_manager)
+        task_manager=task_manager,
+        fragment_manager=fragment_manager)
 
     # ---- 临时素材管理器（拖图片/文件到悬浮球时复制保存）----
     _mark("初始化素材与导航")
@@ -2520,12 +2518,12 @@ def main():
     # 不直接戳托盘/配置——分层与既有通信模式一致。
     main_window.hidden_to_tray.connect(tray.notify_hidden_to_tray)
 
-    # ---- 1.1 / 3.2 启动一次性托盘告知：config 损坏重置 + 上次会话异常退出 ----
-    # 1.1：此前损坏是静默回退默认，用户的热键/AI key/主题无痕迹丢失；
-    #      损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
-    # 3.2：prev_abnormal 在 mark_session_start 之前已判定（否则会读到本次
-    #      会话的 start 标记而恒真）；拖到托盘建好后再提示，不打断启动闪屏。
-    tray.notify_startup_once(prev_abnormal)
+    # ---- 1.1 启动一次性托盘告知：config 损坏重置 ----
+    # 此前损坏是静默回退默认，用户的热键/AI key/主题无痕迹丢失；
+    # 损坏文件已由 ConfigManager 备份为 .corrupt.bak，这里只负责告知。
+    # （3.2 的「上次可能异常退出」气泡已按用户要求移除：开发/调试场景
+    #  强杀退出是常态，判定恒真、每次启动必弹成噪音。）
+    tray.notify_startup_once()
 
     # ==================================================================
     # 信号槽桥梁：大小窗口数据双向同步
@@ -3511,8 +3509,8 @@ def main():
 
     # ---- 退出诊断日志 ----
     def _on_about_to_quit():
-        # 3.2 正常退出标记：必须排在所有退出日志之前（见 mark_session_end），
-        # 下次启动的 previous_session_abnormal 以它为「上次会话善终」的依据
+        # 正常退出标记：必须排在所有退出日志之前（见 mark_session_end），
+        # 与启动标记圈出本次会话的日志区间，供人工排障
         mark_session_end()
         get_logger().info("程序准备退出（aboutToQuit 信号触发）")
         # 显式收尾（1.4，幂等）：若 _safe_quit 已收尾过则直接跳过

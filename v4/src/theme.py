@@ -717,18 +717,14 @@ QFrame#chatBubbleHint {
     border: 1px solid $warn_border;
     border-radius: 14px;
 }
-/* 思考动画气泡：AI 回复在途时的「打字中」三点波（主色，造型随 AI 气泡）*/
+/* 思考动画气泡：AI 回复在途时的「打字中」三点波（造型随 AI 气泡）；
+   点本身由插件的 ThinkingDots 自绘（零字体依赖 + 主题 $primary 跟随），
+   因此这里只有气泡壳，不再有 chatThinkingDots 文字规则 */
 QFrame#chatBubbleThinking {
     background-color: $menu_bg;
     border: 1px solid $panel_edge;
     border-radius: 14px;
     border-bottom-left-radius: 4px;
-}
-QLabel#chatThinkingDots {
-    color: $primary;
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 4px;
 }
 QLabel#fieldLabel {
     color: $text_secondary;

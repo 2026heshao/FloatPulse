@@ -353,8 +353,18 @@ class MainWindow(QWidget):
         # 使用说明页面（F1 切换用）：记录进入说明页前的页面索引
         self._page_before_help = 0
 
-        # 软件导航页面（嵌入 QStackedWidget 的页面组件，非弹窗）
-        self._page_app_launcher = None
+        # ---- 页面懒加载状态（2026-10-01 启动丝滑化）----
+        # 10 个固定页里只有首页(0)在构造期同步构建；其余页先以空占位
+        # QWidget 占住 QStackedWidget 槽位（物理索引契约 0-9 + 插件页 10+
+        # 不变），show 后由 QTimer 逐页后台构建替换（_start_lazy_warmup）。
+        # 页属性全部 property 化：任何外部访问都会同步构建真页（幂等），
+        # 对测试/宿主/信号完全透明。
+        self._lazy_builders = {}      # index -> builder（_build_content_area 填充）
+        self._real_pages = {}         # index -> 已构建真页
+        self._lazy_placeholders = {}  # index -> 占位 widget
+        self._lazy_pending = []       # 预热待构建序列
+        self._lazy_warm_timer = None
+        self._lazy_building = set()   # 正在构建中的页（防重入递归）
 
         # 窗口入场动画（仅首次显示播放一次）
         self._entrance_played = False
@@ -808,11 +818,13 @@ class MainWindow(QWidget):
         self._save_geometry(force=True)
 
     def showEvent(self, event):
-        """窗口显示前确保位置在屏幕内；首次显示播放入场动画"""
+        """窗口显示前确保位置在屏幕内；首次显示播放入场动画并启动页面预热"""
         super().showEvent(event)
         self._ensure_on_screen(init=False)
         QTimer.singleShot(0, self._init_nav_indicator_position)
         self._play_entrance_animation()
+        # 启动丝滑化：构造期只建首页，show 后逐页后台构建（一次性）
+        self._start_lazy_warmup()
 
     def _init_nav_indicator_position(self):
         """布局完成后把指示条对齐到当前选中项（不带动画，避免从 0 滑下来）"""
@@ -2214,55 +2226,164 @@ class MainWindow(QWidget):
 
         self._stack = QStackedWidget()
 
-        # 七个面板：碎片 / 任务 / 笔记 / 知识库 / 临时素材 / 网址导航 / 设置
-        # （逐页构建后各泵一次事件循环：主窗口构建是启动最重的同步段
-        #   （实测 2s+），泵帧让启动闪屏动画在这段里也持续旋转，见 src/splash.py）
-        self._page_fragments = self._build_fragments_page()
-        self._pump_boot()
-        self._page_tasks = self._build_tasks_page()
-        self._pump_boot()
-        self._page_notes = self._build_notes_page()
-        self._pump_boot()
-        self._page_knowledge = self._build_knowledge_page()
-        self._pump_boot()
-        self._page_assets = self._build_assets_page()
-        self._pump_boot()
-        self._page_nav = self._build_nav_page()
-        self._pump_boot()
-        self._page_settings = self._build_settings_page()
-        self._pump_boot()
-        self._page_app_launcher = self._build_app_launcher_page()
-        self._pump_boot()
-        self._page_help = self._build_help_page()
-        self._pump_boot()
-        self._page_plugins = self._build_plugins_page()
-        self._pump_boot()
+        # ★ 2026-10-01 启动丝滑化（懒加载 + show 后后台预热）：
+        # 这里 10 个页面全部同步构建曾是启动最重的同步段（实测 2s+，
+        # 占整个启动 ~90%）。现在只有首页(0)同步构建——它决定首屏观感；
+        # 其余 9 页用空占位 QWidget 占住**物理槽位**（QStackedWidget 索引
+        # 契约 0-9 + 插件页 10+ 逐字节不变），show 后由 QTimer 逐页后台
+        # 构建替换（_start_lazy_warmup）；用户在预热完成前切页会被
+        # _ensure_page_built 同步兜底。页属性全部 property 化：外部访问
+        # （测试/宿主/信号）即触发幂等构建，行为与从前等价。
+        self._lazy_builders = {
+            0: self._build_fragments_page,   # 首页也走统一 ensure 路径
+            1: self._build_tasks_page,
+            2: self._build_notes_page,
+            3: self._build_knowledge_page,
+            4: self._build_assets_page,
+            5: self._build_nav_page,
+            6: self._build_settings_page,
+            7: self._build_app_launcher_page,
+            8: self._build_help_page,
+            9: self._build_plugins_page,
+        }
+        for idx in range(10):
+            if idx == 0:
+                # 首页：首屏观感所在，构造期同步构建
+                self._stack.addWidget(self._ensure_page_built(0))
+            else:
+                ph = QWidget()
+                ph.setObjectName(f"lazyPagePlaceholder{idx}")
+                self._stack.addWidget(ph)
+                self._lazy_placeholders[idx] = ph
 
-        self._stack.addWidget(self._page_fragments)   # 0
-        self._stack.addWidget(self._page_tasks)        # 1
-        self._stack.addWidget(self._page_notes)       # 2
-        self._stack.addWidget(self._page_knowledge)    # 3
-        self._stack.addWidget(self._page_assets)       # 4
-        self._stack.addWidget(self._page_nav)          # 5
-        self._stack.addWidget(self._page_settings)     # 6
-        self._stack.addWidget(self._page_app_launcher) # 7
-        self._stack.addWidget(self._page_help)         # 8
-        self._stack.addWidget(self._page_plugins)      # 9
-
-        # 软件导航页面信号：启动软件后请求回到首页
-        self._page_app_launcher.request_switch_to_home.connect(
-            lambda: self._switch_page(0)
-        )
-
-        # 动画速度档位：初始化 + 变更时透传给任务面板（勾选动画时长缩放）
-        try:
-            self._page_tasks.set_anim_speed(self.anim_speed)
-        except (AttributeError, TypeError, ValueError):
-            pass
-        self.anim_speed_changed.connect(self._page_tasks.set_anim_speed)
+        # 软件导航页/任务页的信号接线挪到 _after_page_built（真页首次
+        # 构建完成时执行一次，行为与原构造期接线等价）
 
         v.addWidget(self._stack)
         return content
+
+    # ---------------- 页面懒加载（2026-10-01 启动丝滑化） ----------------
+    def _ensure_page_built(self, index: int):
+        """确保指定页已真实构建并占住 stack 槽位（幂等，返回页 widget）。
+
+        - 已构建 → 直接返回
+        - 未构建 → 调 builder 构建、记入 _real_pages、把占位 widget
+          replaceWidget 换成真页（**物理索引不变**）
+        页属性 property 与 _switch_page 都走这里；任何外部访问都拿到
+        可用的真页，懒加载对外部完全透明。index 无 builder（如插件页
+        10+，走 register_plugin_page 直建）时返回 None。
+        """
+        w = self._real_pages.get(index)
+        if w is not None:
+            return w
+        builder = self._lazy_builders.get(index)
+        if builder is None:
+            return None
+        # ★重入守卫：页构造内部可能回调宿主并再次访问页属性（如
+        # TasksPanel 构造里触发 ensure(1)），此时 _real_pages[1] 尚未
+        # 写入 → 无限递归。重入时返回 None，调用方以 `is not None`
+        # 容忍（可见页刷新、面板刷新路径均已判空）。
+        if index in self._lazy_building:
+            return None
+        self._lazy_building.add(index)
+        try:
+            w = builder()
+        finally:
+            self._lazy_building.discard(index)
+        self._real_pages[index] = w
+        ph = self._lazy_placeholders.pop(index, None)
+        if ph is not None and self._stack.widget(index) is ph:
+            # QStackedWidget 没有 replaceWidget（那是 QLayout 的 API），
+            # 等价做法 = 先插真页到同槽位、再移除占位（index 不漂移）；
+            # 并守住 currentIndex 不被插入/移除动作扰动（预热期间
+            # 用户看到的页面必须纹丝不动）。
+            cur = self._stack.currentWidget()
+            self._stack.insertWidget(index, w)
+            self._stack.removeWidget(ph)
+            ph.deleteLater()
+            if cur is ph:
+                self._stack.setCurrentWidget(w)
+            elif self._stack.currentWidget() is not cur:
+                self._stack.setCurrentWidget(cur)
+        self._after_page_built(index, w)
+        return w
+
+    def _after_page_built(self, index: int, w):
+        """每页首次构建完成后的接线（原来写在 _build_content_area 构造期，
+        懒加载后必须推迟到真页存在时执行一次）"""
+        if index == 7:
+            # 软件导航页面信号：启动软件后请求回到首页
+            w.request_switch_to_home.connect(lambda: self._switch_page(0))
+        elif index == 1:
+            # 动画速度档位：初始化 + 变更时透传给任务面板（勾选动画时长缩放）
+            try:
+                w.set_anim_speed(self.anim_speed)
+            except (AttributeError, TypeError, ValueError):
+                pass
+            self.anim_speed_changed.connect(w.set_anim_speed)
+
+    def _start_lazy_warmup(self):
+        """show 后逐页后台预热：每拍构建一页并替换占位（一次性）。
+
+        预热让「切到任何页都无感」；构建顺序 = 页码序（settings 等重页
+        靠后，常用页先就绪）。单页构建是同步重活（约百 ms），放进
+        QTimer 拍里让事件循环在页与页之间喘息，主窗不冻结。
+        """
+        if self._lazy_warm_timer is not None:
+            return
+        self._lazy_pending = sorted(self._lazy_placeholders)
+        timer = QTimer(self)
+        timer.setInterval(40)
+        timer.timeout.connect(self._warm_one_page)
+        timer.start()
+        self._lazy_warm_timer = timer
+
+    def _warm_one_page(self):
+        if not self._lazy_pending:
+            self._lazy_warm_timer.stop()
+            self._lazy_warm_timer = None
+            return
+        self._ensure_page_built(self._lazy_pending.pop(0))
+
+    @property
+    def _page_fragments(self):
+        return self._ensure_page_built(0)
+
+    @property
+    def _page_tasks(self):
+        return self._ensure_page_built(1)
+
+    @property
+    def _page_notes(self):
+        return self._ensure_page_built(2)
+
+    @property
+    def _page_knowledge(self):
+        return self._ensure_page_built(3)
+
+    @property
+    def _page_assets(self):
+        return self._ensure_page_built(4)
+
+    @property
+    def _page_nav(self):
+        return self._ensure_page_built(5)
+
+    @property
+    def _page_settings(self):
+        return self._ensure_page_built(6)
+
+    @property
+    def _page_app_launcher(self):
+        return self._ensure_page_built(7)
+
+    @property
+    def _page_help(self):
+        return self._ensure_page_built(8)
+
+    @property
+    def _page_plugins(self):
+        return self._ensure_page_built(9)
 
     @staticmethod
     def _pump_boot():
@@ -2483,6 +2604,9 @@ class MainWindow(QWidget):
     # ==================================================================
     def _switch_page(self, index: int):
         """切换到指定页面，并刷新对应面板数据"""
+        # 懒加载兜底：后台预热没轮到该页时（用户提前切页）同步构建真页；
+        # 插件页 10+ 无 builder，此处为无害空操作
+        self._ensure_page_built(index)
         self._stack.setCurrentIndex(index)
         # 默认选中对应的导航按钮，并让指示条滑过去
         btn = self._nav_group.button(index)
@@ -2560,16 +2684,26 @@ class MainWindow(QWidget):
         if index is None or self._stack.currentIndex() != index:
             return
         # 所有面板已抽离为独立 panel，统一调用其 refresh()
-        panel = {
-            "fragments": self._page_fragments,
-            "tasks": self._page_tasks,
-            "notes": self._page_notes,
-            "knowledge": self._page_knowledge,
-            "assets": self._page_assets,
-            "nav": self._page_nav,
-            "settings": self._page_settings,
-            "plugins": self._page_plugins,
-        }.get(name)
+        # ★按需访问页属性（懒加载）：此处若用字典字面量会把全部页
+        # property 一口气求值 → 构造期强推全页构建 → builder 内部
+        # 再触发 ensure 形成 8 层互相递归。守卫已保证只有可见页
+        # 才走到这里，可见页必然已构建（_switch_page 入口先 ensure）。
+        if name == "fragments":
+            panel = self._page_fragments
+        elif name == "tasks":
+            panel = self._page_tasks
+        elif name == "notes":
+            panel = self._page_notes
+        elif name == "knowledge":
+            panel = self._page_knowledge
+        elif name == "assets":
+            panel = self._page_assets
+        elif name == "nav":
+            panel = self._page_nav
+        elif name == "settings":
+            panel = self._page_settings
+        else:
+            panel = self._page_plugins
         if panel is not None and hasattr(panel, "refresh"):
             panel.refresh()
 
@@ -2734,29 +2868,30 @@ class MainWindow(QWidget):
         # 更新右键菜单样式
         if hasattr(self, '_menu'):
             self._menu.setStyleSheet(qss)
-        # 同步更新软件导航页面的主题
-        if hasattr(self, '_page_app_launcher') and self._page_app_launcher is not None:
-            self._page_app_launcher._theme = self._theme
-            self._page_app_launcher._apply_style()
+        # 同步更新软件导航页面的主题（懒加载：只刷已构建页——未构建页
+        # 之后构建时自会用当前主题，无需提前触发构建）
+        if 7 in self._real_pages:
+            self._real_pages[7]._theme = self._theme
+            self._real_pages[7]._apply_style()
         # 使用说明页正文颜色跟随主题
         self._apply_help_content_color()
         # 任务面板行委托为自绘，配色需显式同步（QSS 无法覆盖 delegate 绘制）
-        if getattr(self, "_page_tasks", None) is not None:
-            self._page_tasks.apply_theme()
+        if 1 in self._real_pages:
+            self._real_pages[1].apply_theme()
         # 碎片列表同理：代理字色 + 条目前景色（日期行/路径行）都是创建时
         # 取色烘进 item 的，QSS 刷不到 —— 不显式同步的话切主题后列表停在
         # 旧配色（深色字落在浅色底上几乎不可见），要切一次页面才恢复。
-        if getattr(self, "_page_fragments", None) is not None:
-            self._page_fragments.apply_theme()
+        if 0 in self._real_pages:
+            self._real_pages[0].apply_theme()
         # 知识库面板：只有"检测到外部修改"警告文字是 inline stylesheet 着色
-        if getattr(self, "_page_knowledge", None) is not None:
-            self._page_knowledge.apply_theme()
+        if 3 in self._real_pages:
+            self._real_pages[3].apply_theme()
         # 设置页的自绘开关（ToggleSwitch）与主题按钮也要跟随主题
-        if getattr(self, "_page_settings", None) is not None:
-            self._page_settings.apply_theme()
+        if 6 in self._real_pages:
+            self._real_pages[6].apply_theme()
         # 素材网格的 delegate 是动态取色，重绘即可跟随主题
-        if getattr(self, "_page_assets", None) is not None:
-            self._page_assets.apply_theme()
+        if 4 in self._real_pages:
+            self._real_pages[4].apply_theme()
 
     def _sync_nav_indicator_color(self, colors=None):
         """同步导航指示条与**分组箭头**的颜色（主题切换时调用）。
