@@ -1,15 +1,15 @@
 {
  "schema": 1,
- "updated": "2026-09-30",
+ "updated": "2026-10-02",
  "plugins": [
   {
    "id": "ai-assistant",
    "name": "AI 助手",
-   "version": "1.8.0",
+   "version": "1.12.0",
    "file": "ai-assistant.fpplug",
-   "size": 26504,
-   "sha256": "f12d852dec3d6750ae47dbb504b3451e4a884180caad2937ab1bde630643c129",
-   "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，规则库自定义 AI 行为",
+   "size": 37502,
+   "sha256": "abf7fbfcc955a7fd0ccf79eeb2fd5738dff9d0dcdd175ea18d01ff72768351a6",
+   "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，多会话记录重启不丢，可导出 Markdown，支持自定义快捷指令与规则库",
    "capabilities": [
     "network",
     "write",
@@ -24,10 +24,10 @@
   {
    "id": "ai-text-workshop",
    "name": "AI 文本工坊",
-   "version": "1.4.0",
+   "version": "1.5.1",
    "file": "ai-text-workshop.fpplug",
-   "size": 12018,
-   "sha256": "e97fa271cda985613590574a84a1c8e67de2c36b1d2eef4152520e17791e2efb",
+   "size": 16576,
+   "sha256": "6a0145396b170f173df87394b029c122e70caeff7ac29156f78c60d8b4fc4e18",
    "description": "剪贴板一键 AI 加工：主窗口侧栏「✂ 文本工坊」页（或热键 `Ctrl+Alt+T`），原文自动带入剪贴板内容，一键润色成邮件、翻译、总结要点、改写正式、提取待办并转任务。",
    "capabilities": [
     "network",
@@ -42,10 +42,10 @@
   {
    "id": "kb-search",
    "name": "站内搜索",
-   "version": "1.0.0",
+   "version": "1.2.0",
    "file": "kb-search.fpplug",
-   "size": 22145,
-   "sha256": "a16f903ce6eb17830fbdb74c797d1511ba6365fa7c810ed8bd040ceb0a16d351",
+   "size": 25945,
+   "sha256": "6f0a170ece42bd59f167e05204fef39052c36df5da9680ab6f60647d0b023529",
    "description": "在知识库 / 笔记 / 碎片 / 任务 / 素材里做全文检索：自研中文分词 + 倒排索引 + BM25 排序，命中片段带高亮，点结果标题跳转到对应面板。纯站内检索，不碰文件系统",
    "capabilities": [],
    "page": "🔍 站内搜索",
@@ -56,11 +56,11 @@
   {
    "id": "recurring-tasks",
    "name": "周期任务",
-   "version": "1.0.0",
+   "version": "1.2.0",
    "file": "recurring-tasks.fpplug",
-   "size": 18495,
-   "sha256": "bee8263565b47b36032b96895055e489ad7e1b2e42e5aa900be5bff40ae5c40b",
-   "description": "只给规则（每天 / 每周几 / 每月几号 / 每 N 天），到点自动生成任务；错过的补一次、同一天不重复生成",
+   "size": 21915,
+   "sha256": "06c74423e59b9d144dda48e786383589edea649feae6faf26f6f851ac0ea817a",
+   "description": "只给规则（每天 / 每周几 / 每月几号 / 每 N 天 / 每 N 周），到点自动生成任务；错过的补一次、同一天不重复生成",
    "capabilities": [
     "write"
    ],
@@ -70,14 +70,32 @@
    ]
   },
   {
+   "id": "vault",
+   "name": "密码保险箱",
+   "version": "1.0.0",
+   "file": "vault.fpplug",
+   "size": 23749,
+   "sha256": "e635fa3aeafb0a8430e9f59ebf5047331f137bc8263fe0d2b41bb46a49e63789",
+   "description": "只活在本机的密码保险箱：自定义字段收纳账号密码与任意机密，DPAPI + 主密码双因子加密，热键快速取用，复制 30 秒后自动清剪贴板。不联网、不同步、不碰宿主数据",
+   "capabilities": [],
+   "page": "🔒 密码保险箱",
+   "hotkeys": [
+    "Ctrl+Alt+V",
+    "Ctrl+Alt+B"
+   ]
+  },
+  {
    "id": "weekly-report",
    "name": "日报 / 周报草稿",
-   "version": "1.0.0",
+   "version": "1.2.0",
    "file": "weekly-report.fpplug",
-   "size": 10912,
-   "sha256": "fb039189cff608b8ee6f0fa527c93a09096fdf6bcfc87b7ca09669dc95a541a3",
-   "description": "日报 / 周报草稿（weekly-report）",
-   "capabilities": [],
+   "size": 16627,
+   "sha256": "b4d725540093c2977732771656609095921a02bea5dd879ae65b4f40a38ada54",
+   "description": "一键汇总这段时间的任务 / 碎片 / 番茄生成 Markdown 周报草稿，可再交 AI 润色成正式周报（接入 AI 总配置时）",
+   "capabilities": [
+    "network",
+    "ai"
+   ],
    "page": "",
    "hotkeys": [
     "Ctrl+Alt+W"

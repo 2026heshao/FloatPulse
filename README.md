@@ -125,6 +125,7 @@
 | [ai-text-workshop.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-text-workshop.fpplug) | ✂ 文本工坊 / `Ctrl+Alt+T`   | 🌐 ✍ 🧠    | 剪贴板一键 AI 加工：润色成邮件、翻译、总结要点、提取待办并转任务                           |
 | [kb-search.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/kb-search.fpplug)               | 🔍 站内搜索 / `Ctrl+Alt+F`  | 只读         | 五类数据全文检索：自研中文分词 + 倒排索引 + BM25，`Ctrl+K` 也由它承接                 |
 | [recurring-tasks.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/recurring-tasks.fpplug)   | 🔁 周期任务 / `Ctrl+Alt+R`  | ✍          | 只给规则（每天/每周几/每月几号/每 N 天），到点自动生成任务                             |
+| [vault.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/vault.fpplug)                       | 🔒 密码保险箱 / `Ctrl+Alt+V` | 只读         | 只活在本机的密码保险箱：自定义字段收纳账号密码与任意机密，DPAPI + 主密码双因子加密，`Ctrl+Alt+B` 快速取用，复制 30 秒后自动清剪贴板 |
 | [weekly-report.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/weekly-report.fpplug)       | 周报草稿 / `Ctrl+Alt+W`     | 只读         | 汇总区间内已完成任务、碎片与番茄次数，生成 Markdown 草稿                            |
 
 > 能力标记的含义：🌐 会经宿主联网（只记 URL 与耗时进日志）· ✍ 能新增数据 · 🛠 能改删数据（删除带撤销令牌）· 🧠 可接入设置页的「AI 总配置」共用一套后端。插件本身拿不到网络库，未声明的能力调用会被直接拒绝。
@@ -202,7 +203,7 @@ python tools/build_release.py                      # 产出 宣传页/FloatPulse
 - **发布前三源一致性自检**：打包前先跑 `tools/check_release_consistency.py`，核对 `APP_VERSION` ↔ `CHANGELOG.md` 版本标题 ↔ Release tag 三者对齐，任一不符直接终止发布（本地也能手动跑）
 - **产物附 `SHA256SUMS.txt`**：`build_release.py` 收尾生成校验清单（覆盖 zip / setup.exe / 插件附件），下载后在 `宣传页/` 目录 `sha256sum -c SHA256SUMS.txt` 一键核验完整性
 
-体积口径：**下载包 31 MB**（v4.7.0 zip，2026-09-30 实测）／**解压后 75 MB**（2026-09-27 实测，`FloatPulse.spec` 内有构成分析）；恢复 ssl 支持插件联网桥后约 +4 MB，下次打包时以 `build_release.py` 输出为准。
+体积口径：**下载包 31.6 MB**（v4.8.0 zip，2026-10-02 实测）／**解压后 73.5 MB**（同上，`FloatPulse.spec` 内有构成分析）。
 
 ---
 
