@@ -30,6 +30,7 @@ from src.constants import (
 )
 from src.note_manager import Note
 from src.theme import DEFAULT_THEME, get_colors
+from src.icon_render import icon as render_icon
 from src.controls import tune_list_scrolling, EmptyState, IconButton, PageTitle
 
 # 手动命名标题的长度上限（与重命名对话框一致）
@@ -148,7 +149,7 @@ class NotesPanel(QWidget):
 
         # ---- 搜索框 ----
         self._note_search = QLineEdit()
-        self._note_search.setPlaceholderText("🔍 搜索标题或内容...")
+        self._note_search.setPlaceholderText("搜索标题或内容...")
         self._note_search.textChanged.connect(self.refresh)
         v.addWidget(self._note_search)
 
@@ -432,18 +433,24 @@ class NotesPanel(QWidget):
         target = self._note_manager.get_note(note_id)
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
-        act_rename = menu.addAction("✏️ 编辑标题...")
+        act_rename = menu.addAction("编辑标题...")
         # 临时笔记标题固定，不提供跟随开关
         act_title_auto = None
         if target is not None and target.title != Note.TEMP_NOTE_TITLE:
             act_title_auto = menu.addAction(
-                "🔒 锁定标题（不随内容更新）" if target.title_auto
-                else "🔄 标题跟随内容"
+                "锁定标题（不随内容更新）" if target.title_auto
+                else "标题跟随内容"
             )
-        act_delete = menu.addAction("🗑 删除此笔记")
+        act_delete = menu.addAction("删除此笔记")
+        # 删除项危险语义：Qt 菜单无法按 action 单独设文字色，
+        # 用 danger 色的自绘 trash 图标承载（UI 重构 05）
+        act_delete.setIcon(render_icon(
+            "trash", 14,
+            get_colors(getattr(self._host, "current_theme", None)
+                       or DEFAULT_THEME)["danger"]))
         menu.addSeparator()
-        act_sticky = menu.addAction("📌 钉到桌面")
-        act_export = menu.addAction("📤 导出到 Obsidian")
+        act_sticky = menu.addAction("钉到桌面")
+        act_export = menu.addAction("导出到 Obsidian")
         action = menu.exec(self._note_list.mapToGlobal(pos))
         if action == act_rename:
             self._rename_dialog(note_id)
@@ -497,7 +504,7 @@ class NotesPanel(QWidget):
         ok, reason = manager.open(note_id)
         if not ok and reason == "limit":
             self._host.show_toast(
-                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
 
     def _rename_dialog(self, note_id: int):
         """编辑笔记标题对话框"""
