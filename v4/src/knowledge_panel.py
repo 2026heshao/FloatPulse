@@ -56,7 +56,7 @@ class KnowledgePanel(QWidget):
         add_btn.clicked.connect(self._on_append)
         toolbar.addWidget(add_btn)
 
-        add_frag_btn = SmoothButton("📥 加入碎片池")
+        add_frag_btn = SmoothButton("加入碎片池")
         add_frag_btn.setObjectName("secondaryBtn")
         add_frag_btn.clicked.connect(self._on_add_to_fragments)
         toolbar.addWidget(add_frag_btn)
@@ -76,7 +76,7 @@ class KnowledgePanel(QWidget):
 
         # ---- 搜索框 ----
         self._kb_search = QLineEdit()
-        self._kb_search.setPlaceholderText("🔍 搜索段落内容...")
+        self._kb_search.setPlaceholderText("搜索段落内容...")
         # 搜索输入只做本地过滤（外部修改检测走 recheck=True 路径，避免每敲一字算一次 docx 哈希）
         # 输入去抖：停顿 SEARCH_DEBOUNCE_MS 才真正刷新，敲字过程不重建列表
         self._search_timer = QTimer(self)
@@ -174,10 +174,10 @@ class KnowledgePanel(QWidget):
             return
 
         if self._docx_manager.check_external_modification():
-            self._kb_modify_label.setText("⚠️ 检测到外部修改，建议重新加载")
+            self._kb_modify_label.setText("检测到外部修改，建议重新加载")
             self._apply_modify_label_color()
         else:
-            self._kb_modify_label.setText("✓ 文件无外部修改")
+            self._kb_modify_label.setText("文件无外部修改")
             self._kb_modify_label.setStyleSheet("")
 
     def _apply_modify_label_color(self):
@@ -256,11 +256,11 @@ class KnowledgePanel(QWidget):
 
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
-        act_edit = menu.addAction("✏️ 编辑此段...")
-        act_add_frag = menu.addAction("📥 加入碎片池")
+        act_edit = menu.addAction("编辑此段...")
+        act_add_frag = menu.addAction("加入碎片池")
         menu.addSeparator()
-        act_insert = menu.addAction("➕ 在此后新增段落...")
-        act_delete = menu.addAction("🗑 删除此段")
+        act_insert = menu.addAction("在此后新增段落...")
+        act_delete = menu.addAction("删除此段")
         action = menu.exec(self._kb_list.mapToGlobal(pos))
 
         if action == act_edit:
@@ -342,7 +342,7 @@ class KnowledgePanel(QWidget):
         """删除段落"""
         if not self._confirm("确认删除",
                              f"确认删除段落 {index + 1}？此操作将修改 docx 文件。",
-                             "🗑 删除"):
+                             "删除"):
             return
         if self._docx_manager.delete_paragraph(index):
             if self._docx_manager.save():
@@ -354,7 +354,8 @@ class KnowledgePanel(QWidget):
                 self._docx_manager.reload()
                 self.refresh()
 
-    def _confirm(self, title: str, text: str, confirm_label: str = "确认") -> bool:
+    def _confirm(self, title: str, text: str, confirm_label: str = "确认",
+                 confirm_icon: str = None) -> bool:
         """玻璃风格确认框（替代原生 QMessageBox.question）"""
         dlg = GlassDialog(self._host, title=title, size=(440, 220))
         msg = QLabel(text)
@@ -363,7 +364,7 @@ class KnowledgePanel(QWidget):
 
         result = {"ok": False}
         btns = dlg.add_footer([
-            (confirm_label, "dangerBtn", None),
+            (confirm_label, "dangerBtn", None, confirm_icon),
             ("取消", "secondaryBtn", dlg.reject),
         ])
 
@@ -402,7 +403,7 @@ class KnowledgePanel(QWidget):
     def _on_append(self):
         """新增知识：弹窗输入内容，追加到 docx 末尾（玻璃风格）"""
         dlg = GlassDialog(self._host, title="新增知识", size=(520, 420))
-        hint = QLabel("📝 输入新知识内容（将追加到知识库末尾）：")
+        hint = QLabel("输入新知识内容（将追加到知识库末尾）：")
         hint.setObjectName("sectionLabel")
         dlg.body_layout.addWidget(hint)
 
@@ -443,7 +444,7 @@ class KnowledgePanel(QWidget):
         if not self._confirm("确认重新加载",
                              "重新加载将丢弃当前未保存的内存修改，"
                              "并重新读取 docx 文件。确认？",
-                             "🔄 重新加载"):
+                             "重新加载", confirm_icon="refresh"):
             return
         paragraphs, err = self._docx_manager.reload()
         if err:

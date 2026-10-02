@@ -5,7 +5,7 @@
   1. 创建即设图标/tooltip/可见（tooltip「生活悬浮球」）
   2. 托盘单击 → 主窗口显隐切换（带日志）；双击/右键忽略
   3. 气泡点击 → 主窗口 show/raise/activate + show_page(1)（任务页）
-  4. 右键菜单结构：主窗口 / 悬浮球 / 📌 便签子菜单 / 分隔线 / 退出程序；
+  4. 右键菜单结构：主窗口 / 悬浮球 / 便签子菜单 / 分隔线 / 退出程序；
      便签子菜单 aboutToShow 时按注入数据源重建
   5. 首次收进托盘提示只发一次（tray_hint_shown 落盘防重复）
   6. 启动一次性告知：config 损坏 → 警示
@@ -178,7 +178,7 @@ def test_menu_structure_and_actions(qapp):
     assert non_sep[-1].text() == "退出程序"
     submenu = non_sep[2]
     assert submenu.menu() is not None
-    assert submenu.menu().title() == "📌 便签"
+    assert submenu.menu().title() == "便签"
     # 触发主窗口/悬浮球/退出三个动作 → 注入的回调被调用
     non_sep[0].trigger()
     non_sep[1].trigger()
@@ -187,7 +187,7 @@ def test_menu_structure_and_actions(qapp):
 
 
 def test_sticky_submenu_rebuild(qapp):
-    """便签子菜单 aboutToShow 重建：图标前缀 / 全部置前 / 全部关闭"""
+    """便签子菜单 aboutToShow 重建：纯文字项 / 全部置前 / 全部关闭"""
     mw = _FakeMainWindow()
     sticky = _FakeStickyManager(entries=[
         (1, "便签标题可能很长被截断" * 3, None, "note"),
@@ -199,12 +199,11 @@ def test_sticky_submenu_rebuild(qapp):
                if not a.isSeparator()][2].menu()
     submenu.aboutToShow.emit()          # aboutToShow → _rebuild_sticky_menu
     texts = [a.text() for a in submenu.actions() if not a.isSeparator()]
-    assert texts[0].startswith("📄 ")
-    assert len(texts[0]) <= 27          # 标题截断到 24 字（icon+空格+24）
-    assert texts[1].startswith("📋 ")
-    assert "任务便签" in texts[1]
-    assert texts[-2] == "⬆ 全部置前"
-    assert texts[-1] == "✕ 全部关闭"
+    assert texts[0].startswith("便签标题")
+    assert len(texts[0]) <= 24          # 标题截断到 24 字（UI 重构 03：去图标前缀）
+    assert texts[1] == "任务便签"
+    assert texts[-2] == "全部置前"
+    assert texts[-1] == "全部关闭"
     # 点「全部置前」「全部关闭」→ 注入的管理器公开方法被调
     acts = [a for a in submenu.actions() if not a.isSeparator()]
     acts[-2].trigger()
@@ -224,7 +223,7 @@ def test_sticky_submenu_empty_shows_placeholder(qapp):
     acts = [a for a in submenu.actions() if not a.isSeparator()]
     assert acts[0].text() == "（暂无便签）"
     assert not acts[0].isEnabled()
-    assert acts[-1].text() == "✕ 全部关闭"
+    assert acts[-1].text() == "全部关闭"
 
 
 def test_notify_hidden_to_tray_only_once(qapp):

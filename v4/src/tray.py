@@ -76,8 +76,9 @@ class TrayController:
         act_main = menu.addAction("显示 / 隐藏主窗口")
         act_ball = menu.addAction("显示 / 隐藏悬浮球")
 
-        # ---- 📌 便签子菜单：列出已钉便签 + 全部置前 / 全部关闭 ----
-        sticky_menu = QMenu("📌 便签", menu)
+        # ---- 便签子菜单：列出已钉便签 + 全部置前 / 全部关闭 ----
+        # UI 重构 03：托盘菜单一律纯文字，去 emoji 前缀
+        sticky_menu = QMenu("便签", menu)
 
         def _rebuild_sticky_menu():
             sticky_menu.clear()
@@ -86,15 +87,14 @@ class TrayController:
                 empty = sticky_menu.addAction("（暂无便签）")
                 empty.setEnabled(False)
             else:
-                for sid, title, _aid, kind in entries:
-                    icon = "📋" if kind == "task" else "📄"
-                    act = sticky_menu.addAction(f"{icon} {title[:24]}")
+                for sid, title, _aid, _kind in entries:
+                    act = sticky_menu.addAction(title[:24])
                     act.triggered.connect(
                         lambda _checked=False, s=sid: sticky_manager.raise_sticky(s))
                 sticky_menu.addSeparator()
-                front = sticky_menu.addAction("⬆ 全部置前")
+                front = sticky_menu.addAction("全部置前")
                 front.triggered.connect(sticky_manager.bring_all_to_front)
-            close_all = sticky_menu.addAction("✕ 全部关闭")
+            close_all = sticky_menu.addAction("全部关闭")
             close_all.triggered.connect(sticky_manager.close_all)
 
         sticky_menu.aboutToShow.connect(_rebuild_sticky_menu)

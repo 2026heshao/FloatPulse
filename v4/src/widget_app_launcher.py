@@ -59,7 +59,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSize, QFileInfo, pyqtSignal
 from PyQt6.QtGui import (QPixmap, QPainter, QColor, QPen, QPixmapCache,
-                         QGuiApplication)
+                         QGuiApplication, QIcon)
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
@@ -522,16 +522,16 @@ class AppCardWidget(QFrame):
         exec 结束后 accept，阻止事件继续冒泡到主窗口兜底菜单。
         """
         menu = QMenu(self)
-        menu.addAction("🚀 启动", lambda: self.actionRequested.emit(
+        menu.addAction("启动", lambda: self.actionRequested.emit(
             self._index, "launch"))
-        menu.addAction("✏️ 编辑…", lambda: self.actionRequested.emit(
+        menu.addAction("编辑…", lambda: self.actionRequested.emit(
             self._index, "edit"))
-        menu.addAction("📁 打开所在位置", lambda: self.actionRequested.emit(
+        menu.addAction("打开所在位置", lambda: self.actionRequested.emit(
             self._index, "locate"))
-        menu.addAction("📋 复制路径", lambda: self.actionRequested.emit(
+        menu.addAction("复制路径", lambda: self.actionRequested.emit(
             self._index, "copypath"))
         menu.addSeparator()
-        menu.addAction("🗑️ 移除", lambda: self.actionRequested.emit(
+        menu.addAction("移除", lambda: self.actionRequested.emit(
             self._index, "remove"))
         menu.exec(event.globalPos())
         event.accept()
@@ -621,8 +621,8 @@ class AppLauncherPage(QWidget):
 
         # 管理软件列表按钮：唤起 AppManageDialog 完成新增/编辑/删除
         # （本页面唯一的软件管理入口，保存后立即刷新下方卡片网格）
-        self._manage_btn = SmoothButton("📋 管理软件列表")
-        self._manage_btn.setObjectName("secondaryBtn")
+        self._manage_btn = IconButton("apps", text="管理软件列表", icon_size=14,
+                                      object_name="secondaryBtn")
         self._manage_btn.setFixedHeight(28)
         self._manage_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._manage_btn.clicked.connect(self._on_manage_apps)
@@ -863,8 +863,8 @@ class AppLauncherPage(QWidget):
         （此前空白处右键会弹出「显示/隐藏悬浮球」，与本页无关）。
         """
         menu = QMenu(self)
-        menu.addAction("➕ 新增软件", self._on_add_quick)
-        menu.addAction("📋 管理软件列表", self._on_manage_apps)
+        menu.addAction("新增软件", self._on_add_quick)
+        menu.addAction("管理软件列表", self._on_manage_apps)
         menu.exec(event.globalPos())
         event.accept()
 
@@ -1002,8 +1002,8 @@ class AppManageDialog(QDialog):
         root.setSpacing(10)
 
         # 标题
-        title = QLabel("📋 软件列表管理")
-        title.setObjectName("pageTitle")
+        title = PageTitle("apps", "软件列表管理")
+        title.apply_theme(self._theme)
         root.addWidget(title)
 
         # 提示
@@ -1060,6 +1060,19 @@ class AppManageDialog(QDialog):
         self.setStyleSheet(qss + extra)
 
     # ---------------- 数据加载 ----------------
+    @staticmethod
+    def _status_dot(color: str) -> QIcon:
+        """状态圆点（6px 直径、居中于 12px 画布）：有效 success / 失效 danger。"""
+        pm = QPixmap(12, 12)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(color))
+        p.drawEllipse(3, 3, 6, 6)
+        p.end()
+        return QIcon(pm)
+
     def _refresh_list(self):
         """从 config 读取 apps 列表，刷新列表控件。"""
         self._list_widget.blockSignals(True)
@@ -1073,13 +1086,15 @@ class AppManageDialog(QDialog):
             for item in raw
         ]
 
+        colors = get_colors(self._theme)
         for i, app in enumerate(self._apps):
             name = app.get("name", "未命名")
             exe = app.get("exe_path", "")
             valid = bool(exe) and os.path.exists(exe)
-            icon = "🟢" if valid else "🔴"
-            text = f"{icon} {name}  —  {exe or '（空路径）'}"
-            item = QListWidgetItem(text)
+            # exe 是否有效的状态点：自绘 6px 圆点（有效 success / 失效 danger），
+            # 语义与旧 🟢/🔴 一致，不再依赖 emoji 字体
+            dot = self._status_dot(colors["success"] if valid else colors["danger"])
+            item = QListWidgetItem(dot, f"{name}  —  {exe or '（空路径）'}")
             item.setData(Qt.ItemDataRole.UserRole, i)
             self._list_widget.addItem(item)
 

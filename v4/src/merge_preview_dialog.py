@@ -15,7 +15,6 @@
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QTextEdit
 
-from src.fragment_manager import TYPE_ICONS
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 
 
@@ -42,7 +41,7 @@ class MergePreviewDialog(GlassDialog):
 
         # 顶部信息（标题 + 条数统计）
         head = QHBoxLayout()
-        info = QLabel("🔗 合并结果预览（可直接编辑）")
+        info = QLabel("合并结果预览（可直接编辑）")
         info.setObjectName("sectionLabel")
         head.addWidget(info)
         head.addStretch()
@@ -54,8 +53,7 @@ class MergePreviewDialog(GlassDialog):
         # 来源列表（紧凑显示）
         source_lines = []
         for i, f in enumerate(fragments, 1):
-            icon = TYPE_ICONS.get(f.type, "📄")
-            source_lines.append(f"{i}. {icon} {f.preview(40)}")
+            source_lines.append(f"{i}. {f.preview(40)}")
         source_label = QLabel("\n".join(source_lines))
         source_label.setObjectName("hintLabel")
         source_label.setWordWrap(True)
@@ -72,7 +70,7 @@ class MergePreviewDialog(GlassDialog):
 
         # 按钮区
         btns = self.add_footer([
-            ("📋 复制到剪贴板", "primaryBtn", None),
+            ("复制到剪贴板", "primaryBtn", None),
             ("存为笔记", "secondaryBtn", None, "save"),
             ("关闭", "secondaryBtn", self.reject),
         ])
@@ -85,15 +83,15 @@ class MergePreviewDialog(GlassDialog):
         text = self._preview_edit.toPlainText()
         if self._clipboard_monitor:
             self._clipboard_monitor.put_text(text)
-        flash_button(self._copy_btn, "✅ 已复制")
+        flash_button(self._copy_btn, "已复制")
 
     def _on_save_note(self):
         """保存合并内容为一条新笔记"""
         text = self._preview_edit.toPlainText()
         if not text.strip():
-            flash_button(self._save_btn, "⚠️ 内容为空")
+            flash_button(self._save_btn, "内容为空")
             return
         if self._note_manager:
             self._note_manager.add_note(text)
-        flash_button(self._save_btn, "✅ 已存为笔记", 900)
+        flash_button(self._save_btn, "已存为笔记", 900)
         QTimer.singleShot(900, self.accept)

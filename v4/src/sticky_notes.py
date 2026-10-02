@@ -50,6 +50,7 @@ from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
 from src.controls import SmoothButton, IconButton
 from src.theme import get_colors, get_menu_qss
+from src.icon_render import icon as render_icon
 from src.app_paths import get_data_dir, get_screen_geometry
 from src.task_manager import task_state, format_relative_deadline
 
@@ -504,16 +505,16 @@ class StickyNoteWindow(QWidget):
             self._note.content = text   # Note.content / Fragment.content 同名字段
 
     def _refresh_task_chip(self):
-        """截止日徽章：✔ 已完成 / 📅 相对截止（overdue 红 / today 主色 / 其他灰）"""
+        """截止日徽章：已完成 / 相对截止（overdue 红 / today 主色 / 其他灰）"""
         if self._chip is None:
             return
         colors = get_colors(self._theme)
         if getattr(self._note, "done", False):
-            self._chip.setText("✔ 已完成")
+            self._chip.setText("已完成")
             color = str(colors.get("success", "#1F8A4C"))
         else:
             state, _delta = task_state(self._note.deadline)
-            self._chip.setText(f"📅 {format_relative_deadline(self._note.deadline)}")
+            self._chip.setText(format_relative_deadline(self._note.deadline))
             if state == "overdue":
                 color = str(colors.get("danger", "#D6483A"))
             elif state == "today":
@@ -676,17 +677,17 @@ class StickyNoteWindow(QWidget):
         menu.setStyleSheet(get_menu_qss(self._theme))
 
         act_rename = (None if self._kind == "fragment"   # 碎片无标题字段
-                      else menu.addAction("✏️ 标题重命名..."))
+                      else menu.addAction("标题重命名..."))
         act_toggle = None
         if self._kind == "task":
             done = bool(getattr(self._note, "done", False))
-            act_toggle = menu.addAction("✔ 取消完成" if done else "✔ 标记完成")
-        act_top = menu.addAction("📌 取消置顶" if self._is_on_top()
-                                 else "📌 窗口置顶")
+            act_toggle = menu.addAction("取消完成" if done else "标记完成")
+        act_top = menu.addAction("取消置顶" if self._is_on_top()
+                                 else "窗口置顶")
         act_top.setCheckable(True)
         act_top.setChecked(self._is_on_top())
         # 透明度三档（spec 允许三档或 Stepper 滑块；菜单里用三档更轻）
-        op_menu = menu.addMenu("🌗 透明度")
+        op_menu = menu.addMenu("透明度")
         op_actions = {}
         for label, value in (("不透明", 100), ("较透明", 80), ("半透明", 60)):
             a = op_menu.addAction(label)
@@ -694,11 +695,15 @@ class StickyNoteWindow(QWidget):
             a.setChecked(round(self.windowOpacity() * 100) == value)
             op_actions[a] = value
         menu.addSeparator()
-        act_unpin = menu.addAction("▢ 取消钉住")
+        act_unpin = menu.addAction("取消钉住")
         act_delete = menu.addAction(
-            "🗑 删除任务并关闭" if self._kind == "task"
-            else "🗑 删除碎片并关闭" if self._kind == "fragment"
-            else "🗑 删除笔记并关闭")
+            "删除任务并关闭" if self._kind == "task"
+            else "删除碎片并关闭" if self._kind == "fragment"
+            else "删除笔记并关闭")
+        # 删除项危险语义：Qt 菜单无法按 action 设文字色，
+        # 用 danger 色的自绘 trash 图标承载（UI 重构 03）
+        act_delete.setIcon(
+            render_icon("trash", 14, get_colors(self._theme)["danger"]))
         action = menu.exec(global_pos)
 
         if act_rename is not None and action == act_rename:

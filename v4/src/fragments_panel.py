@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize, QTimer, QRect
 from PyQt6.QtGui import QColor, QFontMetrics, QBrush
 
-from src.fragment_manager import TYPE_LABELS, TYPE_ICONS
+from src.fragment_manager import TYPE_LABELS
 from src.fragment_classifier import (
     CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
     CATEGORY_LABELS, CATEGORY_ORDER,
@@ -278,7 +278,7 @@ class _PreviewPane(QWidget):
 
         btns = QHBoxLayout()
         btns.setSpacing(8)
-        self._copy_btn = SmoothButton("📋 复制")
+        self._copy_btn = SmoothButton("复制")
         self._copy_btn.setObjectName("secondaryBtn")
         self._edit_btn = IconButton("edit", text="编辑", icon_size=14,
                                     object_name="secondaryBtn")
@@ -301,12 +301,11 @@ class _PreviewPane(QWidget):
         if frag is None:
             self._stack.setCurrentIndex(0)
             return
-        icon = TYPE_ICONS.get(frag.type, "📄")
         label = TYPE_LABELS.get(frag.type, "未知")
-        self._title.setText(f"{icon} {label}  #{frag.fragment_id}")
-        meta = f"🕐 {frag.created_at or '—'}"
+        self._title.setText(f"{label}  #{frag.fragment_id}")
+        meta = f"{frag.created_at or '—'}"
         if frag.source:
-            meta += f"　🔗 {frag.source}"
+            meta += f"　{frag.source}"
         self._meta.setText(meta)
         text = frag.content or ""
         self._stat.setText(f"{len(text)} 字")
@@ -318,7 +317,7 @@ class _PreviewPane(QWidget):
         if self._frag is None:
             return
         self._panel._copy_content(self._frag)
-        flash_button(self._copy_btn, "✅ 已复制")
+        flash_button(self._copy_btn, "已复制")
 
     def _on_edit(self):
         if self._frag is None:
@@ -367,10 +366,10 @@ class FragmentsPanel(QWidget):
 
         self._frag_filter = QComboBox()
         self._frag_filter.addItem("全部类型", "all")
-        self._frag_filter.addItem("📋 剪贴板文本", "clipboard_text")
-        self._frag_filter.addItem("📁 剪贴板路径", "clipboard_path")
-        self._frag_filter.addItem("📥 文件拾取",   "file_pickup")
-        self._frag_filter.addItem("📚 知识段落",   "knowledge_segment")
+        self._frag_filter.addItem("剪贴板文本", "clipboard_text")
+        self._frag_filter.addItem("剪贴板路径", "clipboard_path")
+        self._frag_filter.addItem("文件拾取",   "file_pickup")
+        self._frag_filter.addItem("知识段落",   "knowledge_segment")
         self._frag_filter.currentIndexChanged.connect(
             lambda _i: self.refresh(preserve_view=False))
         toolbar.addWidget(self._frag_filter)
@@ -379,8 +378,8 @@ class FragmentsPanel(QWidget):
         # 与 _frag_filter（来源渠道 type）互不替代，AND 组合筛选
         self._frag_category = QComboBox()
         self._frag_category.addItem("全部内容", "all")
-        labels = {CAT_LINK: "🔗 链接", CAT_CODE: "⌗ 代码", CAT_PATH: "📁 路径",
-                  CAT_COMMAND: "▶ 命令", CAT_TEXT: "📝 文本"}
+        labels = {CAT_LINK: "链接", CAT_CODE: "代码", CAT_PATH: "路径",
+                  CAT_COMMAND: "命令", CAT_TEXT: "文本"}
         for cat in CATEGORY_ORDER:
             self._frag_category.addItem(labels.get(cat, cat), cat)
         self._frag_category.setSizeAdjustPolicy(
@@ -391,14 +390,14 @@ class FragmentsPanel(QWidget):
         toolbar.addWidget(self._frag_category)
 
         self._frag_search = QLineEdit()
-        self._frag_search.setPlaceholderText("🔍 搜索碎片内容...")
+        self._frag_search.setPlaceholderText("搜索碎片内容...")
         self._frag_search.setClearButtonEnabled(True)
         self._frag_search.textChanged.connect(self._on_search_text_changed)
         toolbar.addWidget(self._frag_search, 1)
 
         preview_visible = bool(self._host._config.get(
             "fragment_preview_visible", True))
-        self._preview_btn = SmoothButton("👁 预览")
+        self._preview_btn = SmoothButton("预览")
         self._preview_btn.setObjectName("secondaryBtn")
         self._preview_btn.setCheckable(True)
         self._preview_btn.setChecked(preview_visible)
@@ -472,11 +471,11 @@ class FragmentsPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
 
-        merge_btn = SmoothButton("🔗 合并选中")
+        merge_btn = SmoothButton("合并选中")
         merge_btn.clicked.connect(self._on_merge)
         bottom.addWidget(merge_btn)
 
-        copy_btn = SmoothButton("📋 复制选中")
+        copy_btn = SmoothButton("复制选中")
         copy_btn.setObjectName("secondaryBtn")
         copy_btn.clicked.connect(self._on_copy)
         bottom.addWidget(copy_btn)
@@ -695,7 +694,7 @@ class FragmentsPanel(QWidget):
     def _make_row_item(self, row, colors):
         """把一条行描述符建成 QListWidgetItem（条目属性与旧内联实现一致）"""
         if row[0] == "header":
-            date_item = QListWidgetItem(f"📅  {row[1]}")
+            date_item = QListWidgetItem(f"  {row[1]}")
             date_item.setData(Qt.ItemDataRole.UserRole, None)
             flags = date_item.flags()
             date_item.setFlags(flags & ~Qt.ItemFlag.ItemIsSelectable
@@ -723,14 +722,14 @@ class FragmentsPanel(QWidget):
         if f.type in ("clipboard_path", "file_pickup"):
             item.setData(COLOR_TOKEN_ROLE, "link")
             item.setForeground(QColor(colors["link"]))
-        icon = TYPE_ICONS.get(f.type, "📄")
+        item.setSizeHint(QSize(0, 28))
         label = TYPE_LABELS.get(f.type, "未知")
         cat_label = CATEGORY_LABELS.get(f.category, f.category)
-        tip_lines = [f"{icon} 类型: {label}", f"🏷 内容: {cat_label}"]
+        tip_lines = [f"类型: {label}", f"类别: {cat_label}"]
         if f.source:
-            tip_lines.append(f"🔗 来源: {f.source}")
-        tip_lines.append(f"🕐 时间: {created}")
-        tip_lines.append(f"📝 内容:\n{f.content}")
+            tip_lines.append(f"来源: {f.source}")
+        tip_lines.append(f"时间: {created}")
+        tip_lines.append(f"内容:\n{f.content}")
         item.setToolTip("\n".join(tip_lines))
         return item
 
@@ -784,18 +783,18 @@ class FragmentsPanel(QWidget):
             return
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
-        act_detail = menu.addAction("🔍 查看详情")
-        act_edit = menu.addAction("✏️ 编辑内容")
-        act_copy = menu.addAction("📋 复制内容")
+        act_detail = menu.addAction("查看详情")
+        act_edit = menu.addAction("编辑内容")
+        act_copy = menu.addAction("复制内容")
         menu.addSeparator()
-        act_to_note = menu.addAction("💾 存为笔记")
-        act_to_kb = menu.addAction("📚 加入知识库")
-        act_to_nav = menu.addAction("🌐 添加至网址导航")
-        act_to_sticky = menu.addAction("📌 钉为便签")
-        act_export = menu.addAction("📤 导出到 Obsidian")
+        act_to_note = menu.addAction("存为笔记")
+        act_to_kb = menu.addAction("加入知识库")
+        act_to_nav = menu.addAction("添加至网址导航")
+        act_to_sticky = menu.addAction("钉为便签")
+        act_export = menu.addAction("导出到 Obsidian")
         menu.addSeparator()
         # 手动归类子菜单（自动分类判错时的纠正入口）
-        cat_menu = menu.addMenu("🏷 归类为")
+        cat_menu = menu.addMenu("归类为")
         cat_actions = {}
         for c in CATEGORY_ORDER:
             act = cat_menu.addAction(CATEGORY_LABELS.get(c, c))
@@ -803,7 +802,7 @@ class FragmentsPanel(QWidget):
             act.setChecked(self._frag_current_category(fid) == c)
             cat_actions[act] = c
         menu.addSeparator()
-        act_delete = menu.addAction("🗑 删除")
+        act_delete = menu.addAction("删除")
         action = menu.exec(self._frag_list.mapToGlobal(pos))
         if action == act_detail:
             self._show_detail(fid)
@@ -861,7 +860,7 @@ class FragmentsPanel(QWidget):
         if not frag:
             return None
         title_text = frag.content.replace("\n", " ").strip()[:20]
-        title = f"💾 {title_text}{'...' if len(frag.content) > 20 else ''}"
+        title = f"{title_text}{'...' if len(frag.content) > 20 else ''}"
         note_id = self._note_manager.add_note(frag.content, title=title)
         self._host.refresh_page("notes")
         self._host.data_changed.emit("note")
@@ -881,7 +880,7 @@ class FragmentsPanel(QWidget):
         """碎片 → 直接钉成桌面便签（锚定碎片本身，内容写回碎片）。
 
         2026-10-01 用户拍板取消自动收录：钉便签**不再转存新笔记**，
-        笔记库不被污染；「💾 存为笔记」仍是显式的独立入口。
+        笔记库不被污染；「存为笔记」仍是显式的独立入口。
         """
         manager = self._host.sticky_manager
         if manager is None:
@@ -889,10 +888,10 @@ class FragmentsPanel(QWidget):
             return
         ok, reason = manager.open_fragment(fragment_id)
         if ok:
-            self._host.show_toast("📌 已钉为桌面便签")
+            self._host.show_toast("已钉为桌面便签")
         elif reason == "limit":
             self._host.show_toast(
-                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
         elif reason == "missing":
             self._host.show_toast("碎片已不存在")
         else:
@@ -966,7 +965,6 @@ class FragmentsPanel(QWidget):
         body = dlg.body_layout
 
         # ---- 元信息卡片（标签/值两列对齐）----
-        icon = TYPE_ICONS.get(frag.type, "📄")
         label = TYPE_LABELS.get(frag.type, "未知")
         card = QFrame()
         card.setObjectName("glassCard")
@@ -976,7 +974,7 @@ class FragmentsPanel(QWidget):
         grid.setVerticalSpacing(8)
 
         meta_rows = [
-            ("类型", f"{icon} {label}"),
+            ("类型", label),
             ("时间", frag.created_at or "—"),
         ]
         if frag.source:
@@ -997,7 +995,7 @@ class FragmentsPanel(QWidget):
 
         # ---- 内容标题行：标题 + 字数统计 ----
         head = QHBoxLayout()
-        content_label = QLabel("📄 完整内容")
+        content_label = QLabel("完整内容")
         content_label.setObjectName("sectionLabel")
         head.addWidget(content_label)
         head.addStretch()
@@ -1017,14 +1015,14 @@ class FragmentsPanel(QWidget):
 
         # ---- 底部按钮 ----
         btns = dlg.add_footer([
-            ("📋 复制全部内容", "primaryBtn", None),
-            ("✏️ 编辑内容", "secondaryBtn", None),
+            ("复制全部内容", "primaryBtn", None),
+            ("编辑内容", "secondaryBtn", None, "edit"),
             ("关闭", "secondaryBtn", dlg.accept),
         ])
 
         def _copy_all():
             self._copy_content(frag)
-            flash_button(btns[0], "✅ 已复制")
+            flash_button(btns[0], "已复制")
 
         def _edit_from_detail():
             # 先关详情，再经事件循环空闲时机开编辑窗，避免模态嵌套

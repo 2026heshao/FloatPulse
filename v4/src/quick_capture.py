@@ -65,7 +65,7 @@ class QuickCaptureWindow(QWidget):
         layout.addWidget(self._handle)
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText("⚡ 快速捕捉：输入后回车存入碎片池，Esc 关闭")
+        self._input.setPlaceholderText("快速捕捉：输入后回车存入碎片池，Esc 关闭")
         self._input.setFixedHeight(self.HEIGHT - 12)
         self._input.returnPressed.connect(self._submit)
         # Esc 由 QLineEdit 自行消费（窗口收不到 keyPressEvent），过滤器兜底拦截

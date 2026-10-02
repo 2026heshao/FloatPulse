@@ -32,6 +32,7 @@ from PyQt6.QtGui import (
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
+from src.icon_render import icon as render_icon
 from src.controls import SmoothButton, EmptyState, IconButton, PageTitle
 from src import motion
 
@@ -303,7 +304,7 @@ class AssetsPanel(QWidget):
         v.addLayout(header)
 
         # ---- 提示 ----
-        hint = QLabel("💡 拖拽图片/文件到悬浮球即可自动复制保存到此处")
+        hint = QLabel("拖拽图片/文件到悬浮球即可自动复制保存到此处")
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         v.addWidget(hint)
@@ -312,7 +313,7 @@ class AssetsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_folder_btn = SmoothButton("📁 打开素材文件夹")
+        open_folder_btn = SmoothButton("打开素材文件夹")
         open_folder_btn.setObjectName("secondaryBtn")
         open_folder_btn.clicked.connect(self._on_open_folder)
         toolbar.addWidget(open_folder_btn)
@@ -507,10 +508,14 @@ class AssetsPanel(QWidget):
 
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
-        act_open = menu.addAction("📂 打开")
-        act_save_as = menu.addAction("💾 另存为...")
+        act_open = menu.addAction("打开")
+        act_save_as = menu.addAction("另存为...")
         menu.addSeparator()
-        act_delete = menu.addAction("🗑 删除" if n <= 1 else f"🗑 删除（{n} 个）")
+        act_delete = menu.addAction("删除" if n <= 1 else f"删除（{n} 个）")
+        # 删除项危险语义：Qt 菜单无法按 action 单独设文字色，
+        # 用 danger 色的自绘 trash 图标承载（UI 重构 05）
+        act_delete.setIcon(
+            render_icon("trash", 14, self._colors()["danger"]))
         action = menu.exec(self._asset_list.mapToGlobal(pos))
         if action == act_open:
             self._open(aid)

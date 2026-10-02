@@ -56,14 +56,14 @@ from src.update_checker import RELEASES_API_URL, check_headers
 
 # 卡片能力标签（商店卡与在线市场卡共用，改一处两处生效）
 CAP_LABELS = {
-    "network": "🌐 网络访问", "write": "✍ 写入数据",
-    "manage": "🛠 改删数据", "ai": "🧠 AI 总配置",
+    "network": "网络访问", "write": "写入数据",
+    "manage": "改删数据", "ai": "AI 总配置",
 }
 
 # 能力徽章短文案（2026-10-01 卡片降噪：卡面只放短词，完整语义进悬停提示）
 CAP_BADGES = {
-    "network": "🌐 网络", "write": "✍ 写入",
-    "manage": "🛠 改删", "ai": "🧠 AI",
+    "network": "网络", "write": "写入",
+    "manage": "改删", "ai": "AI",
 }
 
 # 能力徽章悬停提示（完整语义；manage 蕴含 write、ai 由设置页勾选授权）
@@ -148,7 +148,7 @@ def _build_usage_viewer(host, path: str, text: str):
     viewer.setMarkdown(text)   # 非 md 内容也能按纯文本显示，不抛异常
     dlg.body_layout.addWidget(viewer, 1)
     dlg.add_footer([
-        ("📁 用系统程序打开", "secondaryBtn",
+        ("用系统程序打开", "secondaryBtn",
          lambda _checked=False: _startfile_warn(viewer, path)),
         ("关闭", "primaryBtn", dlg.accept),
     ])
@@ -202,7 +202,7 @@ class PluginsPanel(QWidget):
         v.addLayout(header)
 
         # ---- 提示 ----
-        hint = QLabel("💡 插件商店放插件包（.fpplug / 含 manifest.json 的文件夹），"
+        hint = QLabel("插件商店放插件包（.fpplug / 含 manifest.json 的文件夹），"
                       "点「安装」解压到安装目录后即可使用；"
                       "「卸载」只删安装目录里的副本，商店里的源包会保留，随时能再装。"
                       "插件包内建议放一份「使用说明.md」，摘要会自动显示在卡片上")
@@ -226,7 +226,7 @@ class PluginsPanel(QWidget):
         v.addWidget(self._store_dir_label)
 
         # ---- 插件总闸关闭提示条（默认隐藏）----
-        self._gate_label = QLabel("⛔ 插件功能已在设置页停用（全局开关），"
+        self._gate_label = QLabel("插件功能已在设置页停用（全局开关），"
                                   "如需使用请到「设置」开启后重启程序")
         self._gate_label.setObjectName("pluginGateHint")
         self._gate_label.setWordWrap(True)
@@ -237,12 +237,12 @@ class PluginsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_dir_btn = SmoothButton("📁 打开插件目录")
+        open_dir_btn = SmoothButton("打开插件目录")
         open_dir_btn.setObjectName("secondaryBtn")
         open_dir_btn.clicked.connect(self._on_open_plugins_dir)
         toolbar.addWidget(open_dir_btn)
 
-        open_store_btn = SmoothButton("🏪 插件商店")
+        open_store_btn = SmoothButton("插件商店")
         open_store_btn.setObjectName("secondaryBtn")
         open_store_btn.setToolTip("浏览商店目录里的可安装插件包（独立窗口）")
         open_store_btn.clicked.connect(self._on_open_store_dialog)
@@ -264,7 +264,7 @@ class PluginsPanel(QWidget):
         eb = QVBoxLayout(self._error_box)
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(8)
-        self._error_label = QLabel("⚠ 加载失败的插件")
+        self._error_label = QLabel("加载失败的插件")
         self._error_label.setObjectName("pluginSectionLabel")
         eb.addWidget(self._error_label)
         self._error_layout = QVBoxLayout()
@@ -351,9 +351,9 @@ class PluginsPanel(QWidget):
         # 标签单行显示（长路径由 Qt 自带省略），完整路径挂在 tooltip 上。
         plugins_text = self._plugins_dir_text(loader)
         store_text = self._store_dir_text(loader)
-        self._dir_label.setText("📂 插件安装目录：%s" % plugins_text)
+        self._dir_label.setText("插件安装目录：%s" % plugins_text)
         self._dir_label.setToolTip(plugins_text)
-        self._store_dir_label.setText("🏪 插件商店目录：%s" % store_text)
+        self._store_dir_label.setText("插件商店目录：%s" % store_text)
         self._store_dir_label.setToolTip(store_text)
 
         # 清空旧卡片（网格只装卡片本体；尾部 stretch 在外层 vbox，不会被动到）
@@ -377,7 +377,7 @@ class PluginsPanel(QWidget):
         self._error_box.setVisible(has_errors)
         if has_errors:
             self._error_label.setText(
-                f"⚠ 加载失败的插件（{len(errors)} 个）——见下方原因与修复建议")
+                f"加载失败的插件（{len(errors)} 个）——见下方原因与修复建议")
             for fe in errors:
                 self._error_layout.addWidget(self._make_error_card(fe))
 
