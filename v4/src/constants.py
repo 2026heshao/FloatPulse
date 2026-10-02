@@ -66,6 +66,20 @@ MINI_ICON_DEFAULT = 36
 MINI_BTN_PAD = 40
 
 
+# ---- UI 设计令牌：圆角与字阶（UI 重构 00/01，2026-10-02）----
+# 与 theme.py QSS 模板里的 $r_* / $fs_* 令牌**同源同值**：
+# QSS 用字符串（"8"），自绘 delegate / overlay 取这里的 int。
+# 改任何一个数值必须两边同步（theme.py 圆角四档注释同款纪律）。
+RADIUS_WIN = 12      # 窗口
+RADIUS_PANEL = 8     # 面板/卡片/列表容器
+RADIUS_CTL = 6       # 按钮/输入框
+RADIUS_CHIP = 4      # chip/徽章
+FS_XS = 11           # 时间戳/计数（等宽 Consolas）
+FS_SM = 13           # 正文与列表行
+FS_MD = 15           # 页标题/卡标题
+FS_LG = 20           # 大标题
+
+
 def mini_btn_size(icon_px: int) -> int:
     """小卡片图标边长 → 按钮边长（唯一换算点，别处不要另写公式）。"""
     return max(MINI_ICON_MIN, min(MINI_ICON_MAX, int(icon_px))) + MINI_BTN_PAD

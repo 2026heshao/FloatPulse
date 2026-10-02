@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QPropertyAnimation
 
 from src.app_paths import get_screen_geometry
-from src.constants import UNDO_BAR_MS
+from src.constants import RADIUS_CTL, RADIUS_PANEL, UNDO_BAR_MS
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.theme import DEFAULT_THEME, get_colors
 from src import icon_render
@@ -65,12 +65,14 @@ _PRESS_SCALE = 0.98     # 按下微缩
 # 端点逐一对照 theme.py 里已删除的 QSS 背景（丝滑化清单 §2.1 的落地契约）：
 #   · 不透明端点（$primary_hover / $primary / $danger …）→ (token, 255)
 #   · 半透明 a08/a12/a18/a30 端点 → (primary, 255*比例)
-#   · secondaryBtn 基底是 a12，叠 18 合成 ≈ a18，与旧 :hover 端点一致
+#   · secondaryBtn 基底已改 $surface 实底（UI 重构 01），hover 叠 primary 18%
+#     淡染 ≈ 网页 ghost 按钮；textBtn 文字钮 hover 用 primary 20% 更弱的淡染
 #   · None = 该状态不换底色（维持现状，仅吃按下位移）
 #   · None 键 = 未命名 / 未收录按钮的兜底，等价旧的全局 QPushButton:hover/:pressed
 _SMOOTH_OVERLAYS = {
     "secondaryBtn":     (("primary", 18), None),
-    "dangerBtn":        (("danger", 255), ("danger", 255)),
+    "textBtn":          (("primary", 20), ("primary", 31)),
+    "dangerBtn":        (("danger", 26), ("danger", 46)),
     "fragDelBtn":       (("danger", 255), ("danger", 255)),
     "cardCloseBtn":     (("danger", 255), ("danger", 255)),
     "iconBtn":          (("primary", 31), ("primary", 46)),
@@ -91,13 +93,19 @@ _SMOOTH_OVERLAYS = {
     None:               (("primary_hover", 255), ("primary_pressed", 255)),
 }
 
-# overlay 圆角（对照 theme.py 各选择器的 border-radius）；未收录的走全局 9px
+# overlay 圆角（对照 theme.py 各选择器的 border-radius）；未收录的走全局
+# RADIUS_CTL。UI 重构 01 起取 constants.RADIUS_* 与 QSS 的 $r_* 同源 ——
+# theme.py 圆角四档收敛后这里的像素值全部随之更新，两边不再可能漂移。
 _OVERLAY_RADIUS = {
-    "modeBtn": 11, "cardCloseBtn": 11, "nextBtn": 13, "iconBtn": 10,
-    "sideTabIconBtn": 10, "settingsNavBtn": 10, "tableOpenBtn": 7,
-    "undoUndoBtn": 7, "fragCopyBtn": 7, "fragDelBtn": 7, "navBtn": 10,
+    "modeBtn": RADIUS_CTL, "cardCloseBtn": RADIUS_CTL,
+    "nextBtn": RADIUS_CTL, "iconBtn": RADIUS_PANEL,
+    "sideTabIconBtn": RADIUS_PANEL, "settingsNavBtn": RADIUS_PANEL,
+    "tableOpenBtn": RADIUS_CTL, "undoUndoBtn": RADIUS_CTL,
+    "fragCopyBtn": RADIUS_CTL, "fragDelBtn": RADIUS_CTL,
+    "navBtn": RADIUS_PANEL, "secondaryBtn": RADIUS_CTL,
+    "textBtn": RADIUS_CTL,
 }
-_DEFAULT_RADIUS = 9
+_DEFAULT_RADIUS = RADIUS_CTL
 
 
 class SmoothButton(QPushButton):

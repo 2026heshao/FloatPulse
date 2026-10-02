@@ -192,7 +192,8 @@ def section_render_matrix():
             if n == 0:
                 empty.append((name, size))
         print("     %-10s 16=%-5d 24=%-5d 32=%-5d 48=%-5d" % (name, *row))
-    check("11 个图标 × 4 档尺寸全部画出内容", not empty, f"空渲染：{empty}")
+    check("%d 个图标 × 4 档尺寸全部画出内容" % len(icons.icon_names()),
+          not empty, f"空渲染：{empty}")
 
     print("== B. 外接框占比（防'孤点'）==")
     # P1 起图标集里有「一根线条」的一维字形（minimize/minus）——外接框
@@ -231,7 +232,8 @@ def section_render_matrix():
                 img = icon_render.icon_pixmap(name, 32, want).toImage()
                 if color_count(img, want) == 0:
                     wrong.append((theme, tok, name))
-    check("双主题 × 两种 token × 11 图标：渲染色都等于传入色", not wrong,
+    check("双主题 × 两种 token × %d 图标：渲染色都等于传入色"
+          % len(icons.icon_names()), not wrong,
           f"不符：{wrong[:6]}")
 
     print("== D. 缓存语义 ==")
@@ -394,7 +396,7 @@ def section_main_window(app, theme):
     nav_area.grab().save(p2)
     print(f"     [OK] {p2}")
 
-    # 图标对照板（11 个图标 × 3 档尺寸，直接渲在玻璃底上）
+    # 图标对照板（全部图标 × 3 档尺寸，直接渲在玻璃底上）
     p3 = os.path.join(OUT_DIR, f"icons-{theme}-03-bench.png")
     _save_bench(theme, p3)
     print(f"     [OK] {p3}")

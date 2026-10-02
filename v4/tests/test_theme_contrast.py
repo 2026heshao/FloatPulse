@@ -173,16 +173,29 @@ def test_base_button_text_is_readable_in_both_themes():
 
 
 def test_danger_and_disabled_states_still_use_their_own_colors():
-    """守卫改动边界：danger 按钮的 hover 白字、disabled 的灰字都不该被顺手改掉"""
+    """守卫改动边界：danger 按钮用 $danger（文字按钮，不做红胶囊）、disabled
+    的灰字都不该被顺手改掉。
+
+    ★ UI 重构 01：``#dangerBtn`` 从红胶囊改成文字按钮（透明底 + $danger），
+    hover 的淡红底归 SmoothButton overlay，QSS 侧不再有白字/背景声明。
+    """
     for theme in ("light", "dark"):
         qss = get_main_window_qss(theme)
-        assert "QPushButton#dangerBtn:hover" in qss
-        danger_body = dict(_rules(qss)).get("QPushButton#dangerBtn:hover", "")
-        assert "#FFFFFF" in _text_colors(danger_body), (
-            "danger 按钮 hover 应保持白字（深红底）"
+        rules = dict(_rules(qss))
+        danger_body = rules.get("QPushButton#dangerBtn", "")
+        assert THEMES[theme]["danger"].lower() in danger_body.lower(), (
+            "danger 按钮静止态文字色应为 $danger(%s)，实际：%s"
+            % (THEMES[theme]["danger"], danger_body.strip())
+        )
+        hover_body = rules.get("QPushButton#dangerBtn:hover", "")
+        assert "#FFFFFF" not in _text_colors(hover_body), (
+            "danger 按钮 hover 不应压白字（已是文字按钮，不做红胶囊）"
+        )
+        assert "background-color" not in hover_body, (
+            "danger hover 背景过渡归 SmoothButton overlay，QSS 不应再写背景色"
         )
 
-        disabled_body = dict(_rules(qss)).get("QPushButton:disabled", "")
+        disabled_body = rules.get("QPushButton:disabled", "")
         assert THEMES[theme]["on_disabled"].lower() in disabled_body.lower(), (
             "disabled 态应使用 on_disabled 主题词"
         )
@@ -191,13 +204,11 @@ def test_danger_and_disabled_states_still_use_their_own_colors():
 # ====================================================================
 # 4. 次按钮（secondaryBtn）文字对比度
 # ====================================================================
-# 次按钮底色是半透明 $primary_a12，静态拿不到合成后的实色。
-# 这里按"叠加在卡片实底上"的合成色做估计（留了余量，宁可判严）。
-# light: #FFFFFF + rgba(91,192,190,0.12)  ->  #E7F4F4
-# dark : #232536 + rgba(111,255,233,0.12) ->  #31374A
+# UI 重构 01（2026-10-02）起次按钮是 ghost：$surface 实底 + $line_2 描边，
+# 底色静态可得（不再是半透明 a12 需要估算合成）。这里直接用 surface 值。
 _SECONDARY_BG = {
-    "light": "#E7F4F4",
-    "dark":  "#31374A",
+    "light": "#FFFFFF",
+    "dark":  "#1E2126",
 }
 
 

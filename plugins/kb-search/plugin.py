@@ -96,8 +96,10 @@ HISTORY_LIMIT = 10         # 最多保留的搜索词（最新在前，丢最旧
 HISTORY_CHARS = 60         # 单条搜索词的最大字符数
 
 # 富文本里的强调色**不能靠 QSS**：QTextBrowser 的 setHtml 只认行内样式，
-# 所以颜色必须由插件自己按主题注入。取不到主题色时的兜底值。
-_ACCENT_FALLBACK = {"light": "#27787A", "dark": "#6FFFE9"}
+# 所以颜色必须由插件自己按主题注入。取不到主题色时的兜底值
+# （UI 重构 01 起镜像新版 secondary_text：light #0C5A47 白底 8.2:1，
+#   dark #5DCAA5 深底约 7.6:1）。
+_ACCENT_FALLBACK = {"light": "#0C5A47", "dark": "#5DCAA5"}
 DEFAULT_THEME = "light"
 
 
@@ -105,8 +107,8 @@ def accent_for(theme) -> str:
     """当前主题下「既当链接色又当高亮色」的强调色。
 
     为什么复用宿主的 ``$secondary_text``（次按钮文字色）：那个 token 的选型
-    标准正是「浅底和深底都要读得清」——light 压深到 #27787A（白底约 4.6:1），
-    dark 直接用 #6FFFE9（深底 14.7:1）。早期版本在这里写死了 #0a7d7b，
+    标准正是「浅底和深底都要读得清」——light 用压深的 #0C5A47（白底 8.2:1），
+    dark 用 #5DCAA5（深底约 7.6:1）。早期版本在这里写死了 #0a7d7b，
     浅色主题下没问题，**深色主题下结果标题几乎看不见**（实测截图确认）。
     """
     theme = theme if theme in _ACCENT_FALLBACK else DEFAULT_THEME

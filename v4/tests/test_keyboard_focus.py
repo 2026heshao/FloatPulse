@@ -25,8 +25,8 @@ from src.theme import (  # noqa: E402
 )
 
 # ---- 面板底的合成色估计（与 test_theme_contrast 同口径：半透明 panel_fill
-#      叠在实底 card_bg_solid 之上）----
-_PANEL_BG = {"light": "#FFFFFF", "dark": "#393B4A"}
+#      叠在实底 card_bg_solid 之上；UI 重构 01 后 card_bg_solid = surface）----
+_PANEL_BG = {"light": "#FFFFFF", "dark": "#34373C"}
 
 RING_MIN_CONTRAST = 3.0
 
@@ -255,18 +255,19 @@ def test_focus_ring_contrast_against_panel(theme):
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_primary_alone_would_be_insufficient(theme):
-    """把"为什么不用 $primary"钉成可执行证据：$primary 确实达不到 3:1
+def test_focus_ring_matches_secondary_text(theme):
+    """focus_ring 与 secondary_text 同值同因（UI 重构 01 后的锚）。
 
-    light 主题下 $primary 对白面板底约 2.1:1。若哪天有人调高 $primary 的
-    对比度使本断言失败，说明可以用回 $primary 了 —— 那时删掉 $focus_ring
-    即可，本测试会主动提醒。
+    历史锚（已退役）：旧浅青主色 #5BC0BE 对白面板底仅 2.1:1，彼时
+    「$primary 单独当焦点环不够亮」成立，故本文件曾有
+    test_primary_alone_would_be_insufficient 钉死 ratio < 3。
+    UI 重构 01 把浅色主色改深（#0F6E56，对白底 6.2:1），那条前提消失，
+    该断言按其自身注释的预告退役；focus_ring 保留独立 token（语义不与
+    「次按钮文字色」绑死），本测试改为钉「两 token 同值」防漂移。
     """
-    ratio = _contrast(THEMES[theme]["primary"], _PANEL_BG[theme])
-    if theme == "light":
-        assert ratio < RING_MIN_CONTRAST, (
-            "light 主题 $primary(%s) 对面板底已达 %.2f:1，已够 3:1 —— "
-            "可以简化掉 $focus_ring 了" % (THEMES[theme]["primary"], ratio))
+    assert THEMES[theme]["focus_ring"] == THEMES[theme]["secondary_text"], (
+        "%s 主题 focus_ring 与 secondary_text 应同值（同因：非文本前景在"
+        "面板底上需 ≥3:1，见 A4）" % theme)
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

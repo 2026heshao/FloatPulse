@@ -136,13 +136,28 @@ def test_named_hover_rules_have_no_background_color_left():
 
 
 def test_danger_and_close_hover_keep_white_text():
-    """收编只动背景，不动文字：danger 系 hover 白字必须仍在 QSS 里。"""
+    """收编只动背景，不动文字：danger 系「实底充填」按钮 hover 白字必须仍在。
+
+    ★ UI 重构 01 例外：``#dangerBtn`` 已从红胶囊改成文字按钮（透明底 +
+    $danger 文字，hover 只叠淡红底 a26/a46），文字不再走白 —— 见
+    test_dangerbtn_is_text_button_no_white_hover。cardCloseBtn / fragDelBtn
+    仍是深红实底按钮，白字契约不变。
+    """
     bodies = _rule_bodies()
-    for sel in ("QPushButton#dangerBtn:hover", "QPushButton#cardCloseBtn:hover",
-                "QPushButton#fragDelBtn:hover"):
+    for sel in ("QPushButton#cardCloseBtn:hover", "QPushButton#fragDelBtn:hover"):
         assert "color: white" in bodies[sel], (
             "%s 丢失了 hover 白字（背景过渡收编时误删了文字契约）" % sel
         )
+
+
+def test_dangerbtn_is_text_button_no_white_hover():
+    """#dangerBtn 是文字按钮（UI 重构 01 三级制）：hover 不得压白字、不得
+    自己写 background-color（背景过渡归 SmoothButton 淡红 overlay）。"""
+    bodies = _rule_bodies()
+    assert "QPushButton#dangerBtn" in bodies
+    assert "color: white" not in bodies["QPushButton#dangerBtn:hover"]
+    assert "background-color" not in bodies["QPushButton#dangerBtn:hover"]
+    assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 26), ("danger", 46))
 
 
 # ====================================================================
@@ -175,7 +190,7 @@ def test_key_overlay_endpoints_are_pinned():
     """端点值钉死：这些值 = 被删的 QSS :hover/:pressed 旧端点，
     改任何一个都意味着视觉端点漂移，必须过肉眼校验再改这里。"""
     assert _SMOOTH_OVERLAYS["secondaryBtn"] == (("primary", 18), None)
-    assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 255), ("danger", 255))
+    assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 26), ("danger", 46))
     assert _SMOOTH_OVERLAYS["iconBtn"] == (("primary", 31), ("primary", 46))
     assert _SMOOTH_OVERLAYS["modeBtn"] == (
         ("primary_hover", 255), ("primary_pressed", 255))
@@ -188,7 +203,9 @@ def test_key_overlay_endpoints_are_pinned():
     # S2 收编的按钮都要有圆角契约（overlay 形状跟 QSS border-radius 对齐）
     for name in ("iconBtn", "modeBtn", "nextBtn", "cardCloseBtn"):
         assert name in _OVERLAY_RADIUS
-    assert _OVERLAY_RADIUS.get("secondaryBtn", 9) == 9
+    # UI 重构 01：QSS 圆角四档收敛后全局按钮半径 9 → RADIUS_CTL(6)，
+    # overlay 跟着走 constants.RADIUS_*（与 QSS 的 $r_ctl 同源）
+    assert _OVERLAY_RADIUS.get("secondaryBtn", 9) == 6
 
 
 # ====================================================================

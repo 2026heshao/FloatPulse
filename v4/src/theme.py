@@ -6,12 +6,16 @@
 配色字典 + QSS 模板，支持浅色/深色两套主题；
 另提供「跟随系统」解析（config 取值 "follow" → resolve_theme_name）。
 
-v2 视觉规范（对照 `设计稿/ui-preview.html` 高仿真稿）：
-  · 玻璃壳 = 半透明填充 + 顶部高光带 + 1px 上亮下暗描边 + 噪点，
-    前四层由 src/glass.py 的 GlassPanel 手绘，QSS 只负责子控件样式
-  · 圆角：大窗口 14 / 小卡片 22 / 内嵌面板 12 / 行与按钮 9~10
-  · 主色三档渐变：#6FFFE9 → #5BC0BE → #3D9E9C
-  · 动效统一 160~220ms、OutCubic；hover 只做视觉，切换靠点击
+v3 视觉规范（UI 重构 00/01，对照 `设计稿/ui-redesign-preview.html`）：
+  · 玻璃拟态数值退役：glass_fill 实度 96%+，GlassPanel 高光/噪点归零，
+    视觉等同实底（等 03/05 包清完调用点再决定是否删类）
+  · 圆角四档：r_win=12 / r_panel=8 / r_ctl=6 / r_chip=4（$r_* 令牌，
+    自绘取数走 constants.RADIUS_*；滑杆手柄除外——正圆几何）
+  · 主色：墨绿实底 #0F6E56（浅）/ #5DCAA5（深），只用于主按钮与选中态；
+    primary_lite/deep 保留旧薄荷值（撤销条按钮/启动屏仍在用）
+  · 按钮三级制：primaryBtn 实底 / secondaryBtn ghost / textBtn 文字 /
+    dangerBtn 危险文字钮（hover 填充实底）
+  · 动效统一 160ms、OutCubic；hover 只做视觉，切换靠点击
 
 设计要点：
   1. 用 string.Template + $var 占位符（QSS 中无 $ 符号，安全）
@@ -33,87 +37,118 @@ THEMES = {
         "_name": "light",
 
         # ---- 玻璃壳（由 GlassPanel 使用，见 glass.py）----
-        # 说明：没有真模糊时，背景内容会原样透上来与前景文字打架，
-        # 因此填充实度必须更高（实机 67% 明显不够用，见 docs/背景适配方案）。
-        "glass_fill":        "rgba(255, 255, 255, 224)",   # 容器填充 88%（实机验证：67% 背景会打架）
+        # UI 重构 01（2026-10-02）：玻璃拟态数值退役 —— 填充实度提到 96%+，
+        # 底色对齐新 bg（纸感暖白），视觉上等同实底；高光带与噪点的真身是
+        # GlassPanel 类常量（HIGHLIGHT_ALPHA / NOISE_OPACITY），已同步归零。
+        # glass_highlight / noise_alpha 两个键历史上就没有消费者（死键），
+        # 按总纲一并归零留档，等 03/05 包清完调用点后连同键一起移除。
+        "glass_fill":        "rgba(250, 250, 248, 246)",   # 容器填充 ≈97%（纸感暖白实底）
         "glass_edge":        "rgba(255, 255, 255, 236)",   # 描边：上（亮）
         "glass_edge_bottom": "rgba(16, 32, 48, 20)",       # 描边：下（暗，模拟厚度）
-        "glass_highlight":   "rgba(255, 255, 255, 140)",   # 顶部高光带 55%
-        "noise_alpha":       10,                            # 噪点强度
+        "glass_highlight":   "rgba(255, 255, 255, 0)",     # 顶部高光带 → 0（退役）
+        "noise_alpha":       0,                             # 噪点强度 → 0（退役）
 
         # ---- 内嵌面板（列表/输入框等第二层面）----
+        # panel_fill/panel_edge 仍走半透明（02–05 包迁移调用点后再实底化）
         "panel_fill":        "rgba(255, 255, 255, 170)",   # 67%
         "panel_edge":        "rgba(255, 255, 255, 217)",   # 85%
         "hair":              "rgba(16, 32, 48, 18)",       # 分隔线 7%
         "slider_handle":     "#FFFFFF",                    # 滑杆手柄（圆形）
 
-        # ---- 背景（兼容旧引用）----
-        "bg":                "#F8F9FA",
-        "card_bg":           "rgba(255, 255, 255, 148)",
-        "card_bg_solid":     "#FFFFFF",
-        "input_bg":          "rgba(255, 255, 255, 132)",
-        "menu_bg":           "rgba(255, 255, 255, 232)",
-        "list_bg":           "rgba(255, 255, 255, 90)",
-        "bg_level2":         "#EEF0F2",
+        # ---- 新令牌（UI 重构 00/01，四档 surface + 两档线）----
+        "surface":           "#FFFFFF",                    # 卡片、面板
+        "surface_2":         "#F5F4F0",                    # 次级底、hover、标题栏
+        "surface_3":         "#F1EFE8",                    # 分段控件底、chip、骨架
+        "line":              "#E4E2DB",                    # 0.5~1px 分隔线
+        "line_2":            "#D3D1C7",                    # 描边（按钮/输入框外框）
+        "on_accent":         "#FFFFFF",                    # 强调色上的文字（= on_primary 值，语义独立）
+        "accent_soft":       "#E1F5EE",                    # 选中行底
+        # 碎片行首类别点（02 包 delegate 取用）
+        "cat_code":          "#185FA5",
+        "cat_cmd":           "#A32D2D",
+        "cat_link":          "#185FA5",
+        "cat_plain":         "#888780",
+        "cat_img":           "#3B6D11",
 
-        # ---- 主色三档 ----
-        # hover/pressed 采用「同色系下沉」而非跳亮档（丝滑化清单 S1）：
-        # #5BC0BE → #4FB3B1 → #3D9E9C 单调下沉，配合 160ms 过渡即是网页手感。
-        # pressed 不得比 #3D9E9C 更暗 —— 主色底压深墨字（$on_primary），
-        # 底越暗对比越低，#439A98 只有 4.39:1，低于 WCAG AA 4.5:1（见 test_theme_contrast）。
-        "primary":           "#5BC0BE",
-        "primary_lite":      "#6FFFE9",   # 仅作主按钮渐变起点 / 深底亮青强调
+        # ---- 背景（兼容旧引用，值对齐新令牌）----
+        "bg":                "#FAFAF8",                    # 窗口底（纸感暖白）
+        "card_bg":           "rgba(255, 255, 255, 148)",
+        "card_bg_solid":     "#FFFFFF",                    # = surface
+        "input_bg":          "#F5F4F0",                    # = surface_2
+        "menu_bg":           "#FFFFFF",                    # = surface（菜单实底化）
+        "list_bg":           "#F5F4F0",                    # = surface_2
+        "bg_level2":         "#F1EFE8",                    # = surface_3
+
+        # ---- 圆角四档（QSS 用字符串；自绘取数走 constants.RADIUS_*）----
+        "r_win":             "12",                         # 窗口
+        "r_panel":           "8",                          # 面板/卡片/列表容器
+        "r_ctl":             "6",                          # 按钮/输入框
+        "r_chip":            "4",                          # chip/徽章
+
+        # ---- 字阶四档（QSS 用字符串；自绘取数走 constants.FS_*）----
+        "fs_xs":             "11px",                       # 时间戳/计数
+        "fs_sm":             "13px",                       # 正文与列表行
+        "fs_md":             "15px",                       # 页标题/卡标题
+        "fs_lg":             "20px",                       # 大标题
+
+        # ---- 主色（强调色）----
+        # UI 重构 01：主色从「薄荷青渐变」改为「墨绿实底」。#0F6E56 对白底
+        # 6.2:1，配白字（on_primary）过 WCAG AA；hover/pressed 沿「同色系
+        # 下沉」（S1），pressed #085041 对白字 7.6:1。只用于主按钮与选中态，
+        # 不做大面积铺色。
+        # primary_lite/deep 保留旧薄荷值：只剩撤销条按钮（深底亮字）与
+        # 启动屏渐变在用，不随新主色走。
+        "primary":           "#0F6E56",
+        "primary_lite":      "#6FFFE9",
         "primary_deep":      "#3D9E9C",
-        "primary_hover":     "#4FB3B1",
-        "primary_pressed":   "#3D9E9C",
-        "primary_alpha":     "rgba(91, 192, 190, 0.12)",
-        "primary_a08":       "rgba(91, 192, 190, 0.08)",
-        "primary_a12":       "rgba(91, 192, 190, 0.12)",
-        "primary_a18":       "rgba(91, 192, 190, 0.18)",
-        "primary_a30":       "rgba(91, 192, 190, 0.30)",
-        "primary_border":    "rgba(91, 192, 190, 0.30)",
-        "primary_border_strong": "rgba(91, 192, 190, 0.40)",
-        "list_border":       "rgba(91, 192, 190, 0.22)",
-        "list_item_hover":   "rgba(91, 192, 190, 0.08)",
-        "list_item_selected": "rgba(91, 192, 190, 0.16)",
+        "primary_hover":     "#0C5A47",
+        "primary_pressed":   "#085041",
+        "primary_alpha":     "rgba(15, 110, 86, 0.12)",
+        "primary_a08":       "rgba(15, 110, 86, 0.08)",
+        "primary_a12":       "rgba(15, 110, 86, 0.12)",
+        "primary_a18":       "rgba(15, 110, 86, 0.18)",
+        "primary_a30":       "rgba(15, 110, 86, 0.30)",
+        "primary_border":    "rgba(15, 110, 86, 0.30)",
+        "primary_border_strong": "rgba(15, 110, 86, 0.40)",
+        "list_border":       "rgba(15, 110, 86, 0.22)",
+        "list_item_hover":   "rgba(15, 110, 86, 0.08)",
+        "list_item_selected": "rgba(15, 110, 86, 0.16)",
 
         # ---- 主色底上的文字色 ----
-        # 浅色主色 #5BC0BE 明度偏高：白字对比度仅 2.16:1，必须用深墨（6.76:1）
-        "on_primary":        "#1B2B33",
+        # 新主色是深绿实底：白字 6.2:1（旧浅青底必须压深墨的约束已随改色消失）
+        "on_primary":        "#FFFFFF",
         "on_disabled":       "#6B747E",
         # ---- 次按钮（secondaryBtn）文字色 ----
-        # 次按钮 = 淡青底($primary_a12) + 青色文字。直接用 $primary 作文字色时，
-        # 浅色主题下对比度仅 2.16:1（远低于 WCAG AA 4.5:1），全项目所有次按钮
-        # 看起来都像禁用态。这里单独给一个加深的同色系文字色：白底上 5.18:1。
-        # （深色主题不必加深，$primary 在深底上是 14.7:1）
-        "secondary_text":    "#27787A",
+        # 次按钮 = $surface 实底 + $line_2 描边（不再全员淡青）。文字色与
+        # primary_hover 同值（白底 8.2:1）；focus_ring 与它同值同因，
+        # 独立命名让「次按钮文字」与「焦点环」两个语义不绑死。
+        "secondary_text":    "#0C5A47",
         # ---- 键盘焦点环（UI 强化方案 A4）----
-        # 焦点环是「非文本前景」，须在面板底上达 WCAG 下限 3:1。$primary
-        # (#5BC0BE) 压在白玻璃面板底上只有约 2.1:1 —— 焦点环会看不见，
-        # 与 secondaryBtn 文字是同一类问题、同一个解，故取同值。
-        # 独立 token 命名（而非直接复用 $secondary_text）是为了不让
-        # 「次按钮文字色」与「焦点环色」两个语义被绑死，将来可各自演化。
-        "focus_ring":        "#27787A",
+        # 焦点环是「非文本前景」，须在面板底上达 WCAG 下限 3:1。
+        # 旧断言「$primary 对白底不足 3:1」已随主色改深失效（现 6.2:1），
+        # focus_ring 保留独立 token 并与 secondary_text 同值，理由同上。
+        "focus_ring":        "#0C5A47",
 
         # ---- 文字 ----
-        "text":              "#2C3E50",
-        "text_secondary":    "#8B96A3",
-        "text_placeholder":  "#AAB4BF",
-        "text_disabled":     "#C0C8D0",
+        "text":              "#2C2C2A",                    # 正文（12.6:1）
+        "text_secondary":    "#5F5E5A",                    # 次级文字（6.5:1）
+        "text_placeholder":  "#6E6D67",                    # 时间戳/提示（11px 专用，5.4:1）
+        "text_disabled":     "#B4B2A9",
         "app_name_text":     "#1A1A1A",
 
-        # ---- 危险/成功 ----
-        "danger":            "#D6483A",
-        "danger_hover":      "#E4593B",
-        "danger_alpha":      "rgba(214, 72, 58, 0.10)",
-        "danger_border":     "rgba(214, 72, 58, 0.28)",
-        "warn":              "#C97A1E",
-        "warn_alpha":        "rgba(230, 126, 34, 0.12)",
-        "warn_border":       "rgba(230, 126, 34, 0.30)",
+        # ---- 危险/警告/链接/成功 ----
+        "danger":            "#A32D2D",                    # 危险 = 文字按钮 + 二次确认
+        "danger_hover":      "#E4593B",                    # 保留旧值（dangerBtn 文字钮 hover 走实底填充）
+        "danger_alpha":      "rgba(163, 45, 45, 0.10)",
+        "danger_border":     "rgba(163, 45, 45, 0.28)",
+        "warn":              "#854F0B",
+        "warn_alpha":        "rgba(133, 79, 11, 0.12)",
+        "warn_border":       "rgba(133, 79, 11, 0.30)",
         "success":           "#1F8A4C",
-        "link":              "#1976D2",   # 碎片内容类别色条（链接）
+        "link":              "#185FA5",                    # 碎片内容类别色条（链接）
 
         # ---- 日程任务状态色（A2/A3，delegate 自绘取色，QSS 集中于此）----
+        # （02 包接管任务面板时再对齐新色板，本包不动语义色）
         "task_overdue":      "#E74C3C",                    # 逾期（浅色）
         "task_today":        "#E67E22",                    # 今日到期
         "task_done":         "#9AA5B1",                    # 已完成（次级灰）
@@ -131,71 +166,101 @@ THEMES = {
     "dark": {
         "_name": "dark",
 
-        "glass_fill":        "rgba(20, 22, 32, 208)",      # 82%
+        # 玻璃拟态数值退役（与 light 同因，见 light 处注释）：底色去紫调，
+        # 对齐新 bg #17191C 中性深灰
+        "glass_fill":        "rgba(23, 25, 28, 248)",      # ≈97% 实底
         "glass_edge":        "rgba(255, 255, 255, 46)",    # 18%
         "glass_edge_bottom": "rgba(0, 0, 0, 120)",
-        "glass_highlight":   "rgba(255, 255, 255, 40)",    # 16%
-        "noise_alpha":       12,
+        "glass_highlight":   "rgba(255, 255, 255, 0)",     # 退役
+        "noise_alpha":       0,                             # 退役
 
         "panel_fill":        "rgba(255, 255, 255, 26)",    # 10%
         "panel_edge":        "rgba(255, 255, 255, 44)",    # 17%
         "hair":              "rgba(255, 255, 255, 23)",    # 9%
         "slider_handle":     "#E8ECF2",                    # 滑杆手柄（圆形）
 
-        "bg":                "#1E1E2E",
-        "card_bg":           "rgba(20, 22, 32, 158)",
-        "card_bg_solid":     "#232536",
-        "input_bg":          "rgba(255, 255, 255, 18)",
-        "menu_bg":           "rgba(28, 30, 42, 240)",
-        "list_bg":           "rgba(255, 255, 255, 10)",
-        "bg_level2":         "#2A2A3C",
+        # ---- 新令牌（UI 重构 00/01，深色底去紫调）----
+        "surface":           "#1E2126",
+        "surface_2":         "#23262C",
+        "surface_3":         "#2A2E34",
+        "line":              "#33373D",
+        "line_2":            "#454A52",
+        "on_accent":         "#04342C",
+        "accent_soft":       "#1E332C",
+        "cat_code":          "#85B7EB",
+        "cat_cmd":           "#F09595",
+        "cat_link":          "#85B7EB",
+        "cat_plain":         "#888780",
+        "cat_img":           "#97C459",
 
-        # 深色同走「下沉」路线（丝滑化清单 S1）：#6FFFE9 → #57E2DA → #40B8B1
-        # 深色档对比度余量充足（pressed 对 $on_primary 6.05:1）
-        "primary":           "#6FFFE9",
+        # ---- 背景（兼容旧引用，值对齐新令牌）----
+        "bg":                "#17191C",
+        "card_bg":           "rgba(20, 22, 32, 158)",
+        "card_bg_solid":     "#1E2126",                    # = surface
+        "input_bg":          "#23262C",                    # = surface_2
+        "menu_bg":           "#1E2126",                    # = surface（菜单实底化）
+        "list_bg":           "#23262C",                    # = surface_2
+        "bg_level2":         "#2A2E34",                    # = surface_3
+
+        # ---- 圆角四档（与 light 同值）----
+        "r_win":             "12",
+        "r_panel":           "8",
+        "r_ctl":             "6",
+        "r_chip":            "4",
+
+        # ---- 字阶四档（与 light 同值）----
+        "fs_xs":             "11px",
+        "fs_sm":             "13px",
+        "fs_md":             "15px",
+        "fs_lg":             "20px",
+
+        # ---- 主色（强调色）----
+        # 深色主色换成中亮度的绿（#5DCAA5 对深底 8:1），压 on_primary
+        # 深墨 6.8:1；hover 跳亮档 / pressed 下沉（S1 深色分支）
+        # primary_lite/deep 保留旧值（撤销条按钮 / 启动屏在用）
+        "primary":           "#5DCAA5",
         "primary_lite":      "#8BFFF0",
         "primary_deep":      "#4AA8A6",
-        "primary_hover":     "#57E2DA",
-        "primary_pressed":   "#40B8B1",
-        "primary_alpha":     "rgba(111, 255, 233, 0.15)",
-        "primary_a08":       "rgba(111, 255, 233, 0.08)",
-        "primary_a12":       "rgba(111, 255, 233, 0.12)",
-        "primary_a18":       "rgba(111, 255, 233, 0.18)",
-        "primary_a30":       "rgba(111, 255, 233, 0.30)",
-        "primary_border":    "rgba(111, 255, 233, 0.30)",
-        "primary_border_strong": "rgba(111, 255, 233, 0.45)",
-        "list_border":       "rgba(111, 255, 233, 0.20)",
-        "list_item_hover":   "rgba(111, 255, 233, 0.08)",
-        "list_item_selected": "rgba(111, 255, 233, 0.18)",
+        "primary_hover":     "#6FD6B4",
+        "primary_pressed":   "#4BB894",
+        "primary_alpha":     "rgba(93, 202, 165, 0.15)",
+        "primary_a08":       "rgba(93, 202, 165, 0.08)",
+        "primary_a12":       "rgba(93, 202, 165, 0.12)",
+        "primary_a18":       "rgba(93, 202, 165, 0.18)",
+        "primary_a30":       "rgba(93, 202, 165, 0.30)",
+        "primary_border":    "rgba(93, 202, 165, 0.30)",
+        "primary_border_strong": "rgba(93, 202, 165, 0.45)",
+        "list_border":       "rgba(93, 202, 165, 0.20)",
+        "list_item_hover":   "rgba(93, 202, 165, 0.08)",
+        "list_item_selected": "rgba(93, 202, 165, 0.18)",
 
         # ---- 主色底上的文字色 ----
-        # 深色主色 #6FFFE9 极浅：白字对比度仅 1.22:1（几乎不可读），必须用深墨（11.9:1）
-        "on_primary":        "#1B2B33",
+        # 深色主色中亮：深墨 #04342C 压底 6.8:1（旧 #6FFFE9 需深墨的强约束放宽）
+        "on_primary":        "#04342C",
         "on_disabled":       "rgba(255, 255, 255, 180)",
         # ---- 次按钮（secondaryBtn）文字色 ----
-        # 深色主题下 $primary(#6FFFE9) 在深底上已达 14.7:1，直接用主色即可，
-        # 这里只为与 light 主题保持同一 token 名（QSS 模板共用一份）。
-        "secondary_text":    "#6FFFE9",
+        # 次按钮 = $surface 实底 + $line_2 描边；文字直接用主色
+        # （#5DCAA5 在 #1E2126 上 8:1），与 light 保持同一 token 名
+        "secondary_text":    "#5DCAA5",
         # ---- 键盘焦点环（A4）----
-        # 深色主题下 $primary(#6FFFE9) 在深底上已达 14.7:1，直接用主色即可
-        # （与 $secondary_text 同值同因，理由见 light 主题处注释）。
-        "focus_ring":        "#6FFFE9",
+        # 与 $secondary_text 同值同因（理由见 light 主题处注释）
+        "focus_ring":        "#5DCAA5",
 
-        "text":              "#E4E8EE",
-        "text_secondary":    "#98A2AE",
-        "text_placeholder":  "#7A8592",
+        "text":              "#E9EAE7",                    # 正文
+        "text_secondary":    "#A8ADA5",                    # 次级文字
+        "text_placeholder":  "#8A8F88",                    # 时间戳/提示（11px 专用）
         "text_disabled":     "#5A6170",
         "app_name_text":     "#E4E8EE",
 
-        "danger":            "#E4593B",
+        "danger":            "#F09595",
         "danger_hover":      "#FF6B5B",
-        "danger_alpha":      "rgba(228, 89, 59, 0.14)",
-        "danger_border":     "rgba(228, 89, 59, 0.34)",
-        "warn":              "#E0A34B",
-        "warn_alpha":        "rgba(224, 163, 75, 0.14)",
-        "warn_border":       "rgba(224, 163, 75, 0.32)",
+        "danger_alpha":      "rgba(240, 149, 149, 0.14)",
+        "danger_border":     "rgba(240, 149, 149, 0.34)",
+        "warn":              "#EF9F27",
+        "warn_alpha":        "rgba(239, 159, 39, 0.14)",
+        "warn_border":       "rgba(239, 159, 39, 0.32)",
         "success":           "#2ECC71",
-        "link":              "#64B5F6",   # 碎片内容类别色条（链接）
+        "link":              "#85B7EB",                    # 碎片内容类别色条（链接）
 
         # ---- 日程任务状态色（A2/A3，delegate 自绘取色，QSS 集中于此）----
         "task_overdue":      "#FF6B5B",                    # 逾期（深色）
@@ -270,7 +335,7 @@ QPushButton#navBtn {
     background-color: transparent;
     color: $text_secondary;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: $r_panel;
     /* 左内边距比右大一档 = 组内缩进（按钮现在嵌在分组标题下面）。
        只动左右、不动上下 —— 上下内边距决定行高，改它会连带改 sizeHint。 */
     padding: 8px 12px 8px 20px;
@@ -320,7 +385,7 @@ QPushButton#navGroupHeader {
     background-color: transparent;
     color: $text_placeholder;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: $r_panel;
     /* 上下 margin 对称 4px：箭头按几何中心定位（见 NavGroupHeader.resizeEvent），
        不对称的话箭头会偏离文字基线。上 4 + 上一条目的下 margin 4 = 组间 8px，
        与组内 4px 拉开层次。 */
@@ -354,7 +419,7 @@ QScrollArea#navScroll QScrollBar:vertical {
 }
 QScrollArea#navScroll QScrollBar::handle:vertical {
     background: $hair;
-    border-radius: 3px;
+    border-radius: $r_chip;
     min-height: 24px;
 }
 QScrollArea#navScroll QScrollBar::handle:vertical:hover {
@@ -384,7 +449,7 @@ QLabel#countChip {
     color: $primary;
     background-color: $primary_a12;
     border: 1px solid $primary_a30;
-    border-radius: 7px;
+    border-radius: $r_chip;
     padding: 3px 9px;
     font-size: 11px;
     font-weight: 600;
@@ -412,16 +477,24 @@ QFrame#settingsSeparator {
 }
 
 /* ---- 按钮 ---- */
-/* 丝滑化清单 S2：QPushButton 的 hover/press 背景过渡由 SmoothButton
-   （controls.py）在 paint 层插值，端点色契约见其 _SMOOTH_OVERLAYS。
-   QSS 只保留文字/边框变化；**:pressed 禁止再用 margin 做位移** ——
-   按下态 polish 会把 sizeHint 算大并永久缓存（拖拽后行高 +1px 的根因），
-   位移已改走绘制级 -1px 下沉 + 0.98 微缩。 */
 QPushButton {
+    /* 按钮三级制（UI 重构 00/01）：
+       · primaryBtn   实底 $primary + $on_primary —— 一屏至多 1 个
+       · secondaryBtn ghost：$surface 底 + $line_2 描边（文字固定 $secondary_text，铁律）
+       · textBtn      透明底 + $text_secondary —— 第三级操作、批量操作
+       · dangerBtn    透明底 + $danger 文字钮（hover 才填充实底），不做红胶囊
+       丝滑化清单 S2 仍然有效：QPushButton 的 hover/press 背景过渡由
+       SmoothButton（controls.py）在 paint 层插值，端点色契约见其
+       _SMOOTH_OVERLAYS；QSS 只保留文字/边框变化；**:pressed 禁止再用
+       margin 做位移** —— 位移走绘制级 -1px 下沉 + 0.98 微缩。
+       基态一律声明 1px 边框（与底同色或透明）：焦点环只换 border-color，
+       不撑盒模型（A4 纪律）。
+       ★ 本区块的说明注释一律写在规则体内部：规则之间的注释会被
+       test_theme_contrast 等正则切分器并进下一条规则的选择器键。 */
     background-color: $primary;
     color: $on_primary;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 7px 15px;
     font-size: 13px;
 }
@@ -433,55 +506,72 @@ QPushButton:disabled {
     color: $on_disabled;
 }
 
-/* 主按钮：主色三档渐变（与效果图一致） */
 QPushButton#primaryBtn {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 $primary_lite, stop:0.6 $primary, stop:1 $primary_deep);
+    /* 主按钮：主色实底（渐变已退役）。border 与底同色 = 视觉 none，
+       但保住了 1px 边框位给焦点环换色，盒模型稳定 */
+    background-color: $primary;
     color: $on_primary;
     font-weight: 600;
-    border: 1px solid $primary_a30;
-    border-radius: 9px;
+    border: 1px solid $primary;
+    border-radius: $r_ctl;
     padding: 8px 16px;
     font-size: 13px;
 }
 QPushButton#primaryBtn:hover {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 $primary_lite, stop:0.45 $primary, stop:1 $primary);
-    /* 渐变 hover 属清单 B5（后置）：渐变跳变保留，SmoothButton 对
-       primaryBtn 的 overlay 返回 None，只提供按下位移 */
+    /* 背景过渡走 SmoothButton overlay（端点 $primary_hover，
+       未命名按钮兜底 spec），QSS 不再跳变 */
 }
 
 QPushButton#secondaryBtn {
-    background-color: $primary_a12;
+    /* 次按钮：ghost —— surface 实底 + line_2 描边（替代全员淡青胶囊） */
+    background-color: $surface;
     color: $secondary_text;
-    border: 1px solid $primary_a30;
-    border-radius: 9px;
+    border: 1px solid $line_2;
+    border-radius: $r_ctl;
 }
 QPushButton#secondaryBtn:hover {
-    /* 背景过渡走 SmoothButton overlay（端点 ≈ a18），QSS 不再跳变 */
+    /* 背景过渡走 SmoothButton overlay（端点 primary a18），QSS 不再跳变 */
 }
 QPushButton#secondaryBtn:checked {
-    background-color: $primary_a18;
+    background-color: $accent_soft;
     border: 1px solid $primary;
     color: $secondary_text;
     font-weight: 600;
 }
 
+QPushButton#textBtn {
+    /* 第三级：文字按钮（透明底，批量操作/弱操作用） */
+    background-color: transparent;
+    color: $text_secondary;
+    border: 1px solid transparent;
+    border-radius: $r_ctl;
+    padding: 7px 15px;
+    font-size: 13px;
+}
+QPushButton#textBtn:hover {
+    /* 背景过渡走 SmoothButton overlay（端点 primary a20 淡染），
+       文字加深即时 */
+    color: $text;
+}
+
 QPushButton#dangerBtn {
-    background-color: $danger_alpha;
+    /* 危险操作：文字按钮 + 二次确认（调用点负责确认）。不做红胶囊 —— 静止态
+       透明底 + $danger 文字，hover 只由 SmoothButton overlay 叠一层淡红底
+       （a26→a46，与 iconBtn[danger] 同款），文字色保持 $danger 不变 */
+    background-color: transparent;
     color: $danger;
-    border: 1px solid $danger_border;
+    border: 1px solid transparent;
 }
 QPushButton#dangerBtn:hover {
-    /* 背景过渡走 SmoothButton overlay（端点 $danger 实底），白字保持即时 */
-    color: white;
+    /* 背景过渡走 SmoothButton overlay（端点 $danger 淡染 a26/a46），
+       文字保持 $danger 即时 —— 本规则刻意不声明底色，避免与 overlay 打架 */
 }
 
 QPushButton#iconBtn {
     background-color: transparent;
     color: $text_secondary;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: $r_panel;
     padding: 6px;
     font-size: 15px;
 }
@@ -500,7 +590,7 @@ QLabel#toastBar {
     background-color: $glass_fill;
     color: $text;
     border: 1px solid $primary_a30;
-    border-radius: 12px;
+    border-radius: $r_panel;
     padding: 10px 18px;
     font-size: 12px;
 }
@@ -509,14 +599,14 @@ QLabel#toastBar {
 QWidget#glassCard, QFrame#glassCard {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
 }
 
 /* ---- 设置页分组卡片 ---- */
 QWidget#settingsGroup {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
 }
 
 /* ---- 设置页内部分类导航（2026-09-29）：三态对齐侧栏 navBtn、去掉拖拽态 ----
@@ -527,7 +617,7 @@ QPushButton#settingsNavBtn {
     background-color: transparent;
     color: $text_secondary;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: $r_panel;
     padding: 8px 12px;
     text-align: left;
     font-size: 13px;
@@ -551,12 +641,12 @@ QFrame#settingsNavDivider {
 QFrame#pluginCard {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
 }
 /* ---- 页面插件容器（AI 助手等）：实底遮住玻璃壳，避免透出屏幕后内容 ---- */
 QWidget#pluginPage {
     background-color: $bg;
-    border-radius: 10px;
+    border-radius: $r_panel;
 }
 QLabel#pluginCardTitle {
     color: $text;
@@ -575,7 +665,7 @@ QTextBrowser#usageViewer {
     background-color: transparent;
     color: $text;
     border: 1px solid $panel_edge;
-    border-radius: 8px;
+    border-radius: $r_panel;
     padding: 8px;
     font-size: 13px;
 }
@@ -591,7 +681,7 @@ QLabel#pluginGateHint {
     color: $danger;
     background-color: $danger_alpha;
     border: 1px solid $danger_border;
-    border-radius: 8px;
+    border-radius: $r_panel;
     padding: 8px 12px;
     font-size: 12px;
 }
@@ -604,7 +694,7 @@ QLabel#pluginEmptyHint {
 QFrame#pluginErrorCard {
     background-color: $danger_alpha;
     border: 1px solid $danger_border;
-    border-radius: 12px;
+    border-radius: $r_panel;
 }
 QLabel#pluginErrorTitle {
     color: $danger;
@@ -626,7 +716,7 @@ QLabel#pluginStatusOn {
     font-weight: 600;
     padding: 2px 8px;
     border: 1px solid $success;
-    border-radius: 8px;
+    border-radius: $r_chip;
 }
 QLabel#pluginStatusOff {
     color: $text_secondary;
@@ -634,7 +724,7 @@ QLabel#pluginStatusOff {
     font-weight: 600;
     padding: 2px 8px;
     border: 1px solid $panel_edge;
-    border-radius: 8px;
+    border-radius: $r_chip;
 }
 QLabel#pluginStatusWarn {
     color: $danger;
@@ -642,7 +732,7 @@ QLabel#pluginStatusWarn {
     font-weight: 600;
     padding: 2px 8px;
     border: 1px solid $danger_border;
-    border-radius: 8px;
+    border-radius: $r_chip;
 }
 /* ---- 插件中心：失败区小标题 ---- */
 QLabel#pluginSectionLabel {
@@ -664,7 +754,7 @@ QFrame#pluginStoreBox {
 QFrame#pluginStoreCard {
     background-color: $panel_fill;
     border: 1px dashed $primary_border;
-    border-radius: 12px;
+    border-radius: $r_panel;
 }
 QLabel#pluginStoreTitle {
     color: $text;
@@ -678,7 +768,7 @@ QLabel#pluginStoreBadge {
     font-size: 11px;
     padding: 1px 6px;
     border: 1px solid $primary_a30;
-    border-radius: 6px;
+    border-radius: $r_chip;
 }
 /* 能力胶囊徽章（🌐 网络 / ✍ 写入 / 🛠 改删 / 🧠 AI）：
    淡主色底中性字，完整语义在悬停提示；与 pluginStoreBadge 同族淡主色 */
@@ -688,7 +778,7 @@ QLabel#pluginCapBadge {
     font-size: 11px;
     padding: 1px 7px;
     border: 1px solid $primary_a30;
-    border-radius: 7px;
+    border-radius: $r_chip;
 }
 
 /* ---- AI 助手页面：左右对话气泡 ---- */
@@ -699,8 +789,8 @@ QLabel#pluginCapBadge {
    尾角收小指向说话人（用户右下 / AI 左下），对话感更强 */
 QFrame#chatBubbleUser {
     background-color: $primary;
-    border-radius: 14px;
-    border-bottom-right-radius: 4px;
+    border-radius: $r_win;
+    border-bottom-right-radius: $r_chip;
 }
 QLabel#chatBubbleText {
     color: $on_primary;
@@ -713,13 +803,13 @@ QLabel#chatBubbleAiText {
 QFrame#chatBubbleAI {
     background-color: $menu_bg;
     border: 1px solid $panel_edge;
-    border-radius: 14px;
-    border-bottom-left-radius: 4px;
+    border-radius: $r_win;
+    border-bottom-left-radius: $r_chip;
 }
 QFrame#chatBubbleHint {
     background-color: $menu_bg;
     border: 1px solid $warn_border;
-    border-radius: 14px;
+    border-radius: $r_win;
 }
 /* 思考动画气泡：AI 回复在途时的「打字中」三点波（造型随 AI 气泡）；
    点本身由插件的 ThinkingDots 自绘（零字体依赖 + 主题 $primary 跟随），
@@ -727,8 +817,8 @@ QFrame#chatBubbleHint {
 QFrame#chatBubbleThinking {
     background-color: $menu_bg;
     border: 1px solid $panel_edge;
-    border-radius: 14px;
-    border-bottom-left-radius: 4px;
+    border-radius: $r_win;
+    border-bottom-left-radius: $r_chip;
 }
 QLabel#fieldLabel {
     color: $text_secondary;
@@ -747,7 +837,7 @@ QLabel#valueChip {
     color: $primary;
     background-color: $primary_a12;
     border: 1px solid $primary_a30;
-    border-radius: 7px;
+    border-radius: $r_chip;
     padding: 3px 6px;
     font-size: 12px;
     font-weight: 600;
@@ -757,7 +847,7 @@ QLabel#valueChip {
 QPushButton#stepBtn {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     color: $text_secondary;
     font-size: 17px;
     font-weight: 700;
@@ -806,12 +896,12 @@ QSlider {
 }
 QSlider::groove:horizontal {
     height: 6px;
-    border-radius: 3px;
+    border-radius: $r_chip;
     background: $hair;
 }
 QSlider::sub-page:horizontal {
     height: 6px;
-    border-radius: 3px;
+    border-radius: $r_chip;
     background: $primary_a30;
 }
 QSlider::add-page:horizontal {
@@ -822,7 +912,8 @@ QSlider::handle:horizontal {
     width: 14px;
     height: 14px;
     margin: -5px 0px;
-    border-radius: 7px;
+    /* 圆形手柄：半径必须 = 边长一半，不参与四档收敛（6px 会变圆角方） */
+    border-radius: $r_ctl;
     background: $slider_handle;
     border: 1px solid $primary_a30;
 }
@@ -842,7 +933,7 @@ QSlider::handle:horizontal:disabled {
 QLineEdit, QTextEdit, QPlainTextEdit, QDateEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 6px 10px;
     color: $text;
     font-size: 13px;
@@ -871,7 +962,7 @@ QComboBox::drop-down {
 QComboBox QAbstractItemView {
     background-color: $menu_bg;
     border: 1px solid $primary_a30;
-    border-radius: 8px;
+    border-radius: $r_panel;
     padding: 4px;
     selection-background-color: $list_item_selected;
     color: $text;
@@ -882,7 +973,7 @@ QComboBox QAbstractItemView {
 QListWidget {
     background-color: transparent;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
     padding: 6px;
     color: $text;
     font-size: 13px;
@@ -890,7 +981,7 @@ QListWidget {
 }
 QListWidget::item {
     padding: 9px 11px;
-    border-radius: 9px;
+    border-radius: $r_ctl;
 }
 QListWidget::item:hover {
     background-color: $primary_a08;
@@ -904,7 +995,7 @@ QListWidget::item:selected {
 QTreeWidget {
     background-color: transparent;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
     padding: 4px;
     color: $text;
     font-size: 13px;
@@ -914,7 +1005,7 @@ QTreeWidget {
 QTreeWidget::item {
     padding: 7px 8px;
     min-height: 18px;
-    border-radius: 8px;
+    border-radius: $r_panel;
 }
 QTreeWidget::item:hover {
     background-color: $primary_a08;
@@ -934,7 +1025,7 @@ QTreeWidget QHeaderView::section {
 QTableWidget {
     background-color: transparent;
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
     gridline-color: transparent;
     color: $text;
     font-size: 13px;
@@ -946,7 +1037,7 @@ QTableWidget QWidget {
 QTableWidget::item {
     padding: 6px;
     background-color: transparent;
-    border-radius: 8px;
+    border-radius: $r_panel;
 }
 QTableWidget::item:hover {
     background-color: $primary_a08;
@@ -975,7 +1066,7 @@ QPushButton#tableOpenBtn {
     background-color: $primary_a12;
     color: $primary;
     border: 1px solid $primary_a30;
-    border-radius: 7px;
+    border-radius: $r_ctl;
     padding: 2px 10px;
     font-size: 12px;
     min-width: 50px;
@@ -990,7 +1081,7 @@ QPushButton#tableOpenBtn:hover {
 QFrame#navRow {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 10px;
+    border-radius: $r_panel;
 }
 QFrame#navRow:hover {
     background-color: $primary_a08;
@@ -1021,7 +1112,7 @@ QCheckBox {
 QCheckBox::indicator {
     width: 16px;
     height: 16px;
-    border-radius: 5px;
+    border-radius: $r_chip;
     border: 1px solid $primary_a30;
     background-color: $panel_fill;
 }
@@ -1041,7 +1132,7 @@ QScrollBar:vertical {
 }
 QScrollBar::handle:vertical {
     background: $primary_a18;
-    border-radius: 4px;
+    border-radius: $r_chip;
     min-height: 30px;
     margin: 0 2px;
 }
@@ -1058,7 +1149,7 @@ QScrollBar:horizontal {
 }
 QScrollBar::handle:horizontal {
     background: transparent;
-    border-radius: 4px;
+    border-radius: $r_chip;
     min-width: 30px;
 }
 QScrollBar::handle:horizontal:hover { background: $primary_a30; }
@@ -1072,7 +1163,7 @@ QListWidget#kbList QScrollBar:vertical {
 }
 QListWidget#kbList QScrollBar::handle:vertical {
     background: $primary_a18;
-    border-radius: 5px;
+    border-radius: $r_chip;
     min-height: 30px;
     margin: 0 2px;
 }
@@ -1084,12 +1175,12 @@ QListWidget#kbList QScrollBar::handle:vertical:hover {
 QMenu {
     background-color: $menu_bg;
     border: 1px solid $primary_a30;
-    border-radius: 10px;
+    border-radius: $r_panel;
     padding: 6px;
 }
 QMenu::item {
     padding: 8px 28px 8px 16px;
-    border-radius: 8px;
+    border-radius: $r_panel;
     font-size: 13px;
     color: $text;
 }
@@ -1113,7 +1204,7 @@ QSplitter::handle { background-color: $hair; }
 QSplitter::handle:hover { background-color: $primary; }
 QGroupBox {
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
     margin-top: 12px;
     padding-top: 10px;
     color: $text;
@@ -1127,14 +1218,14 @@ QGroupBox::title {
 }
 QTabWidget::pane {
     border: 1px solid $panel_edge;
-    border-radius: 12px;
+    border-radius: $r_panel;
     background-color: transparent;
 }
 QTabBar::tab {
     background-color: transparent;
     color: $text_secondary;
     padding: 8px 16px;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     margin-right: 4px;
 }
 QTabBar::tab:hover { background-color: $primary_a08; color: $primary; }
@@ -1146,13 +1237,13 @@ QTabBar::tab:selected {
 QProgressBar {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 6px;
+    border-radius: $r_ctl;
     text-align: center;
     color: $text;
 }
 QProgressBar::chunk {
     background-color: $primary;
-    border-radius: 5px;
+    border-radius: $r_chip;
 }
 
 /* ---- 设置页 / 通用滚动区（视口透明，避免透明窗口下渲染成黑色）---- */
@@ -1168,7 +1259,7 @@ QScrollArea > QWidget > QWidget {
 QWidget#undoBar {
     background-color: $undo_bg;
     border: 1px solid $primary_a30;
-    border-radius: 10px;
+    border-radius: $r_panel;
 }
 QLabel#undoBarLabel {
     color: $undo_text;
@@ -1179,7 +1270,7 @@ QPushButton#undoUndoBtn {
     background-color: transparent;
     color: $primary_lite;
     border: 1px solid $primary_lite;
-    border-radius: 7px;
+    border-radius: $r_ctl;
     padding: 3px 12px;
     font-size: 12px;
     font-weight: 600;
@@ -1214,6 +1305,7 @@ QPushButton#primaryBtn:focus {
     outline: none;
 }
 QPushButton#secondaryBtn:focus,
+QPushButton#textBtn:focus,
 QPushButton#iconBtn:focus,
 QPushButton#navBtn:focus,
 QPushButton#settingsNavBtn:focus,
@@ -1249,7 +1341,7 @@ _QSS_MAIN_WINDOW = _QSS_MAIN_WINDOW  # 保持名称稳定，便于外部引用
 _QSS_CARD_WINDOW = Template("""
 QWidget#cardContainer {
     background-color: transparent;
-    border-radius: 22px;
+    border-radius: $r_win;
 }
 
 /* ---- 左侧 Tab 栏 ---- */
@@ -1261,7 +1353,7 @@ QPushButton#sideTabIconBtn {
     background-color: transparent;
     color: $text_secondary;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: $r_panel;
     font-size: 17px;
     padding: 0px;
 }
@@ -1298,7 +1390,7 @@ QPushButton#modeBtn {
     background-color: $primary_a12;
     color: $primary;
     border: 1px solid $primary_a30;
-    border-radius: 11px;
+    border-radius: $r_ctl;
     padding: 5px 14px;
     font-size: 12px;
 }
@@ -1311,7 +1403,7 @@ QPushButton#cardCloseBtn {
     background-color: $danger_alpha;
     color: $danger;
     border: 1px solid $danger_border;
-    border-radius: 11px;
+    border-radius: $r_ctl;
     font-size: 12px;
     font-weight: bold;
     padding: 0px;
@@ -1321,14 +1413,12 @@ QPushButton#cardCloseBtn:hover {
     color: white;
 }
 QPushButton#nextBtn {
-    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 $primary_lite, stop:0.6 $primary, stop:1 $primary_deep);
+    /* UI 重构 01：渐变退役，改与新 primaryBtn 一致的主色实底。
+       A4：1px 透明边框保留（焦点环不撑盒模型），padding 补偿不动。 */
+    background-color: $primary;
     color: $on_primary;
-    /* A4：原本 border:none，为了能有焦点环改成 1px 透明边框，
-       padding 各减 1px 补偿 —— padding+border 总量不变，sizeHint 与
-       内容区位置逐像素保持原样（否则会给卡片整体带来 2px 抖动）。 */
     border: 1px solid transparent;
-    border-radius: 13px;
+    border-radius: $r_ctl;
     padding: 8px 23px;
     font-size: 13px;
     font-weight: 600;
@@ -1342,7 +1432,7 @@ QPushButton#nextBtn:hover {
 QLineEdit#taskInput {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 6px 10px;
     font-size: 13px;
     color: $text;
@@ -1354,7 +1444,7 @@ QLineEdit#taskInput:focus {
 QDateEdit#taskDate {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 5px 4px;
     font-size: 12px;
     color: $text;
@@ -1365,7 +1455,7 @@ QPushButton#taskAddBtn {
     color: $on_primary;
     /* A4：同 #nextBtn，透明边框 + padding 补偿（7px 15px → 6px 14px） */
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 6px 14px;
     font-size: 12px;
 }
@@ -1376,7 +1466,7 @@ QPushButton#taskAddBtn:hover {
 QListWidget#taskList {
     background-color: transparent;
     border: 1px solid $panel_edge;
-    border-radius: 11px;
+    border-radius: $r_panel;
     padding: 5px;
     font-size: 13px;
     color: $text;
@@ -1384,7 +1474,7 @@ QListWidget#taskList {
 }
 QListWidget#taskList::item {
     padding: 7px 9px;
-    border-radius: 8px;
+    border-radius: $r_panel;
 }
 QListWidget#taskList::item:hover {
     background-color: $primary_a08;
@@ -1396,7 +1486,7 @@ QListWidget#taskList::item:selected {
 QTextEdit#noteEdit {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
-    border-radius: 11px;
+    border-radius: $r_ctl;
     padding: 8px;
     font-size: 13px;
     color: $text;
@@ -1423,7 +1513,7 @@ QScrollBar:vertical {
 }
 QScrollBar::handle:vertical {
     background: $primary_a18;
-    border-radius: 4px;
+    border-radius: $r_chip;
     min-height: 30px;
 }
 QScrollBar::handle:vertical:hover { background: $primary_a30; }
@@ -1434,7 +1524,7 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 QPushButton#navSiteCard {
     background-color: $primary_a12;
     border: 1px solid $primary_a30;
-    border-radius: 9px;
+    border-radius: $r_ctl;
     padding: 0px;
 }
 QPushButton#navSiteCard:hover {
@@ -1459,7 +1549,7 @@ QLabel#navSiteCardDomain {
 /* ---- 碎片行 ---- */
 QWidget#fragItemRow {
     background-color: transparent;
-    border-radius: 8px;
+    border-radius: $r_panel;
 }
 QWidget#fragItemRow:hover {
     background-color: $primary_a08;
@@ -1472,7 +1562,7 @@ QLabel#fragPreview {
     border: none;
 }
 QPushButton#fragCopyBtn, QPushButton#fragDelBtn {
-    border-radius: 7px;
+    border-radius: $r_ctl;
     font-size: 11px;
     padding: 0px;
 }
@@ -1505,7 +1595,7 @@ QLabel#assetName {
 QToolButton#appLaunchBtn {
     background-color: transparent;
     border: 1px solid transparent;
-    border-radius: 10px;
+    border-radius: $r_panel;
     padding: 4px;
     color: $app_name_text;
 }
@@ -1524,7 +1614,7 @@ QToolButton#appLaunchBtn:disabled {
 QWidget#undoBar {
     background-color: $undo_bg;
     border: 1px solid $primary_a30;
-    border-radius: 10px;
+    border-radius: $r_panel;
 }
 QLabel#undoBarLabel {
     color: $undo_text;
@@ -1535,7 +1625,7 @@ QPushButton#undoUndoBtn {
     background-color: transparent;
     color: $primary_lite;
     border: 1px solid $primary_lite;
-    border-radius: 6px;
+    border-radius: $r_ctl;
     padding: 2px 10px;
     font-size: 11px;
     font-weight: 600;
@@ -1590,12 +1680,12 @@ _QSS_MENU = Template("""
 QMenu {
     background-color: $menu_bg;
     border: 1px solid $primary_a30;
-    border-radius: 10px;
+    border-radius: $r_panel;
     padding: 6px;
 }
 QMenu::item {
     padding: 8px 28px 8px 16px;
-    border-radius: 8px;
+    border-radius: $r_panel;
     font-size: 13px;
     color: $text;
 }

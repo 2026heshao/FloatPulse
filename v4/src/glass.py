@@ -101,10 +101,14 @@ class GlassPanel(QWidget):
 
     # 顶部高光带占整体高度的比例（与效果图一致）
     HIGHLIGHT_RATIO = 0.28
-    # 高光最强处的不透明度（0-1）
-    HIGHLIGHT_ALPHA = 0.50
-    # 噪点整体浓淡系数（0-1），对应效果图的 3~5%（过重会显脏，宁轻勿重）
-    NOISE_OPACITY = 0.22
+    # 高光最强处的不透明度（0-1）。
+    # UI 重构 01（2026-10-02）：玻璃拟态数值退役 —— 归零后高光带/噪点不再
+    # 可见，视觉等同实底。主题里的 glass_highlight / noise_alpha 是无消费
+    # 者的死键，真正的开关是这两个类常量（theme.py 同款注释）；等 03/05
+    # 包清完调用点再决定是否连绘制代码一起移除。
+    HIGHLIGHT_ALPHA = 0.0
+    # 噪点整体浓淡系数（0-1）：同上退役归零
+    NOISE_OPACITY = 0.0
 
     def __init__(self, parent=None, radius: float = 14.0, noise: bool = True):
         super().__init__(parent)
