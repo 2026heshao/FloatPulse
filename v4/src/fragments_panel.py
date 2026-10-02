@@ -18,6 +18,8 @@
 ====================================================================
 """
 
+import datetime
+
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
@@ -100,7 +102,7 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         self._cat_colors = {}          # category -> QColor 类别色条
 
     def set_theme(self, colors: dict):
-        """按主题刷新文字色 / 时间色 / 高亮底色 / 类别色条
+        """按主题刷新文字色 / 时间色 / 高亮底色 / 类别色条 / 组间分割线
 
         主色半透明 + 深色文字；类别色条从主题 token 取色
         （映射见 _CATEGORY_TOKENS，缺 token 时回退次级灰）。
@@ -112,6 +114,7 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
             bg = QColor("#6FFFE9")
         bg.setAlpha(85)
         self._hl_bg = bg
+        self._line_color = QColor(str(colors.get("line", "#E4E2DB")))
         self._cat_colors = {}
         for cat, token in _CATEGORY_TOKENS.items():
             c = QColor(colors.get(token, ""))
@@ -120,7 +123,15 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         time_text = index.data(TIME_ROLE)
         if not time_text:
-            # 日期分组行等：完全交给默认绘制，保持原有观感
+            # 日期分组行：默认绘制 + 组间分割线（覆盖矩阵第四轮图2 定稿：
+            # 每组日期头上方一条全宽细线；分组必然以 row 0 的组头开头，
+            # row>0 的组头前面一定是上一组的碎片行 → 逐组画线，首组自然豁免）
+            if index.row() > 0:
+                painter.save()
+                painter.setPen(self._line_color)
+                painter.drawLine(option.rect.left(), option.rect.top(),
+                                 option.rect.right(), option.rect.top())
+                painter.restore()
             super().paint(painter, option, index)
             return
 
@@ -698,18 +709,39 @@ class FragmentsPanel(QWidget):
             rows.append(("frag", f))
         return rows
 
+    @staticmethod
+    def _day_label(date_part: str) -> str:
+        """分组头的人性化日期（覆盖矩阵第四轮图2 定稿）：
+        今天 / 昨天 相对化，其余「M 月 D 日」，跨年补年份。
+        解析失败原样返回 —— 数据被手改过也不能炸整个列表。"""
+        try:
+            day = datetime.date.fromisoformat(date_part)
+        except ValueError:
+            return date_part
+        today = datetime.date.today()
+        md = f"{day.month} 月 {day.day} 日"
+        if day == today:
+            return f"今天 · {md}"
+        if (today - day).days == 1:
+            return f"昨天 · {md}"
+        if day.year != today.year:
+            return f"{day.year} 年 {md}"
+        return md
+
     def _make_row_item(self, row, colors):
         """把一条行描述符建成 QListWidgetItem（条目属性与旧内联实现一致）"""
         if row[0] == "header":
-            date_item = QListWidgetItem(f"  {row[1]}")
+            # 组头样式（覆盖矩阵第四轮图2 定稿）：人性化灰字小标（11px、
+            # text_placeholder、不加粗），替换原先的 ISO 主色加粗
+            date_item = QListWidgetItem(f"  {self._day_label(row[1])}")
             date_item.setData(Qt.ItemDataRole.UserRole, None)
             flags = date_item.flags()
             date_item.setFlags(flags & ~Qt.ItemFlag.ItemIsSelectable
                                & ~Qt.ItemFlag.ItemIsEnabled)
-            date_item.setData(COLOR_TOKEN_ROLE, "primary")
-            date_item.setForeground(QColor(colors["primary"]))
+            date_item.setData(COLOR_TOKEN_ROLE, "text_placeholder")
+            date_item.setForeground(QColor(colors["text_placeholder"]))
             f_font = date_item.font()
-            f_font.setBold(True)
+            f_font.setPixelSize(11)
             date_item.setFont(f_font)
             date_item.setSizeHint(QSize(0, 30))
             return date_item
