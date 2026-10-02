@@ -120,13 +120,9 @@ TYPE_LABELS = {
     TYPE_KNOWLEDGE_SEGMENT: "知识段落",
 }
 
-# 类型图标映射（UI 显示用）
-TYPE_ICONS = {
-    TYPE_CLIPBOARD_TEXT:    "📋",
-    TYPE_CLIPBOARD_PATH:    "📁",
-    TYPE_FILE_PICKUP:       "📥",
-    TYPE_KNOWLEDGE_SEGMENT: "📚",
-}
+# 注：UI 重构（2026-10-02）已移除旧的 ``TYPE_ICONS`` emoji 映射表 ——
+# 碎片行的类型图标统一由 ``icons.py`` 的自绘图标 + 面板侧 ``IconButton`` 承担，
+# 本模块只保留文字标签（``TYPE_LABELS``），不再持有任何字符图标。
 
 
 # ====================================================================
