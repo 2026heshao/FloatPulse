@@ -137,7 +137,7 @@ DEFAULT_CONFIG = {
     # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
     "nav_expanded_groups":  ["workbench"],
     "side_bar_width":       168,          # 侧栏宽度（像素；不声明则 _load 不读，拖宽重启即丢）
-    # ===== AI 总配置（2026-09-29 设置页「🧠 AI 总配置」，插件单一真相源）=====
+    # ===== AI 总配置（2026-09-29 设置页「AI 配置」分类，插件单一真相源）=====
     # 插件声明 capabilities=["ai"] 且被用户在设置页下拉框勾选接入后，
     # 经 ctx.ai.params() 实时读取——各 AI 插件不再各自维护一份后端配置。
     "ai_backend_mode":      "cloud",      # cloud=云端 API / local=本机 llama-server

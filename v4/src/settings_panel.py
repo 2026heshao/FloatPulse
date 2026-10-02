@@ -25,7 +25,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QSize
 # ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
 #   此前漏了这行导入 → MainWindow 构造走到设置页就 NameError，
 #   程序直接起不来（2026-09-29 11:07 修）。
-# ★ QDesktopServices：关于页「📂 打开日志」用系统文件管理器开数据目录。
+# ★ QDesktopServices：「打开日志」按钮用系统文件管理器开数据目录。
 from PyQt6.QtGui import QAction, QDesktopServices
 
 
@@ -49,21 +49,25 @@ from src import autostart
 from src.constants import (MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT)
 
 
-# 设置页内部分类导航：顺序即左栏展示顺序，(key, 图标, 名称)。
+# 设置页内部分类导航：顺序即左栏展示顺序，(key, 图标名, 名称)。
 # 9 个行为配置分类沿用原单页分组的语义（不合并不改名），
 # 「关于」从滚动页尾独立成分类，「恢复默认设置」移至页底常驻栏。
 # 2026-10-02：「番茄钟」从「全局工具」独立成分类（原 4 项参数整体搬迁）。
+# 2026-10-02 UI 重构 04：第二项由 emoji 改为 icons.py 的**自绘图标名**，
+#   左导航按「图标 + 文字」两列渲染（emoji 在离屏渲染 / 精简字体下会退化成
+#   豆腐块）。`tool`/`rocket` 不在图标库内，按 04 文档给的备选取
+#   `settings`（工具）/ `apps`（系统）。
 SETTINGS_CATEGORIES = (
-    ("appearance", "🎨", "外观"),
-    ("ball", "🔵", "悬浮球"),
-    ("clipboard", "📋", "剪贴板与碎片"),
-    ("assets", "🖼", "临时素材"),
-    ("tools", "⚡", "全局工具"),
-    ("pomodoro", "🍅", "番茄钟"),
-    ("system", "🚀", "启动与系统"),
-    ("export", "📤", "导出"),
-    ("ai", "🧠", "AI 配置"),
-    ("about", "ℹ️", "关于"),
+    ("appearance", "palette", "外观"),
+    ("ball", "ball", "悬浮球"),
+    ("clipboard", "clipboard", "剪贴板与碎片"),
+    ("assets", "assets", "临时素材"),
+    ("tools", "settings", "全局工具"),
+    ("pomodoro", "pomodoro", "番茄钟"),
+    ("system", "apps", "启动与系统"),
+    ("export", "export", "导出"),
+    ("ai", "ai", "AI 配置"),
+    ("about", "help", "关于"),
 )
 
 # 主题三按钮的自绘图标边长（逻辑像素）：30px 按钮高 + 13px 字号下取 15，
@@ -173,6 +177,10 @@ class SettingsPanel(QWidget):
         bv.setSpacing(0)
         label = QLabel(title)
         label.setObjectName("sectionLabel")
+        # UI 重构 04：分组卡标题走高一级字阶（theme.py 的
+        # QLabel#sectionLabel[groupTitle="true"] → $fs_md / 500）。
+        # 属性必须在入布局（触发 polish）之前设好，否则 QSS 不生效。
+        label.setProperty("groupTitle", "true")
         bv.addWidget(label)
         gap = QWidget()
         gap.setFixedHeight(6)
@@ -600,13 +608,18 @@ class SettingsPanel(QWidget):
         mode_row = QHBoxLayout(mode_ctl)
         mode_row.setContentsMargins(0, 0, 0, 0)
         mode_row.setSpacing(8)
-        self._ai_mode_cloud = SmoothButton("☁ 云端", self)
-        self._ai_mode_local = SmoothButton("💻 本地", self)
+        # 自绘图标 + 文字（UI 重构 04）：☁/💻 换 icons.py 的 cloud/pc。
+        # 取色对齐 modeBtn QSS：常态/悬停 primary、选中 on_primary（实底反白）。
+        self._ai_mode_cloud = IconButton(
+            "cloud", text="云端", icon_size=14, object_name="modeBtn",
+            checkable=True, host=self._host, off_color="primary",
+            hover_color="primary", on_color="on_primary", parent=self)
+        self._ai_mode_local = IconButton(
+            "pc", text="本地", icon_size=14, object_name="modeBtn",
+            checkable=True, host=self._host, off_color="primary",
+            hover_color="primary", on_color="on_primary", parent=self)
         for _b in (self._ai_mode_cloud, self._ai_mode_local):
-            _b.setObjectName("modeBtn")
-            _b.setCheckable(True)
             _b.setFixedHeight(28)
-            _b.setCursor(Qt.CursorShape.PointingHandCursor)
         self._ai_mode_cloud.clicked.connect(
             lambda: self._on_ai_mode("cloud"))
         self._ai_mode_local.clicked.connect(
@@ -838,10 +851,10 @@ class SettingsPanel(QWidget):
         self._upd_btn.setFixedHeight(30)
         self._upd_btn.clicked.connect(self._on_check_update)
         upd_row.addWidget(self._upd_btn)
-        self._upd_open_btn = SmoothButton("🌐 打开下载页")
-        self._upd_open_btn.setObjectName("secondaryBtn")
+        self._upd_open_btn = IconButton("nav", text="打开下载页", icon_size=14,
+                                        object_name="secondaryBtn",
+                                        host=self._host)
         self._upd_open_btn.setFixedHeight(30)
-        self._upd_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._upd_open_btn.setVisible(False)
         self._upd_open_btn.clicked.connect(self._on_open_downloads)
         upd_row.addWidget(self._upd_open_btn)
@@ -861,10 +874,11 @@ class SettingsPanel(QWidget):
         log_row = QHBoxLayout(log_ctl)
         log_row.setContentsMargins(0, 0, 0, 0)
         log_row.setSpacing(8)
-        self._open_log_btn = SmoothButton("📂 打开日志")
-        self._open_log_btn.setObjectName("secondaryBtn")
+        self._open_log_btn = IconButton("folder_open", text="打开日志",
+                                        icon_size=14,
+                                        object_name="secondaryBtn",
+                                        host=self._host)
         self._open_log_btn.setFixedHeight(30)
-        self._open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._open_log_btn.clicked.connect(self._on_open_log)
         log_row.addWidget(self._open_log_btn)
         add_row(gv, "打开日志",
@@ -893,10 +907,14 @@ class SettingsPanel(QWidget):
         self._cat_group = QButtonGroup(self)
         self._cat_group.setExclusive(True)
         for idx, (key, icon, label) in enumerate(SETTINGS_CATEGORIES):
-            btn = SmoothButton(f"{icon}  {label}")
-            btn.setObjectName("settingsNavBtn")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 自绘图标 + 文字（UI 重构 04）：图标由 QIcon 位图承载，选中态
+            # 转主色走 On 位图（checkable），与 QSS 的 $accent_soft 选中底配套；
+            # 取色三态对齐 QSS（常态 text_secondary / 悬停 text / 选中 primary）。
+            btn = IconButton(icon, icon_size=16, text=label,
+                             object_name="settingsNavBtn", checkable=True,
+                             host=self._host,
+                             off_color="text_secondary", hover_color="text",
+                             on_color="primary")
             btn.clicked.connect(
                 lambda _checked=False, k=key: self.show_category(k))
             self._cat_group.addButton(btn)
@@ -1195,7 +1213,7 @@ class SettingsPanel(QWidget):
                 getattr(host, "_theme", "dark")))
 
     def _on_replay_onboarding(self):
-        """「🔄 重看引导」（3.4）：置回未完成态并弹出同一欢迎向导。
+        """「重看引导」（3.4）：置回未完成态并弹出同一欢迎向导。
 
         复用首启状态链：mark_show_again 置 first_run_done=False 落盘，
         向导关闭（完成 / Esc / 跳过）时 mark_done 置回 True——看完不会
@@ -1722,7 +1740,7 @@ class SettingsPanel(QWidget):
         self._config.save()
 
     def _on_open_log(self):
-        """「📂 打开日志」（3.2）：系统文件管理器打开数据目录 float_data/。
+        """「打开日志」（3.2）：系统文件管理器打开数据目录 float_data/。
 
         打开目录而非 app.log 文件本身——文件管理器里还能顺带看到
         config.json / 备份等现场；路径取自 app_paths 的统一入口。

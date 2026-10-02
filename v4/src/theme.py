@@ -466,6 +466,14 @@ QLabel#sectionLabel {
     font-size: 13px;
     font-weight: 600;
 }
+/* 设置页分组卡标题（UI 重构 04）：比通用 sectionLabel 大一档，
+   用字阶令牌 $fs_md + 中等字重提升层级。★必须用属性选择器限定作用域——
+   #sectionLabel 是全局共享的（EmptyState 标题、碎片预览标题、知识库/合并
+   对话框等都在用），直接改上面那条会把别处标题一起放大。 */
+QLabel#sectionLabel[groupTitle="true"] {
+    font-size: $fs_md;
+    font-weight: 500;
+}
 
 /* 设置页分隔线 */
 QFrame#settingsSeparator {
@@ -627,9 +635,11 @@ QPushButton#settingsNavBtn:hover {
     color: $text;
 }
 QPushButton#settingsNavBtn:checked {
-    background-color: $primary_a18;
+    /* 选中行底走 $accent_soft（UI 重构 04：左导航「图标 + 文字」两列），
+       文字取主色；不再用 primary_a18 半透明染，避免与卡片底叠色发灰。 */
+    background-color: $accent_soft;
     color: $primary;
-    border: 1px solid $primary_a30;
+    border: 1px solid transparent;
     font-weight: 600;
 }
 QFrame#settingsNavDivider {
@@ -639,9 +649,39 @@ QFrame#settingsNavDivider {
 
 /* ---- 插件中心 ---- */
 QFrame#pluginCard {
-    background-color: $panel_fill;
-    border: 1px solid $panel_edge;
+    /* 实底 + 左缘 3px 状态条（属性选择器按状态换色，2026-10-02 卡片重设计）：
+       状态条是插件页唯一「一眼可扫」的信号——启用=主色 / 停用=中性灰 /
+       警告=橙。用 $surface 实底而非旧的 $panel_fill 半透明：卡片是信息
+       容器，不是玻璃层。★卡片须 setProperty("state", ...) 后再 polish。 */
+    background-color: $surface;
+    border: 1px solid $line;
+    border-left: 3px solid $line_2;
     border-radius: $r_panel;
+}
+QFrame#pluginCard[state="on"] {
+    border-left-color: $primary;
+}
+QFrame#pluginCard[state="warn"] {
+    border-left-color: $warn;
+}
+/* 卡片图标槽（28×28）：给卡片一个视觉锚点；启用态淡主色底 + 主色描边 */
+QFrame#pluginIconSlot {
+    background-color: $surface_2;
+    border: 1px solid $line;
+    border-radius: $r_ctl;
+}
+QFrame#pluginIconSlot[state="on"] {
+    background-color: $accent_soft;
+    border-color: $primary_a30;
+}
+QFrame#pluginIconSlot[state="warn"] {
+    background-color: $warn_alpha;
+    border-color: $warn_border;
+}
+/* 卡片底部操作行：通栏 + 上分隔线（布局里靠 addStretch(1) 吸底） */
+QFrame#pluginCardFoot {
+    border: none;
+    border-top: 1px solid $line;
 }
 /* ---- 页面插件容器（AI 助手等）：实底遮住玻璃壳，避免透出屏幕后内容 ---- */
 QWidget#pluginPage {
@@ -650,16 +690,18 @@ QWidget#pluginPage {
 }
 QLabel#pluginCardTitle {
     color: $text;
-    font-size: 14px;
-    font-weight: 600;
+    font-size: $fs_md;
+    font-weight: 500;
 }
 QLabel#pluginCardId {
-    color: $text_secondary;
-    font-size: 11px;
+    /* 版本号 / 目录名：等宽小字弱化到 text_placeholder，不再与标题抢层级 */
+    color: $text_placeholder;
+    font-family: 'Consolas', 'Cascadia Mono', monospace;
+    font-size: $fs_xs;
 }
 QLabel#pluginCardDesc {
-    color: $text;
-    font-size: 12px;
+    color: $text_secondary;
+    font-size: $fs_sm;
 }
 QTextBrowser#usageViewer {
     background-color: transparent;
@@ -669,13 +711,31 @@ QTextBrowser#usageViewer {
     padding: 8px;
     font-size: 13px;
 }
-QLabel#pluginActionTitle {
-    color: $text;
-    font-size: 12px;
+/* 动作 chip（2026-10-02 卡片重设计）：一个动作一枚「实底 chip」——
+   动作名 + 热键（等宽小字）+「右键菜单」归属，由 _FlowLayout 横向排列
+   并自动换行。实底＝可执行性质，与能力标签（描边＝标签性质）区分开。
+   取代此前「· 动作名〔右键菜单〕热键」三标签逐行排列（旧
+   #pluginActionTitle / #pluginActionTag 随之退役）。 */
+QFrame#pluginActChip {
+    background-color: $surface_2;
+    border: none;
+    border-radius: $r_chip;
 }
-QLabel#pluginActionTag {
+QLabel#pluginActName {
     color: $text_secondary;
-    font-size: 11px;
+    font-size: $fs_xs;
+}
+QLabel#pluginActHotkey {
+    color: $text_placeholder;
+    font-family: 'Consolas', 'Cascadia Mono', monospace;
+    font-size: 10px;
+    background-color: $surface_3;
+    border-radius: 3px;
+    padding: 1px 5px;
+}
+QLabel#pluginActTag {
+    color: $text_placeholder;
+    font-size: 10px;
 }
 QLabel#pluginGateHint {
     color: $danger;
@@ -709,29 +769,46 @@ QLabel#pluginErrorHint {
     color: $text_secondary;
     font-size: 12px;
 }
-/* ---- 插件中心：状态标签（已启用 / 已停用 / 部分生效）---- */
+/* ---- 插件中心：状态（已启用 / 已停用 / 部分生效）---- */
+/* 2026-10-02 卡片重设计：描边胶囊退役，改「6px 圆点 + 11px 文字」——
+   胶囊在暗色下发重、抢标题注意力；点+字轻，且状态文字固定钉在标题行
+   右端，一排卡自然形成可扫读的「状态列」。圆点是独立的
+   QFrame#pluginStatusDot（QSS 无法给 QLabel 加伪元素）。 */
 QLabel#pluginStatusOn {
-    color: $success;
-    font-size: 11px;
+    color: $primary;
+    font-size: $fs_xs;
     font-weight: 600;
-    padding: 2px 8px;
-    border: 1px solid $success;
-    border-radius: $r_chip;
 }
 QLabel#pluginStatusOff {
-    color: $text_secondary;
-    font-size: 11px;
+    color: $text_placeholder;
+    font-size: $fs_xs;
     font-weight: 600;
-    padding: 2px 8px;
-    border: 1px solid $panel_edge;
-    border-radius: $r_chip;
 }
 QLabel#pluginStatusWarn {
-    color: $danger;
-    font-size: 11px;
+    color: $warn;
+    font-size: $fs_xs;
     font-weight: 600;
-    padding: 2px 8px;
-    border: 1px solid $danger_border;
+}
+QFrame#pluginStatusDot {
+    background-color: $line_2;
+    border: none;
+    border-radius: 3px;
+}
+QFrame#pluginStatusDot[state="on"] {
+    background-color: $primary;
+}
+QFrame#pluginStatusDot[state="warn"] {
+    background-color: $warn;
+}
+/* 加载失败卡的阶段标签：沿用旧「状态胶囊」的描边样式，与卡片上的
+   状态点区分开（失败卡是异常物，可以比正常卡重一点） */
+QLabel#pluginStageTag {
+    color: $warn;
+    background-color: $warn_alpha;
+    font-size: $fs_xs;
+    font-weight: 600;
+    padding: 1px 7px;
+    border: 1px solid $warn_border;
     border-radius: $r_chip;
 }
 /* ---- 插件中心：失败区小标题 ---- */
@@ -740,11 +817,13 @@ QLabel#pluginSectionLabel {
     font-size: 12px;
     font-weight: 600;
 }
-/* ---- 插件中心：插件安装目录 / 商店目录（等宽，便于核对路径）---- */
+/* ---- 插件中心：插件安装目录 / 商店目录（等宽，便于核对路径）----
+   2026-10-02 起降为 11px text_placeholder：路径是「设置期信息」，
+   完整绝对路径仍在标签的 tooltip 上，不删信息只降视觉重量。 */
 QLabel#pluginDirLabel {
-    color: $text_secondary;
+    color: $text_placeholder;
     font-family: 'Consolas', 'Cascadia Mono', monospace;
-    font-size: 12px;
+    font-size: $fs_xs;
 }
 
 /* ---- 插件中心：插件商店（可安装包）---- */
@@ -770,14 +849,15 @@ QLabel#pluginStoreBadge {
     border: 1px solid $primary_a30;
     border-radius: $r_chip;
 }
-/* 能力胶囊徽章（🌐 网络 / ✍ 写入 / 🛠 改删 / 🧠 AI）：
-   淡主色底中性字，完整语义在悬停提示；与 pluginStoreBadge 同族淡主色 */
+/* 能力标签（网络 / 写入 / 改删 / AI）：描边＝标签性质，与动作 chip
+   （实底＝可执行性质）形成层级差；完整语义仍在悬停提示里。
+   商店卡与在线市场卡复用同一 objectName —— 样式一处改、三处生效。 */
 QLabel#pluginCapBadge {
-    color: $secondary_text;
-    background-color: $primary_a12;
-    font-size: 11px;
+    color: $text_placeholder;
+    background-color: transparent;
+    font-size: $fs_xs;
     padding: 1px 7px;
-    border: 1px solid $primary_a30;
+    border: 1px solid $line;
     border-radius: $r_chip;
 }
 

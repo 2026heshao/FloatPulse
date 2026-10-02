@@ -442,14 +442,17 @@ class _BallSurface(QWidget):
         w = max(d, text_w + 10.0)              # 数字长时自动变胶囊形
         rect = QRectF(cx + vis_r * 0.68 - w / 2.0,
                       cy + vis_r * 0.68 - d / 2.0, w, d)
-        # 白色描边让徽标从暖黄球体上浮起（深浅桌面都清晰）
+        # 徽标底/字统一走 accent 主色（UI 重构 03：原硬编码红 #E5484D
+        # 退役）。字色取 on_primary —— 浅主题深绿底配白字、深主题亮绿底
+        # 配墨字，两套主题都过对比度。白描边保留：让徽标从暖黄球体上浮起。
+        colors = get_colors(self._theme)
         pen = QPen(QColor(255, 255, 255, 235))
         pen.setWidthF(1.6)
         painter.setPen(pen)
-        painter.setBrush(QBrush(QColor(0xE5, 0x48, 0x4D)))
+        painter.setBrush(QBrush(QColor(str(colors["primary"]))))
         painter.drawRoundedRect(rect, d / 2.0, d / 2.0)
         painter.setFont(font)
-        painter.setPen(QColor(255, 255, 255))
+        painter.setPen(QColor(str(colors["on_primary"])))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
 
@@ -818,17 +821,22 @@ class FloatingBall(QWidget):
         self.apply_pomodoro_config()
 
     def _apply_ring_colors(self):
-        """按当前主题取环配色：专注=主色深档，休息=成功绿。"""
+        """按当前主题取环配色：专注=主色（accent），休息=成功绿。
+
+        UI 重构 03：专注填充色从旧薄荷 ``primary_deep`` 换成统一 accent
+        ``primary``（浅 #0F6E56 / 深 #5DCAA5），与全站主色口径一致。
+        """
         colors = get_colors(self._theme)
         track = QColor(str(colors.get("text", "#2C3E50")))
         track.setAlpha(60)
-        focus_fill = QColor(str(colors.get("primary_deep", "#3D9E9C")))
+        focus_fill = QColor(str(colors.get("primary", "#0F6E56")))
         break_fill = QColor(str(colors.get("success", "#1F8A4C")))
         self._surface.set_ring_colors(track, focus_fill)
         # 相位切换时换填充色（休息相位用 break_fill）
         if self._pomodoro.phase == PHASE_BREAK:
             self._surface.set_ring_colors(track, break_fill)
         self._ring_break_fill = break_fill
+        self._ring_focus_fill = focus_fill
         self._ring_track = track
 
     def apply_pomodoro_config(self):
@@ -967,9 +975,9 @@ class FloatingBall(QWidget):
         colors = getattr(self, "_ring_track", None)
         if colors is not None:
             fill = (self._ring_break_fill if phase == PHASE_BREAK
-                    else QColor(str(get_colors(self._theme).get(
-                        "primary_deep", "#3D9E9C"))))
-            self._surface.set_ring_colors(colors, fill)
+                    else getattr(self, "_ring_focus_fill", None))
+            if fill is not None:
+                self._surface.set_ring_colors(colors, fill)
         self._update_pomodoro_visuals()
 
     def _on_pomodoro_state_changed(self, _state: str):

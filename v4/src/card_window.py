@@ -5,11 +5,14 @@
 ====================================================================
 小卡片弹窗窗口（440×340），左侧微型 Tab 导航 + 右侧内容区。
 
-Tab 列表（数字序号）：
-  1. 📚 知识卡片  - 随机知识卡片，「下一张」切换
-  2. 📋 日程任务  - 任务输入 + 列表，右键菜单管理
-  3. 📝 临时笔记  - 单条便签，800ms 防抖自动保存
-  4.  网址导航  - 平铺展示所有站点，点击跳转浏览器（锁定常驻，仅展示）
+Tab 列表（左侧竖排，物理索引固定）：
+  0. 碎片     - 最近碎片列表，点击复制
+  1. 知识卡片  - 随机知识卡片，「下一张」切换
+  2. 日程任务  - 任务输入 + 列表，右键菜单管理
+  3. 临时笔记  - 单条便签，800ms 防抖自动保存
+  4. 网址导航  - 平铺展示所有站点，点击跳转浏览器（锁定常驻，仅展示）
+  5. 临时素材  - 收录的图片/文件缩略图，点击打开
+  6. 软件导航  - 软件图标网格，点击启动（图标尺寸见 app_mini_icon_size）
 
 统一行为：
   - 鼠标离开「球+卡片」区域 → 自动关闭
@@ -59,12 +62,14 @@ from src.task_delegate import (
 )
 from src.controls import (
     tune_list_scrolling, SmoothButton, IconButton, IconLabel, UndoBar,
+    EmptyState,
 )
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
 from src.icon_render import icon as render_icon
-from src.glass import GlassPanel, NavIndicator, draw_soft_shadow
+from src.assets_panel import EXT_ICON
+from src.glass import NavIndicator, draw_soft_shadow
 from src.app_paths import get_screen_geometry
 from src.constants import (
     NOTE_AUTOSAVE_INTERVAL_MS, DEFAULT_THEME, CHECK_ANIM_MS,
@@ -109,6 +114,36 @@ _TAB_INDICATOR_H = 24       # 选中竖条指示器高度
 # 此前 icon_px=36 / btn_size=76 是两处独立硬编码，调设置页的「软件卡片尺寸」
 # 完全推不动小卡片（那是主窗口的键）。现统一由 ``app_mini_icon_size`` 驱动，
 # 范围常量在 src/constants.py（card_window / settings_panel / config 共用）。
+
+
+def _card_shell_qss(colors: dict) -> str:
+    """UI 重构 03 本包自持的小卡片「覆盖 QSS」。
+
+    不写进 theme.py（01 包文件，02/04/05 可能并行改动）—— 追加在
+    :func:`get_card_window_qss` 之后，同选择器等特异性下后置者生效：
+
+      · ``#cardContainer``：玻璃壳退役 → 实底 ``$surface`` + 1px ``$line_2``
+        描边。圆角必须带 ``px``（token ``r_win`` 是无单位字符串，玻璃壳时代
+        圆角由 glass.py 手绘，QSS 这条其实没生效过）。
+      · ``#titleLabel``：页标题统一 15px/500（``$fs_md``）。
+      · ``#sectionLabel``：素材空状态标题（EmptyState 用；卡片 QSS 原缺该规则）。
+    """
+    return (
+        "QWidget#cardContainer {\n"
+        "    background-color: %(surface)s;\n"
+        "    border: 1px solid %(line_2)s;\n"
+        "    border-radius: %(r_win)spx;\n"
+        "}\n"
+        "QLabel#titleLabel {\n"
+        "    font-size: %(fs_md)s;\n"
+        "    font-weight: 500;\n"
+        "}\n"
+        "QLabel#sectionLabel {\n"
+        "    color: %(text)s;\n"
+        "    font-size: %(fs_sm)s;\n"
+        "    font-weight: 600;\n"
+        "}\n"
+    ) % colors
 
 
 def _domain_of_url(url: str) -> str:
@@ -211,13 +246,24 @@ class _AssetItemWidget(QWidget):
         return tip
 
     def _load_icon(self):
-        """加载缩略图（缩略图走缓存 + 解码期缩放，大图不卡）。
+        """加载缩略图 / 类型图标。
 
-        UI 重构 03：非图片文件类型图 / 失效提示 / 解码失败三处原用 emoji 占位，
-        对应图标位依赖 01 包的 ``warning`` / ``image`` / ``file_*`` 自绘图标，
-        本包先去 emoji（图标位暂留空），待 01 合并后补齐自绘。
+        UI 重构 03：三处 emoji 占位全部换成 01 包自绘图标 ——
+          · 失效文件       → ``warning``（danger 色）
+          · 非图片文件     → 按扩展名查 :data:`EXT_ICON`（**唯一来源**：
+                             ``assets_panel.EXT_ICON``，本包只 import 不另立一份，
+                             缺省 ``file_generic``）
+          · 图片但解码失败 → ``image``（占位色）
+
+        图片缩略图走缓存 + 解码期缩放，大图不卡。
         """
-        if not self._is_valid or not self._asset.is_image:
+        if not self._is_valid:
+            self._show_type_icon("warning", "danger")
+            return
+        if not self._asset.is_image:
+            ext = os.path.splitext(self._asset.original_name)[1].lower()
+            self._show_type_icon(EXT_ICON.get(ext, "file_generic"),
+                                 "text_secondary")
             return
 
         aid = self._asset.asset_id
@@ -245,6 +291,18 @@ class _AssetItemWidget(QWidget):
             self._thumb_cache[aid] = cached
         if cached is not False:
             self._icon_label.setPixmap(cached)
+        else:
+            self._show_type_icon("image", "text_placeholder")
+
+    def _show_type_icon(self, icon_name: str, token: str):
+        """把类型自绘图标画进 64×64 的缩略图位（36px 居中）。
+
+        ``token`` 为主题色名（如 ``text_secondary``），主题切换时由
+        :meth:`_apply_style` 走重建路径重新取色。
+        """
+        color = get_colors(self._theme).get(token, "#000000")
+        self._icon_label.setPixmap(
+            render_icon(icon_name, 36, color).pixmap(36, 36))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._is_valid:
@@ -431,9 +489,14 @@ class CardWindow(QWidget):
         painter.end()
 
     def _init_ui(self):
-        # 玻璃壳容器：半透明填充 + 顶部高光带 + 双色描边 + 噪点（glass.py 手绘）
-        self._container = GlassPanel(self, radius=self.CARD_RADIUS)
+        # 卡片壳容器（UI 重构 03）：玻璃拟态退役 → 普通 QWidget，实底
+        # ``$surface`` + 1px ``$line_2`` 描边由本包自持的覆盖 QSS
+        # :func:`_card_shell_qss` 负责。WA_StyledBackground 是自定义
+        # QWidget 吃到 QSS ``background-color`` 的前提（否则背景不绘制）。
+        self._container = QWidget(self)
         self._container.setObjectName("cardContainer")
+        self._container.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True)
         self._container.setGeometry(self.CARD_MARGIN, self.CARD_MARGIN,
                                     self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
 
@@ -580,8 +643,8 @@ class CardWindow(QWidget):
         # 取最近 20 条显示（小卡片不宜过多）
         display_frags = fragments[:20]
 
-        # 预览文本可用宽度：内容区360 - 按钮(40×2) - 间距(6×2) - 行边距(左4右12) - 滚动条预留12
-        text_width = self.WINDOW_WIDTH - _TAB_BAR_WIDTH - 32 - 40 * 2 - 6 * 2 - 4 - 12 - 12
+        # 预览文本可用宽度：内容区360 - 按钮(26×2) - 间距(6×2) - 行边距(左4右12) - 滚动条预留12
+        text_width = self.WINDOW_WIDTH - _TAB_BAR_WIDTH - 32 - 26 * 2 - 6 * 2 - 4 - 12 - 12
         font = QFont("Microsoft YaHei")
         font.setPixelSize(14)  # 与 QSS 中 fragPreview 字号一致
         fm = QFontMetrics(font)
@@ -602,20 +665,22 @@ class CardWindow(QWidget):
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             row_layout.addWidget(label)
 
-            # 复制按钮
-            copy_btn = SmoothButton("复制")
-            copy_btn.setObjectName("fragCopyBtn")
-            copy_btn.setFixedSize(40, 24)
-            copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 复制按钮（UI 重构 03：40×24 文字钮 → 26px 图标钮；objectName
+            # 保留 fragCopyBtn —— QSS 底色/焦点环与 _SMOOTH_OVERLAYS 过渡
+            # 均按它解析。hover 叠 $primary 实底 → 位图转 $on_primary 保对比）
+            copy_btn = IconButton("copy", size=26, icon_size=14,
+                                  object_name="fragCopyBtn",
+                                  off_color="primary", hover_color="on_primary")
             copy_btn.setToolTip("复制碎片内容")
             copy_btn.clicked.connect(lambda checked=False, c=frag.content: self._copy_fragment(c))
             row_layout.addWidget(copy_btn)
 
-            # 删除按钮
-            del_btn = SmoothButton("删除")
-            del_btn.setObjectName("fragDelBtn")
-            del_btn.setFixedSize(40, 24)
-            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 删除按钮（同上；danger=True 配 QSS [danger="true"] 与 danger 过渡，
+            # hover 叠 $danger 实底 → 白位图，沿用原 QSS `color: white` 口径）
+            del_btn = IconButton("trash", size=26, icon_size=14,
+                                 object_name="fragDelBtn",
+                                 off_color="danger", hover_color="white",
+                                 danger=True)
             del_btn.setToolTip("删除此碎片")
             del_btn.clicked.connect(lambda checked=False, fid=frag.fragment_id: self._delete_fragment(fid))
             row_layout.addWidget(del_btn)
@@ -1061,6 +1126,18 @@ class CardWindow(QWidget):
 
         return page
 
+    def _make_asset_empty(self) -> EmptyState:
+        """素材页空态（UI 重构 03）：图标 + 标题 + 提示，替代原单行 QLabel。
+
+        图标取页面同名 ``assets`` 自绘图标；无动作钮 —— 「收录」动作发生在
+        悬浮球拖入，这里只做引导（EmptyState 无钮时自动鼠标穿透）。图标配色
+        在这里就近刷一次，免等下一次换主题（构造时机晚于 ``_apply_style``）。
+        """
+        empty = EmptyState("assets", "暂无素材", "拖文件到悬浮球即可收录",
+                           icon_size=36, object_name="assetEmpty")
+        empty.apply_theme(self._theme)
+        return empty
+
     def _refresh_asset_page(self):
         """刷新临时素材页面（数据变化后首次进入才调用，平常切页零开销）"""
         self._asset_page_dirty = False
@@ -1073,10 +1150,7 @@ class CardWindow(QWidget):
                 self._clear_layout(item.layout())
 
         if not self._asset_manager:
-            empty = QLabel("暂无素材，拖文件到悬浮球收录")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._asset_content_layout.addWidget(empty)
+            self._asset_content_layout.addWidget(self._make_asset_empty())
             self._asset_count_label.setText("共 0 个")
             return
 
@@ -1087,10 +1161,7 @@ class CardWindow(QWidget):
             if key not in valid_ids:
                 del self._asset_thumb_cache[key]
         if not assets:
-            empty = QLabel("暂无素材，拖文件到悬浮球收录")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._asset_content_layout.addWidget(empty)
+            self._asset_content_layout.addWidget(self._make_asset_empty())
             self._asset_count_label.setText("共 0 个")
             return
 
@@ -1148,11 +1219,12 @@ class CardWindow(QWidget):
 
     # ---------------- 样式 ----------------
     def _apply_pages_background(self):
-        """让 QStackedWidget 的所有页面保持透明 —— 背景由 GlassPanel 统一负责。
+        """让 QStackedWidget 的所有页面保持透明 —— 背景由卡片壳统一负责。
 
         历史遗留：早期为了规避 grab() 快照黑底、切页透黑，曾给每个页面铺
-        card_bg_solid 实色底；现在容器层已由 GlassPanel 画好玻璃填充/高光/噪点，
-        页面再铺实色会把玻璃效果整块盖掉，因此必须改回透明。
+        card_bg_solid 实色底。UI 重构 01 已把玻璃拟态的填充提到 ≈97% 实底、
+        高光带与噪点归零（视觉等同实底），03 再把卡片壳换成普通 QWidget +
+        实底 ``$surface``；页面若仍铺实色会把壳底整块盖掉，因此必须保持透明。
 
         注意：QScrollArea 的 viewport 也要靠 QSS 设为透明（见 theme.py），
         否则在深色系统主题下会露出系统 Base 色（#1e1e1e）形成黑块。
@@ -1179,16 +1251,24 @@ class CardWindow(QWidget):
                 child.ensurePolished()
 
     def _apply_style(self):
-        self._container.setStyleSheet(get_card_window_qss(self._theme))
-        # 玻璃壳配色（填充/描边/高光/噪点）由 GlassPanel 手绘，需同步
-        if isinstance(self._container, GlassPanel):
-            self._container.apply_theme(get_colors(self._theme))
-        # P1：图标按钮（侧 Tab + 关闭钮）的位图颜色不在 QSS 管辖内
+        colors = get_colors(self._theme)
+        # 基础卡片 QSS + 本包自持覆盖（实底壳 $surface/$line_2、页标题
+        # 15px/500、空态标题 sectionLabel）—— 覆盖层不写进 theme.py，
+        # 避免与 01/02/04/05 并行会话抢文件（全局指挥裁决）。
+        self._container.setStyleSheet(
+            get_card_window_qss(self._theme) + _card_shell_qss(colors))
+        # P1：图标按钮（侧 Tab / 关闭钮 / 碎片行复制·删除）的位图颜色
+        # 不在 QSS 管辖内
         for btn in self.findChildren(IconButton):
             btn.apply_theme(self._theme)
         # 页标题的自绘图标（IconLabel）同样不在 QSS 管辖内
         for ic in self.findChildren(IconLabel):
-            ic.set_color(QColor(get_colors(self._theme)["primary"]))
+            ic.set_color(QColor(colors["primary"]))
+        # 素材空态（EmptyState）图标取色跟主题；须排在 IconLabel 循环之后
+        # —— EmptyState 内含一个 IconLabel，前排的 primary 需被这里覆盖成
+        # text_placeholder。
+        for st in self.findChildren(EmptyState):
+            st.apply_theme(self._theme)
 
     def apply_theme(self, theme_name: str):
         if theme_name not in ("light", "dark"):
