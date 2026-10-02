@@ -31,7 +31,7 @@ class FragmentEditDialog(GlassDialog):
 
         body = self.body_layout
 
-        tip = QLabel("🧩 直接修改下方内容，保存后立即生效")
+        tip = QLabel("直接修改下方内容，保存后立即生效")
         tip.setObjectName("hintLabel")
         body.addWidget(tip)
 
@@ -57,16 +57,16 @@ class FragmentEditDialog(GlassDialog):
     def _save(self):
         text = self._edit.toPlainText()
         if not text.strip():
-            flash_button(self._save_btn, "⚠️ 内容不能为空")
+            flash_button(self._save_btn, "内容不能为空")
             return
         if text == self._fragment.content:
             flash_button(self._save_btn, "未做修改")
             return
         ok = bool(self._on_save(text))
         if not ok:
-            flash_button(self._save_btn, "⚠️ 保存失败")
+            flash_button(self._save_btn, "保存失败")
             return
-        flash_button(self._save_btn, "✅ 已保存", 900)
+        flash_button(self._save_btn, "已保存", 900)
         QTimer.singleShot(900, self.accept)
 
     def keyPressEvent(self, event):
