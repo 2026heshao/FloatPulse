@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QMenu, QCheckBox, QWidgetAction, QButtonGroup,
     QMessageBox, QFileDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QSize
 # ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
 #   此前漏了这行导入 → MainWindow 构造走到设置页就 NameError，
 #   程序直接起不来（2026-09-29 11:07 修）。
@@ -29,14 +29,17 @@ from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices
 
 
-from src.controls import SmoothButton, IconButton, PageTitle, Stepper, ToggleSwitch
+from src.controls import (SmoothButton, IconButton, IconLabel, PageTitle,
+                          Stepper, ToggleSwitch)
 from src.glass_dialog import make_separator
 from src.plugin_net import make_async_getter, make_async_poster
 from src.ai_server import AI_SERVER, ST_READY, ST_STARTING, sync_loopback_allowlist
 from src.app_version import APP_VERSION
 from src.app_paths import get_data_dir
-from src.theme import resolve_theme_name, apply_app_font, UI_SCALE_VALUES
+from src.theme import (resolve_theme_name, apply_app_font, get_colors,
+                       UI_SCALE_VALUES)
 from src import motion
+from src import icon_render
 from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
                                 CHECK_TIMEOUT_S, check_headers, extract_tag,
                                 is_newer)
@@ -62,6 +65,13 @@ SETTINGS_CATEGORIES = (
     ("ai", "🧠", "AI 配置"),
     ("about", "ℹ️", "关于"),
 )
+
+# 主题三按钮的自绘图标边长（逻辑像素）：30px 按钮高 + 13px 字号下取 15，
+# 「图标 + 文字」整体不显拥挤（UI 重构 04 的样板控件）。
+THEME_BTN_ICON_SIZE = 15
+
+# 关于卡片标题的 help 自绘图标边长（与 sectionLabel 13px 字号并排）
+ABOUT_ICON_SIZE = 15
 
 
 class PluginsPickButton(QPushButton):
@@ -246,33 +256,23 @@ class SettingsPanel(QWidget):
 
         # ================= 1. 外观（外观与主题） =================
         cv = self._new_category_page("appearance")
-        gv = group(cv, "🎨 外观与主题")
+        gv = group(cv, "外观与主题")
 
         theme_ctl = QWidget()
         theme_row = QHBoxLayout(theme_ctl)
         theme_row.setContentsMargins(0, 0, 0, 0)
         theme_row.setSpacing(8)
-        self._set_theme_light = SmoothButton("☀️ 浅色主题")
-        self._set_theme_light.setObjectName("secondaryBtn")
-        self._set_theme_light.setCheckable(True)
-        self._set_theme_light.setFixedHeight(30)
-        self._set_theme_light.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._set_theme_light.clicked.connect(lambda: self._on_set_theme("light"))
+        # 自绘图标 + 文字（UI 重构 04 的样板）：emoji ☀️/🌙/🖥 在离屏渲染 /
+        # 精简字体环境下会退化成豆腐块，改用 icons.py 的 sun / moon / restore
+        # 三个自绘字形，零字体依赖；选中态图标转主色由 QIcon 的 On 位图承担。
+        self._set_theme_light = self._make_theme_btn("sun", "浅色主题", "light")
+        self._set_theme_dark = self._make_theme_btn("moon", "深色主题", "dark")
+        self._set_theme_follow = self._make_theme_btn(
+            "restore", "跟随系统", "follow")
         theme_row.addWidget(self._set_theme_light)
-        self._set_theme_dark = SmoothButton("🌙 深色主题")
-        self._set_theme_dark.setObjectName("secondaryBtn")
-        self._set_theme_dark.setCheckable(True)
-        self._set_theme_dark.setFixedHeight(30)
-        self._set_theme_dark.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._set_theme_dark.clicked.connect(lambda: self._on_set_theme("dark"))
         theme_row.addWidget(self._set_theme_dark)
-        self._set_theme_follow = SmoothButton("🖥 跟随系统")
-        self._set_theme_follow.setObjectName("secondaryBtn")
-        self._set_theme_follow.setCheckable(True)
-        self._set_theme_follow.setFixedHeight(30)
-        self._set_theme_follow.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._set_theme_follow.clicked.connect(lambda: self._on_set_theme("follow"))
         theme_row.addWidget(self._set_theme_follow)
+        self._apply_theme_btn_icons()
         add_row(gv, "主题外观", "浅色 / 深色 / 跟随系统（系统深浅色变化时自动换），切换即时生效",
                 theme_ctl)
 
@@ -348,7 +348,7 @@ class SettingsPanel(QWidget):
 
         # ================= 2. 悬浮球 =================
         cv = self._new_category_page("ball")
-        gv = group(cv, "🔵 悬浮球")
+        gv = group(cv, "悬浮球")
 
         self._set_ball_visible = self._toggle("ball_visible", True)
         self._set_ball_visible.toggled.connect(self._on_ball_visibility_changed)
@@ -396,7 +396,7 @@ class SettingsPanel(QWidget):
 
         # ================= 3. 剪贴板与碎片 =================
         cv = self._new_category_page("clipboard")
-        gv = group(cv, "📋 剪贴板与碎片")
+        gv = group(cv, "剪贴板与碎片")
 
         self._set_clipboard_max = Stepper(10, 10000,
                                           self._config.get("clipboard_max_items", 200),
@@ -422,7 +422,7 @@ class SettingsPanel(QWidget):
 
         # ================= 4. 临时素材 =================
         cv = self._new_category_page("assets")
-        gv = group(cv, "🖼 临时素材")
+        gv = group(cv, "临时素材")
 
         self._set_temp_asset_max_count = Stepper(
             5, 500, self._config.get("temp_asset_max_count", 50),
@@ -455,7 +455,7 @@ class SettingsPanel(QWidget):
 
         # ================= 5. 全局工具 =================
         cv = self._new_category_page("tools")
-        gv = group(cv, "⚡ 全局工具")
+        gv = group(cv, "全局工具")
 
         self._set_quick_capture = self._toggle("quick_capture_enabled", True)
         self._set_quick_capture.toggled.connect(self._on_quick_capture_changed)
@@ -489,7 +489,7 @@ class SettingsPanel(QWidget):
         # 混在热键工具里既难找也难扩展（后续加统计/提示音都归这一页）。
         # 控件属性名与回调一律不变 → refresh() / _on_pomodoro_* 零改动。
         cv = self._new_category_page("pomodoro")
-        gv = group(cv, "🍅 番茄钟")
+        gv = group(cv, "番茄钟")
 
         # 总开关 + 时长两档 + 自动休息
         self._set_pomodoro = self._toggle("pomodoro_enabled", True)
@@ -518,7 +518,7 @@ class SettingsPanel(QWidget):
 
         # ================= 7. 启动与系统 =================
         cv = self._new_category_page("system")
-        gv = group(cv, "🚀 启动与系统")
+        gv = group(cv, "启动与系统")
 
         self._set_autostart = self._toggle("autostart", False)
         self._set_autostart.setChecked(autostart.is_autostart_enabled())
@@ -533,7 +533,7 @@ class SettingsPanel(QWidget):
 
         self._set_close_to_tray = self._toggle("close_to_tray", True)
         self._set_close_to_tray.toggled.connect(self._on_close_to_tray_changed)
-        add_row(gv, "关闭即收进托盘", "点 ✕ 不退出、常驻后台，从托盘图标唤回",
+        add_row(gv, "关闭即收进托盘", "点关闭按钮不退出、常驻后台，从托盘图标唤回",
                 self._set_close_to_tray)
 
         self._set_task_reminder = self._toggle("task_reminder_enabled", True)
@@ -557,7 +557,7 @@ class SettingsPanel(QWidget):
         # 单列一组而非并入现有组：现有六组各管一类"行为配置"，
         # 导出是「数据出口」而非行为开关，且需要承载路径 + 操作两个控件，
         # 并入任一组都会破坏该组"同类项相邻"的语义。
-        gv = group(self._new_category_page("export"), "📤 导出")
+        gv = group(self._new_category_page("export"), "导出")
 
         vault_ctl = QWidget()
         vault_row = QHBoxLayout(vault_ctl)
@@ -593,7 +593,7 @@ class SettingsPanel(QWidget):
         # 接入哪些插件由用户在下拉框勾选（勾选 = 授权）。接入的插件经
         # ctx.ai 实时读取这里的配置，不再各自维护后端设置；未接入的
         # 插件照旧用各自私有配置（向后兼容，互不影响）。
-        gv = group(self._new_category_page("ai"), "🧠 AI 总配置")
+        gv = group(self._new_category_page("ai"), "AI 总配置")
 
         # ---- 后端模式：云端 / 本地（modeBtn checked 高亮，与插件页同款）----
         mode_ctl = QWidget()
@@ -781,9 +781,20 @@ class SettingsPanel(QWidget):
         ab_v.setContentsMargins(14, 10, 14, 12)
         ab_v.setSpacing(6)
 
-        about_title = QLabel("ℹ️ 关于")
+        # 关于卡片标题：help 自绘图标 + 文字（UI 重构 04，替代 ℹ️ emoji）。
+        # 图标取色随主题走，见 _apply_about_icon_color。
+        ab_head = QWidget()
+        ab_head_row = QHBoxLayout(ab_head)
+        ab_head_row.setContentsMargins(0, 0, 0, 0)
+        ab_head_row.setSpacing(6)
+        self._about_icon = IconLabel("help", ABOUT_ICON_SIZE)
+        ab_head_row.addWidget(self._about_icon)
+        about_title = QLabel("关于")
         about_title.setObjectName("sectionLabel")
-        ab_v.addWidget(about_title)
+        ab_head_row.addWidget(about_title)
+        ab_head_row.addStretch()
+        ab_v.addWidget(ab_head)
+        self._apply_about_icon_color()
 
         about_text = QLabel(
             f"生活悬浮球 v{APP_VERSION} | PyQt6 + python-docx\n"
@@ -802,7 +813,7 @@ class SettingsPanel(QWidget):
         # 产品承诺「程序不联网」不变：不点按钮就零网络请求（自动检查见下，
         # 同样只 GET Releases latest，失败静默）；发现新版只给下载页入口，
         # 不自动下载（立场详见 update_checker 模块注释）。
-        gv = group(av, "🔄 软件更新")
+        gv = group(av, "软件更新")
 
         self._ver_label = QLabel(self._version_label_text())
         self._ver_label.setObjectName("hintLabel")
@@ -925,6 +936,65 @@ class SettingsPanel(QWidget):
         btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
         self._cat_stack.setCurrentIndex(self._cat_index[key])
 
+    def _make_theme_btn(self, icon_name: str, text: str, mode: str):
+        """主题三按钮的统一构造：自绘图标 + 文字（UI 重构 04 样板）。
+
+        图标名写进 ``property("iconName")``，取色统一交给
+        :meth:`_apply_theme_btn_icons` —— QPixmap 不吃 QSS 换肤，不另设
+        一处取色入口的话，切主题后图标会停在旧主题的取色上。
+        """
+        btn = SmoothButton(text)
+        btn.setObjectName("secondaryBtn")
+        btn.setCheckable(True)
+        btn.setFixedHeight(30)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setProperty("iconName", icon_name)
+        btn.clicked.connect(lambda _checked=False, m=mode: self._on_set_theme(m))
+        return btn
+
+    def _apply_theme_btn_icons(self):
+        """按当前主题重刷主题三按钮的自绘图标（构造时 + 换主题时各一次）。"""
+        if not hasattr(self, "_set_theme_light"):
+            return
+        colors = get_colors(getattr(self._host, "current_theme", None))
+        for btn in (self._set_theme_light, self._set_theme_dark,
+                    self._set_theme_follow):
+            name = btn.property("iconName")
+            if not name:
+                continue
+            btn.setIcon(icon_render.icon(
+                name, THEME_BTN_ICON_SIZE,
+                colors["text_secondary"], on_color=colors["primary"]))
+            btn.setIconSize(QSize(THEME_BTN_ICON_SIZE, THEME_BTN_ICON_SIZE))
+
+    # ---- 状态行：文案 + 颜色语义（UI 重构 04）----
+    # ✓/✗/⚠ 这类符号在离屏渲染 / 精简字体下会退化成豆腐块，改用颜色表达
+    # 结果（成功 success / 失败 danger / 警告 warn），无符号纯粹靠色调。
+    def _set_status(self, label, text: str, tone: str = ""):
+        """写状态行：``tone`` 取 success / danger / warn，空串 = 默认灰。"""
+        label.setProperty("tone", tone)
+        label.setText(text)
+        self._apply_status_tone(label)
+
+    def _apply_status_tone(self, label):
+        """按当前主题给状态行重新着色（换主题时由 apply_theme 统一重放）。"""
+        tone = label.property("tone") or ""
+        colors = get_colors(getattr(self._host, "current_theme", None))
+        label.setStyleSheet(f"color:{colors[tone]};" if tone in colors else "")
+
+    def _reapply_status_tones(self):
+        for name in ("_ai_status", "_upd_status"):
+            label = getattr(self, name, None)
+            if label is not None:
+                self._apply_status_tone(label)
+
+    def _apply_about_icon_color(self):
+        """关于标题的 help 图标按主题取色（与 sectionLabel 的 $text 同族）。"""
+        icon = getattr(self, "_about_icon", None)
+        if icon is not None:
+            icon.set_color(
+                get_colors(getattr(self._host, "current_theme", None))["text"])
+
     def apply_theme(self):
         """主题切换：同步开关配色与主题按钮选中态（由主窗口 _apply_theme 调用）"""
         theme = self._host.current_theme
@@ -935,6 +1005,9 @@ class SettingsPanel(QWidget):
             self._set_theme_light.setChecked(theme == "light")
             self._set_theme_dark.setChecked(theme == "dark")
             self._set_theme_follow.setChecked(theme == "follow")
+            self._apply_theme_btn_icons()
+        self._reapply_status_tones()
+        self._apply_about_icon_color()
 
     def _sync_auto_hide_rows(self):
         """同步「自动隐藏」相关行的可用性：总开关关闭时秒数步进器灰化。
@@ -1470,12 +1543,15 @@ class SettingsPanel(QWidget):
         base = cfg["ai_cloud_base_url"].rstrip("/")
         model = cfg["ai_cloud_model"]
         if not base or not model:
-            self._ai_status.setText("⚠ 地址或模型名为空，已保存但无法测试")
+            self._set_status(self._ai_status, "地址或模型名为空，已保存但无法测试",
+                             "warn")
             return
         if not (base.startswith("http://") or base.startswith("https://")):
-            self._ai_status.setText(f"⚠ 地址必须以 http:// 或 https:// 开头：{base}")
+            self._set_status(
+                self._ai_status,
+                f"地址必须以 http:// 或 https:// 开头：{base}", "warn")
             return
-        self._ai_status.setText("配置已保存，正在测试连接…")
+        self._set_status(self._ai_status, "配置已保存，正在测试连接…")
         headers = ({"Authorization": f"Bearer {cfg['ai_cloud_api_key']}"}
                    if cfg["ai_cloud_api_key"] else {})
         body = {"model": model, "max_tokens": 1, "temperature": 0,
@@ -1485,12 +1561,14 @@ class SettingsPanel(QWidget):
             self._on_ai_probe_done)
         if not ok:
             # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复
-            self._ai_status.setText("⚠ 探活请求未能发出（详见 app.log）")
+            self._set_status(self._ai_status, "探活请求未能发出（详见 app.log）",
+                             "warn")
 
     def _on_ai_probe_done(self, result: dict):
-        """云端探活回调（UI 线程）：✓ / ✗ + 针对性提示"""
+        """云端探活回调（UI 线程）：成功 / 失败 + 针对性提示（颜色语义）"""
         if result.get("ok"):
-            self._ai_status.setText("✓ 连接成功，接入的插件即刻可用")
+            self._set_status(self._ai_status, "连接成功，接入的插件即刻可用",
+                             "success")
             return
         err = str(result.get("error") or "未知错误")
         hint = ""
@@ -1502,7 +1580,7 @@ class SettingsPanel(QWidget):
             hint = "（超时，可重试一次）"
         elif "refused" in err.lower():
             hint = "（端口没有服务在听）"
-        self._ai_status.setText(f"✗ 连接失败：{err}{hint}")
+        self._set_status(self._ai_status, f"连接失败：{err}{hint}", "danger")
 
     def _ai_start_local(self, cfg: dict):
         """落盘后拉起 / 平滑重启本地服务（保存并测试、手动启动共用入口）。
@@ -1514,16 +1592,18 @@ class SettingsPanel(QWidget):
                       cfg["ai_local_gguf"], cfg["ai_local_port"],
                       cfg["ai_local_ctx_size"], cfg["ai_local_thinking"])
         if not AI_SERVER.running:
-            self._ai_status.setText("配置已保存，正在拉起本地服务…")
+            self._set_status(self._ai_status, "配置已保存，正在拉起本地服务…")
             AI_SERVER.start(*start_args)
             return
         changed = (AI_SERVER.port != int(cfg["ai_local_port"])
                    or AI_SERVER.ctx_size != int(cfg["ai_local_ctx_size"])
                    or bool(AI_SERVER.thinking) != bool(cfg["ai_local_thinking"]))
         if not changed:
-            self._ai_status.setText("✓ 配置已保存（服务运行中，参数未变，无需重启）")
+            self._set_status(
+                self._ai_status,
+                "配置已保存（服务运行中，参数未变，无需重启）", "success")
             return
-        self._ai_status.setText("参数已变更，正在重启本地服务…")
+        self._set_status(self._ai_status, "参数已变更，正在重启本地服务…")
         AI_SERVER.restart(*start_args)
 
     def _on_ai_local_toggle(self):
@@ -1584,12 +1664,13 @@ class SettingsPanel(QWidget):
             self._upd_getter = make_async_getter()
         self._upd_btn.setEnabled(False)
         self._upd_open_btn.setVisible(False)
-        self._upd_status.setText("正在检查更新…")
+        self._set_status(self._upd_status, "正在检查更新…")
         ok = self._upd_getter(RELEASES_API_URL, check_headers(),
                               CHECK_TIMEOUT_S, self._on_update_result)
         if not ok:
             # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复按钮
-            self._upd_status.setText("⚠ 检查请求未能发出（详见 app.log）")
+            self._set_status(self._upd_status, "检查请求未能发出（详见 app.log）",
+                             "warn")
 
     def _on_update_result(self, result: dict):
         """更新检查回调（UI 线程）：新版 → 提示 + 下载页出口；按原因给文案"""
@@ -1602,26 +1683,28 @@ class SettingsPanel(QWidget):
                 hint = "（网络超时，可重试一次）"
             else:
                 hint = "（无法连接 GitHub，离线不影响任何功能）"
-            self._upd_status.setText(f"✗ 检查失败：{err}{hint}")
+            self._set_status(self._upd_status, f"检查失败：{err}{hint}", "danger")
             return
         tag = extract_tag(result.get("body") or "")
         if not tag:
-            self._upd_status.setText("⚠ 响应格式异常，请稍后再试")
+            self._set_status(self._upd_status, "响应格式异常，请稍后再试", "warn")
             return
         if is_newer(tag):
-            self._upd_status.setText(
-                f"🆕 发现新版本 {tag}（当前 v{APP_VERSION}），可打开下载页获取")
+            self._set_status(
+                self._upd_status,
+                f"发现新版本 {tag}（当前 v{APP_VERSION}），可打开下载页获取")
             self._upd_open_btn.setVisible(True)
         else:
-            self._upd_status.setText(f"✓ 已是最新（当前 v{APP_VERSION}）")
+            self._set_status(self._upd_status,
+                             f"已是最新（当前 v{APP_VERSION}）", "success")
 
     def _on_open_downloads(self):
         """系统浏览器打开 Releases 页；失败在状态行提示而非弹窗打断"""
         try:
             os.startfile(RELEASES_PAGE_URL)
-            self._upd_status.setText("已在浏览器打开下载页")
+            self._set_status(self._upd_status, "已在浏览器打开下载页", "success")
         except OSError as exc:
-            self._upd_status.setText(f"✗ 打开浏览器失败：{exc!r}")
+            self._set_status(self._upd_status, f"打开浏览器失败：{exc!r}", "danger")
 
     def _version_label_text(self) -> str:
         """「当前版本」行文案：静默检查发现过新版本（≠ 当前版本）时旁注提示。

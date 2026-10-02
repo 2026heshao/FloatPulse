@@ -78,6 +78,7 @@ from src.main_window import MainWindow
 from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
     apply_app_font
 from src.controls import ScreenToast
+from src import icon_render
 from src.constants import sanitize_filename, DEFAULT_THEME
 from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
@@ -412,13 +413,12 @@ class _BallSurface(QWidget):
                 QRectF(self._pixmap.rect()),
             )
         else:
-            # 降级：图标不存在时绘制灯泡 emoji
-            painter.setPen(QColor(255, 255, 255, 235))
-            painter.setFont(QFont("Microsoft YaHei", 15, QFont.Weight.Bold))
-            painter.drawText(
-                QRectF(0, 0, self.width(), self.height()),
-                Qt.AlignmentFlag.AlignCenter, "💡"
-            )
+            # 降级：图标不存在时用自绘 knowledge 图标顶上（UI 重构 03：去 emoji）
+            s = vis_r * 1.1
+            icon_render.paint_icon(
+                painter, "knowledge",
+                QRectF(cx - s / 2.0, cy - s / 2.0, s, s),
+                QColor(255, 255, 255, 235))
         # 边缘描边：让球体从桌面上"浮起"（浅底压暗边、深底提亮边）
         edge = QColor(255, 255, 255, 34) if self._theme == "dark" \
             else QColor(0, 0, 0, 20)
@@ -434,7 +434,10 @@ class _BallSurface(QWidget):
         if not text:
             return
         d = max(17.0, vis_r * 0.60)            # 徽标高度
-        font = QFont("Microsoft YaHei", max(8, int(d * 0.52)), QFont.Weight.Bold)
+        # UI 重构 03：徽标数字改等宽 11px（数字位对齐，计数变化时不跳动）
+        font = QFont("Consolas")
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.Bold)
         text_w = QFontMetrics(font).horizontalAdvance(text)
         w = max(d, text_w + 10.0)              # 数字长时自动变胶囊形
         rect = QRectF(cx + vis_r * 0.68 - w / 2.0,

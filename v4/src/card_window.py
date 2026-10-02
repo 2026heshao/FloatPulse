@@ -57,10 +57,13 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import tune_list_scrolling, SmoothButton, IconButton, UndoBar
+from src.controls import (
+    tune_list_scrolling, SmoothButton, IconButton, IconLabel, UndoBar,
+)
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
+from src.icon_render import icon as render_icon
 from src.glass import GlassPanel, NavIndicator, draw_soft_shadow
 from src.app_paths import get_screen_geometry
 from src.constants import (
@@ -71,20 +74,21 @@ from src import motion
 from datetime import date as _date
 
 
-# Tab 定义（纯图标，无数字）
+# Tab 定义（纯文字；图标由 _TAB_ICONS 提供自绘名，首字段仅占位）
+# UI 重构 03：原 emoji 列已清空 —— 渲染一律走 icons.py 自绘（见 _TAB_ICONS）
 _TABS = [
-    ("🧩", "碎片"),
-    ("💡", "知识卡片"),
-    ("📋", "日程任务"),
-    ("📝", "临时笔记"),
-    ("🌐", "网址导航"),
-    ("📎", "临时素材"),
-    ("🚀", "软件导航"),
+    ("", "碎片"),
+    ("", "知识卡片"),
+    ("", "日程任务"),
+    ("", "临时笔记"),
+    ("", "网址导航"),
+    ("", "临时素材"),
+    ("", "软件导航"),
 ]
 _TAB_KEYS = ["fragment", "card", "task", "note", "nav", "asset", "app"]
 
 # Tab 键 → icons.py 图标名（P1：emoji 字形改自绘，消除字体缺字形时的方框；
-# _TABS 里的 emoji 仅作历史参照，不再参与渲染）
+# UI 重构 03 起 _TABS 首字段已清空，图标全部由本表提供）
 _TAB_ICONS = {
     "fragment": "fragments",
     "card": "knowledge",
@@ -96,7 +100,7 @@ _TAB_ICONS = {
 }
 
 # 左侧 Tab 栏尺寸（固定宽度，不再展开收起）
-_TAB_BAR_WIDTH = 48         # 固定宽度
+_TAB_BAR_WIDTH = 44         # 固定宽度（UI 重构 03：48→44，省 4px 给内容区）
 _TAB_BTN_SIZE = 40          # 图标按钮尺寸
 _TAB_INDICATOR_W = 3        # 选中竖条指示器宽度
 _TAB_INDICATOR_H = 24       # 选中竖条指示器高度
@@ -203,58 +207,44 @@ class _AssetItemWidget(QWidget):
         tip += f"收录: {self._asset.added_time}\n"
         tip += "拖拽取出 | 双击打开 | 右键菜单"
         if not self._is_valid:
-            tip += "\n⚠ 文件已失效"
+            tip += "\n文件已失效"
         return tip
 
     def _load_icon(self):
-        """加载缩略图或文件类型图标（缩略图走缓存 + 解码期缩放，大图不卡）"""
-        if not self._is_valid:
-            self._icon_label.setText("⚠️")
-            self._icon_label.setStyleSheet("font-size: 24px; color: #999;")
+        """加载缩略图（缩略图走缓存 + 解码期缩放，大图不卡）。
+
+        UI 重构 03：非图片文件类型图 / 失效提示 / 解码失败三处原用 emoji 占位，
+        对应图标位依赖 01 包的 ``warning`` / ``image`` / ``file_*`` 自绘图标，
+        本包先去 emoji（图标位暂留空），待 01 合并后补齐自绘。
+        """
+        if not self._is_valid or not self._asset.is_image:
             return
 
-        if self._asset.is_image:
-            aid = self._asset.asset_id
-            cached = self._thumb_cache.get(aid)
-            if cached is None:
-                # 缓存未命中：QImageReader 解码期先缩到 2x 目标尺寸，
-                # 避免整图载入内存（截图 PNG 可达数 MB）
-                reader = QImageReader(self._asset.stored_path)
-                reader.setAutoTransform(True)
-                size = reader.size()
-                if size.isValid() and (size.width() > 128 or size.height() > 128):
-                    scale = 128 / max(size.width(), size.height())
-                    reader.setScaledSize(QSize(int(size.width() * scale),
-                                               int(size.height() * scale)))
-                img = reader.read()
-                if not img.isNull():
-                    pix = QPixmap.fromImage(img).scaled(
-                        64, 64,
-                        Qt.AspectRatioMode.KeepAspectRatio,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    cached = pix
-                else:
-                    cached = False
-                self._thumb_cache[aid] = cached
-            if cached is not False:
-                self._icon_label.setPixmap(cached)
+        aid = self._asset.asset_id
+        cached = self._thumb_cache.get(aid)
+        if cached is None:
+            # 缓存未命中：QImageReader 解码期先缩到 2x 目标尺寸，
+            # 避免整图载入内存（截图 PNG 可达数 MB）
+            reader = QImageReader(self._asset.stored_path)
+            reader.setAutoTransform(True)
+            size = reader.size()
+            if size.isValid() and (size.width() > 128 or size.height() > 128):
+                scale = 128 / max(size.width(), size.height())
+                reader.setScaledSize(QSize(int(size.width() * scale),
+                                           int(size.height() * scale)))
+            img = reader.read()
+            if not img.isNull():
+                pix = QPixmap.fromImage(img).scaled(
+                    64, 64,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                cached = pix
             else:
-                self._icon_label.setText("🖼️")
-                self._icon_label.setStyleSheet("font-size: 28px;")
-        else:
-            # 非图片文件：根据扩展名显示图标
-            ext = os.path.splitext(self._asset.original_name)[1].lower()
-            icon_map = {
-                ".txt": "📄", ".pdf": "📕", ".doc": "📘", ".docx": "📘",
-                ".xls": "📗", ".xlsx": "📗", ".ppt": "📙", ".pptx": "📙",
-                ".zip": "📦", ".rar": "📦", ".7z": "📦",
-                ".mp3": "🎵", ".wav": "🎵", ".mp4": "🎬", ".avi": "🎬",
-                ".py": "🐍", ".js": "📜", ".json": "📋",
-            }
-            icon = icon_map.get(ext, "📄")
-            self._icon_label.setText(icon)
-            self._icon_label.setStyleSheet("font-size: 28px;")
+                cached = False
+            self._thumb_cache[aid] = cached
+        if cached is not False:
+            self._icon_label.setPixmap(cached)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._is_valid:
@@ -319,10 +309,14 @@ class _AssetItemWidget(QWidget):
         # 跟随当前主题（原先硬编码 light，深色主题下会弹出白底菜单）
         menu.setStyleSheet(get_menu_qss(self._theme))
 
-        act_open = menu.addAction("📂 打开")
-        act_copy = menu.addAction("📋 复制路径")
+        act_open = menu.addAction("打开")
+        act_copy = menu.addAction("复制路径")
         menu.addSeparator()
-        act_delete = menu.addAction("🗑 删除")
+        act_delete = menu.addAction("删除")
+        # 删除项危险语义：Qt 菜单无法按 action 单独设文字色，
+        # 用 danger 色的自绘 trash 图标承载（UI 重构 03）
+        act_delete.setIcon(
+            render_icon("trash", 14, get_colors(self._theme)["danger"]))
 
         action = menu.exec(event.globalPos())
         if action == act_open:
@@ -353,7 +347,7 @@ class CardWindow(QWidget):
     WINDOW_WIDTH = 440
     WINDOW_HEIGHT = 340
     CARD_MARGIN = 16             # 窗口四周阴影留白（卡片内容仍是 440×340）
-    CARD_RADIUS = 22             # 卡片圆角（与设计稿一致）
+    CARD_RADIUS = 12             # 卡片圆角（UI 重构 03：22→12，小窗配大圆角不划算）
     CONTENT_MARGIN = 16          # 内容区四周内边距
     CLOSE_BTN_SIZE = 22          # 常驻模式的右上角关闭按钮
     CLOSE_BTN_MARGIN = 8         # 该按钮距卡片右/上边缘的内边距
@@ -651,6 +645,24 @@ class CardWindow(QWidget):
         except Exception:
             pass
 
+    def _make_page_title(self, icon_name: str, text: str) -> QWidget:
+        """页标题 = 自绘图标 + 文字。
+
+        文字仍挂 ``#titleLabel`` —— 沿用 card_window QSS 口径，零样式回归；
+        图标取当前主题 ``primary`` 色（换主题时在 :meth:`_apply_style` 重取）。
+        """
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(IconLabel(icon_name, 15,
+                                get_colors(self._theme)["primary"]))
+        label = QLabel(text)
+        label.setObjectName("titleLabel")
+        lay.addWidget(label)
+        lay.addStretch()
+        return row
+
     # ==================================================================
     # 知识卡片页面
     # ==================================================================
@@ -660,9 +672,7 @@ class CardWindow(QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(10)
 
-        self._title_label = QLabel("💡 知识卡片")
-        self._title_label.setObjectName("titleLabel")
-        v.addWidget(self._title_label)
+        v.addWidget(self._make_page_title("knowledge", "知识卡片"))
 
         self._content_label = QLabel()
         self._content_label.setObjectName("contentLabel")
@@ -671,7 +681,7 @@ class CardWindow(QWidget):
         self._content_label.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(self._content_label, 1)
 
-        self._next_btn = SmoothButton("下一张  ➜")
+        self._next_btn = SmoothButton("下一张")
         self._next_btn.setObjectName("nextBtn")
         self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._next_btn.clicked.connect(self.next_card)
@@ -770,9 +780,7 @@ class CardWindow(QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(6)
 
-        self._nav_title = QLabel("🌐 网址导航")
-        self._nav_title.setObjectName("titleLabel")
-        v.addWidget(self._nav_title)
+        v.addWidget(self._make_page_title("nav", "网址导航"))
 
         # 可滚动区域展示分组和站点（仅纵向滚动，禁止横向滚动条）
         self._nav_scroll = QScrollArea()
@@ -905,9 +913,7 @@ class CardWindow(QWidget):
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(6)
 
-        self._app_title = QLabel("🚀 软件导航")
-        self._app_title.setObjectName("titleLabel")
-        v.addWidget(self._app_title)
+        v.addWidget(self._make_page_title("apps", "软件导航"))
 
         # 可滚动区域展示软件网格（仅纵向滚动）
         self._app_scroll = QScrollArea()
@@ -1010,7 +1016,7 @@ class CardWindow(QWidget):
             else:
                 # exe 失效：置灰禁用，悬浮提示说明原因
                 btn.setEnabled(False)
-                btn.setToolTip(f"{name}\n{exe_path}\n⚠ 可执行文件不存在")
+                btn.setToolTip(f"{name}\n{exe_path}\n可执行文件不存在")
 
             self._app_grid.addWidget(btn, placed // cols, placed % cols)
             placed += 1
@@ -1026,9 +1032,7 @@ class CardWindow(QWidget):
 
         # 顶部标题 + 计数
         header = QHBoxLayout()
-        self._asset_title = QLabel("📎 临时素材")
-        self._asset_title.setObjectName("titleLabel")
-        header.addWidget(self._asset_title)
+        header.addWidget(self._make_page_title("assets", "临时素材"))
         header.addStretch()
         self._asset_count_label = QLabel("共 0 个")
         self._asset_count_label.setObjectName("hintLabel")
@@ -1182,6 +1186,9 @@ class CardWindow(QWidget):
         # P1：图标按钮（侧 Tab + 关闭钮）的位图颜色不在 QSS 管辖内
         for btn in self.findChildren(IconButton):
             btn.apply_theme(self._theme)
+        # 页标题的自绘图标（IconLabel）同样不在 QSS 管辖内
+        for ic in self.findChildren(IconLabel):
+            ic.set_color(QColor(get_colors(self._theme)["primary"]))
 
     def apply_theme(self, theme_name: str):
         if theme_name not in ("light", "dark"):
