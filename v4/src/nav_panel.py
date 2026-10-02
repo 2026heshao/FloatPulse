@@ -115,8 +115,15 @@ class _NavList(QWidget):
         # 一旦 show 会变成独立弹窗（2026-09-24 用户实测踩坑）。
         # A3 通用化：QLabel 占位 → EmptyState（自绘图标+标题+提示），
         # 无动作钮 → 鼠标全透明，不挡列表自身的拖拽命中测试
+        # ★2026-10-02：必须走关键字 parent= —— EmptyState 的第 4 个
+        #   位置参数是 action_text（不是 parent）。此前写成位置参数，
+        #   于是 self(_NavList) 被当成动作钮文本、parent 恒为 None，
+        #   本控件成了顶层窗口：首次进入网址导航页（行列表尚未填充、
+        #   _relayout 里 show() 一次）会在屏幕左上角闪一个黑框，
+        #   数据到位后 hide() 立刻消失；此后 _rows 非空不再 show，
+        #   所以只在「每次启动后的首次进入」出现。
         self._empty_label = EmptyState(
-            "nav", "暂无站点", "先在上方添加一个常用的网址", self)
+            "nav", "暂无站点", "先在上方添加一个常用的网址", parent=self)
         self._empty_label.hide()
 
         # ---- 拖拽状态 ----
