@@ -19,7 +19,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import update_checker as uc                     # noqa: E402
-from src.app_version import APP_VERSION                  # noqa: E402
+from src.app_version import APP_VERSION, parse_version   # noqa: E402
 from src.update_checker import (                         # noqa: E402
     RELEASES_API_URL, check_headers, extract_tag, is_newer, parse_tag,
 )
@@ -47,7 +47,15 @@ class TestParseTag:
 
 class TestIsNewer:
     def test_newer_patch(self):
-        assert is_newer("v4.7.1") is True
+        """比当前版本高一个补丁号 → 算新版。
+
+        ★ 必须从 APP_VERSION 推导，不能写死字面量：写死会在下次升版时
+        假红（2026-10-02 升 4.8.0 时踩过——硬编码的 v4.7.1 一夜之间从
+        「更新的版本」变成「更旧的版本」）。
+        """
+        parts = list(parse_version(APP_VERSION)) + [0, 0, 0]
+        major, minor, patch = parts[0], parts[1], parts[2]
+        assert is_newer("v%d.%d.%d" % (major, minor, patch + 1)) is True
 
     def test_equal_is_not_newer(self):
         assert is_newer(f"v{APP_VERSION}") is False

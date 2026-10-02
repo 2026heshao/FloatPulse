@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import (
 from src.glass_dialog import GlassDialog
 
 from src import plugin_market
-from src.controls import EmptyState, IconButton, PageTitle
+from src.controls import SmoothButton, EmptyState, IconButton, PageTitle
 from src.plugin_net import make_async_getter, make_async_bytes_getter
 from src.update_checker import RELEASES_API_URL, check_headers
 
@@ -237,12 +237,12 @@ class PluginsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_dir_btn = QPushButton("📁 打开插件目录")
+        open_dir_btn = SmoothButton("📁 打开插件目录")
         open_dir_btn.setObjectName("secondaryBtn")
         open_dir_btn.clicked.connect(self._on_open_plugins_dir)
         toolbar.addWidget(open_dir_btn)
 
-        open_store_btn = QPushButton("🏪 插件商店")
+        open_store_btn = SmoothButton("🏪 插件商店")
         open_store_btn.setObjectName("secondaryBtn")
         open_store_btn.setToolTip("浏览商店目录里的可安装插件包（独立窗口）")
         open_store_btn.clicked.connect(self._on_open_store_dialog)
@@ -607,7 +607,7 @@ class PluginsPanel(QWidget):
         if toggle_btn is not None:
             bottom.addWidget(toggle_btn)
 
-        open_btn = QPushButton("📁 打开目录")
+        open_btn = SmoothButton("📁 打开目录")
         open_btn.setObjectName("secondaryBtn")
         open_btn.clicked.connect(
             lambda _checked=False, p=lp.path: self._on_open_dir(p))
@@ -615,7 +615,7 @@ class PluginsPanel(QWidget):
 
         readme = find_usage_file(lp.path)
         if readme:
-            readme_btn = QPushButton("📄 查看使用说明")
+            readme_btn = SmoothButton("📄 查看使用说明")
             readme_btn.setObjectName("secondaryBtn")
             readme_btn.clicked.connect(
                 lambda _checked=False, p=readme: self._on_open_file(p))
@@ -730,7 +730,7 @@ class PluginsPanel(QWidget):
         bottom.setSpacing(8)
         bottom.addStretch()
 
-        install_btn = QPushButton("⬇ 安装")
+        install_btn = SmoothButton("⬇ 安装")
         install_btn.setObjectName("primaryBtn")
         install_btn.setToolTip(
             "把该插件包解压到插件安装目录并加载；源包保留在商店目录，"
@@ -749,7 +749,7 @@ class PluginsPanel(QWidget):
                 n=title_text: self._on_install(p, n))
         bottom.addWidget(install_btn)
 
-        open_btn = QPushButton("📁 打开目录")
+        open_btn = SmoothButton("📁 打开目录")
         open_btn.setObjectName("secondaryBtn")
         open_btn.clicked.connect(
             lambda _checked=False, p=getattr(entry, "path", ""):
@@ -802,7 +802,7 @@ class PluginsPanel(QWidget):
         if path:
             bottom = QHBoxLayout()
             bottom.addStretch()
-            open_btn = QPushButton("📁 打开目录")
+            open_btn = SmoothButton("📁 打开目录")
             open_btn.setObjectName("secondaryBtn")
             open_btn.clicked.connect(
                 lambda _checked=False, p=path: self._on_open_dir(p))
@@ -863,7 +863,7 @@ class PluginsPanel(QWidget):
         if not aid or not hasattr(first, "enabled"):
             return None
         on = bool(first.enabled())
-        btn = QPushButton("⏸ 停用" if on else "▶ 启用")
+        btn = SmoothButton("⏸ 停用" if on else "▶ 启用")
         btn.setObjectName("secondaryBtn")
         btn.setToolTip("停用后不挂右键菜单、不绑热键（不卸载插件模块），"
                        "状态会记住，重启后依然生效")
@@ -1163,7 +1163,7 @@ class PluginStoreDialog(GlassDialog):
         body.addWidget(self._installed_hint)
 
         # ---- 在线市场（2026-09-30 起，用户主动点击才联网）----
-        self._online_btn = QPushButton("🌐 检查在线市场")
+        self._online_btn = SmoothButton("🌐 检查在线市场")
         self._online_btn.setObjectName("secondaryBtn")
         self._online_btn.setToolTip(
             "联网拉取官方插件市场索引（GitHub API）。\n"
@@ -1458,7 +1458,7 @@ class PluginStoreDialog(GlassDialog):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         bottom.addStretch()
-        btn = QPushButton("⬇ 下载安装")
+        btn = SmoothButton("⬇ 下载安装")
         btn.setObjectName("primaryBtn")
         btn.setToolTip(
             "从 GitHub Releases 下载插件包（sha256 校验后放进商店目录）"

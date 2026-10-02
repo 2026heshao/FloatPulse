@@ -30,7 +30,7 @@ from src.constants import (
 )
 from src.note_manager import Note
 from src.theme import DEFAULT_THEME, get_colors
-from src.controls import EmptyState, IconButton, PageTitle
+from src.controls import tune_list_scrolling, EmptyState, IconButton, PageTitle
 
 # 手动命名标题的长度上限（与重命名对话框一致）
 _TITLE_MAX_LEN = 50
@@ -156,6 +156,7 @@ class NotesPanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         self._note_list = QListWidget()
+        tune_list_scrolling(self._note_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._note_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._note_list.customContextMenuRequested.connect(self._on_context_menu)
         self._note_list.currentItemChanged.connect(self._on_selected)

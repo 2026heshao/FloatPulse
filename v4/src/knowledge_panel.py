@@ -9,7 +9,7 @@
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
     QMessageBox,
 )
@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QTimer
 
 from src.constants import PARAGRAPH_PREVIEW_LEN
 from src.glass_dialog import GlassDialog
-from src.controls import EmptyState, IconButton, PageTitle
+from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 
 # 搜索去抖毫秒数（与碎片页 SEARCH_DEBOUNCE_MS 同值；两面板各自本地定义，避免跨面板耦合）
 SEARCH_DEBOUNCE_MS = 250
@@ -56,7 +56,7 @@ class KnowledgePanel(QWidget):
         add_btn.clicked.connect(self._on_append)
         toolbar.addWidget(add_btn)
 
-        add_frag_btn = QPushButton("📥 加入碎片池")
+        add_frag_btn = SmoothButton("📥 加入碎片池")
         add_frag_btn.setObjectName("secondaryBtn")
         add_frag_btn.clicked.connect(self._on_add_to_fragments)
         toolbar.addWidget(add_frag_btn)
@@ -89,6 +89,7 @@ class KnowledgePanel(QWidget):
 
         # ---- 段落列表（多选） ----
         self._kb_list = QListWidget()
+        tune_list_scrolling(self._kb_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._kb_list.setObjectName("kbList")
         # 长列表（300+ 段）：垂直滚动条常驻，滑块样式见 theme.py 的 #kbList 规则
         self._kb_list.setVerticalScrollBarPolicy(

@@ -48,6 +48,7 @@ from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QShortcut, QKeySequenc
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
 from src import motion
+from src import controls
 from src import icon_render
 from src.icons import NAV_ICON, PLUGIN_PAGE_ICON, strip_leading_emoji
 from src.app_version import APP_VERSION
@@ -61,7 +62,7 @@ from src.nav_layout import (
     reorder_within_group,
 )
 from src.glass import GlassPanel, NavIndicator, NavGroupHeader
-from src.controls import IconButton, PageTitle, ScreenToast
+from src.controls import IconButton, PageTitle, ScreenToast, SmoothButton
 from src.app_paths import find_icon_file, get_screen_geometry
 from src.fragments_panel import FragmentsPanel
 from src.tasks_panel import TasksPanel
@@ -139,8 +140,12 @@ NAV_GROUP_STAGGER_MS = 12      # 逐条错峰（stagger），最多叠加 4~5 �
 NAV_ARROW_MS = 240             # 箭头旋转时长
 
 
-class _NavButton(QPushButton):
+class _NavButton(SmoothButton):
     """左栏功能页导航按钮：普通点击切页 + 纵向拖动换位。
+
+    基类 SmoothButton（清单 S2/S4）：hover/press 背景走 overlay 插值、
+    按下为绘制级下沉 —— navBtn 不再有 QSS 按下态背景/margin 变化，
+    拖拽期间 sizeHint 恒定，行高 +1px 问题从根上消失。
 
     - press 记录起点 → move 位移超过 ``NAV_DRAG_THRESHOLD`` 才进入拖拽，
       未超阈值的 press-release 仍是一次正常的页面切换点击（不破坏现有点击）；
@@ -183,6 +188,9 @@ class _NavButton(QPushButton):
             self._is_dragging = False
             self._press_global = None
             self.setDown(False)
+            # 拖拽落定吞掉了 release（不调 super），SmoothButton 的按下
+            # 过渡不会被 mouseReleaseEvent 收回 —— 必须显式回弹
+            self.cancel_press_feedback()
             self.drag_finished.emit(self, event.globalPosition().toPoint())
             event.accept()
             return
@@ -277,6 +285,7 @@ class MainWindow(QWidget):
     auto_hide_seconds_changed = pyqtSignal(int)  # 悬浮球空闲吸边隐藏秒数变更
     auto_hide_enabled_changed = pyqtSignal(bool)  # 悬浮球空闲吸边自动隐藏总开关变更
     ball_size_changed = pyqtSignal(int)          # 悬浮球球体直径变更
+    mini_icon_size_changed = pyqtSignal(int)    # 小卡片软件导航页图标边长变更
     hide_on_fullscreen_changed = pyqtSignal(bool)  # 全屏应用自动隐藏开关变更
     quick_capture_changed = pyqtSignal()         # 快速捕捉设置（开关/热键）变更
     screenshot_changed = pyqtSignal()            # 截图钉屏设置（开关/热键）变更
@@ -297,6 +306,8 @@ class MainWindow(QWidget):
         self._config = config_manager
         # 减弱动效总闸（#14）：启动即按配置置位，motion.duration 单点生效
         motion.set_reduce_motion(bool(config_manager.get("reduce_motion", False)))
+        # 按钮丝滑过渡（清单 S2）：启动按档位置位；设置页变更走广播接线
+        controls.set_ui_speed(config_manager.get("anim_speed", 1.0))
         self._clipboard_monitor = clipboard_monitor
         self._temp_asset_manager = temp_asset_manager
         self._nav_manager = nav_manager
@@ -2334,6 +2345,9 @@ class MainWindow(QWidget):
             except (AttributeError, TypeError, ValueError):
                 pass
             self.anim_speed_changed.connect(w.set_anim_speed)
+            # 按钮/通知等动效同步跟档（controls.set_ui_speed 单一入口，全进程生效）
+            controls.set_ui_speed(self.anim_speed)
+            self.anim_speed_changed.connect(controls.set_ui_speed)
 
     def _start_lazy_warmup(self):
         """show 后逐页后台预热：每拍构建一页并替换占位（一次性）。
@@ -3073,12 +3087,13 @@ class MainWindow(QWidget):
         • <b>单实例运行</b>：重复启动会唤醒已在运行的窗口，不会开出第二个进程</p>
 
         <h3>⚙️ 设置</h3>
-        <p>• <b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——🎨 外观 / 🔵 悬浮球 / 📋 剪贴板与碎片 / 🖼 临时素材 / ⚡ 全局工具 / 🚀 启动与系统 / 📤 导出 / 🧠 AI 配置 / ℹ️ 关于，点分类即切换<br>
+        <p>• <b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——🎨 外观 / 🔵 悬浮球 / 📋 剪贴板与碎片 / 🖼 临时素材 / ⚡ 全局工具 / 🍅 番茄钟 / 🚀 启动与系统 / 📤 导出 / 🧠 AI 配置 / ℹ️ 关于，点分类即切换<br>
         • <b>外观</b>：浅色 / 深色主题一键切换、动画速度、软件卡片尺寸<br>
         • <b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸<br>
         • <b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片<br>
         • <b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小<br>
-        • <b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）、番茄钟（开关 + 专注 / 休息时长 + 自动进入休息）<br>
+        • <b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）<br>
+        • <b>番茄钟</b>：开关、专注时长（1-120 分钟）、休息时长（1-60 分钟）、自动进入休息；计时由悬浮球外圈进度环呈现，右键球体开始 / 暂停 / 结束<br>
         • <b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务提醒（汇总逾期 / 今日到期 / 未安排日期的未完成任务）<br>
         • <b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）<br>
         • <b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「💾 保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）<br>

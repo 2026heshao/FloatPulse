@@ -24,7 +24,7 @@
 from datetime import date as _date
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QDialog,
     QFormLayout, QMessageBox, QDateEdit,
 )
@@ -39,7 +39,7 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import EmptyState, IconButton, PageTitle, UndoBar
+from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle, UndoBar
 from src.constants import CHECK_ANIM_MS
 from src import motion
 from src.theme import get_colors
@@ -133,6 +133,7 @@ class TasksPanel(QWidget):
 
         # ---- 任务列表（多选 + 自定义行委托） ----
         self._task_list = QListWidget()
+        tune_list_scrolling(self._task_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._task_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self._task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._task_list.customContextMenuRequested.connect(self._on_context_menu)
@@ -159,7 +160,7 @@ class TasksPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
 
-        toggle_btn = QPushButton("✓ 批量完成")
+        toggle_btn = SmoothButton("✓ 批量完成")
         toggle_btn.setObjectName("secondaryBtn")
         toggle_btn.clicked.connect(self._on_batch_toggle)
         bottom.addWidget(toggle_btn)
@@ -171,7 +172,7 @@ class TasksPanel(QWidget):
 
         bottom.addStretch()
 
-        clear_done_btn = QPushButton("清除已完成")
+        clear_done_btn = SmoothButton("清除已完成")
         clear_done_btn.setObjectName("secondaryBtn")
         clear_done_btn.clicked.connect(self._on_clear_done)
         bottom.addWidget(clear_done_btn)

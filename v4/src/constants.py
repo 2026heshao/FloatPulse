@@ -54,6 +54,22 @@ CHECK_BOUNCE_SCALE = 1.15
 # 撤销提示条自动隐藏时长（毫秒）——误勾撤销窗口。
 UNDO_BAR_MS = 5000
 
+# ---- 小卡片（悬浮球旁）软件导航页：图标边长与由此推出的按钮边长 ----
+# 三处共用，故收在此处：card_window（渲染）、settings_panel（步进器范围）、
+# config._CONFIG_RANGES（越界丢弃）。默认值 36 与历史硬编码一致，
+# 老用户视觉零变化。上限 56 的依据：内容区可用宽
+# ≈ 440 - 48(侧栏) - 40(边距) = 352px，按钮 96px 时仍排得下 3 列。
+MINI_ICON_MIN = 24
+MINI_ICON_MAX = 56
+MINI_ICON_DEFAULT = 36
+# 按钮边长 = 图标 + 40（图标上下留白 24px + 名称文字带约 16px）；36 → 76。
+MINI_BTN_PAD = 40
+
+
+def mini_btn_size(icon_px: int) -> int:
+    """小卡片图标边长 → 按钮边长（唯一换算点，别处不要另写公式）。"""
+    return max(MINI_ICON_MIN, min(MINI_ICON_MAX, int(icon_px))) + MINI_BTN_PAD
+
 # ---- 文件名非法字符净化 ----
 # Windows 不允许出现在文件名中的字符（含保留设备名前缀风险由调用方规避）。
 # 集中定义便于各落盘点（拖拽落盘、素材复制）复用同一套净化规则。

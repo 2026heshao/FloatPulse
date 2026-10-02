@@ -44,9 +44,9 @@ class TestSettingsCategories:
         # AI 总配置（插件后端单一真相源）与关于必须各占一个分类
         assert "ai" in keys and "about" in keys
 
-    def test_nine_categories(self):
-        # 8 个行为配置分类 + 关于
-        assert len(SETTINGS_CATEGORIES) == 9
+    def test_ten_categories(self):
+        # 9 个行为配置分类 + 关于（2026-10-02 番茄钟从全局工具独立成分类）
+        assert len(SETTINGS_CATEGORIES) == 10
 
 
 # ====================================================================
@@ -122,7 +122,7 @@ class TestRowsSurviveSplit:
     @pytest.mark.parametrize("attr", [
         # 外观
         "_set_theme_light", "_set_theme_dark", "_set_anim_speed",
-        "_set_card_size",
+        "_set_card_size", "_set_mini_icon_size",
         # 悬浮球
         "_set_ball_visible", "_set_ball_size", "_set_auto_hide_enabled",
         "_set_auto_hide", "_set_hide_fullscreen", "_set_card_always_show",
@@ -133,7 +133,9 @@ class TestRowsSurviveSplit:
         "_set_temp_asset_max_days", "_set_asset_thumb",
         # 全局工具
         "_set_quick_capture", "_set_capture_hotkey", "_set_screenshot",
-        "_set_screenshot_hotkey", "_set_pomodoro", "_set_pomodoro_focus",
+        "_set_screenshot_hotkey",
+        # 番茄钟（2026-10-02 独立分类）
+        "_set_pomodoro", "_set_pomodoro_focus",
         "_set_pomodoro_break", "_set_pomodoro_auto",
         # 启动与系统
         "_set_autostart", "_set_restore_last_page", "_set_close_to_tray",

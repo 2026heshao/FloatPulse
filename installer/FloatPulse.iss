@@ -2,7 +2,7 @@
 ; FloatPulse 安装包脚本（Inno Setup 6，per-user 免管理员）
 ; ====================================================================
 ; 编译（版本号由 build_release.py 传入，**不要在这里手改**）：
-;     ISCC /DAPP_VERSION=4.7.0 installer\FloatPulse.iss
+;     ISCC /DAPP_VERSION=4.8.0 installer\FloatPulse.iss
 ;
 ; 设计口径：
 ;   · per-user 安装（PrivilegesRequired=lowest）→ 默认装到

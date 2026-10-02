@@ -36,7 +36,7 @@ import random
 from urllib.parse import urlparse
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QMenu, QToolButton,
     QStackedWidget, QListWidget, QListWidgetItem, QLineEdit, QDateEdit,
     QDialog, QFormLayout, QTextEdit, QScrollArea,
@@ -57,7 +57,7 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import IconButton, UndoBar
+from src.controls import tune_list_scrolling, SmoothButton, IconButton, UndoBar
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
@@ -65,6 +65,7 @@ from src.glass import GlassPanel, NavIndicator, draw_soft_shadow
 from src.app_paths import get_screen_geometry
 from src.constants import (
     NOTE_AUTOSAVE_INTERVAL_MS, DEFAULT_THEME, CHECK_ANIM_MS,
+    MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT, mini_btn_size,
 )
 from src import motion
 from datetime import date as _date
@@ -99,6 +100,11 @@ _TAB_BAR_WIDTH = 48         # 固定宽度
 _TAB_BTN_SIZE = 40          # 图标按钮尺寸
 _TAB_INDICATOR_W = 3        # 选中竖条指示器宽度
 _TAB_INDICATOR_H = 24       # 选中竖条指示器高度
+
+# ===== 软件导航小卡片的图标尺寸 =====
+# 此前 icon_px=36 / btn_size=76 是两处独立硬编码，调设置页的「软件卡片尺寸」
+# 完全推不动小卡片（那是主窗口的键）。现统一由 ``app_mini_icon_size`` 驱动，
+# 范围常量在 src/constants.py（card_window / settings_panel / config 共用）。
 
 
 def _domain_of_url(url: str) -> str:
@@ -373,6 +379,8 @@ class CardWindow(QWidget):
         self._loading_note = False
         self._last_mode = "fragment"
         self._dragging = False
+        # 小卡片软件图标边长；None = 尚未从配置读入（mini_icon_size 懒读兜底）
+        self._mini_icon_size = None
         self._drag_offset = QPoint()
         self._note_save_timer = QTimer(self)
         self._note_save_timer.setSingleShot(True)
@@ -601,7 +609,7 @@ class CardWindow(QWidget):
             row_layout.addWidget(label)
 
             # 复制按钮
-            copy_btn = QPushButton("复制")
+            copy_btn = SmoothButton("复制")
             copy_btn.setObjectName("fragCopyBtn")
             copy_btn.setFixedSize(40, 24)
             copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -610,7 +618,7 @@ class CardWindow(QWidget):
             row_layout.addWidget(copy_btn)
 
             # 删除按钮
-            del_btn = QPushButton("删除")
+            del_btn = SmoothButton("删除")
             del_btn.setObjectName("fragDelBtn")
             del_btn.setFixedSize(40, 24)
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -663,7 +671,7 @@ class CardWindow(QWidget):
         self._content_label.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(self._content_label, 1)
 
-        self._next_btn = QPushButton("下一张  ➜")
+        self._next_btn = SmoothButton("下一张  ➜")
         self._next_btn.setObjectName("nextBtn")
         self._next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._next_btn.clicked.connect(self.next_card)
@@ -694,7 +702,7 @@ class CardWindow(QWidget):
         self._task_deadline.setDate(QDate.currentDate())
         self._task_deadline.setFixedWidth(120)
 
-        self._task_add_btn = QPushButton("添加")
+        self._task_add_btn = SmoothButton("添加")
         self._task_add_btn.setObjectName("taskAddBtn")
         self._task_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._task_add_btn.clicked.connect(self._on_add_task)
@@ -705,6 +713,7 @@ class CardWindow(QWidget):
         v.addLayout(input_bar)
 
         self._task_list = QListWidget()
+        tune_list_scrolling(self._task_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._task_list.setObjectName("taskList")
         self._task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._task_list.customContextMenuRequested.connect(self._on_task_context_menu)
@@ -837,7 +846,7 @@ class CardWindow(QWidget):
         grid.setVerticalSpacing(spacing)
 
         for i, site in enumerate(sites):
-            card = QPushButton()
+            card = SmoothButton()
             card.setObjectName("navSiteCard")
             card.setCursor(Qt.CursorShape.PointingHandCursor)
             card.setToolTip(f"{site.title}\n{site.url}" if site.title != site.url else site.url)
@@ -958,11 +967,10 @@ class CardWindow(QWidget):
         )
 
         # 小卡片内容区可用宽度：440 - 侧栏48 - 内容边距32 - 内层边距8 ≈ 352
-        btn_size = 76
+        icon_px = self.mini_icon_size
+        btn_size = mini_btn_size(icon_px)
         available = self.WINDOW_WIDTH - _TAB_BAR_WIDTH - 40
         cols = max(1, available // (btn_size + 6))
-
-        icon_px = 36  # 小卡片图标尺寸（小于主窗口）
 
         placed = 0  # 实际放置计数（非法条目跳过不留洞）
         for app in apps:
@@ -1275,6 +1283,43 @@ class CardWindow(QWidget):
         if refresher is not None:
             refresher()
 
+    @property
+    def mini_icon_size(self) -> int:
+        """小卡片软件导航页的图标边长（像素）。
+
+        懒读配置：``set_config_manager`` 在构造之后才注入，所以不能放__init__；
+        未注入时回退默认 36（与历史硬编码值一致）。取值已钳制在
+        MINI_ICON_MIN..MAX，脏配置/越界值不会撑破 352px 的内容区。
+        """
+        if self._mini_icon_size is not None:
+            return self._mini_icon_size
+        raw = MINI_ICON_DEFAULT
+        if self._config_manager is not None:
+            try:
+                raw = int(self._config_manager.get("app_mini_icon_size",
+                                                  MINI_ICON_DEFAULT))
+            except (TypeError, ValueError):
+                raw = MINI_ICON_DEFAULT
+        return max(MINI_ICON_MIN, min(MINI_ICON_MAX, raw))
+
+    def apply_icon_size(self, value: int):
+        """公开入口：设置页改「小卡片图标大小」后实时应用（D3 门面）。
+
+        值未变则直接返回（避免长按 ± 时反复重建网格）；
+        仅当小卡片正停在软件导航页且可见时才重建——不可见时下一次
+        ``_apply_mode_init("app")`` 自然会读到新值，无需提前重建。
+        """
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return
+        value = max(MINI_ICON_MIN, min(MINI_ICON_MAX, value))
+        if value == self._mini_icon_size:
+            return
+        self._mini_icon_size = value
+        if self.isVisible() and self.current_mode == "app":
+            self._refresh_app_page()
+
     def _switch_mode(self, mode: str):
         """切换 Tab 模式（即时切换，无页面转场）。
 
@@ -1389,6 +1434,8 @@ class CardWindow(QWidget):
 
     def set_config_manager(self, cm):
         self._config_manager = cm
+        # 换配置源 → 缓存的图标尺寸作废，让 mini_icon_size 按新源重读
+        self._mini_icon_size = None
 
     def set_asset_manager(self, am):
         """注入临时素材管理器"""

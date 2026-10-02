@@ -1,17 +1,21 @@
 # FloatPulse · 生活悬浮球
 
-[![Tests](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml/badge.svg)](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue)](README.md)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](requirements.txt)
-[![Qt](https://img.shields.io/badge/UI-PyQt6%206.7%2B-41cd52)](requirements.txt)
+![Tests](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml/badge.svg)
 
-**一款 Windows 桌面常驻悬浮球工具：剪贴板自动留存 → 素材临时中转 → 截图钉屏对照，手边的零碎一个球接住。**
+![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)
+
+![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue)
+
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+
+![Qt](https://img.shields.io/badge/UI-PyQt6%206.7%2B-41cd52)
+
+**一款 Windows 桌面常驻悬浮球工具：剪贴板自动留存 → 素材临时中转 → 截图钉屏对照，手边的零碎一个球接住。**  
 原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核；下载包 31 MB（解压后 75 MB），启动约 1 秒。
 
 | 主窗口（深色） | 主窗口（浅色） |
-|---|---|
-| ![主窗口](assets/images/preview-main-dark.png) | ![主窗口](assets/images/preview-main-light.png) |
+| ------- | ------- |
+| 主窗口     | 主窗口     |
 
 ---
 
@@ -21,33 +25,33 @@
 
 它不打算做你的第二大脑。碎片进来是什么样，出去还是什么样；能带走的是你主动挑出来存成笔记、丢进知识库、或导出进 Obsidian 的那些。
 
-| 能力 | FloatPulse | FocusCapture | Floatyball | Flow Launcher | Snipaste |
-|---|---|---|---|---|---|
-| 悬浮球常驻入口 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| 随手记录碎片 | ✅ 剪贴板自动收（为主）+ 快捕条 + 拖拽 | ✅ 剪贴板 | ⚠️ 拖放 | ❌ | ❌ |
-| 碎片分类管理 | ✅ 来源 + 内容语义双轴 | ❌ 仅时间流 | ❌ | ❌ | ❌ |
-| 碎片转笔记 / 入知识库 | ✅ 一键存为笔记、加入知识库 | ❌ | ❌ | ❌ | ❌ |
-| 碎片转任务 | ❌ 手动无入口（AI 文本工坊可自动提取待办） | ❌ | ❌ | ❌ | ❌ |
-| 临时素材中转 | ✅ 去重 + 缩略图 + 过期清理 | ❌ | ❌ | ❌ | ❌ |
-| 截图钉屏 | ✅ 含批注与撤销 | ❌ | ❌ | ❌ | ✅ |
-| 软件 / 网址启动 | ✅ 拖 exe 即建 | ❌ | ✅ AHK 动作 | ✅ | ❌ |
-| AI 总结 / 对话 | ✅ 可选，本地 + 云端双后端 | ❌ | ❌ | ❌ | ❌ |
-| 全局文件搜索 | ❌ | ❌ | ❌ | ✅ 含 Everything | ❌ |
-| 插件生态 | ⚠️ 外置插件 5 个，按需下载不预装 | ❌ | ✅ AHK | ✅ 200+ 社区插件 | ❌ |
-| 技术栈 | Python + PyQt6 | C# / WPF | AutoHotkey | C# / .NET | 闭源 |
-| GitHub Stars | 1 | 0 | 19 | 15,693 | 闭源 |
+| 能力           | FloatPulse              | FocusCapture | Floatyball | Flow Launcher  | Snipaste |
+| ------------ | ----------------------- | ------------ | ---------- | -------------- | -------- |
+| 悬浮球常驻入口      | ✅                       | ✅            | ✅          | ❌              | ❌        |
+| 随手记录碎片       | ✅ 剪贴板自动收（为主）+ 快捕条 + 拖拽  | ✅ 剪贴板        | ⚠️ 拖放      | ❌              | ❌        |
+| 碎片分类管理       | ✅ 来源 + 内容语义双轴           | ❌ 仅时间流       | ❌          | ❌              | ❌        |
+| 碎片转笔记 / 入知识库 | ✅ 一键存为笔记、加入知识库          | ❌            | ❌          | ❌              | ❌        |
+| 碎片转任务        | ❌ 手动无入口（AI 文本工坊可自动提取待办） | ❌            | ❌          | ❌              | ❌        |
+| 临时素材中转       | ✅ 去重 + 缩略图 + 过期清理       | ❌            | ❌          | ❌              | ❌        |
+| 截图钉屏         | ✅ 含批注与撤销                | ❌            | ❌          | ❌              | ✅        |
+| 软件 / 网址启动    | ✅ 拖 exe 即建              | ❌            | ✅ AHK 动作   | ✅              | ❌        |
+| AI 总结 / 对话   | ✅ 可选，本地 + 云端双后端         | ❌            | ❌          | ❌              | ❌        |
+| 全局文件搜索       | ❌                       | ❌            | ❌          | ✅ 含 Everything | ❌        |
+| 插件生态         | ⚠️ 外置插件 5 个，按需下载不预装     | ❌            | ✅ AHK      | ✅ 200+ 社区插件    | ❌        |
+| 技术栈          | Python + PyQt6          | C# / WPF     | AutoHotkey | C# / .NET      | 闭源       |
+| GitHub Stars | 1                       | 0            | 19         | 15,693         | 闭源       |
 
 **表里的 ❌ 不是缺陷，是取舍。** 全局文件搜索交给 Everything 和 Flow Launcher——它们在索引速度与搜索语法上做得更好，再做一个没有意义；插件生态刚起步，目前是 5 个外置插件 + 插件商店 + 打包器，社区插件的数量不跟任何人比，写 ⚠️ 就是 ⚠️。项目 Stars 是 1 也照实写 1：这是个还在自用打磨阶段的项目，没有外部用户验证，不装成「已被广泛使用」。
 
 **它不适合下面这些期待**——提前说清楚，省得装完才发现不是想要的：
 
-| 如果你想要 | 实际情况 |
-|---|---|
-| 全局文件搜索 | ❌ 交给 Everything / Flow Launcher，它们做得更好 |
-| 多端同步 / 手机也能看 | ❌ 本机单用户，没有服务端，也不会有 |
-| 替代你的笔记软件 | ❌ 它只是中转站，长文写作请交给 Obsidian / Notion |
-| 开箱即用的 AI | ❌ AI 是外置插件的可选能力，不配 key、不开本地服务就完全不联网 |
-| macOS / Linux 版 | ❌ Windows 10/11 only，且 UI 目前只有中文 |
+| 如果你想要           | 实际情况                                   |
+| --------------- | -------------------------------------- |
+| 全局文件搜索          | ❌ 交给 Everything / Flow Launcher，它们做得更好 |
+| 多端同步 / 手机也能看    | ❌ 本机单用户，没有服务端，也不会有                     |
+| 替代你的笔记软件        | ❌ 它只是中转站，长文写作请交给 Obsidian / Notion     |
+| 开箱即用的 AI        | ❌ AI 是外置插件的可选能力，不配 key、不开本地服务就完全不联网    |
+| macOS / Linux 版 | ❌ Windows 10/11 only，且 UI 目前只有中文       |
 
 *Stars 数据取自 GitHub API（仓库：`lch319/Floatyball`、`pengjie1115/FocusCapture`、`Flow-Launcher/Flow.Launcher`），2026-10-01 快照，之后会变化。完整竞品实测数据、赛道分析与「站不住的说法」清单属内部调研资料，未随仓库公开，需要可开 Issue 索取。*
 
@@ -56,6 +60,7 @@
 ## ✨ 功能特性
 
 ### 🎈 悬浮球（高频轻量入口）
+
 - 可拖拽、四向吸边隐藏、鼠标移近自动滑出
 - 悬停弹出 440×340 快捷卡片，滚轮翻卡、点击换卡
 - 拖文件到球 → 自动收入碎片池；拖入 `.exe/.lnk` → 生成软件启动器
@@ -65,13 +70,15 @@
 ![悬浮球 + 快捷卡片](assets/images/preview-card-dark.png)
 
 ### 🃏 快捷卡片（三模式）
-| 模式 | 行为 |
-|------|------|
-| 📚 知识卡片 | 随机抽取知识库段落供速查，悬停自动关闭 |
+
+| 模式      | 行为                               |
+| ------- | -------------------------------- |
+| 📚 知识卡片 | 随机抽取知识库段落供速查，悬停自动关闭              |
 | 📋 日程任务 | 输入区 + 任务列表 + 截止日期分组（逾期/今天/本周/以后） |
-| 📝 随时笔记 | 单条便签，800ms 防抖自动保存 |
+| 📝 随时笔记 | 单条便签，800ms 防抖自动保存                |
 
 ### 🤖 AI 助手（可选能力，本地 / 云端双后端）
+
 - **主窗口专属页面**（第一个页面插件）：`Ctrl+Alt+I` 或侧栏「🤖 AI 助手」进入，一键「总结任务 / 整理碎片 / 本周小结」读应用内数据，也可自由问答；输入框 **Enter 直发、Shift+Enter 换行**
 - **三种后端一套配置**：统一走 OpenAI 兼容协议——① 云端填 DeepSeek / 硅基流动地址与 key；② 纯本地接 Ollama（`127.0.0.1:11434`）；③ **自带本地推理**：浏览选择 llama-server.exe 与 .gguf 模型，点「启动」由插件拉起服务（默认端口 8093，显卡全量卸载，退出程序自动结束、不占残留显存），本地模式**断网可用**、数据不出机
 - **保存并测试连接**：后端设置一键落盘 + 探活，状态行即时反馈 ✓ / ✗ 与失败原因（401 / 404 / 超时各有针对性提示）
@@ -80,16 +87,18 @@
 - 不装 key、不开本地服务时，程序其余功能与旧版完全一致
 
 ### 🖥 主窗口（十个页面，侧栏按四组折叠）
+
 侧栏分「**工作台 / 工具 / 插件 / 系统**」四组，点组标题开合，**多组可同时展开**；展开集合会被记住，下次启动原样恢复。窗口装不下时侧栏出现滚动条，按钮尺寸恒定不再被压扁。
 
-| 分组 | 页面 |
-|------|------|
+| 分组  | 页面                                                                                                                                                                                                                    |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 工作台 | 🧩 碎片工作台（剪贴板文本/路径/文件/知识段落**自动收纳**，来源 + 内容语义双轴筛选、搜索、合并、一键存为笔记 / 加入知识库 / 导出 Obsidian）· 📋 日程任务（逾期红标、相对截止时间、撤销条、🍅 专注计时）· 📝 笔记管理（列表 + 编辑区 + 自动保存）· 📚 知识库（docx 数据源，段落增删改、外部修改检测、增量同步）· 📎 临时素材（拖拽拾取、缩略图、sha256 去重、过期清理） |
-| 工具 | 🌐 网址导航（收藏网址一键打开）· 🚀 软件导航（本地快捷方式、图标提取、一键启动） |
-| 插件 | 全部页面插件，**按需安装**（见下节） |
-| 系统 | 🔌 插件中心（安装 / 启停 / 卸载 / 商店）· ⚙️ 设置 · ❓ 使用说明 |
+| 工具  | 🌐 网址导航（收藏网址一键打开）· 🚀 软件导航（本地快捷方式、图标提取、一键启动）                                                                                                                                                                          |
+| 插件  | 全部页面插件，**按需安装**（见下节）                                                                                                                                                                                                  |
+| 系统  | 🔌 插件中心（安装 / 启停 / 卸载 / 商店）· ⚙️ 设置 · ❓ 使用说明                                                                                                                                                                            |
 
 ### 🛡 工程化细节
+
 - 三层架构（UI / 业务 / 数据）严格解耦，模块化拆分
 - JSON 原子写入（临时文件 + `os.replace`）、损坏自动回退
 - Windows 互斥量单实例防护、全局异常钩子、多屏/分辨率漂移容错
@@ -110,13 +119,13 @@
 
 **更省事：应用内在线市场。** 插件商店弹窗里有「🌐 检查在线市场」按钮——点一下自动拉取官方插件索引、列出本地还没装的插件，点「⬇ 下载安装」即可（下载经 sha256 校验后落商店目录，再走同一条安装链路）。只在点击那一刻访问 GitHub API，不点不联网，离线时本地安装完全不受影响。
 
-| 插件包 | 页面 / 热键 | 能力 | 说明 |
-|---|---|---|---|
-| [ai-assistant.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-assistant.fpplug) | 🤖 AI 助手 / `Ctrl+Alt+I` | 🌐 ✍ 🛠 🧠 | 本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用本机 llama-server 全程离线 |
-| [ai-text-workshop.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-text-workshop.fpplug) | ✂ 文本工坊 / `Ctrl+Alt+T` | 🌐 ✍ 🧠 | 剪贴板一键 AI 加工：润色成邮件、翻译、总结要点、提取待办并转任务 |
-| [kb-search.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/kb-search.fpplug) | 🔍 站内搜索 / `Ctrl+Alt+F` | 只读 | 五类数据全文检索：自研中文分词 + 倒排索引 + BM25，`Ctrl+K` 也由它承接 |
-| [recurring-tasks.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/recurring-tasks.fpplug) | 🔁 周期任务 / `Ctrl+Alt+R` | ✍ | 只给规则（每天/每周几/每月几号/每 N 天），到点自动生成任务 |
-| [weekly-report.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/weekly-report.fpplug) | 周报草稿 / `Ctrl+Alt+W` | 只读 | 汇总区间内已完成任务、碎片与番茄次数，生成 Markdown 草稿 |
+| 插件包                                                                                                                  | 页面 / 热键                 | 能力         | 说明                                                           |
+| -------------------------------------------------------------------------------------------------------------------- | ----------------------- | ---------- | ------------------------------------------------------------ |
+| [ai-assistant.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-assistant.fpplug)         | 🤖 AI 助手 / `Ctrl+Alt+I` | 🌐 ✍ 🛠 🧠 | 本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，可用本机 llama-server 全程离线 |
+| [ai-text-workshop.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/ai-text-workshop.fpplug) | ✂ 文本工坊 / `Ctrl+Alt+T`   | 🌐 ✍ 🧠    | 剪贴板一键 AI 加工：润色成邮件、翻译、总结要点、提取待办并转任务                           |
+| [kb-search.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/kb-search.fpplug)               | 🔍 站内搜索 / `Ctrl+Alt+F`  | 只读         | 五类数据全文检索：自研中文分词 + 倒排索引 + BM25，`Ctrl+K` 也由它承接                 |
+| [recurring-tasks.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/recurring-tasks.fpplug)   | 🔁 周期任务 / `Ctrl+Alt+R`  | ✍          | 只给规则（每天/每周几/每月几号/每 N 天），到点自动生成任务                             |
+| [weekly-report.fpplug](https://github.com/2026heshao/FloatPulse/releases/latest/download/weekly-report.fpplug)       | 周报草稿 / `Ctrl+Alt+W`     | 只读         | 汇总区间内已完成任务、碎片与番茄次数，生成 Markdown 草稿                            |
 
 > 能力标记的含义：🌐 会经宿主联网（只记 URL 与耗时进日志）· ✍ 能新增数据 · 🛠 能改删数据（删除带撤销令牌）· 🧠 可接入设置页的「AI 总配置」共用一套后端。插件本身拿不到网络库，未声明的能力调用会被直接拒绝。
 
@@ -132,10 +141,10 @@
 
 双击项目根目录的 **`启动v4.bat`**：
 
-| 命令 | 行为 |
-|---|---|
-| `启动v4.bat` | 启动 v4（开发主线），带控制台实时日志 |
-| `启动v4.bat quiet` | 后台启动，无控制台窗口（日常使用） |
+| 命令               | 行为                   |
+| ---------------- | -------------------- |
+| `启动v4.bat`       | 启动 v4（开发主线），带控制台实时日志 |
+| `启动v4.bat quiet` | 后台启动，无控制台窗口（日常使用）    |
 
 > v2 / v3 冻结基线已于 2026-09-27 清理移除，当前只保留 v4 主线；历史版本可从 GitHub 提交记录中查看。
 
@@ -153,12 +162,12 @@ python knowledge_ball.py
 
 ### 默认热键
 
-| 热键 | 功能 |
-|------|------|
-| `Ctrl+Alt+K` | 快速捕捉条（随手记碎片） |
-| `Ctrl+Alt+S` | 截图钉屏（框选区域置顶参考，支持批注） |
-| `Ctrl+K` | 站内搜索（由 `kb-search` 插件提供，需先安装） |
-| `Esc` | 关闭卡片 / 取消截图 |
+| 热键           | 功能                            |
+| ------------ | ----------------------------- |
+| `Ctrl+Alt+K` | 快速捕捉条（随手记碎片）                  |
+| `Ctrl+Alt+S` | 截图钉屏（框选区域置顶参考，支持批注）           |
+| `Ctrl+K`     | 站内搜索（由 `kb-search` 插件提供，需先安装） |
+| `Esc`        | 关闭卡片 / 取消截图                   |
 
 ---
 
@@ -247,7 +256,7 @@ python test_init.py            # 启动冒烟
 
 ## 🤝 贡献
 
-Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。  
 提交前请跑一遍测试套件；UI 改动请附离屏截图（`tools/run_gui_check.py`）。
 
 ## 📄 License
@@ -257,6 +266,7 @@ Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 ---
 
 ## English
+
 
 **FloatPulse** is a Windows floating-ball utility built with native PyQt6 — a lightweight, Electron-free landing spot for everything you copy, drag or capture, always one hover away.
 

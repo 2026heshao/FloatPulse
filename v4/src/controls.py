@@ -27,16 +27,16 @@
 """
 
 from PyQt6.QtCore import (
-    QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QVariantAnimation,
-    pyqtSignal,
+    QEasingCurve, QEvent, QPointF, QPoint, QRectF, Qt, QTimer,
+    QVariantAnimation, pyqtSignal, pyqtProperty,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QDoubleValidator, QIntValidator,
     QPen,
 )
 from PyQt6.QtWidgets import (
-    QAbstractButton, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QWidget,
+    QAbstractButton, QAbstractItemView, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
 )
 from PyQt6.QtCore import QPropertyAnimation
 
@@ -45,6 +45,261 @@ from src.constants import UNDO_BAR_MS
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.theme import DEFAULT_THEME, get_colors
 from src import icon_render
+from src import motion
+
+
+# ====================================================================
+# 丝滑化按钮基类（UI 丝滑化清单 S2，2026-10-02）
+# ====================================================================
+# Qt 的 QSS 引擎不支持 CSS ``transition``：``:hover`` / ``:pressed`` 的
+# 背景色是一帧跳变。所以「丝滑」不能靠改 QSS，只能自绘插值 —— 本节
+# 提供的 SmoothButton 在原生 QSS 之上叠加一层过渡色，QSS 侧只需把
+# 命名按钮 ``:hover`` / ``:pressed`` 的**背景色**删掉（文字/边框/焦点环
+# 仍归 QSS 管），两端点色一一对照记在 _SMOOTH_OVERLAYS 注释里。
+# 改 theme.py 的 hover/pressed 端点或这里任何一个 spec，两边必须同步。
+_PROGRESS_EPS = 0.005   # 低于该进度的叠加/位移直接省略（省一帧无意义重绘）
+_PRESS_SHIFT = 1.0      # 按下下沉 px —— 绘制级位移，绝不碰 margin/padding
+_PRESS_SCALE = 0.98     # 按下微缩
+
+# objectName → (hover 端点 spec, press 端点 spec)；spec = (主题 token 名, 255 上限不透明度)
+# 端点逐一对照 theme.py 里已删除的 QSS 背景（丝滑化清单 §2.1 的落地契约）：
+#   · 不透明端点（$primary_hover / $primary / $danger …）→ (token, 255)
+#   · 半透明 a08/a12/a18/a30 端点 → (primary, 255*比例)
+#   · secondaryBtn 基底是 a12，叠 18 合成 ≈ a18，与旧 :hover 端点一致
+#   · None = 该状态不换底色（维持现状，仅吃按下位移）
+#   · None 键 = 未命名 / 未收录按钮的兜底，等价旧的全局 QPushButton:hover/:pressed
+_SMOOTH_OVERLAYS = {
+    "secondaryBtn":     (("primary", 18), None),
+    "dangerBtn":        (("danger", 255), ("danger", 255)),
+    "fragDelBtn":       (("danger", 255), ("danger", 255)),
+    "cardCloseBtn":     (("danger", 255), ("danger", 255)),
+    "iconBtn":          (("primary", 31), ("primary", 46)),
+    "iconBtn_danger":   (("danger", 26), ("danger", 46)),   # iconBtn[danger="true"] 属性变体
+    "sideTabIconBtn":   (("primary", 31), ("primary", 46)),
+    "settingsNavBtn":   (("primary", 20), ("primary", 31)),
+    "stepBtn":          (("primary", 46), ("primary", 77)),
+    "navSiteCard":      (("primary", 46), ("primary", 77)),
+    "modeBtn":          (("primary_hover", 255), ("primary_pressed", 255)),
+    "taskAddBtn":       (("primary_hover", 255), ("primary_pressed", 255)),
+    "nextBtn":          (("primary_hover", 255), ("primary_pressed", 255)),
+    "fragCopyBtn":      (("primary", 255), ("primary_pressed", 255)),
+    "tableOpenBtn":     (("primary", 255), ("primary_pressed", 255)),
+    "undoUndoBtn":      (("primary_lite", 255), ("primary_lite", 255)),
+    # S4：侧栏导航行。端点对照 navBtn:hover/:pressed 被删的 a08/a18；
+    # 拖拽态（[dragging="true"] 的 a18 底）仍归 QSS（静态状态，无过渡需求）。
+    "navBtn":           (("primary", 20), ("primary", 46)),
+    None:               (("primary_hover", 255), ("primary_pressed", 255)),
+}
+
+# overlay 圆角（对照 theme.py 各选择器的 border-radius）；未收录的走全局 9px
+_OVERLAY_RADIUS = {
+    "modeBtn": 11, "cardCloseBtn": 11, "nextBtn": 13, "iconBtn": 10,
+    "sideTabIconBtn": 10, "settingsNavBtn": 10, "tableOpenBtn": 7,
+    "undoUndoBtn": 7, "fragCopyBtn": 7, "fragDelBtn": 7, "navBtn": 10,
+}
+_DEFAULT_RADIUS = 9
+
+
+class SmoothButton(QPushButton):
+    """在原生 QSS 外观之上叠加 hover / press 过渡的按钮基类（清单 S2）。
+
+    原理（清单 §2.1 的 overlay 插补）：先照常画原生 QSS 外观，再用两个
+    0→1 的动画属性叠加一层过渡色 —— ``hp``（hover 进度）/ ``pp``（press
+    进度）。时长与曲线统一走 motion token（``fast`` / OutCubic），
+    ``reduce_motion`` 开启时直接落终态（motion.duration 返回 0）。
+
+    按下反馈（B2）走**绘制级** -1px 下沉 + 0.98 微缩，由 ``pp`` 驱动 ——
+    margin/padding 方案已在项目里被证明有害（按下态 polish 会把 sizeHint
+    算大并永久缓存，拖拽后行高 +1px，见 theme.py 注释与
+    test_nav_drag_invariants.py）。
+
+    QSS 侧约定（与 theme.py 联动，单改一边即回归）：
+      · 命名按钮 ``:hover`` / ``:pressed`` 的背景色已从 QSS 删除，overlay
+        端点色逐一对照被删旧值（见 _SMOOTH_OVERLAYS 注释）；
+      · 文字色 / 边框 / 焦点环仍归 QSS（文档口径：hover 即时起变化，
+        只补「到位过程」）；
+      · primaryBtn 渐变 hover 属 B5（后置）：QSS 渐变跳变保留，
+        overlay 为 (None, None)，仅享受按下位移。
+
+    动画可打断重定向（清单 §6.4）：复用同一个 QPropertyAnimation，
+    每次 retarget 都从当前值出发 ``stop() → start()``，连续快速进出
+    不会排队。换主题不用通知 —— 端点色在 paint 时按当前主题解析。
+    按设置页 ``anim_speed`` 档位缩放：main_window 启动与变更广播时调
+    :meth:`set_speed`（类级属性，全进程按钮共享）。
+    """
+
+    _speed = 1.0
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（main_window 启动 / 设置页变更时调用）。"""
+        cls._speed = motion.sanitize_speed(speed)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hp = 0.0
+        self._pp = 0.0
+        self._hover_anim = None
+        self._press_anim = None
+        self._child_free = None   # None = 未测定（子控件可能晚于构造加入）
+
+    # ---- 动画属性（QPropertyAnimation 写入端）----
+    def _get_hp(self):
+        return self._hp
+
+    def _set_hp(self, value):
+        self._hp = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _get_pp(self):
+        return self._pp
+
+    def _set_pp(self, value):
+        self._pp = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    hp = pyqtProperty(float, _get_hp, _set_hp)
+    pp = pyqtProperty(float, _get_pp, _set_pp)
+
+    # ---------------- 状态驱动 ----------------
+    def _glide(self, prop, attr, anim_attr, target):
+        """把 attr 插值到 target（0/1）。可打断：从当前值重定向，不排队。"""
+        current = getattr(self, attr)
+        if abs(target - current) <= _PROGRESS_EPS:
+            return
+        ms = motion.eased_ms("fast", self._speed)
+        if ms <= 0:
+            # reduce_motion 总闸 / 档位归零：直接落终态（语义是瞬显，不是缩短）
+            setattr(self, attr, float(target))
+            self.update()
+            return
+        anim = getattr(self, anim_attr)
+        if anim is None:
+            anim = QPropertyAnimation(self, prop, self)
+            anim.setEasingCurve(getattr(QEasingCurve.Type, motion.EASE["out"]))
+            setattr(self, anim_attr, anim)
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(float(target))
+        anim.setDuration(ms)
+        anim.start()
+
+    def enterEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 0.0)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.isDown():
+            self._glide(b"pp", "_pp", "_press_anim", 1.0)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._pp > _PROGRESS_EPS:
+            self._glide(b"pp", "_pp", "_press_anim", 0.0)
+
+    def cancel_press_feedback(self):
+        """显式收回按下反馈（pp 回 0）。
+
+        给"吞掉 release"的手势路径用 —— _NavButton 拖拽落定时只 setDown(False)
+        而不调用 super().mouseReleaseEvent，QPropertyAnimation 不会被通知，
+        pp 会卡在 1（按钮永久下沉 + 叠色）。"""
+        if self._pp > _PROGRESS_EPS:
+            self._glide(b"pp", "_pp", "_press_anim", 0.0)
+
+    # ---------------- 绘制 ----------------
+    def paintEvent(self, event):
+        hover_spec, press_spec = self._overlay_specs()
+        spec, progress = None, 0.0
+        if self._pp > _PROGRESS_EPS:
+            spec, progress = press_spec, self._pp
+        elif self._hp > _PROGRESS_EPS:
+            spec, progress = hover_spec, self._hp
+        if spec is None:
+            if self._pp > _PROGRESS_EPS:
+                # 有按下位移但该按钮 press 不换底色（secondaryBtn/primaryBtn）
+                self._paint_native_transformed()
+            else:
+                super().paintEvent(event)
+            return
+        painter = None
+        if self._pp > _PROGRESS_EPS:
+            painter = self._paint_native_transformed()
+        else:
+            super().paintEvent(event)
+            painter = QPainter(self)
+        self._paint_overlay(painter, spec, progress)
+        painter.end()
+
+    def _paint_native_transformed(self):
+        """按 ``pp`` 进度下沉 + 微缩后画原生 QSS 外观，返回未 end() 的 painter。
+
+        只对**无子控件**的纯文本/图标按钮生效 —— navSiteCard 这类内嵌
+        QLabel 的复合按钮，子控件不走本 paintEvent，跟着缩放会跟背景错位。
+        """
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        painter = QPainter(self)
+        if self._is_child_free():
+            factor = 1.0 - (1.0 - _PRESS_SCALE) * self._pp
+            cx, cy = self.width() / 2.0, self.height() / 2.0
+            painter.translate(cx, cy + _PRESS_SHIFT * self._pp)
+            painter.scale(factor, factor)
+            painter.translate(-cx, -cy)
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, opt,
+                                 painter, self)
+        return painter
+
+    def _paint_overlay(self, painter, spec, progress):
+        """叠一层过渡色：端点 = spec，不透明度按 progress 插值。"""
+        token, max_alpha = spec
+        color = self._overlay_color(token)
+        color.setAlpha(int(max_alpha * progress))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        radius = _OVERLAY_RADIUS.get(self.objectName(), _DEFAULT_RADIUS)
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+
+    # ---------------- 取色与映射 ----------------
+    def _overlay_specs(self):
+        name = self.objectName()
+        if name == "iconBtn" and self.property("danger") == "true":
+            return _SMOOTH_OVERLAYS["iconBtn_danger"]
+        return _SMOOTH_OVERLAYS.get(name, _SMOOTH_OVERLAYS[None])
+
+    def _overlay_color(self, token):
+        colors = get_colors(self._detect_theme() or DEFAULT_THEME)
+        return QColor(str(colors.get(token, colors["primary"])))
+
+    def _is_child_free(self):
+        if self._child_free is None:
+            self._child_free = not self.findChildren(QWidget)
+        return self._child_free
+
+    def _detect_theme(self):
+        """依次找：宿主的 ``_theme`` → 父控件链上最近窗口的 ``_theme``。
+
+        后一半给"运行期动态创建、又没接宿主管线"的按钮兜底：创建时沿
+        parentWidget 向上爬，爬到主窗/卡片窗/便签窗的 ``_theme`` 就取对
+        配色。只认 "light"/"dark"，中途对象挂了同名属性也不误判。
+        """
+        host = getattr(self, "_host", None)
+        if host is not None:
+            t = getattr(host, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+        w = self.parentWidget()
+        while w is not None:
+            t = getattr(w, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+            w = w.parentWidget()
+        return None
 
 
 class Stepper(QWidget):
@@ -269,7 +524,7 @@ class UndoBar(QWidget):
         self._label.setObjectName("undoBarLabel")
         h.addWidget(self._label)
 
-        self._btn = QPushButton("撤销")
+        self._btn = SmoothButton("撤销")
         self._btn.setObjectName("undoUndoBtn")
         self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn.setToolTip("撤销刚才的完成操作")
@@ -445,7 +700,14 @@ class ScreenToast(QWidget):
 
     MARGIN_X, PAD_Y = 18, 11
     TOP_GAP = 20              # 距屏幕顶部的距离
-    FADE_IN_MS, FADE_OUT_MS = 140, 200
+    FLOAT_PX = 10             # 进出场位移幅度：进场自下上浮 / 出场向下沉没
+
+    _speed = 1.0
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（main_window 经 controls.set_ui_speed 调用）。"""
+        cls._speed = motion.sanitize_speed(speed)
 
     _instance = None
 
@@ -466,6 +728,7 @@ class ScreenToast(QWidget):
         self._theme = DEFAULT_THEME
         self._text = ""
         self._fade_target = 1.0
+        self._final_y = self.TOP_GAP
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -475,10 +738,15 @@ class ScreenToast(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        self._anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._anim.setDuration(self.FADE_IN_MS)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.finished.connect(self._on_anim_done)
+        # 进出场 = 透明度 + 位移两条动画并行（丝滑化清单 F6：上浮淡入 /
+        # 下沉淡出）。时长/曲线走 motion token（base / OutCubic）；
+        # reduce_motion 下 motion.eased_ms 返回 0 → popup/_fade_out 直接落终态。
+        easing = getattr(QEasingCurve.Type, motion.EASE["out"])
+        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade_anim.setEasingCurve(easing)
+        self._fade_anim.finished.connect(self._on_anim_done)
+        self._pos_anim = QPropertyAnimation(self, b"pos", self)
+        self._pos_anim.setEasingCurve(easing)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -495,31 +763,80 @@ class ScreenToast(QWidget):
         w = min(max_w, fm.horizontalAdvance(text) + self.MARGIN_X * 2 + 8)
         h = fm.height() + self.PAD_Y * 2
         self.setFixedSize(int(w), int(h))
-        self.move(screen.left() + (screen.width() - int(w)) // 2,
-                  screen.top() + self.TOP_GAP)
+        x = screen.left() + (screen.width() - int(w)) // 2
+        self._final_y = screen.top() + self.TOP_GAP
+        self.move(x, self._final_y)
 
         self._timer.stop()
-        self._anim.stop()
+        self._fade_anim.stop()
+        self._pos_anim.stop()
         self._fade_target = 1.0
+        duration = max(1, motion.eased_ms("base", self._speed))
+        if motion.duration(180, self._speed) <= 0:
+            # reduce_motion：瞬显终态，不排队任何动画
+            self.setWindowOpacity(1.0)
+            self.show()
+            self.raise_()
+            self._timer.start(ms)
+            return
         self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
-        self._anim.setStartValue(0.0)
-        self._anim.setEndValue(1.0)
-        self._anim.start()
+        self._fade_anim.setDuration(duration)
+        self._fade_anim.setStartValue(0.0)
+        self._fade_anim.setEndValue(1.0)
+        self._pos_anim.setDuration(duration)
+        self._pos_anim.setStartValue(self.pos() + QPoint(0, self.FLOAT_PX))
+        self._pos_anim.setEndValue(self.pos())
+        self._fade_anim.start()
+        self._pos_anim.start()
         self._timer.start(ms)
 
     def _fade_out(self):
-        self._anim.stop()
+        self._fade_anim.stop()
+        self._pos_anim.stop()
         self._fade_target = 0.0
-        self._anim.setDuration(self.FADE_OUT_MS)
-        self._anim.setStartValue(self.windowOpacity())
-        self._anim.setEndValue(0.0)
-        self._anim.start()
+        duration = max(1, motion.eased_ms("base", self._speed))
+        if motion.duration(180, self._speed) <= 0:
+            self.setWindowOpacity(0.0)
+            self.hide()
+            return
+        self._fade_anim.setDuration(duration)
+        self._fade_anim.setStartValue(self.windowOpacity())
+        self._fade_anim.setEndValue(0.0)
+        self._pos_anim.setDuration(duration)
+        self._pos_anim.setStartValue(self.pos())
+        self._pos_anim.setEndValue(self.pos() + QPoint(0, self.FLOAT_PX))
+        self._fade_anim.start()
+        self._pos_anim.start()
 
     def _on_anim_done(self):
         if self._fade_target <= 0.0 and self.windowOpacity() <= 0.02:
             self.hide()
+
+
+def set_ui_speed(speed):
+    """设置页 anim_speed 档位广播的**模块级单一入口**：一次调用同步
+    controls 内所有走 motion 缩放的动效控件（现有 SmoothButton /
+    ScreenToast，后续 S4 若新增同样在此登记）。main_window 启动与
+    anim_speed_changed 时调用，替代逐类 set_speed。"""
+    SmoothButton.set_speed(speed)
+    ScreenToast.set_speed(speed)
+
+
+# 滚轮步长（px）：Qt 默认按字体行高步进，列表滚动一格一格"卡顿"；
+# 28px ≈ 一行半的视差，配合像素级滚动是网页般的连续手感（清单 L3）。
+SMOOTH_SCROLL_STEP_PX = 28
+
+
+def tune_list_scrolling(view):
+    """列表/滚动区滚轮手感统一（丝滑化清单 L3）：像素级滚动 + 固定步长。
+
+    只调 QAbstractItemView 的滚动属性，不碰内容与选择行为；QSS 的
+    滚动条样式不受影响。素材网格已有按单元格高度的定制步长（assets_panel），
+    不走本入口。"""
+    view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    view.verticalScrollBar().setSingleStep(SMOOTH_SCROLL_STEP_PX)
 
     def paintEvent(self, event):
         colors = get_colors(self._theme)
@@ -586,7 +903,7 @@ class IconLabel(QWidget):
         p.end()
 
 
-class IconButton(QPushButton):
+class IconButton(SmoothButton):
     """自绘图标按钮（UI 强化方案 A2 的 P1 批次）：纯图标或「图标+文字」。
 
     ★ 最重要的设计约束：**objectName 原样保留站点既有值**。QSS 里
@@ -594,6 +911,9 @@ class IconButton(QPushButton):
     ``#secondaryBtn`` 等契约（背景、悬停、按压、焦点环）全部继续由
     theme.py 管辖，本类只负责「画哪个图标、当前用什么颜色」—— 也就是
     QSS 的 ``color:`` 管不到的 QIcon 位图。
+
+    基类 SmoothButton（丝滑化清单 S2）补齐 hover/press 的背景过渡与
+    按下位移 —— 端点色由 objectName 在 _SMOOTH_OVERLAYS 里解析。
 
     颜色三态（对应 QSS 的 color / :hover 色 / :checked 色）：
       · 常态 ``off_color``   缺省 ``text_secondary``
@@ -679,26 +999,6 @@ class IconButton(QPushButton):
             on_color=self._resolve(self._on_spec, colors),
             disabled_color=colors["text_disabled"]))
 
-    def _detect_theme(self):
-        """依次找：宿主的 ``_theme`` → 父控件链上最近窗口的 ``_theme``。
-
-        后一半是给"运行期动态创建、又没接宿主管线"的按钮兜底（插件页的
-        规则行删除钮等）：它们创建时沿着 parentWidget 向上爬，爬到主窗/
-        卡片窗/便签窗的 ``_theme`` 就立即取对配色，不必等下一次主题广播。
-        只认 "light"/"dark"，中途对象挂了同名属性也不误判。
-        """
-        if self._host is not None:
-            t = getattr(self._host, "_theme", None)
-            if t in ("light", "dark"):
-                return t
-        w = self.parentWidget()
-        while w is not None:
-            t = getattr(w, "_theme", None)
-            if t in ("light", "dark"):
-                return t
-            w = w.parentWidget()
-        return None
-
     def _on_theme_changed(self, _theme=None):
         self._refresh_icon()
 
@@ -762,7 +1062,7 @@ class EmptyState(QWidget):
 
         self._action = None
         if action_text:
-            self._action = QPushButton(action_text)
+            self._action = SmoothButton(action_text)
             self._action.setObjectName("secondaryBtn")
             self._action.setCursor(Qt.CursorShape.PointingHandCursor)
             if on_action is not None:

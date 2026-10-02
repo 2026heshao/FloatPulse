@@ -41,7 +41,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QCheckBox,
     QLineEdit,
-    QPushButton,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -59,11 +58,13 @@ from PyQt6.QtWidgets import (
     QApplication,
 )
 from PyQt6.QtCore import Qt, QSize, QFileInfo, pyqtSignal
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPixmapCache
+from PyQt6.QtGui import (QPixmap, QPainter, QColor, QPen, QPixmapCache,
+                         QGuiApplication)
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
-from src.controls import EmptyState, IconButton, PageTitle
+from src import win_icons
+from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 
 
 # ====================================================================
@@ -125,12 +126,50 @@ def draw_placeholder_icon(size: int = 64) -> QPixmap:
     return pixmap
 
 
+def _fit_icon(pixmap: QPixmap, size: int) -> QPixmap:
+    """把任意来源的图标位图收口到「**逻辑**边长 == size」。
+
+    ★ 这是 2026-10-02 那次「图标大小调不动」的第二处根因。``QIcon.pixmap()``
+    **从不放大**——源帧小于请求尺寸就原样返回；对 ``.lnk`` 更极端，无论请求
+    多大一律只回 32px（125% DPI 实测 40px），而 ``availableSizes()`` /
+    ``actualSize()`` 都会谎报大尺寸，上游无从察觉。于是卡片跟着设置放大、
+    里面的图标纹丝不动。
+
+    这里按设备像素比收口：dpr>1 的位图（QIcon 用 dpr 凑逻辑尺寸）原样保留，
+    dpr==1 的（shell 大图 / 自己新缩的）按屏幕 dpr 补物理像素，避免高 DPI
+    下把图标放大得发虚。
+    """
+    if pixmap.isNull():
+        return pixmap
+    dpr = pixmap.devicePixelRatio() or 1.0
+    if abs(pixmap.width() / dpr - size) < 0.5:
+        return pixmap
+    if dpr <= 1.0:
+        try:
+            scr = QGuiApplication.primaryScreen()
+            dpr = float(scr.devicePixelRatio()) if scr else 1.0
+        except Exception:
+            dpr = 1.0
+    dpr = max(1.0, dpr)
+    dev = max(1, int(round(size * dpr)))
+    out = pixmap.scaled(dev, dev, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation)
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
 def extract_exe_icon(exe_path: str, size: int = 64) -> QPixmap:
     """
-    从 exe 可执行文件提取内部图标，返回 QPixmap。
+    从 exe / 快捷方式提取图标，返回 QPixmap。
 
-    实现方式：使用 Qt 原生 QFileIconProvider 读取系统为该 exe 提供的图标；
-    若路径为空 / 文件不存在 / 提取失败，则回退到默认占位图标。
+    优先级（2026-10-02 重排）：
+      1. **shell jumbo 图像列表**（``src.win_icons``，256px 真高分图）——
+         Qt 的 QFileIconProvider 对 ``.lnk`` 恒回 32px，只有这条能出大图；
+      2. Qt 的 ``QFileIconProvider``（非 Windows / shell 取图失败时兜底）；
+      3. 默认占位图标。
+    两条真实路径的结果都经 ``_fit_icon`` 收口到请求尺寸 —— 否则图标会卡在
+    源帧的原生尺寸上（QIcon 不放大）。
+
     同一 (路径, 尺寸) 的结果按 QPixmapCache 缓存，避免卡片重建时重复提取。
     """
     if not exe_path or not os.path.exists(exe_path):
@@ -141,16 +180,26 @@ def extract_exe_icon(exe_path: str, size: int = 64) -> QPixmap:
     if cached is not None and not cached.isNull():
         return cached
 
+    pixmap = None
     try:
-        provider = QFileIconProvider()
-        icon = provider.icon(QFileInfo(exe_path))
-        pixmap = icon.pixmap(QSize(size, size))
-        if pixmap.isNull():
-            return draw_placeholder_icon(size)
-        QPixmapCache.insert(cache_key, pixmap)
-        return pixmap
+        img = win_icons.shell_icon_image(exe_path)
+        if img is not None and not img.isNull():
+            pixmap = _fit_icon(QPixmap.fromImage(img), size)
     except Exception:
+        pixmap = None
+
+    if pixmap is None or pixmap.isNull():
+        try:
+            provider = QFileIconProvider()
+            icon = provider.icon(QFileInfo(exe_path))
+            pixmap = _fit_icon(icon.pixmap(QSize(size, size)), size)
+        except Exception:
+            pixmap = None
+
+    if pixmap is None or pixmap.isNull():
         return draw_placeholder_icon(size)
+    QPixmapCache.insert(cache_key, pixmap)
+    return pixmap
 
 
 def load_icon_pixmap(icon_path: str, size: int = 64) -> QPixmap:
@@ -159,6 +208,7 @@ def load_icon_pixmap(icon_path: str, size: int = 64) -> QPixmap:
 
     加载失败或路径为空时回退到默认占位图标。
     同一 (路径, 尺寸) 的结果按 QPixmapCache 缓存，避免重复解码。
+    尺寸收口同样走 ``_fit_icon``（与 exe 路径同一口径，高 DPI 下不发虚）。
     """
     if not icon_path or not os.path.exists(icon_path):
         return draw_placeholder_icon(size)
@@ -172,11 +222,7 @@ def load_icon_pixmap(icon_path: str, size: int = 64) -> QPixmap:
         pixmap = QPixmap(icon_path)
         if pixmap.isNull():
             return draw_placeholder_icon(size)
-        pixmap = pixmap.scaled(
-            size, size,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
+        pixmap = _fit_icon(pixmap, size)
         QPixmapCache.insert(cache_key, pixmap)
         return pixmap
     except Exception:
@@ -575,7 +621,7 @@ class AppLauncherPage(QWidget):
 
         # 管理软件列表按钮：唤起 AppManageDialog 完成新增/编辑/删除
         # （本页面唯一的软件管理入口，保存后立即刷新下方卡片网格）
-        self._manage_btn = QPushButton("📋 管理软件列表")
+        self._manage_btn = SmoothButton("📋 管理软件列表")
         self._manage_btn.setObjectName("secondaryBtn")
         self._manage_btn.setFixedHeight(28)
         self._manage_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -968,6 +1014,7 @@ class AppManageDialog(QDialog):
 
         # 软件列表
         self._list_widget = QListWidget()
+        tune_list_scrolling(self._list_widget)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._list_widget.setAlternatingRowColors(True)
         self._list_widget.setSpacing(2)
         self._list_widget.currentRowChanged.connect(self._on_selection_changed)
@@ -996,7 +1043,7 @@ class AppManageDialog(QDialog):
 
         btn_row.addStretch()
 
-        self._close_btn = QPushButton("关闭")
+        self._close_btn = SmoothButton("关闭")
         self._close_btn.clicked.connect(self.accept)
         btn_row.addWidget(self._close_btn)
 
@@ -1159,7 +1206,7 @@ class AppEditDialog(QDialog):
         # exe 程序路径（输入框 + 浏览按钮）
         self._exe_edit = QLineEdit()
         self._exe_edit.setPlaceholderText("选择可执行文件（*.exe）")
-        self._exe_btn = QPushButton("浏览")
+        self._exe_btn = SmoothButton("浏览")
         self._exe_btn.setObjectName("secondaryBtn")
         self._exe_btn.clicked.connect(self._on_browse_exe)
         exe_row = QHBoxLayout()
@@ -1171,7 +1218,7 @@ class AppEditDialog(QDialog):
         # 图标路径（输入框 + 浏览按钮，可选）
         self._icon_edit = QLineEdit()
         self._icon_edit.setPlaceholderText("可选，图标文件（*.ico / *.png）")
-        self._icon_btn = QPushButton("浏览")
+        self._icon_btn = SmoothButton("浏览")
         self._icon_btn.setObjectName("secondaryBtn")
         self._icon_btn.clicked.connect(self._on_browse_icon)
         icon_row = QHBoxLayout()
@@ -1203,12 +1250,12 @@ class AppEditDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        self._cancel_btn = QPushButton("取消")
+        self._cancel_btn = SmoothButton("取消")
         self._cancel_btn.setObjectName("secondaryBtn")
         self._cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._cancel_btn)
 
-        self._confirm_btn = QPushButton("确认")
+        self._confirm_btn = SmoothButton("确认")
         self._confirm_btn.clicked.connect(self._on_confirm)
         btn_row.addWidget(self._confirm_btn)
 

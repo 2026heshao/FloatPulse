@@ -68,7 +68,10 @@
 import os
 import json
 
-from src.constants import DEFAULT_THEME, backup_corrupt_file
+from src.constants import (
+    DEFAULT_THEME, backup_corrupt_file,
+    MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT,
+)
 from src.theme import THEME_VALUES
 from src.data_backups import rotate_backup
 from src.json_store import (STORE_VERSIONS, CONFIG_VERSION_KEY,
@@ -92,6 +95,7 @@ DEFAULT_CONFIG = {
     "ball_visible":         True,         # 悬浮球是否显示
     "apps":                 [],           # 软件导航条目列表
     "app_card_size":        96,           # 软件卡片边长（像素）
+    "app_mini_icon_size":   MINI_ICON_DEFAULT,  # 小卡片（悬浮球旁）软件图标边长（像素）
     "app_auto_back_home":   False,        # 启动软件后是否自动回到主页面
     "anim_speed":           1.0,          # 悬浮球动画速度档位（0.5-2.0，统一缩放动画时长）
     "reduce_motion":        False,        # 减弱动效：界面过渡动画一律瞬显（#14）
@@ -168,6 +172,7 @@ _CONFIG_TYPES = {
     "ball_visible":         bool,
     "apps":                 list,
     "app_card_size":        int,
+    "app_mini_icon_size":   int,
     "app_auto_back_home":   bool,
     "anim_speed":           float,
     "reduce_motion":        bool,
@@ -235,6 +240,9 @@ _CONFIG_RANGES = {
     "asset_thumb_size":     (80, 160),
     # 软件卡片尺寸：与主窗口设置页步进器范围 60-140（每档 4px）保持一致
     "app_card_size":        (60, 140),
+    # 小卡片软件图标边长：范围取自 src.constants（与设置页步进器、
+    # card_window 渲染共用一份定义，改一处即全链路同步）。
+    "app_mini_icon_size":   (MINI_ICON_MIN, MINI_ICON_MAX),
     "anim_speed":           (0.5, 2.0),
     # 主窗口页面索引上限 = 最大物理索引（0-6 面板 + 7 软件导航 + 9 插件中心；
     # 说明页 8 不记录）。页面增删时**必须同步这里**，否则新页存不进配置：

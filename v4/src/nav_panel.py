@@ -15,7 +15,7 @@
 import os
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QMenu, QDialog, QFormLayout, QMessageBox,
     QScrollArea, QFrame, QGraphicsDropShadowEffect,
 )
@@ -25,7 +25,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QDesktopServices, QColor
 
 from src.glass_dialog import make_dialog_buttons
-from src.controls import EmptyState, PageTitle
+from src.controls import SmoothButton, EmptyState, PageTitle
 
 # ---- 行布局几何 ----
 ROW_H = 44          # 单行高度
@@ -69,7 +69,7 @@ class _NavRow(QFrame):
         url.setObjectName("navRowUrl")
         url.setToolTip(site.url)
 
-        open_btn = QPushButton("打开")
+        open_btn = SmoothButton("打开")
         open_btn.setObjectName("tableOpenBtn")
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         open_btn.setFixedHeight(28)
@@ -344,7 +344,7 @@ class NavPanel(QWidget):
         self._nav_url_input = QLineEdit()
         self._nav_url_input.setPlaceholderText("URL（如 baidu.com，自动补全 https://）")
 
-        nav_add_btn = QPushButton("添加站点")
+        nav_add_btn = SmoothButton("添加站点")
         nav_add_btn.setObjectName("taskAddBtn")
         nav_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         nav_add_btn.clicked.connect(self._on_add_site)

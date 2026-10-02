@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from src.app_paths import find_icon_file
-from src.controls import IconButton
+from src.controls import SmoothButton, IconButton
 from src.glass import GlassPanel, draw_soft_shadow
 from src.theme import DEFAULT_THEME, get_colors, get_main_window_qss
 
@@ -247,7 +247,7 @@ class GlassDialog(QDialog):
                 btn.apply_theme(getattr(self._host, "current_theme", None)
                                 or DEFAULT_THEME)
             else:
-                btn = QPushButton(text)
+                btn = SmoothButton(text)
                 if obj_name:
                     btn.setObjectName(obj_name)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)

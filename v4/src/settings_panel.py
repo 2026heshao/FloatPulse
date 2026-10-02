@@ -29,7 +29,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QUrl
 from PyQt6.QtGui import QAction, QDesktopServices
 
 
-from src.controls import IconButton, PageTitle, Stepper, ToggleSwitch
+from src.controls import SmoothButton, IconButton, PageTitle, Stepper, ToggleSwitch
 from src.glass_dialog import make_separator
 from src.plugin_net import make_async_getter, make_async_poster
 from src.ai_server import AI_SERVER, ST_READY, ST_STARTING, sync_loopback_allowlist
@@ -41,17 +41,22 @@ from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
                                 CHECK_TIMEOUT_S, check_headers, extract_tag,
                                 is_newer)
 from src import autostart
+# 小卡片图标尺寸的范围常量：设置页步进器与小卡片本身共用一份定义，
+# 避免两处各写一个数字、日后改一处忘另一处（config._CONFIG_RANGES 同源）。
+from src.constants import (MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT)
 
 
 # 设置页内部分类导航：顺序即左栏展示顺序，(key, 图标, 名称)。
-# 8 个行为配置分类沿用原单页分组的语义（不合并不改名），
+# 9 个行为配置分类沿用原单页分组的语义（不合并不改名），
 # 「关于」从滚动页尾独立成分类，「恢复默认设置」移至页底常驻栏。
+# 2026-10-02：「番茄钟」从「全局工具」独立成分类（原 4 项参数整体搬迁）。
 SETTINGS_CATEGORIES = (
     ("appearance", "🎨", "外观"),
     ("ball", "🔵", "悬浮球"),
     ("clipboard", "📋", "剪贴板与碎片"),
     ("assets", "🖼", "临时素材"),
     ("tools", "⚡", "全局工具"),
+    ("pomodoro", "🍅", "番茄钟"),
     ("system", "🚀", "启动与系统"),
     ("export", "📤", "导出"),
     ("ai", "🧠", "AI 配置"),
@@ -247,21 +252,21 @@ class SettingsPanel(QWidget):
         theme_row = QHBoxLayout(theme_ctl)
         theme_row.setContentsMargins(0, 0, 0, 0)
         theme_row.setSpacing(8)
-        self._set_theme_light = QPushButton("☀️ 浅色主题")
+        self._set_theme_light = SmoothButton("☀️ 浅色主题")
         self._set_theme_light.setObjectName("secondaryBtn")
         self._set_theme_light.setCheckable(True)
         self._set_theme_light.setFixedHeight(30)
         self._set_theme_light.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_theme_light.clicked.connect(lambda: self._on_set_theme("light"))
         theme_row.addWidget(self._set_theme_light)
-        self._set_theme_dark = QPushButton("🌙 深色主题")
+        self._set_theme_dark = SmoothButton("🌙 深色主题")
         self._set_theme_dark.setObjectName("secondaryBtn")
         self._set_theme_dark.setCheckable(True)
         self._set_theme_dark.setFixedHeight(30)
         self._set_theme_dark.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_theme_dark.clicked.connect(lambda: self._on_set_theme("dark"))
         theme_row.addWidget(self._set_theme_dark)
-        self._set_theme_follow = QPushButton("🖥 跟随系统")
+        self._set_theme_follow = SmoothButton("🖥 跟随系统")
         self._set_theme_follow.setObjectName("secondaryBtn")
         self._set_theme_follow.setCheckable(True)
         self._set_theme_follow.setFixedHeight(30)
@@ -324,8 +329,22 @@ class SettingsPanel(QWidget):
         self._set_card_size = Stepper(60, 140, self._config.get("app_card_size", 96),
                                       suffix="px", step=4)
         self._set_card_size.valueChanged.connect(self._on_card_size_changed)
-        add_row(gv, "软件卡片尺寸", "导航页卡片大小，每档 4px，可长按 ± 连续调整",
-                self._set_card_size, last=True)
+        add_row(gv, "软件卡片尺寸", "主窗口软件导航页的卡片大小（图标随之缩放），"
+                "每档 4px，可长按 ± 连续调整",
+                self._set_card_size)
+
+        # 小卡片图标大小（2026-10-02）：小卡片（悬浮球旁）的软件导航页
+        # 图标此前是 36px 硬编码，跟「软件卡片尺寸」完全脱钩——改设置项时
+        # 只有主窗口卡片在动，这里必须给独立一项才控得住。
+        self._set_mini_icon_size = Stepper(
+            MINI_ICON_MIN, MINI_ICON_MAX,
+            self._config.get("app_mini_icon_size", MINI_ICON_DEFAULT),
+            suffix="px", step=4)
+        self._set_mini_icon_size.valueChanged.connect(
+            self._on_mini_icon_size_changed)
+        add_row(gv, "小卡片图标大小", "悬浮球旁小卡片里软件图标的边长，"
+                "每档 4px；不影响主窗口软件导航页",
+                self._set_mini_icon_size, last=True)
 
         # ================= 2. 悬浮球 =================
         cv = self._new_category_page("ball")
@@ -463,9 +482,16 @@ class SettingsPanel(QWidget):
         self._set_screenshot_hotkey.setMinimumWidth(190)
         self._set_screenshot_hotkey.editingFinished.connect(self._on_screenshot_hotkey_changed)
         add_row(gv, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
-                self._set_screenshot_hotkey)
+                self._set_screenshot_hotkey, last=True)
 
-        # 番茄钟（V4）：总开关 + 时长两档 + 自动休息
+        # ================= 6. 番茄钟 =================
+        # 2026-10-02 从「全局工具」独立成独立分类：番茄钟自带 4 项参数，
+        # 混在热键工具里既难找也难扩展（后续加统计/提示音都归这一页）。
+        # 控件属性名与回调一律不变 → refresh() / _on_pomodoro_* 零改动。
+        cv = self._new_category_page("pomodoro")
+        gv = group(cv, "🍅 番茄钟")
+
+        # 总开关 + 时长两档 + 自动休息
         self._set_pomodoro = self._toggle("pomodoro_enabled", True)
         self._set_pomodoro.toggled.connect(self._on_pomodoro_changed)
         add_row(gv, "番茄钟", "悬浮球外圈进度环计时，右键球体开始/暂停/结束",
@@ -490,7 +516,7 @@ class SettingsPanel(QWidget):
         add_row(gv, "自动进入休息", "专注计满后不回 idle，直接开始休息相位",
                 self._set_pomodoro_auto, last=True)
 
-        # ================= 6. 启动与系统 =================
+        # ================= 7. 启动与系统 =================
         cv = self._new_category_page("system")
         gv = group(cv, "🚀 启动与系统")
 
@@ -527,7 +553,7 @@ class SettingsPanel(QWidget):
                 "（热键速查 / 悬浮球用法 / AI 说明）",
                 self._onboard_btn, last=True)
 
-        # ================= 7. 导出 =================
+        # ================= 8. 导出 =================
         # 单列一组而非并入现有组：现有六组各管一类"行为配置"，
         # 导出是「数据出口」而非行为开关，且需要承载路径 + 操作两个控件，
         # 并入任一组都会破坏该组"同类项相邻"的语义。
@@ -543,7 +569,7 @@ class SettingsPanel(QWidget):
         self._set_vault_path.setToolTip(
             "导出目录；导出结果写入其下的 FloatPulse 文件夹（笔记 / 碎片 / 任务）")
         vault_row.addWidget(self._set_vault_path)
-        self._set_vault_choose = QPushButton("更改目录")
+        self._set_vault_choose = SmoothButton("更改目录")
         self._set_vault_choose.setObjectName("secondaryBtn")
         self._set_vault_choose.setFixedHeight(30)
         self._set_vault_choose.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -552,7 +578,7 @@ class SettingsPanel(QWidget):
         add_row(gv, "导出位置", "Obsidian vault 根目录；内容写入其下的 FloatPulse 文件夹",
                 vault_ctl)
 
-        self._set_export_btn = QPushButton("导出到 Obsidian")
+        self._set_export_btn = SmoothButton("导出到 Obsidian")
         self._set_export_btn.setObjectName("secondaryBtn")
         self._set_export_btn.setFixedHeight(30)
         self._set_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -562,7 +588,7 @@ class SettingsPanel(QWidget):
         add_row(gv, "一键导出", "笔记 / 碎片 / 任务导出为 Markdown，重复导出覆盖同名文件",
                 self._set_export_btn, last=True)
 
-        # ================= 8. AI 总配置 =================
+        # ================= 9. AI 总配置 =================
         # 插件 AI 后端的单一真相源（2026-09-29）：云端 / 本地只配一次，
         # 接入哪些插件由用户在下拉框勾选（勾选 = 授权）。接入的插件经
         # ctx.ai 实时读取这里的配置，不再各自维护后端设置；未接入的
@@ -574,8 +600,8 @@ class SettingsPanel(QWidget):
         mode_row = QHBoxLayout(mode_ctl)
         mode_row.setContentsMargins(0, 0, 0, 0)
         mode_row.setSpacing(8)
-        self._ai_mode_cloud = QPushButton("☁ 云端", self)
-        self._ai_mode_local = QPushButton("💻 本地", self)
+        self._ai_mode_cloud = SmoothButton("☁ 云端", self)
+        self._ai_mode_local = SmoothButton("💻 本地", self)
         for _b in (self._ai_mode_cloud, self._ai_mode_local):
             _b.setObjectName("modeBtn")
             _b.setCheckable(True)
@@ -623,7 +649,7 @@ class SettingsPanel(QWidget):
         self._ai_exe.setPlaceholderText("llama-server.exe 路径")
         self._ai_exe.setFixedWidth(160)
         exe_row.addWidget(self._ai_exe)
-        exe_btn = QPushButton("浏览…")
+        exe_btn = SmoothButton("浏览…")
         exe_btn.setObjectName("secondaryBtn")
         exe_btn.setFixedHeight(30)
         exe_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -642,7 +668,7 @@ class SettingsPanel(QWidget):
         self._ai_gguf.setPlaceholderText("模型文件（.gguf）")
         self._ai_gguf.setFixedWidth(160)
         gguf_row.addWidget(self._ai_gguf)
-        gguf_btn = QPushButton("浏览…")
+        gguf_btn = SmoothButton("浏览…")
         gguf_btn.setObjectName("secondaryBtn")
         gguf_btn.setFixedHeight(30)
         gguf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -688,7 +714,7 @@ class SettingsPanel(QWidget):
         local_row = QHBoxLayout(local_ctl)
         local_row.setContentsMargins(0, 0, 0, 0)
         local_row.setSpacing(8)
-        self._ai_local_btn = QPushButton("启动本地服务", self)
+        self._ai_local_btn = SmoothButton("启动本地服务", self)
         self._ai_local_btn.setObjectName("primaryBtn")
         self._ai_local_btn.setFixedHeight(30)
         self._ai_local_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -737,7 +763,7 @@ class SettingsPanel(QWidget):
         foot.setContentsMargins(0, 0, 0, 0)
         foot.setSpacing(8)
         # 所有设置项均已实时持久化（改动即写盘并联动），无"保存"按钮
-        self._reset_btn = QPushButton("↺ 恢复默认设置")
+        self._reset_btn = SmoothButton("↺ 恢复默认设置")
         self._reset_btn.setObjectName("secondaryBtn")
         self._reset_btn.setFixedHeight(32)
         self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -801,7 +827,7 @@ class SettingsPanel(QWidget):
         self._upd_btn.setFixedHeight(30)
         self._upd_btn.clicked.connect(self._on_check_update)
         upd_row.addWidget(self._upd_btn)
-        self._upd_open_btn = QPushButton("🌐 打开下载页")
+        self._upd_open_btn = SmoothButton("🌐 打开下载页")
         self._upd_open_btn.setObjectName("secondaryBtn")
         self._upd_open_btn.setFixedHeight(30)
         self._upd_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -824,7 +850,7 @@ class SettingsPanel(QWidget):
         log_row = QHBoxLayout(log_ctl)
         log_row.setContentsMargins(0, 0, 0, 0)
         log_row.setSpacing(8)
-        self._open_log_btn = QPushButton("📂 打开日志")
+        self._open_log_btn = SmoothButton("📂 打开日志")
         self._open_log_btn.setObjectName("secondaryBtn")
         self._open_log_btn.setFixedHeight(30)
         self._open_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -856,7 +882,7 @@ class SettingsPanel(QWidget):
         self._cat_group = QButtonGroup(self)
         self._cat_group.setExclusive(True)
         for idx, (key, icon, label) in enumerate(SETTINGS_CATEGORIES):
-            btn = QPushButton(f"{icon}  {label}")
+            btn = SmoothButton(f"{icon}  {label}")
             btn.setObjectName("settingsNavBtn")
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1010,6 +1036,11 @@ class SettingsPanel(QWidget):
             self._set_card_size.blockSignals(True)
             self._set_card_size.setValue(int(self._config.get("app_card_size", 96)))
             self._set_card_size.blockSignals(False)
+        if hasattr(self, '_set_mini_icon_size'):
+            self._set_mini_icon_size.blockSignals(True)
+            self._set_mini_icon_size.setValue(
+                int(self._config.get("app_mini_icon_size", MINI_ICON_DEFAULT)))
+            self._set_mini_icon_size.blockSignals(False)
         if hasattr(self, '_set_anim_speed'):
             self._set_anim_speed.blockSignals(True)
             sp = self._config.get("anim_speed", 1.0)
@@ -1653,6 +1684,8 @@ class SettingsPanel(QWidget):
             self._config.get("hide_on_fullscreen", True))
         if self._host._page_app_launcher is not None:
             self._host._page_app_launcher.apply_card_size(self._config.get("app_card_size", 96))
+        self._host.mini_icon_size_changed.emit(
+            self._config.get("app_mini_icon_size", MINI_ICON_DEFAULT))
         if getattr(self._host, "_page_assets", None) is not None:
             self._host._page_assets.apply_thumb_size(
                 self._config.get("asset_thumb_size", 128))
@@ -1677,6 +1710,14 @@ class SettingsPanel(QWidget):
             self._config.save()
         if self._host._page_app_launcher is not None:
             self._host._page_app_launcher.apply_card_size(value)
+
+    def _on_mini_icon_size_changed(self, value: int):
+        """小卡片图标大小步进：即时持久化并广播（小卡片可见且在软件页才重建）"""
+        value = max(MINI_ICON_MIN, min(MINI_ICON_MAX, int(value)))
+        if value != int(self._config.get("app_mini_icon_size", MINI_ICON_DEFAULT)):
+            self._config.set("app_mini_icon_size", value)
+            self._config.save()
+        self._host.mini_icon_size_changed.emit(value)
 
     def _on_asset_thumb_changed(self, value: int):
         """素材缩略图尺寸步进：即时持久化并刷新素材网格（含缩略图缓存重建）"""

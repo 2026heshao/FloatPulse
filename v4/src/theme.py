@@ -57,10 +57,14 @@ THEMES = {
         "bg_level2":         "#EEF0F2",
 
         # ---- 主色三档 ----
+        # hover/pressed 采用「同色系下沉」而非跳亮档（丝滑化清单 S1）：
+        # #5BC0BE → #4FB3B1 → #3D9E9C 单调下沉，配合 160ms 过渡即是网页手感。
+        # pressed 不得比 #3D9E9C 更暗 —— 主色底压深墨字（$on_primary），
+        # 底越暗对比越低，#439A98 只有 4.39:1，低于 WCAG AA 4.5:1（见 test_theme_contrast）。
         "primary":           "#5BC0BE",
-        "primary_lite":      "#6FFFE9",
+        "primary_lite":      "#6FFFE9",   # 仅作主按钮渐变起点 / 深底亮青强调
         "primary_deep":      "#3D9E9C",
-        "primary_hover":     "#6FFFE9",
+        "primary_hover":     "#4FB3B1",
         "primary_pressed":   "#3D9E9C",
         "primary_alpha":     "rgba(91, 192, 190, 0.12)",
         "primary_a08":       "rgba(91, 192, 190, 0.08)",
@@ -146,11 +150,13 @@ THEMES = {
         "list_bg":           "rgba(255, 255, 255, 10)",
         "bg_level2":         "#2A2A3C",
 
+        # 深色同走「下沉」路线（丝滑化清单 S1）：#6FFFE9 → #57E2DA → #40B8B1
+        # 深色档对比度余量充足（pressed 对 $on_primary 6.05:1）
         "primary":           "#6FFFE9",
         "primary_lite":      "#8BFFF0",
         "primary_deep":      "#4AA8A6",
-        "primary_hover":     "#8BFFF0",
-        "primary_pressed":   "#4AA8A6",
+        "primary_hover":     "#57E2DA",
+        "primary_pressed":   "#40B8B1",
         "primary_alpha":     "rgba(111, 255, 233, 0.15)",
         "primary_a08":       "rgba(111, 255, 233, 0.08)",
         "primary_a12":       "rgba(111, 255, 233, 0.12)",
@@ -277,8 +283,9 @@ QPushButton#navBtn {
     font-size: 13px;
 }
 QPushButton#navBtn:hover {
-    /* hover 只做视觉反馈（背景 + 轻微右移），切页靠点击 */
-    background-color: $primary_a08;
+    /* hover 只做视觉反馈（背景 + 轻微右移），切页靠点击。
+       背景（a08）过渡走 SmoothButton overlay（清单 S4）；右移是
+       padding 几何变化，保持即时 */
     color: $text;
     padding-left: 22px;
 }
@@ -405,6 +412,11 @@ QFrame#settingsSeparator {
 }
 
 /* ---- 按钮 ---- */
+/* 丝滑化清单 S2：QPushButton 的 hover/press 背景过渡由 SmoothButton
+   （controls.py）在 paint 层插值，端点色契约见其 _SMOOTH_OVERLAYS。
+   QSS 只保留文字/边框变化；**:pressed 禁止再用 margin 做位移** ——
+   按下态 polish 会把 sizeHint 算大并永久缓存（拖拽后行高 +1px 的根因），
+   位移已改走绘制级 -1px 下沉 + 0.98 微缩。 */
 QPushButton {
     background-color: $primary;
     color: $on_primary;
@@ -414,12 +426,7 @@ QPushButton {
     font-size: 13px;
 }
 QPushButton:hover {
-    background-color: $primary_hover;
     color: $on_primary;
-}
-QPushButton:pressed {
-    background-color: $primary_pressed;
-    margin-top: 1px;
 }
 QPushButton:disabled {
     background-color: $text_disabled;
@@ -440,9 +447,8 @@ QPushButton#primaryBtn {
 QPushButton#primaryBtn:hover {
     background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1,
         stop:0 $primary_lite, stop:0.45 $primary, stop:1 $primary);
-}
-QPushButton#primaryBtn:pressed {
-    margin-top: 1px;
+    /* 渐变 hover 属清单 B5（后置）：渐变跳变保留，SmoothButton 对
+       primaryBtn 的 overlay 返回 None，只提供按下位移 */
 }
 
 QPushButton#secondaryBtn {
@@ -452,16 +458,13 @@ QPushButton#secondaryBtn {
     border-radius: 9px;
 }
 QPushButton#secondaryBtn:hover {
-    background-color: $primary_a18;
+    /* 背景过渡走 SmoothButton overlay（端点 ≈ a18），QSS 不再跳变 */
 }
 QPushButton#secondaryBtn:checked {
     background-color: $primary_a18;
     border: 1px solid $primary;
     color: $secondary_text;
     font-weight: 600;
-}
-QPushButton#secondaryBtn:pressed {
-    margin-top: 1px;
 }
 
 QPushButton#dangerBtn {
@@ -470,7 +473,7 @@ QPushButton#dangerBtn {
     border: 1px solid $danger_border;
 }
 QPushButton#dangerBtn:hover {
-    background-color: $danger;
+    /* 背景过渡走 SmoothButton overlay（端点 $danger 实底），白字保持即时 */
     color: white;
 }
 
@@ -483,15 +486,11 @@ QPushButton#iconBtn {
     font-size: 15px;
 }
 QPushButton#iconBtn:hover {
-    background-color: $primary_a12;
+    /* 背景（a12）过渡走 SmoothButton overlay，色/边框保持即时 */
     color: $primary;
     border: 1px solid $primary_a30;
 }
-QPushButton#iconBtn:pressed {
-    background-color: $primary_a18;
-}
 QPushButton#iconBtn[danger="true"]:hover {
-    background-color: $danger_alpha;
     color: $danger;
     border: 1px solid $danger_border;
 }
@@ -534,7 +533,7 @@ QPushButton#settingsNavBtn {
     font-size: 13px;
 }
 QPushButton#settingsNavBtn:hover {
-    background-color: $primary_a08;
+    /* 背景（a08）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $text;
 }
 QPushButton#settingsNavBtn:checked {
@@ -765,12 +764,12 @@ QPushButton#stepBtn {
     padding: 0px;
 }
 QPushButton#stepBtn:hover {
-    background-color: $primary_a18;
+    /* 背景（a18）过渡走 SmoothButton overlay */
     border: 1px solid $primary_a30;
     color: $primary;
 }
 QPushButton#stepBtn:pressed {
-    background-color: $primary_a30;
+    /* 背景（a30）过渡走 SmoothButton overlay */
     border: 1px solid $primary_border_strong;
     color: $primary;
 }
@@ -983,7 +982,7 @@ QPushButton#tableOpenBtn {
     max-width: 70px;
 }
 QPushButton#tableOpenBtn:hover {
-    background-color: $primary;
+    /* 背景（$primary 实底）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
 }
 
@@ -1186,7 +1185,7 @@ QPushButton#undoUndoBtn {
     font-weight: 600;
 }
 QPushButton#undoUndoBtn:hover {
-    background-color: $primary_lite;
+    /* 背景（$primary_lite 实底）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
 }
 
@@ -1267,7 +1266,7 @@ QPushButton#sideTabIconBtn {
     padding: 0px;
 }
 QPushButton#sideTabIconBtn:hover {
-    background-color: $primary_a12;
+    /* 背景（a12）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $primary;
 }
 QPushButton#sideTabIconBtn:checked {
@@ -1318,7 +1317,7 @@ QPushButton#cardCloseBtn {
     padding: 0px;
 }
 QPushButton#cardCloseBtn:hover {
-    background-color: $danger;
+    /* 背景（$danger 实底）过渡走 SmoothButton overlay，白字保持即时 */
     color: white;
 }
 QPushButton#nextBtn {
@@ -1335,12 +1334,8 @@ QPushButton#nextBtn {
     font-weight: 600;
 }
 QPushButton#nextBtn:hover {
-    background-color: $primary_hover;
+    /* 背景（$primary_hover）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
-}
-QPushButton#nextBtn:pressed {
-    background-color: $primary_pressed;
-    margin-top: 1px;
 }
 
 /* ---- 日程任务 ---- */
@@ -1375,7 +1370,7 @@ QPushButton#taskAddBtn {
     font-size: 12px;
 }
 QPushButton#taskAddBtn:hover {
-    background-color: $primary_hover;
+    /* 背景（$primary_hover）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
 }
 QListWidget#taskList {
@@ -1443,11 +1438,9 @@ QPushButton#navSiteCard {
     padding: 0px;
 }
 QPushButton#navSiteCard:hover {
-    background-color: $primary_a18;
+    /* 背景（a18）过渡走 SmoothButton overlay（复合卡片按钮只换底不位移），
+       边框变化保持即时 */
     border: 1px solid $primary;
-}
-QPushButton#navSiteCard:pressed {
-    background-color: $primary_a30;
 }
 QLabel#navSiteCardTitle {
     background: transparent;
@@ -1489,7 +1482,7 @@ QPushButton#fragCopyBtn {
     border: 1px solid $primary_a30;
 }
 QPushButton#fragCopyBtn:hover {
-    background-color: $primary;
+    /* 背景（$primary 实底）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
 }
 QPushButton#fragDelBtn {
@@ -1498,7 +1491,7 @@ QPushButton#fragDelBtn {
     border: 1px solid $danger_border;
 }
 QPushButton#fragDelBtn:hover {
-    background-color: $danger;
+    /* 背景（$danger 实底）过渡走 SmoothButton overlay，白字保持即时 */
     color: white;
 }
 
@@ -1548,7 +1541,7 @@ QPushButton#undoUndoBtn {
     font-weight: 600;
 }
 QPushButton#undoUndoBtn:hover {
-    background-color: $primary_lite;
+    /* 背景（$primary_lite 实底）过渡走 SmoothButton overlay，文字色保持即时 */
     color: $on_primary;
 }
 

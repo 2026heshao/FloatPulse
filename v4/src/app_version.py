@@ -17,7 +17,7 @@
 
 # 程序版本：三段式点分数字（major.minor.patch）
 # 改这里时**必须同步** CHANGELOG.md 与 Release tag
-APP_VERSION = "4.7.0"
+APP_VERSION = "4.8.0"
 
 # 插件契约版本。破坏性变更（改 PluginContext 签名、删方法、
 # 改 manifest 字段语义等）才 +1；新增可选能力不 +1。

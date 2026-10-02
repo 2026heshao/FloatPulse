@@ -3430,6 +3430,10 @@ def main():
     # 8.7 主窗口悬浮球大小变更 → 实时应用到悬浮球（保持球心不动，位置即落盘）
     main_window.ball_size_changed.connect(ball.apply_ball_size)
 
+    # 8.7b 主窗口小卡片图标大小变更 → 实时应用到小卡片软件导航页
+    main_window.mini_icon_size_changed.connect(
+        ball.card_window.apply_icon_size)
+
     # 8.8 主窗口全屏让位开关变更 → 启停全屏检测
     main_window.hide_on_fullscreen_changed.connect(
         lambda _enabled: _apply_fullscreen_watch())

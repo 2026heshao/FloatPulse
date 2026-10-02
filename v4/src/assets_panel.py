@@ -19,7 +19,7 @@ import os
 import shutil
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QFileDialog,
     QStackedWidget, QStyledItemDelegate, QStyle,
 )
@@ -32,7 +32,7 @@ from PyQt6.QtGui import (
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
-from src.controls import EmptyState, IconButton, PageTitle
+from src.controls import SmoothButton, EmptyState, IconButton, PageTitle
 from src import motion
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）
@@ -312,7 +312,7 @@ class AssetsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_folder_btn = QPushButton("📁 打开素材文件夹")
+        open_folder_btn = SmoothButton("📁 打开素材文件夹")
         open_folder_btn.setObjectName("secondaryBtn")
         open_folder_btn.clicked.connect(self._on_open_folder)
         toolbar.addWidget(open_folder_btn)

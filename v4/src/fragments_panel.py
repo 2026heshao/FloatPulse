@@ -19,7 +19,7 @@
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QFrame, QMessageBox, QTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication,
@@ -37,7 +37,7 @@ from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import get_colors
-from src.controls import EmptyState, IconButton, PageTitle
+from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -278,7 +278,7 @@ class _PreviewPane(QWidget):
 
         btns = QHBoxLayout()
         btns.setSpacing(8)
-        self._copy_btn = QPushButton("📋 复制")
+        self._copy_btn = SmoothButton("📋 复制")
         self._copy_btn.setObjectName("secondaryBtn")
         self._edit_btn = IconButton("edit", text="编辑", icon_size=14,
                                     object_name="secondaryBtn")
@@ -398,7 +398,7 @@ class FragmentsPanel(QWidget):
 
         preview_visible = bool(self._host._config.get(
             "fragment_preview_visible", True))
-        self._preview_btn = QPushButton("👁 预览")
+        self._preview_btn = SmoothButton("👁 预览")
         self._preview_btn.setObjectName("secondaryBtn")
         self._preview_btn.setCheckable(True)
         self._preview_btn.setChecked(preview_visible)
@@ -415,6 +415,7 @@ class FragmentsPanel(QWidget):
 
         # ---- 中部：列表 + 内嵌预览（可拖动分隔条）----
         self._frag_list = QListWidget()
+        tune_list_scrolling(self._frag_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._frag_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self._frag_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._frag_list.customContextMenuRequested.connect(self._on_context_menu)
@@ -471,11 +472,11 @@ class FragmentsPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
 
-        merge_btn = QPushButton("🔗 合并选中")
+        merge_btn = SmoothButton("🔗 合并选中")
         merge_btn.clicked.connect(self._on_merge)
         bottom.addWidget(merge_btn)
 
-        copy_btn = QPushButton("📋 复制选中")
+        copy_btn = SmoothButton("📋 复制选中")
         copy_btn.setObjectName("secondaryBtn")
         copy_btn.clicked.connect(self._on_copy)
         bottom.addWidget(copy_btn)
@@ -487,7 +488,7 @@ class FragmentsPanel(QWidget):
         del_btn.clicked.connect(self._on_delete)
         bottom.addWidget(del_btn)
 
-        clear_btn = QPushButton("清空全部")
+        clear_btn = SmoothButton("清空全部")
         clear_btn.setObjectName("dangerBtn")
         clear_btn.clicked.connect(self._on_clear)
         bottom.addWidget(clear_btn)

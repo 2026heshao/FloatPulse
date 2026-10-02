@@ -43,12 +43,12 @@ from PyQt6.QtCore import QObject, QPoint, QRect, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPushButton, QTextEdit, QVBoxLayout, QWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
-from src.controls import IconButton
+from src.controls import SmoothButton, IconButton
 from src.theme import get_colors, get_menu_qss
 from src.app_paths import get_data_dir, get_screen_geometry
 from src.task_manager import task_state, format_relative_deadline
@@ -734,8 +734,8 @@ class StickyNoteWindow(QWidget):
         v.addWidget(edit)
         h = QHBoxLayout()
         h.addStretch()
-        ok_btn = QPushButton("确定")
-        cancel_btn = QPushButton("取消")
+        ok_btn = SmoothButton("确定")
+        cancel_btn = SmoothButton("取消")
         h.addWidget(ok_btn)
         h.addWidget(cancel_btn)
         v.addLayout(h)
