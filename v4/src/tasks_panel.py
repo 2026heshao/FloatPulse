@@ -160,7 +160,7 @@ class TasksPanel(QWidget):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
 
-        toggle_btn = SmoothButton("✓ 批量完成")
+        toggle_btn = SmoothButton("批量完成")
         toggle_btn.setObjectName("secondaryBtn")
         toggle_btn.clicked.connect(self._on_batch_toggle)
         bottom.addWidget(toggle_btn)
@@ -276,14 +276,14 @@ class TasksPanel(QWidget):
 
     def _rel_text(self, t, today: str) -> str:
         """行尾右侧文案：已完成→完成日期，未完成→相对截止时间；
-        均追加番茄累计（🍅×N，0 次不显示）。"""
+        均追加番茄累计（番茄×N，0 次不显示）。"""
         if t.done:
             rel = format_completed_date(t.completed_at)
         else:
             rel = format_relative_deadline(t.deadline, today)
         n = getattr(t, "focus_sessions", 0) or 0
         if n > 0:
-            tomato = f"🍅×{n}"
+            tomato = f"番茄×{n}"
             rel = f"{rel} · {tomato}" if rel else tomato
         return rel
 
@@ -396,13 +396,13 @@ class TasksPanel(QWidget):
         menu.setStyleSheet(self._host._container.styleSheet())
         act_toggle = menu.addAction("取消完成" if task.done else "标记完成")
         # 番茄钟绑定：右键直接对该任务开始一次专注（悬浮球进度环可见）
-        act_focus = menu.addAction("🎯 专注此任务")
+        act_focus = menu.addAction("专注此任务")
         # 任务便签：把任务（截止日徽章+备注）钉成桌面常驻浮窗
-        act_sticky = menu.addAction("📌 钉为便签")
-        act_edit = menu.addAction("✏️ 编辑...")
-        act_export = menu.addAction("📤 导出到 Obsidian")
+        act_sticky = menu.addAction("钉为便签")
+        act_edit = menu.addAction("编辑...")
+        act_export = menu.addAction("导出到 Obsidian")
         menu.addSeparator()
-        act_delete = menu.addAction("🗑 删除")
+        act_delete = menu.addAction("删除")
         action = menu.exec(self._task_list.mapToGlobal(pos))
 
         if action == act_toggle:
@@ -443,7 +443,7 @@ class TasksPanel(QWidget):
         ok, reason = manager.open_task(task_id)
         if not ok and reason == "limit":
             self._host.show_toast(
-                f"📌 便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
         elif not ok and reason == "missing":
             self._host.show_toast("任务不存在或已被删除")
 
