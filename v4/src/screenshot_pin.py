@@ -591,47 +591,47 @@ class PinWindow(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(get_menu_qss(self._theme))
 
-        copy_action = QAction("📋 复制到剪贴板", menu)
+        copy_action = QAction("复制到剪贴板", menu)
         copy_action.triggered.connect(self._copy_to_clipboard)
         menu.addAction(copy_action)
 
-        save_action = QAction("💾 保存为 PNG", menu)
+        save_action = QAction("保存为 PNG", menu)
         save_action.triggered.connect(self._save_as_png)
         menu.addAction(save_action)
 
         # 批注子菜单：工具 / 颜色 / 撤销 / 清除
-        annot_menu = menu.addMenu("✏ 批注")
-        for label, tool in (("✏ 画笔", "pen"), ("➤ 箭头", "arrow"),
-                            ("▦ 马赛克", "mosaic")):
+        annot_menu = menu.addMenu("批注")
+        for label, tool in (("画笔", "pen"), ("箭头", "arrow"),
+                            ("马赛克", "mosaic")):
             act = QAction(label, annot_menu)
             act.setCheckable(True)
             act.setChecked(self._tool == tool)
             act.triggered.connect(lambda _c, t=tool: self.set_tool(t))
             annot_menu.addAction(act)
-        color_menu = annot_menu.addMenu("🎨 颜色")
+        color_menu = annot_menu.addMenu("颜色")
         for label, hex_color in self._ANNOT_COLORS:
             act = QAction(label, color_menu)
             act.setIcon(QIcon(self._color_swatch(hex_color)))
             act.triggered.connect(lambda _c, h=hex_color: self.set_annot_color(h))
             color_menu.addAction(act)
         annot_menu.addSeparator()
-        undo_action = QAction("↩ 撤销批注 (Ctrl+Z)", annot_menu)
+        undo_action = QAction("撤销批注 (Ctrl+Z)", annot_menu)
         undo_action.triggered.connect(self.undo_annot)
         annot_menu.addAction(undo_action)
-        clear_action = QAction("✕ 清除批注", annot_menu)
+        clear_action = QAction("清除批注", annot_menu)
         clear_action.triggered.connect(self.clear_annot)
         annot_menu.addAction(clear_action)
-        move_action = QAction("✋ 结束批注（恢复拖动）", annot_menu)
+        move_action = QAction("结束批注（恢复拖动）", annot_menu)
         move_action.triggered.connect(lambda: self.set_tool(None))
         annot_menu.addAction(move_action)
 
-        reset_action = QAction("🔍 重置大小", menu)
+        reset_action = QAction("重置大小", menu)
         reset_action.triggered.connect(self.reset_zoom)
         menu.addAction(reset_action)
 
         menu.addSeparator()
 
-        close_action = QAction("✕ 关闭", menu)
+        close_action = QAction("关闭", menu)
         close_action.triggered.connect(self.close)
         menu.addAction(close_action)
 
