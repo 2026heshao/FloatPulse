@@ -408,10 +408,10 @@ class NavPanel(QWidget):
 
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
-        act_open = menu.addAction("🌐 打开")
-        act_edit = menu.addAction("✏️ 编辑...")
+        act_open = menu.addAction("打开")
+        act_edit = menu.addAction("编辑...")
         menu.addSeparator()
-        act_delete = menu.addAction("🗑 删除")
+        act_delete = menu.addAction("删除")
 
         action = menu.exec(gpos)
         if action == act_open:
