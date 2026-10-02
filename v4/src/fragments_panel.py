@@ -136,6 +136,13 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
 
         text_rect = style.subElementRect(
             QStyle.SubElement.SE_ItemViewItemText, opt, widget)
+        # 遮挡修复（2026-10-02，实机截图佐证 + 离屏量化）：全局
+        # QListWidget::item 纵向 padding(9px) 会把 28px 行的 text_rect 压到
+        # 10px —— 字底被裁、类别色条缩成 6px 小方块（离屏实测
+        # text_rect.height()==10）。本行的文字/色条/时间全部由本方法绘制，
+        # 纵向改吃整行（基线公式自行居中），横向保留 QSS 的左右缩进。
+        text_rect = QRect(text_rect.left(), opt.rect.top(),
+                          text_rect.width(), opt.rect.height())
         if text_rect.width() <= 2:
             return
 
