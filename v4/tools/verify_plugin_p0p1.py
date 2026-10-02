@@ -312,7 +312,7 @@ app.processEvents()
 win.refresh_page("plugins")
 app.processEvents()
 blob = "\n".join(lbl.text() for lbl in win._page_plugins.findChildren(QLabel))
-check("E8 面板显示 write 能力标记", "✍ 写入数据" in blob,
+check("E8 面板显示 write 能力标记", "写入" in blob,
       [t for t in blob.split("\n") if "能力" in t][:2])
 
 # 工具类没有破坏性方法

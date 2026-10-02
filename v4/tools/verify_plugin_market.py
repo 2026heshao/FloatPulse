@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Offscreen 端到端验证：插件商店「🌐 在线市场」（2026-09-30）。
+"""Offscreen 端到端验证：插件商店「在线市场」（2026-09-30）。
 
 本地 HTTPServer 伪造「市场索引 + latest Release + .fpplug 附件」三件套，
 走**真实点击路径**验证全链路。验证点：
   A. 点「检查在线市场」→ 两段式拉取（索引→Release）→ 在线卡出现，
      条数 = 索引内未安装条目数；能力/热键/体积渲染正确
-  B. 点「⬇ 下载安装」→ 下载（octet-stream）→ sha256 校验 → 落商店
-     → 既有安装链路（目录生成 + loader 加载）→ 状态行 ✓
+  B. 点「下载安装」→ 下载（octet-stream）→ sha256 校验 → 落商店
+     → 既有安装链路（目录生成 + loader 加载）→ 状态行成功
   C. sha256 不符 → 拒绝落盘、拒绝安装、状态行说明校验失败
   D. 索引里声明但 Release 缺附件 → 不出卡、状态行提示「暂缺」
   E. 索引请求 403 / 404 → 状态行分级文案（限流 / HTTP 404），不弹窗不崩
@@ -257,9 +257,9 @@ def main() -> int:
                     if dlg._list_layout.itemAt(i).widget() is not None
                     and getattr(dlg._list_layout.itemAt(i).widget(),
                                 "_is_online_card", False)]
-    # 5 真实插件 + 1 坏 sha 陷阱 = 6 张在线卡
-    assert len(online_cards) == len(items) == 6, \
-        f"在线卡数 {len(online_cards)} != 6"
+    # 在线卡数 = 索引内未安装条目数（真实包 + 坏 sha 陷阱；数量随商店目录变化）
+    assert len(online_cards) == len(items), \
+        f"在线卡数 {len(online_cards)} != 索引条目数 {len(items)}"
     ok(f"A1. 在线卡出现且数量正确（{len(online_cards)} 张）")
     assert "kb-search" in dlg._online_status.text() or \
         "可安装" in dlg._online_status.text()
@@ -272,7 +272,7 @@ def main() -> int:
     btn = target.findChildren(type(dlg._online_btn))[0]
     target._market_item  # noqa: B018
     card_btn = [b for b in target.findChildren(type(btn))
-                if b.text().startswith("⬇")][0]
+                if b.text().startswith("下载")][0]
     card_btn.click()
     assert wait_until(lambda: os.path.isfile(
         os.path.join(plugins_dir, "kb-search", "manifest.json"))), \
@@ -282,7 +282,7 @@ def main() -> int:
     ok("B1. 下载 → sha256 校验 → 落商店 → loader 安装目录生成")
     assert any(t[0] == "info" for t in shown), "安装成功反馈框未出现"
     assert wait_until(lambda: "已从在线市场安装" in dlg._online_status.text())
-    ok("B2. 状态行 ✓ + 成功反馈框出现（经既有 _on_install 链路）")
+    ok("B2. 状态行成功 + 成功反馈框出现（经既有 _on_install 链路）")
 
     # 安装后重查：kb-search 不再进在线卡（已装）
     dlg._online_btn.click()
@@ -302,7 +302,7 @@ def main() -> int:
         if w is not None and getattr(w, "_is_online_card", False) \
                 and w._market_item["id"] == "badsha":
             bad_card_btn = [b for b in w.findChildren(type(btn))
-                            if b.text().startswith("⬇")][0]
+                            if b.text().startswith("下载")][0]
     bad_card_btn.click()
     assert wait_until(lambda: "校验失败" in dlg._online_status.text()), \
         "sha 校验失败提示未出现"

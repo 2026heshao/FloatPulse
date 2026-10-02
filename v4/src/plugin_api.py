@@ -620,7 +620,7 @@ class PluginWriter:
 class AiBackendFacade:
     """AI 总配置门面（需声明 ``capabilities: ["ai"]``）。
 
-    宿主在设置页「🧠 AI 总配置」维护唯一的 AI 后端配置（云端 / 本地 +
+    宿主在设置页「AI 配置」分类维护唯一的 AI 后端配置（云端 / 本地 +
     接入插件列表），插件经本门面**实时**读取：设置页改完即生效，插件
     不必重建页面，更不必各自维护一份后端配置 UI。
 
@@ -943,7 +943,7 @@ class PluginContext:
     def ai(self) -> "AiBackendFacade":
         """**AI 总配置门面**（需声明 ``capabilities: ["ai"]``）。
 
-        读取设置页「🧠 AI 总配置」的唯一真相源：``is_attached()`` 查本
+        读取设置页「AI 配置」分类的唯一真相源：``is_attached()`` 查本
         插件是否被用户接入（设置页下拉框勾选 = 授权），``params()`` 实时
         返回后端参数（mode / base_url / api_key / model / local_port /
         local_ready ...），``add_listener`` 订阅宿主本地服务状态。

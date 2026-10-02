@@ -316,7 +316,7 @@ panel = PluginsPanel(FakeHost(_loader))
 app.processEvents()
 
 btns = [b.text() for b in panel.findChildren(QPushButton)]
-check("G1. 工具栏含「🏪 插件商店」按钮（商店已拆成独立弹窗）",
+check("G1. 工具栏含「插件商店」按钮（商店已拆成独立弹窗）",
       any("插件商店" in t for t in btns),
       f"btns={btns}")
 
@@ -357,8 +357,8 @@ _install_btns = [b for b in dlg.findChildren(QPushButton)
                  if "安装" in b.text()]
 _enabled = [b.text() for b in _install_btns if b.isEnabled()]
 _disabled = [b.text() for b in _install_btns if not b.isEnabled()]
-check("G7. 弹窗内：未安装包有可点「⬇ 安装」，坏包「⊘ 无法安装」禁用",
-      "⬇ 安装" in _enabled and "⊘ 无法安装" in _disabled,
+check("G7. 弹窗内：未安装包有可点「安装」，坏包「无法安装」禁用",
+      "安装" in _enabled and "无法安装" in _disabled,
       f"enabled={_enabled} disabled={_disabled}")
 
 _bad_texts = "\n".join(w.text() for w in dlg.findChildren(QLabel))

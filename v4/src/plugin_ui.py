@@ -21,7 +21,7 @@
                              parent=parent, size=(760, 560))
             self.body_layout.addWidget(...)        # 内容区
             btns = self.add_footer([
-                ("📋 复制", "primaryBtn", self._do_copy),
+                ("复制", "primaryBtn", self._do_copy, "copy"),
                 ("关闭", "secondaryBtn", self.accept),
             ])
 

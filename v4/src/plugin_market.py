@@ -2,7 +2,7 @@
 """应用内插件市场的纯逻辑（唯一真相源，2026-09-30）。
 
 设计立场（与 update_checker 完全对齐，回应「程序不联网」的产品承诺）：
-  - **只在用户点击「🌐 检查在线市场」时联网**：拉一次索引 JSON
+  - **只在用户点击「检查在线市场」时联网**：拉一次索引 JSON
     （仓库 marketplace/index.json，经 api.github.com contents 接口
     取 raw），再拉一次 /releases/latest 解析 .fpplug 附件的 asset id；
   - **离线零影响**：任何失败都归一成结果 dict / 错误串，不重试、
