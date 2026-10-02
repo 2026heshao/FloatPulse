@@ -36,3 +36,15 @@ skips:
   # card_window.py:1564 用 random.randint 随机切换悬浮球卡片。
   # 非加密场景（不用 secrets 是对的——换卡不需要密码学强度）。
   - B311
+
+  # --- B310: urllib_urlopen ------------------------------------------
+  # 3 处 urlopen 全部在**发请求前**先过 src.net_guard.guard_url：
+  #   · plugin_net.py:78  —— _http_request（POST/GET 公共骨架）第 63 行先 guard
+  #   · plugin_net.py:157 —— http_get_bytes 第 146 行先 guard
+  #   · plugin_market.py:203 —— http_get_bytes 第 197 行先 guard
+  # guard_url 只放行 http/https，并对解析出的全部地址做私网/回环/链路本地
+  # 判定（fail-closed），因此「file:/ 或自定义 scheme 被意外放行」不成立。
+  # 保留原始 urlopen（而非换成 requests/aiohttp）是刻意为之：插件依赖白名单
+  # 只允许 PyQt6 + 标准库，运行时不能引第三方 HTTP 库。
+  # 3 处均为误报，2026-10-02 逐处复核（新增 plugin_market 时 B310 转红）。
+  - B310

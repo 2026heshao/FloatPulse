@@ -39,6 +39,17 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# ★ 本脚本全程打印中文，而 Windows 上 stdout 的默认编码未必能表示中文：
+# GitHub 的 windows runner 是 cp1252，会在第一句 print 就抛
+# UnicodeEncodeError: 'charmap' codec can't encode characters —— 表现为
+# 「tag 推上去、Release 卡在第 1 步秒红，实际什么都没构建」（2026-10-02 实测）。
+# 工作流侧已统一设 PYTHONUTF8=1，这里再兜一层：脚本被任何环境单独调用都不炸。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:                     # 老版本解释器 / 被重定向成非文本流
+        pass
+
 VERSION_FILE = os.path.join(ROOT, "v4", "src", "app_version.py")
 CHANGELOG_FILE = os.path.join(ROOT, "CHANGELOG.md")
 

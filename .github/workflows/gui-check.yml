@@ -21,6 +21,11 @@ name: GUI Check
 on:
   workflow_dispatch:
 
+# ★ 中文输出必须显式 UTF-8（2026-10-02）：Windows runner 默认 stdout 是
+# cp1252，而全部 verify_*.py 都打印中文判据，不改会成片 UnicodeEncodeError。
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   gui-check:
     runs-on: windows-latest

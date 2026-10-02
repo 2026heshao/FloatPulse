@@ -2,6 +2,11 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式。
 
+## [Unreleased]
+
+### Fixed
+- **发布流水线在 Windows CI 上从未跑通（两处真实缺陷，2026-10-02 打 v4.8.0 tag 时暴露）**：①**中文输出编码**——`check_release_consistency.py` / `build_release.py` / `pack_plugin.py` 全程打印中文，而 GitHub 的 windows runner 默认 stdout 是 **cp1252**，第一句 `print` 就抛 `UnicodeEncodeError: 'charmap' codec can't encode characters`。表现极具误导性：tag 推上去、Release **15 秒就 completed=failure**，看板写着「构建成功」的错觉，实际第一步就崩、后面 PyInstaller/Inno/上传全部 skipped —— 所以 v4.7.0 之后的发布一直是本机手工走 API 发出的，CI 的 `release.yml` 形同虚设。修法：两个工作流（release / gui-check）统一加 `env: PYTHONUTF8: "1"`，并给闸门脚本 `check_release_consistency.py` 加 stdout/stderr `reconfigure(encoding="utf-8")` 兜底（被任何环境单独调用都不炸；已用 `PYTHONIOENCODING=cp1252` 实测复现并验证修复）。②**bandit B310 转红**——2026-10-01 新增 `plugin_market.py` 后，`urllib.urlopen` 三处（`plugin_market.py` 的 `http_get_bytes` 与 `plugin_net.py` 的 POST/GET 骨架）触发 B310 medium，把「基线 0 问题」的阻断闸门打红。逐处复核：三处都在**发请求前**先过 `src.net_guard.guard_url`（仅放行 http/https + 私网/回环/链路本地全量判定，fail-closed），保留原始 `urlopen` 是插件依赖白名单（仅 PyQt6 + 标准库）的刻意选择 —— 属误报，按既有体例把 B310 连同理由写进 `v4/.bandit`（本地 `bandit -r src knowledge_ball.py -ll -c .bandit` 复现：Medium 0 / High 0）
+
 ## [v4.8.0] - 2026-10-02
 
 本版把 v4.7.0 之后两天的打磨一次收口，主线是三件事：**图标体系与高 DPI 显示彻底对齐**（自绘图标全量替换 emoji、软件图标随卡片真正缩放）、**设置页体验重整**（番茄钟独立成页、新增窗口透明度 / 界面缩放 / 小卡片图标大小）、**插件生态与数据安全补强**（应用内插件市场、数据写入滚动备份与损坏自愈、安装版数据目录双轨）。

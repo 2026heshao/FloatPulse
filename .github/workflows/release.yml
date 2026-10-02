@@ -7,6 +7,15 @@ on:
 permissions:
   contents: write
 
+# ★ 中文输出必须显式 UTF-8（2026-10-02 实测踩坑）：
+# Windows runner 的默认 stdout 编码是 cp1252，而本仓的发布脚本
+# （check_release_consistency / build_release / pack_plugin）全程打印中文，
+# 第一句 print 就抛 UnicodeEncodeError: 'charmap' codec can't encode...
+# 表现为「tag 打上去、Release 秒红在第 1 步」，实际什么都没构建。
+# PYTHONUTF8=1 让解释器全程用 UTF-8，比逐个脚本改 print 更省事也更彻底。
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   build:
     runs-on: windows-latest
