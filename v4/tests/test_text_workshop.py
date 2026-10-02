@@ -322,7 +322,7 @@ def test_store_sanitize_drops_dirty_and_keeps_valid(tmp_path):
     raw = {"history": [
         "junk",                                          # 非 dict
         {"result": "   "},                               # 空结果
-        {"key": "summarize", "label": "📌 总结要点",
+        {"key": "summarize", "label": "总结要点",
          "ts": "2026-10-01T10:00:00", "source": "src",
          "instruction": "", "result": "要点"},
     ], "presets": [
@@ -358,7 +358,7 @@ def test_store_sanitize_caps(tmp_path):
 def test_store_roundtrip_and_corrupt_degrade(tmp_path):
     ctx = _tmp_ctx(tmp_path)
     st = plugin_mod.sanitize_workshop_store(
-        {"history": [{"key": "polish_email", "label": "✉ 润色成邮件",
+        {"history": [{"key": "polish_email", "label": "润色成邮件",
                       "ts": "2026-10-01T09:30:00", "result": "主题：你好"}],
          "presets": [{"id": "p1", "text": "翻译并保留语气"}]})
     assert plugin_mod.save_workshop_store(ctx, st) is True

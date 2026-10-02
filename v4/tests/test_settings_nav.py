@@ -89,7 +89,9 @@ class TestSettingsNavPanel:
         assert len(panel._cat_btns) == len(SETTINGS_CATEGORIES)
         for key, (_k, icon, label) in zip(
                 panel._cat_btns, SETTINGS_CATEGORIES):
-            assert icon in panel._cat_btns[key].text()
+            # UI 重构 04：第二项由 emoji 改为 icons.py 自绘图标名，图标不再
+            # 出现在按钮文字里，改断言按钮承载的 icon_name（QIcon 位图无文字）。
+            assert panel._cat_btns[key].icon_name == icon
             assert label in panel._cat_btns[key].text()
             assert panel._cat_btns[key].objectName() == "settingsNavBtn"
 

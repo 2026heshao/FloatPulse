@@ -22,10 +22,13 @@
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QGridLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
+from src.controls import IconLabel
 from src.glass_dialog import GlassDialog
+from src.theme import DEFAULT_THEME, get_colors
 
 
 # ====================================================================
@@ -118,6 +121,28 @@ class WelcomeDialog(GlassDialog):
         self._sync_step()
 
     # ---------------- 三步页面 ----------------
+    # 三页标题左侧的自绘大图标边长（UI 重构 04：替代 👋/🫧/🎉 三个 emoji，
+    # 保持亲和但零字体依赖，离屏渲染 / 精简字体下不再有豆腐块风险）。
+    PAGE_ICON_SIZE = 32
+
+    def _make_page_icon(self, name: str) -> IconLabel:
+        """建页标题的自绘大图标，颜色取宿主当前主题的主色。
+
+        宿主带 ``theme_changed`` 就订阅重取色（IconButton 同款 callable
+        守卫：测试替身常只有属性、没有 ``connect``）；没有则停在构造时取色
+        —— 向导是短命对话框，够用。
+        """
+        icon = IconLabel(
+            name, self.PAGE_ICON_SIZE,
+            get_colors(getattr(self._host, "current_theme", None)
+                       or DEFAULT_THEME)["primary"])
+        signal = getattr(self._host, "theme_changed", None)
+        if callable(getattr(signal, "connect", None)):
+            signal.connect(lambda _t=None, ic=icon: ic.set_color(
+                get_colors(getattr(self._host, "current_theme", None)
+                           or DEFAULT_THEME)["primary"]))
+        return icon
+
     def _build_page_welcome(self) -> QWidget:
         """① 欢迎页：一句话定位 + 全局热键速查表"""
         page = QWidget()
@@ -125,9 +150,15 @@ class WelcomeDialog(GlassDialog):
         v.setContentsMargins(8, 4, 8, 4)
         v.setSpacing(10)
 
-        hello = QLabel("👋 从随手记开始")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(self._make_page_icon("fragments"), 0,
+                            Qt.AlignmentFlag.AlignVCenter)
+        hello = QLabel("从随手记开始")
         hello.setObjectName("pageTitle")
-        v.addWidget(hello)
+        title_row.addWidget(hello, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch()
+        v.addLayout(title_row)
 
         intro = QLabel(
             "生活悬浮球管的是「记完之后的那一段」：碎片随手进池，"
@@ -165,9 +196,15 @@ class WelcomeDialog(GlassDialog):
         v.setContentsMargins(8, 4, 8, 4)
         v.setSpacing(10)
 
-        title = QLabel("🫧 悬浮球是你的随手入口")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(self._make_page_icon("ball"), 0,
+                            Qt.AlignmentFlag.AlignVCenter)
+        title = QLabel("悬浮球是你的随手入口")
         title.setObjectName("pageTitle")
-        v.addWidget(title)
+        title_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch()
+        v.addLayout(title_row)
 
         lead = QLabel("桌面上那颗球不需要「打开软件」这个动作：")
         lead.setWordWrap(True)
@@ -186,9 +223,15 @@ class WelcomeDialog(GlassDialog):
         v.setContentsMargins(8, 4, 8, 4)
         v.setSpacing(10)
 
-        title = QLabel("🎉 一切就绪")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(self._make_page_icon("check"), 0,
+                            Qt.AlignmentFlag.AlignVCenter)
+        title = QLabel("一切就绪")
         title.setObjectName("pageTitle")
-        v.addWidget(title)
+        title_row.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch()
+        v.addLayout(title_row)
 
         # AI 说明装进玻璃卡片做视觉强调：定位是「可选增强」而非必填配置
         card = QFrame()
@@ -196,13 +239,13 @@ class WelcomeDialog(GlassDialog):
         cv = QVBoxLayout(card)
         cv.setContentsMargins(12, 10, 12, 10)
         ai_note = QLabel(
-            "🧠 AI 能力（智能归类 / 问答）是可选增强：需要时到"
-            "「设置 → 🧠 AI 配置」接一次后端即可；不配置不影响任何功能。")
+            "AI 能力（智能归类 / 问答）是可选增强：需要时到"
+            "「设置 → AI 配置」接一次后端即可；不配置不影响任何功能。")
         ai_note.setWordWrap(True)
         cv.addWidget(ai_note)
         v.addWidget(card)
 
-        tip = QLabel("随时可到「设置 → 🚀 启动与系统 → 新手引导」重看本向导，"
+        tip = QLabel("随时可到「设置 → 启动与系统 → 新手引导」重看本向导，"
                      "F1 打开使用说明。")
         tip.setObjectName("hintLabel")
         tip.setWordWrap(True)

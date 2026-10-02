@@ -574,14 +574,14 @@ class TestStoreDialog:
             cards = _store_cards(dlg)
             assert len(cards) == 1
             btns_a = [b for b in cards[0].findChildren(QPushButton)
-                      if b.text() == "⬇ 安装"]
+                      if b.text() == "安装"]
             assert len(btns_a) == 1 and btns_a[0].isEnabled()
             # 已装数量压缩成一行提示
             hint = dlg._installed_hint.text()
             assert "1 个插件包已安装" in hint
             assert dlg._installed_hint.isVisibleTo(dlg)
             assert not dlg._empty_label.isVisibleTo(dlg)
-            # 弹窗里没有已安装条目的卡片形态（「✓ 已安装」按钮不该存在）
+            # 弹窗里没有已安装条目的卡片形态（「已安装」按钮不该存在）
             assert not [b for c in _store_cards(dlg)
                         for b in c.findChildren(QPushButton)
                         if "已安装" in b.text()]
@@ -626,14 +626,14 @@ class TestStoreDialog:
             assert len(cards) == 1
             joined = " ".join(lbl.text() for lbl in cards[0].findChildren(QLabel))
             assert "manifest 不合法" in joined
-            # 坏包不给可点的安装按钮（文案是「⊘ 无法安装」且禁用）
+            # 坏包不给可点的安装按钮（文案是「无法安装」且禁用）
             assert [b for b in cards[0].findChildren(QPushButton)
-                    if b.text() == "⬇ 安装"] == []
+                    if b.text() == "安装"] == []
         finally:
             dlg.deleteLater()
 
     def test_install_updates_dialog(self, qapp, tmp_path, monkeypatch):
-        """点安装 → loader 装包 → 弹窗卡片即时翻到「✓ 已安装」"""
+        """点安装 → loader 装包 → 弹窗卡片即时翻到「已安装」"""
         from PyQt6.QtWidgets import QPushButton
         from src.plugins_panel import PluginStoreDialog, PluginsPanel
         entries = [_make_store_entry(tmp_path, "demo-a", installed=False)]
@@ -649,7 +649,7 @@ class TestStoreDialog:
                 lambda *a, **k: None)
             card = _store_cards(dlg)[0]
             btn = [b for b in card.findChildren(QPushButton)
-                   if b.text() == "⬇ 安装"][0]
+                   if b.text() == "安装"][0]
             btn.click()
             assert loader.install_calls == ["demo-a"]
             # reload 后：该包已安装 → 不再列卡片，回落为已装数量提示

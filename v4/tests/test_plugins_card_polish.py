@@ -122,7 +122,9 @@ class TestClipText:
         assert clip_text(None, 64) == ""      # type: ignore[arg-type]
 
     def test_desc_max_constant(self):
-        assert DESC_MAX == 48
+        # 2026-10-02 卡片重设计：卡面描述上限 48 → 64 字（双列卡宽下仍是
+        # 「一行半」，但能容纳更多真实插件的完整一句介绍，减少半句截断）。
+        assert DESC_MAX == 64
 
 
 # ====================================================================

@@ -18,7 +18,7 @@ sectionLabel / glassCard / settingsSeparator），因此主题切换自动跟随
 用法：
     dlg = GlassDialog(host, title="碎片详情", size=(620, 520))
     dlg.body_layout.addWidget(...)          # 往内容区加控件
-    dlg.add_footer([("📋 复制", "primaryBtn", on_copy),
+    dlg.add_footer([("复制", "primaryBtn", on_copy, "copy"),
                     ("关闭", "secondaryBtn", dlg.accept)])
     dlg.exec()
 ====================================================================

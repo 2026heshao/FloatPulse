@@ -403,7 +403,7 @@ class OpenSearchAction(BallAction):
     """打开站内搜索页（在宿主主窗口里）；宿主无页面机制时退回提示弹窗"""
 
     id = f"{PLUGIN_ID}.open"
-    title = "🔍 站内搜索"
+    title = "站内搜索"
 
     def run(self, ctx):
         # 热键路径下 run() 在原生事件过滤器里被调用，UI 操作必须延后一轮
@@ -472,7 +472,7 @@ class SearchPage(QWidget):
         root.setSpacing(10)
 
         head = QHBoxLayout()
-        title = QLabel("🔍 站内搜索")
+        title = QLabel("站内搜索")
         title.setObjectName("pageTitle")
         head.addWidget(title)
         head.addWidget(make_hint_label(
@@ -557,14 +557,14 @@ class SearchPage(QWidget):
         try:
             docs = collect_documents(self._ctx.data)
         except Exception as exc:                  # noqa: BLE001 - 采集失败不崩页面
-            self._stat.setText(f"⚠ 读取数据失败：{exc!r}")
+            self._stat.setText(f"读取数据失败：{exc!r}")
             self._ctx.logger.warning(f"[{PLUGIN_ID}] 采集文档失败：{exc!r}")
             return
         self._docs = len(docs)
         build_index(docs, self._index)
         self.index_ready.emit(len(docs))
         if verbose:
-            self._toast(f"✅ 索引已重建（{len(docs)} 条）")
+            self._toast(f"索引已重建（{len(docs)} 条）")
 
     def _on_index_ready(self, count):
         self._docs = count
@@ -607,7 +607,7 @@ class SearchPage(QWidget):
                                       kind=kind_arg)
         except Exception as exc:                  # noqa: BLE001
             self._hits = []
-            self._stat.setText(f"⚠ 检索失败：{exc!r}")
+            self._stat.setText(f"检索失败：{exc!r}")
             return
         # ⚠ 必须与 render_results_html 用的是**同一个列表**：锚点 href 里存的
         # 是它在列表里的下标，渲染完再改列表就会点错行
@@ -690,7 +690,7 @@ class SearchPage(QWidget):
     def _history_menu(self, btn, word: str, pos):
         """历史词右键菜单：删除单条"""
         menu = QMenu(self)
-        act = menu.addAction(f"🗑 删除「{word}」")
+        act = menu.addAction(f"删除「{word}」")
         act.triggered.connect(lambda: self._remove_history(word))
         menu.exec(btn.mapToGlobal(pos))
 

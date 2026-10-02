@@ -646,6 +646,46 @@ class TestThemedAccent:
         out = mod.render_results_html(idx.search("周报"), "周报")
         assert mod.accent_for("light") in out
 
+    # ---- 兜底字面量同源护栏（2026-10-02 补）----------------------------
+    # 上面 test_accent_reads_host_token 看着像同源护栏，其实**抓不到漂移**：
+    # accent_for 第一步就 ``from src.theme import get_colors``，而测试跑在
+    # v4/ 下这个 import 必然成功，于是它比较的是 theme 与它自己 —— 恒真。
+    # 真正会漏网的是 ``_ACCENT_FALLBACK``：插件**独立分发**时 import 不到
+    # src.theme，只能走这个兜底值；主程序换主题色而插件忘同步，全量测试
+    # 依然全绿，真机上插件的高亮色却停在旧值。所以这里绕开运行分支，
+    # 直接用 AST 钉死字面量与 theme 同源。
+
+    def test_fallback_literal_matches_theme_tokens(self):
+        """_ACCENT_FALLBACK 必须逐档等于 theme 的 secondary_text 字面量。"""
+        import ast
+        from src.theme import THEMES
+        with open(PLUGIN_PATH, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        literal = None
+        for node in tree.body:                      # 只认模块级赋值
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "_ACCENT_FALLBACK"
+                    for t in node.targets):
+                literal = ast.literal_eval(node.value)
+        assert isinstance(literal, dict), "未找到模块级 _ACCENT_FALLBACK 字面量"
+        for theme in ("light", "dark"):
+            assert theme in literal, f"_ACCENT_FALLBACK 缺 {theme} 档"
+            assert literal[theme] == THEMES[theme]["secondary_text"], (
+                f"{theme} 兜底色 {literal[theme]} 与 theme.secondary_text "
+                f"{THEMES[theme]['secondary_text']} 漂移"
+                f"（插件独立分发时用的就是这个值）")
+
+    def test_fallback_branch_is_reachable(self, kb, monkeypatch):
+        """证明兜底分支真会被走到 —— 否则上面那条护栏保护的可能是死代码。
+
+        屏蔽 ``src.theme`` 模拟「插件脱离主程序独立运行」，此时 accent_for
+        必须回落到 _ACCENT_FALLBACK，且返回值与字面量一致。
+        """
+        mod = _load_plugin_module(kb)
+        monkeypatch.setitem(sys.modules, "src.theme", None)   # import 即抛
+        for theme in ("light", "dark"):
+            assert mod.accent_for(theme) == mod._ACCENT_FALLBACK[theme]
+
 
 # ====================================================================
 # H 插件契约

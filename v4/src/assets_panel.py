@@ -32,17 +32,22 @@ from PyQt6.QtGui import (
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
-from src.icon_render import icon as render_icon
-from src.controls import SmoothButton, EmptyState, IconButton, PageTitle
+from src.icon_render import icon as render_icon, paint_icon
+from src.controls import EmptyState, IconButton, PageTitle
 from src import motion
 
-# 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）
+# 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）。
+# 值为 icons.py 的 file_* 图标名（01 包图集；两处引用同一批名字，保持一致）。
 EXT_ICON = {
-    ".txt": "📄", ".md": "📝", ".pdf": "📕", ".doc": "📘", ".docx": "📘",
-    ".xls": "📗", ".xlsx": "📗", ".ppt": "📙", ".pptx": "📙",
-    ".zip": "📦", ".rar": "📦", ".7z": "📦",
-    ".mp3": "🎵", ".wav": "🎵", ".mp4": "🎬", ".avi": "🎬", ".mov": "🎬",
-    ".py": "🐍", ".js": "📜", ".json": "📋", ".html": "🌐",
+    ".txt": "file_text", ".md": "file_md", ".pdf": "file_pdf",
+    ".doc": "file_doc", ".docx": "file_doc",
+    ".xls": "file_xls", ".xlsx": "file_xls",
+    ".ppt": "file_ppt", ".pptx": "file_ppt",
+    ".zip": "file_zip", ".rar": "file_zip", ".7z": "file_zip",
+    ".mp3": "file_audio", ".wav": "file_audio",
+    ".mp4": "file_video", ".avi": "file_video", ".mov": "file_video",
+    ".py": "file_code", ".js": "file_code", ".json": "file_text",
+    ".html": "file_web",
 }
 
 # 缩略图缓存哨兵:_PENDING=后台生成中(画占位图),False=确认不可预览。
@@ -220,20 +225,25 @@ class _AssetThumbDelegate(QStyledItemDelegate):
             painter.setBrush(QColor(colors["panel_fill"]))
             painter.drawRoundedRect(trect, 8, 8)
             if not exists:
-                glyph, sub = "⚠️", "文件已失效"
+                icon_name, sub = "warning", "文件已失效"
             elif asset.is_image:
-                glyph, sub = "🖼️", "图片"
+                icon_name, sub = "image", "图片"
             else:
                 ext = os.path.splitext(asset.original_name)[1].lower()
-                glyph, sub = EXT_ICON.get(ext, "📄"), (ext or "文件").lstrip(".").upper()
-            painter.setPen(QColor(colors["text_secondary"]))
-            f = painter.font()
-            f.setPointSize(24)
-            painter.setFont(f)
-            painter.drawText(trect, Qt.AlignmentFlag.AlignCenter, glyph)
+                icon_name = EXT_ICON.get(ext, "file_generic")
+                sub = (ext or "文件").lstrip(".").upper()
+            # 类型/状态图标：自绘描边图标替代旧 emoji 字形（UI 重构 05）
+            avail_h = max(20.0, trect.height() - 30)
+            side = min(48.0, trect.width() * 0.5, avail_h)
+            paint_icon(painter, icon_name,
+                       QRectF(trect.center().x() - side / 2,
+                              trect.top() + 6 + (avail_h - side) / 2,
+                              side, side),
+                       colors["text_secondary"])
             sub_f = painter.font()
             sub_f.setPointSize(8)
             painter.setFont(sub_f)
+            painter.setPen(QColor(colors["text_secondary"]))
             painter.drawText(QRectF(trect.left(), trect.bottom() - 20,
                                     trect.width(), 16),
                              Qt.AlignmentFlag.AlignHCenter, sub)
@@ -313,8 +323,8 @@ class AssetsPanel(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_folder_btn = SmoothButton("打开素材文件夹")
-        open_folder_btn.setObjectName("secondaryBtn")
+        open_folder_btn = IconButton("folder_open", text="打开素材文件夹",
+                                     icon_size=14, object_name="secondaryBtn")
         open_folder_btn.clicked.connect(self._on_open_folder)
         toolbar.addWidget(open_folder_btn)
 

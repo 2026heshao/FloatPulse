@@ -171,7 +171,7 @@ def _idle_tick() -> None:
     _log(ctx, "info", f"空闲 {minutes} 分钟，已自动锁定")
     if ctx is not None:
         try:
-            ctx.show_toast("🔒 密码保险箱已自动锁定")
+            ctx.show_toast("密码保险箱已自动锁定")
         except Exception:                         # noqa: BLE001
             pass
 
@@ -353,7 +353,7 @@ class EntryDialog(PluginDialog):
             tags = core.normalize_tags(
                 [t.strip() for t in self._tags.text().split(",") if t.strip()])
         except ValueError as exc:
-            self._warn.setText(f"⚠ {exc}")
+            self._warn.setText(f"{exc}")
             flash_button(self._save_btn, "再检查一下")
             return
         self._result = {"title": title, "fields": fields, "tags": tags}
@@ -404,10 +404,10 @@ class ChangePasswordDialog(PluginDialog):
     def _on_ok(self):
         new = self._new.text()
         if not new:
-            self._hint.setText("⚠ 新主密码不能为空")
+            self._hint.setText("新主密码不能为空")
             return
         if new != self._new2.text():
-            self._hint.setText("⚠ 两次输入的新主密码不一致")
+            self._hint.setText("两次输入的新主密码不一致")
             return
         self._ok = True
         self.accept()
@@ -498,7 +498,7 @@ class QuickCopyDialog(PluginDialog):
             ensure_idle_timer(self._plugin_ctx)
             self._sync_state()
         else:
-            self._lock_err.setText("⚠ 主密码错误，或数据/账户环境已变化")
+            self._lock_err.setText("主密码错误，或数据/账户环境已变化")
 
     def _refresh_list(self, *_args):
         if self._vault.locked:
@@ -507,7 +507,7 @@ class QuickCopyDialog(PluginDialog):
         try:
             self._entries = core.sort_entries(self._vault.search(query))
         except Exception as exc:                      # noqa: BLE001 - 未解锁等
-            self._pick_hint.setText(f"⚠ {exc}")
+            self._pick_hint.setText(f"{exc}")
             return
         self._list.clear()
         for e in self._entries:
@@ -535,7 +535,7 @@ class QuickCopyDialog(PluginDialog):
         entry = self._vault.get(item.data(Qt.ItemDataRole.UserRole))
         value = core.first_secret_value(entry or {})
         if not value:
-            self._pick_hint.setText("⚠ 该条目没有机密字段（勾了「机密」的才参与快速取用）")
+            self._pick_hint.setText("该条目没有机密字段（勾了「机密」的才参与快速取用）")
             return
         if copy_with_autoclear(value):
             self._copied = True
@@ -580,7 +580,7 @@ class VaultPage(QWidget):
         root.setSpacing(10)
 
         head = QHBoxLayout()
-        title = QLabel("🔒 密码保险箱")
+        title = QLabel("密码保险箱")
         title.setObjectName("pageTitle")
         head.addWidget(title)
         head.addWidget(make_hint_label(
@@ -759,15 +759,15 @@ class VaultPage(QWidget):
             self._refresh_all()
             self._sync_overlay()
         else:
-            self._unlock_err.setText("⚠ 主密码错误，或数据 / 账户环境已变化")
+            self._unlock_err.setText("主密码错误，或数据 / 账户环境已变化")
 
     def _on_create(self):
         pw = self._wz_pw1.text()
         if not pw:
-            self._wz_err.setText("⚠ 主密码不能为空")
+            self._wz_err.setText("主密码不能为空")
             return
         if pw != self._wz_pw2.text():
-            self._wz_err.setText("⚠ 两次输入不一致")
+            self._wz_err.setText("两次输入不一致")
             return
         host = self._host_window()
         dlg = ConfirmDialog(
@@ -782,7 +782,7 @@ class VaultPage(QWidget):
         try:
             self._vault.create(pw)
         except (ValueError, core.VaultError) as exc:
-            self._wz_err.setText(f"⚠ 创建失败：{exc}")
+            self._wz_err.setText(f"创建失败：{exc}")
             return
         self._wz_pw1.clear()
         self._wz_pw2.clear()
@@ -1143,7 +1143,7 @@ class OpenVaultAction(BallAction):
     """打开主窗口并切到保险箱页"""
 
     id = f"{PLUGIN_ID}.open"
-    title = "🔒 密码保险箱"
+    title = "密码保险箱"
 
     def run(self, ctx):
         # 热键路径 run() 在原生事件过滤器里执行，开窗必须延后一轮（项目铁律）
@@ -1178,7 +1178,7 @@ class QuickCopyAction(BallAction):
     """快速取用：搜索 → 复制首个机密字段 → 30 秒自动清剪贴板"""
 
     id = f"{PLUGIN_ID}.quick"
-    title = "🔒 快速取用"
+    title = "快速取用"
 
     def run(self, ctx):
         QTimer.singleShot(0, lambda: self._go(ctx))

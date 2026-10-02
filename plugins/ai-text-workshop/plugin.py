@@ -77,19 +77,19 @@ SYSTEM_PROMPT = (
 # 内置动作：(键, 按钮文案, 指令全文)。指令里以「待处理文本」指代原文，
 # 真实请求时由 build_request 拼进 user 消息。
 WORK_ACTIONS = (
-    ("polish_email", "✉ 润色成邮件",
+    ("polish_email", "润色成邮件",
      "把待处理文本润色成一封得体的工作邮件（第一行是「主题：…」，"
      "随后是正文）。保持原意，语气专业礼貌，只输出邮件本身。"),
-    ("translate_zh", "🌐 翻成中文",
+    ("translate_zh", "翻成中文",
      "把待处理文本翻译成简体中文，保留原有分段，只输出译文。"),
-    ("translate_en", "🌐 翻成英文",
+    ("translate_en", "翻成英文",
      "把待处理文本翻译成英文，保留原有分段，只输出译文。"),
-    ("summarize", "📌 总结要点",
+    ("summarize", "总结要点",
      "把待处理文本总结成 Markdown 要点列表，不超过 8 条，只输出要点。"),
-    ("formalize", "🎩 改写正式",
+    ("formalize", "改写正式",
      "把待处理文本改写成正式、书面的表达，保持原意与篇幅，"
      "只输出改写结果。"),
-    ("extract_tasks", "✅ 提取待办",
+    ("extract_tasks", "提取待办",
      "从待处理文本里提取所有行动项／待办事项，每行一条，写成 Markdown "
      "任务列表（每行以「- [ ] 」开头）。每条尽量一句话、以动词开头。"
      "不要输出任何其他内容；没有行动项时只输出（无）。"),
@@ -147,9 +147,9 @@ def build_request(params: dict, instruction: str, source: str,
         model = str(params.get("model") or "").strip()
         key = str(params.get("api_key") or "").strip()
         if not base:
-            return None, None, None, "后端地址为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, None, "后端地址为空：到 设置 → AI 总配置 填写"
         if not model:
-            return None, None, None, "模型名为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, None, "模型名为空：到 设置 → AI 总配置 填写"
     if not (base.startswith("http://") or base.startswith("https://")):
         return None, None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
     text = normalize_source(source, max_source_chars)
@@ -181,7 +181,7 @@ def parse_reply(result: dict):
         detail = (result.get("body") or "").strip()[:200]
         hint = ""
         if "HTTP 401" in err or "HTTP 403" in err:
-            hint = "（key 缺失或无效？到 设置 → 🧠 AI 总配置 检查）"
+            hint = "（key 缺失或无效？到 设置 → AI 总配置 检查）"
         elif "HTTP 404" in err:
             hint = "（地址或模型名不对？地址应以 /v1 结尾）"
         elif "timed out" in err.lower() or "timeout" in err.lower():
@@ -406,7 +406,7 @@ class AiWorkshopPage(QWidget):
             action_row.addWidget(btn)
         action_row.addStretch(1)
         # 「🕘 历史」开关（W1）：展开/收起历史卡
-        self._history_btn = QPushButton("🕘 历史", self)
+        self._history_btn = QPushButton("历史", self)
         self._history_btn.setObjectName("secondaryBtn")
         self._history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._history_btn.setToolTip("最近 20 次动作结果，点击可回看再利用")
@@ -424,7 +424,7 @@ class AiWorkshopPage(QWidget):
         hist_head.addWidget(make_section_label("最近结果"))
         hist_head.addWidget(make_hint_label("点击一条填回结果区（可编辑/复制/落库）；右键删除该条"))
         hist_head.addStretch(1)
-        self._hist_clear_btn = QPushButton("🗑 清空历史", self)
+        self._hist_clear_btn = QPushButton("清空历史", self)
         self._hist_clear_btn.setObjectName("secondaryBtn")
         self._hist_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hist_clear_btn.clicked.connect(self._clear_history)
@@ -461,7 +461,7 @@ class AiWorkshopPage(QWidget):
         self._custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom_btn.clicked.connect(self._run_custom)
         custom_row.addWidget(self._custom_btn)
-        self._fav_btn = QPushButton("★ 收藏指令", self)
+        self._fav_btn = QPushButton("收藏指令", self)
         self._fav_btn.setObjectName("secondaryBtn")
         self._fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fav_btn.setToolTip(
@@ -487,7 +487,7 @@ class AiWorkshopPage(QWidget):
         src_head.addWidget(make_section_label("原文"))
         src_head.addWidget(make_hint_label("打开时自动带入剪贴板，可编辑"))
         src_head.addStretch(1)
-        self._grab_btn = QPushButton("📥 带入剪贴板", self)
+        self._grab_btn = QPushButton("带入剪贴板", self)
         self._grab_btn.setObjectName("secondaryBtn")
         self._grab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._grab_btn.clicked.connect(self._on_grab_clicked)
@@ -522,10 +522,10 @@ class AiWorkshopPage(QWidget):
         foot = QHBoxLayout()
         foot.setSpacing(8)
         foot.addStretch(1)
-        self._copy_btn = QPushButton("📋 复制结果", self)
-        self._frag_btn = QPushButton("📥 存为碎片", self)
-        self._note_btn = QPushButton("📝 存为笔记", self)
-        self._tasks_btn = QPushButton("✅ 转任务", self)
+        self._copy_btn = QPushButton("复制结果", self)
+        self._frag_btn = QPushButton("存为碎片", self)
+        self._note_btn = QPushButton("存为笔记", self)
+        self._tasks_btn = QPushButton("转任务", self)
         self._tasks_btn.setObjectName("primaryBtn")
         for btn in (self._copy_btn, self._frag_btn, self._note_btn):
             btn.setObjectName("secondaryBtn")
@@ -545,7 +545,7 @@ class AiWorkshopPage(QWidget):
                 btn.setVisible(False)
         else:
             self._tasks_btn.setEnabled(False)
-            self._tasks_btn.setToolTip("先执行「✅ 提取待办」，识别到行动项后可用")
+            self._tasks_btn.setToolTip("先执行「提取待办」，识别到行动项后可用")
 
         self._refresh_presets()                 # 收藏按钮行（W2）
         self._refresh_history()                 # 历史卡空态/行（W1）
@@ -562,11 +562,11 @@ class AiWorkshopPage(QWidget):
         params = self._attached_params()
         if params is None:
             self._ai_hint.setText(
-                "⚠ 尚未接入 AI：到 设置 → 🧠 AI 总配置 配好云端或本地后端，"
+                "尚未接入 AI：到 设置 → AI 总配置 配好云端或本地后端，"
                 "并在「接入插件」里勾选本插件")
         else:
             self._ai_hint.setText(
-                "🧠 已接入设置页「AI 总配置」，后端改动即时生效")
+                "已接入设置页「AI 总配置」，后端改动即时生效")
 
     # ---------------- AI 总配置接入（唯一后端来源） ----------------
     def _attached_params(self):
@@ -598,7 +598,7 @@ class AiWorkshopPage(QWidget):
     def _on_grab_clicked(self):
         if self._prefill_clipboard():
             self._status.setText(
-                f"✓ 已带入剪贴板 "
+                f"已带入剪贴板 "
                 f"{len(self._src_edit.toPlainText().strip())} 字")
         else:
             self._status.setText("剪贴板里没有文本")
@@ -629,12 +629,12 @@ class AiWorkshopPage(QWidget):
         params = self._attached_params()
         if params is None:
             self._status.setText(
-                "尚未接入 AI：到 设置 → 🧠 AI 总配置 配置并勾选本插件")
+                "尚未接入 AI：到 设置 → AI 总配置 配置并勾选本插件")
             return
         if params.get("mode") == "local" and not params.get("local_ready"):
             # 宿主本地服务的启停入口在设置页，这里只引导不代启
             self._status.setText(
-                "宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动")
+                "宿主本地服务未就绪：到 设置 → AI 总配置 启动")
             return
         src_text = self._src_edit.toPlainText()
         url, headers, body, err = build_request(
@@ -691,10 +691,10 @@ class AiWorkshopPage(QWidget):
         if key == "extract_tasks":
             count = len(parse_task_lines(reply))
             self._status.setText(
-                f"✓ 识别到 {count} 条行动项" + (
-                    "，点「✅ 转任务」写入任务列表" if count else ""))
+                f"识别到 {count} 条行动项" + (
+                    "，点「转任务」写入任务列表" if count else ""))
         else:
-            self._status.setText(f"✓ 完成，共 {len(reply)} 字")
+            self._status.setText(f"完成，共 {len(reply)} 字")
         if from_custom:
             self._custom_edit.clear()
 
@@ -773,7 +773,7 @@ class AiWorkshopPage(QWidget):
 
     def _history_item_menu(self, btn, idx: int, pos):
         menu = QMenu(self)
-        act = menu.addAction("🗑 删除这条历史")
+        act = menu.addAction("删除这条历史")
         act.triggered.connect(lambda: self._delete_history(idx))
         menu.exec(btn.mapToGlobal(pos))
 
@@ -784,7 +784,7 @@ class AiWorkshopPage(QWidget):
         h = self._store["history"][idx]
         self._apply_result(str(h.get("result") or ""), h.get("key") or "")
         src = str(h.get("source") or "")
-        self._status.setText("✓ 已从历史填入结果（可编辑/复制/落库）"
+        self._status.setText("已从历史填入结果（可编辑/复制/落库）"
                              + (f"｜源文摘要：{src}" if src else ""))
 
     def _delete_history(self, idx: int):
@@ -800,7 +800,7 @@ class AiWorkshopPage(QWidget):
         self._store["history"] = []
         save_workshop_store(self._ctx, self._store)
         self._refresh_history()
-        self._status.setText("✓ 历史已清空")
+        self._status.setText("历史已清空")
 
     def _record_history(self, key: str, label: str, instruction: str,
                         source: str, result: str):
@@ -819,7 +819,7 @@ class AiWorkshopPage(QWidget):
         """把输入框当前指令收藏成按钮（去重、上限丢最旧）"""
         text = self._custom_edit.text().strip()
         if not text:
-            self._status.setText("先在输入框写好指令，再点「★ 收藏指令」")
+            self._status.setText("先在输入框写好指令，再点「收藏指令」")
             return
         presets = self._store["presets"]
         if any(p["text"] == text for p in presets):
@@ -829,7 +829,7 @@ class AiWorkshopPage(QWidget):
         self._store["presets"] = presets[:PRESET_LIMIT]
         save_workshop_store(self._ctx, self._store)
         self._refresh_presets()
-        self._status.setText("✓ 已收藏：点下方按钮即可填入，右键按钮可删除")
+        self._status.setText("已收藏：点下方按钮即可填入，右键按钮可删除")
 
     def _refresh_presets(self):
         """按存档重建收藏按钮行（无收藏时整行隐藏）"""
@@ -842,7 +842,7 @@ class AiWorkshopPage(QWidget):
         self._preset_widget.setVisible(bool(presets))
         for p in presets:
             text = str(p.get("text") or "")
-            btn = QPushButton(f"★ {text[:16]}" + ("…" if len(text) > 16 else ""),
+            btn = QPushButton(f"{text[:16]}" + ("…" if len(text) > 16 else ""),
                               self._preset_widget)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -857,7 +857,7 @@ class AiWorkshopPage(QWidget):
 
     def _preset_menu(self, btn, pid: str, pos):
         menu = QMenu(self)
-        act = menu.addAction("🗑 删除这条收藏")
+        act = menu.addAction("删除这条收藏")
         act.triggered.connect(lambda: self._delete_preset(pid))
         menu.exec(btn.mapToGlobal(pos))
 
@@ -865,7 +865,7 @@ class AiWorkshopPage(QWidget):
         """收藏指令填入输入框（不自动执行，改完再跑）"""
         self._custom_edit.setText(text)
         self._custom_edit.setFocus()
-        self._status.setText("✓ 已填入收藏指令，可修改后执行")
+        self._status.setText("已填入收藏指令，可修改后执行")
 
     def _delete_preset(self, pid: str):
         self._store["presets"] = [p for p in self._store["presets"]
@@ -883,11 +883,11 @@ class AiWorkshopPage(QWidget):
             return
         clipboard = QApplication.clipboard()
         if clipboard is None:                      # 离屏/无剪贴板环境兜底
-            self._status.setText("⚠ 当前环境没有剪贴板，复制失败")
+            self._status.setText("当前环境没有剪贴板，复制失败")
             return
         clipboard.setText(text)
-        self._status.setText(f"✓ 已复制 {len(text)} 字到剪贴板")
-        flash_button(self._copy_btn, "✓ 已复制")
+        self._status.setText(f"已复制 {len(text)} 字到剪贴板")
+        flash_button(self._copy_btn, "已复制")
 
     def _do_fragment(self):
         text = self._result_text()
@@ -896,8 +896,8 @@ class AiWorkshopPage(QWidget):
             return
         fid = self._ctx.write.add_fragment(text)
         if fid:
-            self._status.setText("✓ 已存为碎片（可在碎片页查看）")
-            flash_button(self._frag_btn, "✓ 已存碎片")
+            self._status.setText("已存为碎片（可在碎片页查看）")
+            flash_button(self._frag_btn, "已存碎片")
             self._ctx.show_toast("已存为碎片（可在碎片页查看）")
         else:
             self._status.setText("存为碎片失败（详见 app.log）")
@@ -910,8 +910,8 @@ class AiWorkshopPage(QWidget):
         title = first_line_title(text)
         nid = self._ctx.write.add_note(title, text)
         if nid:
-            self._status.setText(f"✓ 已存为笔记：{title}")
-            flash_button(self._note_btn, "✓ 已存笔记")
+            self._status.setText(f"已存为笔记：{title}")
+            flash_button(self._note_btn, "已存笔记")
             self._ctx.show_toast("已存为笔记（可在笔记页查看）")
         else:
             self._status.setText("存为笔记失败（详见 app.log）")
@@ -930,8 +930,8 @@ class AiWorkshopPage(QWidget):
                 written += 1
         if written:
             self._status.setText(
-                f"✓ 已写入 {written}/{len(tasks)} 条任务（可在日程任务页查看）")
-            flash_button(self._tasks_btn, f"✓ 已转 {written} 条")
+                f"已写入 {written}/{len(tasks)} 条任务（可在日程任务页查看）")
+            flash_button(self._tasks_btn, f"已转 {written} 条")
             self._tasks_btn.setEnabled(False)   # 防重复点击造成重复任务
             self._tasks_btn.setToolTip("已写入，如需修改请到任务页")
             self._ctx.show_toast(f"已写入 {written} 条任务")
@@ -946,7 +946,7 @@ class WorkshopAction(BallAction):
     """切到文本工坊页（热键 Ctrl+Alt+T；页面缺席时兜底开主窗口）"""
 
     id = f"{PLUGIN_ID}.open"
-    title = "✂ AI 文本工坊"
+    title = "AI 文本工坊"
 
     def run(self, ctx: PluginContext):
         # 置「带入剪贴板」标记：页面 showEvent 消费（见 AiWorkshopPage）

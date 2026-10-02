@@ -15,7 +15,7 @@
   4. 顶部「重新扫描」按钮：无需重启即可加载新放入的插件
   5. 插件总闸关闭时显示提示条；无插件且无失败时显示安装引导空态
   6. **插件商店独立弹窗**（2026-09-28 起，取代原先内嵌在页面里的商店区）：
-     「🏪 插件商店」按钮弹出独立窗口（GlassDialog，与主窗口同主题），
+     「插件商店」按钮弹出独立窗口（GlassDialog，与主窗口同主题），
      列出商店目录里的 ``*.fpplug`` 可安装包，每个包一个「安装」按钮；
      已装好的包标记「已安装」且按钮禁用。页面本体只留已安装插件卡片
 
@@ -38,11 +38,13 @@
 """
 
 import os
+import re
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QTextBrowser, QMessageBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QLabel,
+    QPushButton, QScrollArea, QFrame, QTextBrowser, QMessageBox,
+    QSizePolicy,
 )
 
 # 弹窗基类：PluginStoreDialog 在模块加载期就需要它作基类，
@@ -50,7 +52,9 @@ from PyQt6.QtWidgets import (
 from src.glass_dialog import GlassDialog
 
 from src import plugin_market
-from src.controls import SmoothButton, EmptyState, IconButton, PageTitle
+from src.controls import (SmoothButton, EmptyState, IconButton, PageTitle,
+                          IconLabel)
+from src.theme import DEFAULT_THEME, get_colors
 from src.plugin_net import make_async_getter, make_async_bytes_getter
 from src.update_checker import RELEASES_API_URL, check_headers
 
@@ -64,6 +68,12 @@ CAP_LABELS = {
 CAP_BADGES = {
     "network": "网络", "write": "写入",
     "manage": "改删", "ai": "AI",
+}
+
+# 能力徽章图标（自绘，UI 重构 05）：network→nav / write→edit / manage→settings / ai→ai
+CAP_ICONS = {
+    "network": "nav", "write": "edit",
+    "manage": "settings", "ai": "ai",
 }
 
 # 能力徽章悬停提示（完整语义；manage 蕴含 write、ai 由设置页勾选授权）
@@ -85,8 +95,9 @@ CAP_TIPS = {
 # 插件包内使用说明文件约定（按优先级探测；「查看使用说明」按钮用）
 USAGE_FILENAMES = ("使用说明.md", "README.md")
 # 卡片描述在卡面上最多显示的字符数（超出截断加省略号，全文进悬停提示；
-# 双列卡宽下 48 字约一行半——介绍看一眼定位即可，详情看使用说明 md）
-DESC_MAX = 48
+# 2026-10-02 卡片重设计 48 → 64：卡面内容列左侧让出了 28px 图标槽，
+# 48 字在双列卡宽下只够一行半、像「被切断」；64 字正好占满两行收口干净）
+DESC_MAX = 64
 # 已装插件卡片双列网格的最小容器宽度：低于此值回落单列。
 # 依据实测（带主题 QSS，light/dark 一致）：最宽卡片（启停 + 打开目录 +
 # 查看使用说明 + 卸载四按钮行）最小宽 368px，两列需容器 ≥ 2×368 + 间距
@@ -113,6 +124,97 @@ class _CardsScroll(QScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._panel._reflow_cards(self.viewport().width())
+
+
+class _FlowLayout(QLayout):
+    """横向排列、放不下自动换行的流式布局（能力标签 / 动作 chip 用）。
+
+    Qt 没有内置 flow layout，而这两类标签的数量与宽度都由插件 manifest
+    决定（一个插件可能注册 1~5 个动作，名字长短不一），固定列数必然在
+    某个宽度下溢出。★ 实现要点：``hasHeightForWidth`` 必须为 True，
+    且 ``heightForWidth`` 与 ``setGeometry`` 走**同一套**排布逻辑 ——
+    否则布局给的高度与实际排出的行数不一致，末行会被卡片裁掉。
+    """
+
+    def __init__(self, parent=None, spacing=5):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    # ---- QLayout 必备接口 ----
+    def addItem(self, item):                       # noqa: N802 - Qt 命名
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):                       # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):                       # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):                 # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):                   # noqa: N802
+        return True
+
+    def heightForWidth(self, width):               # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):                   # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):                            # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self):                         # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    # ---- 排布（两个入口共用，保证 heightForWidth 与实际几何一致）----
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        left = rect.x() + m.left()
+        right = rect.right() - m.right()
+        x, y, line_h = left, rect.y() + m.top(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if line_h and x + hint.width() > right:
+                x, y, line_h = left, y + line_h + self._spacing, 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._spacing
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+# 插件 manifest 里的 emoji 前缀（动作标题 / 页面标题普遍带，渲染成豆腐块）
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2190-\u21FF\u2600-\u27BF\u2B00-\u2BFF"
+    "\uFE0E\uFE0F\u200D]+")
+
+
+def strip_emoji(text: str) -> str:
+    """剥离展示层用文本的 emoji 前缀（2026-10-02 卡片重设计）。
+
+    插件包的 ``actions[].title`` 与 ``page.title`` 绝大多数带 emoji
+    （🤖 AI 助手 / 🔒 密码保险箱 / 📝 生成日报 / 周报草稿）——这些字符在
+    微软雅黑下缺字形、渲染成豆腐块（评审 P0-1 的残留源头之一）。但
+    manifest 归插件作者维护、id 与能力声明更是宿主契约，所以**只在展示
+    层剥离**，不改任何 manifest 字段。
+    """
+    return _EMOJI_RE.sub("", text or "").strip()
 
 
 def clip_text(text: str, max_len: int) -> str:
@@ -191,39 +293,52 @@ class PluginsPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(10)
 
-        # ---- 顶部标题 + 计数 ----
+        # ---- 顶部标题 + 计数 + 唯一主操作 ----
+        # 计数从「共 N 个插件」扩成「共 N 个插件 · M 启用」：只有总数时
+        # 看不出健康度，带状态才能一眼知道有没有被停掉的插件。
         header = QHBoxLayout()
         title = PageTitle("plugins", "插件中心", self._host)
         header.addWidget(title)
-        header.addStretch()
         self._count_label = QLabel("共 0 个插件")
         self._count_label.setObjectName("hintLabel")
         header.addWidget(self._count_label)
+        header.addStretch()
+        # 「插件商店」升为主按钮并移到页头右端：它是本页唯一的高频正向
+        # 操作（装新插件）。此前与「打开目录 / 重新扫描」并排、三者同权重。
+        open_store_btn = IconButton("store", text="插件商店",
+                                    icon_size=14, object_name="primaryBtn")
+        open_store_btn.setToolTip("浏览商店目录里的可安装插件包（独立窗口）")
+        open_store_btn.clicked.connect(self._on_open_store_dialog)
+        header.addWidget(open_store_btn)
         v.addLayout(header)
 
-        # ---- 提示 ----
-        hint = QLabel("插件商店放插件包（.fpplug / 含 manifest.json 的文件夹），"
-                      "点「安装」解压到安装目录后即可使用；"
-                      "「卸载」只删安装目录里的副本，商店里的源包会保留，随时能再装。"
-                      "插件包内建议放一份「使用说明.md」，摘要会自动显示在卡片上")
+        # ---- 提示（2026-10-02 压成一句：原来四句共占 3 行竖向空间）----
+        hint = QLabel("插件包（.fpplug）放进安装目录后点「重新扫描」即可用；"
+                      "「卸载」只删安装目录里的副本，商店里的源包会保留")
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         v.addWidget(hint)
 
         # ---- 两个目录的绝对路径（用户最常搞混「装在哪 / 包放哪」）----
-        # 单行显示 + 完整路径进 tooltip：路径很长时会自动换行占掉太多竖向空间，
-        # 单行截断、tooltip 给全文，兼顾可读与紧凑。
+        # 单行显示 + 完整路径进 tooltip：路径很长时会自动换行占掉太多竖向
+        # 空间，单行截断、tooltip 给全文，兼顾可读与紧凑。
+        # 2026-10-02：两个标签并进一个 spacing=0 的紧凑容器（原来各占一行
+        # 且各自再吃一个 10px 段间距），视觉上归入「管理信息」而非说明书。
+        dirs = QVBoxLayout()
+        dirs.setContentsMargins(0, 0, 0, 0)
+        dirs.setSpacing(0)
         self._dir_label = QLabel()
         self._dir_label.setObjectName("pluginDirLabel")
         self._dir_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(self._dir_label)
+        dirs.addWidget(self._dir_label)
 
         self._store_dir_label = QLabel()
         self._store_dir_label.setObjectName("pluginDirLabel")
         self._store_dir_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        v.addWidget(self._store_dir_label)
+        dirs.addWidget(self._store_dir_label)
+        v.addLayout(dirs)
 
         # ---- 插件总闸关闭提示条（默认隐藏）----
         self._gate_label = QLabel("插件功能已在设置页停用（全局开关），"
@@ -233,23 +348,19 @@ class PluginsPanel(QWidget):
         self._gate_label.setVisible(False)
         v.addWidget(self._gate_label)
 
-        # ---- 工具栏 ----
+        # ---- 工具栏：只剩两个低频操作（主按钮已在页头）----
+        # 「打开插件目录」「重新扫描」由描边按钮降为文字按钮：一屏只留
+        # 一个主按钮，其余按层级递降，不再是一排同权重的按钮汤。
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
 
-        open_dir_btn = SmoothButton("打开插件目录")
-        open_dir_btn.setObjectName("secondaryBtn")
+        open_dir_btn = IconButton("folder_open", text="打开插件目录",
+                                  icon_size=14, object_name="textBtn")
         open_dir_btn.clicked.connect(self._on_open_plugins_dir)
         toolbar.addWidget(open_dir_btn)
 
-        open_store_btn = SmoothButton("插件商店")
-        open_store_btn.setObjectName("secondaryBtn")
-        open_store_btn.setToolTip("浏览商店目录里的可安装插件包（独立窗口）")
-        open_store_btn.clicked.connect(self._on_open_store_dialog)
-        toolbar.addWidget(open_store_btn)
-
         self._rescan_btn = IconButton("refresh", text="重新扫描", icon_size=14,
-                                      object_name="secondaryBtn")
+                                      object_name="textBtn")
         self._rescan_btn.setToolTip(
             "重新扫描插件安装目录与商店目录（不必重启程序）")
         self._rescan_btn.clicked.connect(self._on_rescan)
@@ -307,10 +418,13 @@ class PluginsPanel(QWidget):
         #   是商店弹窗那个 QLabel 空态的契约（verify_kb_search 断言 QSS 含该
         #   选择器），不能动；本组件内部标签走 sectionLabel/hintLabel 通用样式。
         # ★ 绝不能放进 _cards_layout —— 测试对卡片网格有精确占位断言。
+        # 2026-10-02：补一个动作钮（评审 P2-7「占位文案当设计用」的整改）——
+        # 空态是唯一能给出「下一步做什么」的位置，只有说明没有动作等于没引导。
         self._empty_label = EmptyState(
             "plugins", "还没有安装任何插件",
-            "点上方「插件商店」安装插件包（.fpplug）\n"
+            "点下方按钮从商店安装插件包（.fpplug）\n"
             "或把插件文件夹放进安装目录后点「重新扫描」",
+            action_text="打开插件商店", on_action=self._on_open_store_dialog,
             object_name="pluginEmptyState")
         v.addWidget(self._empty_label, 1)
 
@@ -382,9 +496,32 @@ class PluginsPanel(QWidget):
                 self._error_layout.addWidget(self._make_error_card(fe))
 
         has_plugins = bool(plugins)
-        self._empty_label.setVisible(
-            not has_plugins and not has_errors and not self._has_store_pkgs(store))
+        show_empty = (not has_plugins and not has_errors
+                      and not self._has_store_pkgs(store))
+        # 空态两形态（2026-10-02）：总闸关闭时插件**根本没被加载**（loader
+        # 返回空列表），空态必须如实说「未加载」而不是误导成「还没安装任何
+        # 插件」；只有真没装时才给出「去商店」这个下一步动作。
+        if not gate_on:
+            self._empty_label.set_state(
+                "plugins", "插件未加载",
+                "插件的动作、热键与插件页都已一并摘掉\n"
+                "到「设置」打开插件总开关后重启程序即可恢复",
+                show_action=False)
+        else:
+            self._empty_label.set_state(
+                "plugins", "还没有安装任何插件",
+                "点下方按钮从商店安装插件包（.fpplug）\n"
+                "或把插件文件夹放进安装目录后点「重新扫描」",
+                show_action=True)
+        self._empty_label.setVisible(show_empty)
+
+        # 计数：保留「共 N 个插件」前缀（既有断言口径不变），再补启用数 ——
+        # 「有几个」之外还要能一眼看出「有几个是活的」。
         cnt = f"共 {len(plugins)} 个插件"
+        n_on = sum(1 for lp in plugins
+                   if (self._status_of(lp) or ("", ""))[1] == "pluginStatusOn")
+        if plugins:
+            cnt += f"，{n_on} 个已启用"
         if has_errors:
             cnt += f"，{len(errors)} 个加载失败"
         n_store = self._installable_count(store)
@@ -492,19 +629,60 @@ class PluginsPanel(QWidget):
 
     # ---------------- 卡片构建 ----------------
     def _make_card(self, lp) -> QWidget:
-        """单个插件卡片：标题行 + 描述 + 告警 + 动作清单 + 依赖 + 操作按钮"""
+        """单个已装插件卡片（2026-10-02 重设计）。
+
+        版式：卡体分「主体」与「底部操作行（#pluginCardFoot，通栏 + 上
+        分隔线、吸底）」两段；主体再横排成 ``28×28 图标槽 ‖ 四行内容``：
+
+            [图标槽]  插件名   v1.2.3            ● 已启用
+                      描述（最多 DESC_MAX 字，全文进悬停提示）
+                      能力标签（描边＝标签性质）…
+                      动作 chip（实底＝可执行性质）…
+
+        卡片左缘 3px 状态条、图标槽与状态点都由 ``setProperty("state", …)``
+        驱动 QSS 属性选择器（``on`` / ``off`` / ``warn``），三处状态同源
+        （见 :meth:`_state_key`），不会互相打架。
+        """
         card = QFrame()
         card.setObjectName("pluginCard")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(7)
+        state = self._state_key(lp)
+        card.setProperty("state", state)
 
         manifest = getattr(lp, "manifest", {}) or {}
 
-        # ---- 标题行：名称 + 版本（弱化小字）+ 状态标签 + id ----
+        # v（卡片总列）只负责「主体吸顶 + 操作行吸底」，间距全交给子布局，
+        # 这样主体与操作行之间的留白不会被 addStretch 吃掉。
+        v = QVBoxLayout(card)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        main = QHBoxLayout()
+        main.setContentsMargins(12, 12, 14, 11)
+        main.setSpacing(10)
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(7)
+
+        # ---- 图标槽：28×28 卡片视觉锚点（独立控件，不参与文字度量）----
+        slot = QFrame()
+        slot.setObjectName("pluginIconSlot")
+        slot.setProperty("state", state)
+        slot.setFixedSize(28, 28)
+        slot_lay = QVBoxLayout(slot)
+        slot_lay.setContentsMargins(0, 0, 0, 0)
+        theme = getattr(self._host, "current_theme", None) or DEFAULT_THEME
+        _colors = get_colors(theme)
+        icon_color = {"on": _colors["primary"], "warn": _colors["warn"]}.get(
+            state, _colors["text_secondary"])
+        slot_lay.addWidget(IconLabel("plugin", 15, icon_color), 0,
+                           Qt.AlignmentFlag.AlignCenter)
+        main.addWidget(slot, 0, Qt.AlignmentFlag.AlignTop)
+
+        # ---- 标题行：名称（大字）+ 版本（等宽小字）+ 状态点&文字 ----
         head = QHBoxLayout()
-        head.setSpacing(6)
-        name = QLabel(lp.name)
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(7)
+        name = QLabel(strip_emoji(lp.name))
         name.setObjectName("pluginCardTitle")
         head.addWidget(name)
 
@@ -512,17 +690,21 @@ class PluginsPanel(QWidget):
         ver.setObjectName("pluginCardId")
         head.addWidget(ver)
 
+        head.addStretch()
+
+        # 状态＝圆点 + 文字（取代旧描边胶囊）：胶囊在暗色下发重、抢标题，
+        # 点+字轻，且文字钉在标题行右端，一排卡自然形成可扫读的「状态列」。
         status = self._status_of(lp)
         if status is not None:
+            dot = QFrame()
+            dot.setObjectName("pluginStatusDot")
+            dot.setProperty("state", state)
+            dot.setFixedSize(6, 6)
+            head.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
             tag = QLabel(status[0])
             tag.setObjectName(status[1])
             head.addWidget(tag)
-
-        head.addStretch()
-        pid = QLabel(lp.plugin_id)
-        pid.setObjectName("pluginCardId")
-        head.addWidget(pid)
-        v.addLayout(head)
+        body.addLayout(head)
 
         # ---- 描述行：manifest.description > 类 docstring 首行 ----
         # 卡面最多 DESC_MAX 字（双列卡宽下约一行半，一眼扫完），
@@ -533,54 +715,30 @@ class PluginsPanel(QWidget):
             doc = getattr(type(lp.plugin), "__doc__", "") or ""
             desc = doc.strip().splitlines()[0].strip() if doc.strip() else ""
         if desc:
-            desc_label = QLabel(clip_text(desc, DESC_MAX))
+            desc_label = QLabel(clip_text(strip_emoji(desc), DESC_MAX))
             desc_label.setObjectName("pluginCardDesc")
             desc_label.setWordWrap(True)
             if len(desc) > DESC_MAX:
                 desc_label.setToolTip(desc)
-            v.addWidget(desc_label)
+            body.addWidget(desc_label)
 
         # ---- 使用说明摘要不上卡（2026-10-01 用户拍板）----
-        # 描述与「📖 摘自 md 的摘要」两段都在介绍「这插件是干嘛的」，重复；
+        # 描述与「摘自 md 的摘要」两段都在介绍「这插件是干嘛的」，重复；
         # 详细用法本来就有点下方「查看使用说明」按钮（程序内渲染 md），
         # 卡面不再重复展示——需要详情时按一次按钮就能看到全文。
 
         # ---- 动作级告警（热键被占 / 未声明等）----
         for warn in list(getattr(lp, "warnings", []) or []):
-            wl = QLabel(f"⚠ {warn}")
+            wl = QLabel(warn)
             wl.setObjectName("pluginErrorHint")
             wl.setWordWrap(True)
-            v.addWidget(wl)
+            body.addWidget(wl)
 
-        # ---- 动作清单 ----
-        actions = list(getattr(lp, "actions_raw", []) or [])
-        for act in actions:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            title = QLabel(f"·  {getattr(act, 'title', '') or act.id}")
-            title.setObjectName("pluginActionTitle")
-            row.addWidget(title)
-            if getattr(act, "menu", False):
-                menu_tag = QLabel("[右键菜单]")
-                menu_tag.setObjectName("pluginActionTag")
-                row.addWidget(menu_tag)
-            hotkey = (getattr(act, "hotkey", None) or "").strip()
-            if hotkey:
-                hk = QLabel(f"⌨ {hotkey}")
-                hk.setObjectName("pluginActionTag")
-                row.addWidget(hk)
-            row.addStretch()
-            v.addLayout(row)
-        if not actions:
-            no_act = QLabel("（无注册动作）")
-            no_act.setObjectName("pluginActionTag")   # 弱化灰，不与描述抢层级
-            v.addWidget(no_act)
-
-        # ---- 能力徽章行 + 卡片悬停详情（2026-10-01 卡片降噪）----
-        # 能力：一排胶囊徽章（🌐 网络 / ✍ 写入 / 🛠 改删 / 🧠 AI），
-        # 完整语义在徽章悬停提示里；依赖是开发者信息，不再占卡面行，
-        # 连同被截断的描述全文一起挂进**卡片整体悬停提示**（悬停卡面
-        # 空白处可见——QToolTip 沿父链找最近的有提示的控件）。
+        # ---- 能力标签 + 卡片悬停详情（2026-10-01 卡片降噪）----
+        # 能力：一排描边标签（网络 / 写入 / 改删 / AI，各带自绘图标），
+        # 完整语义在标签悬停提示里；依赖是开发者信息，不占卡面行，连同被
+        # 截断的描述全文一起挂进**卡片整体悬停提示**（悬停卡面空白处可见
+        # ——QToolTip 沿父链找最近的有提示的控件）。
         requires = list(manifest.get("requires", []) or [])
         caps = list(manifest.get("capabilities", []) or [])
         card_tips = []
@@ -591,32 +749,59 @@ class PluginsPanel(QWidget):
         if card_tips:
             card.setToolTip("\n\n".join(card_tips))
         if caps:
-            cap_row = QHBoxLayout()
-            cap_row.setSpacing(6)
+            caps_host = QWidget()
+            caps_host.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                    QSizePolicy.Policy.Minimum)
+            caps_lay = _FlowLayout(caps_host, spacing=5)
             for c in caps:
-                cap_row.addWidget(self._make_cap_badge(c))
-            cap_row.addStretch()
-            v.addLayout(cap_row)
+                caps_lay.addWidget(self._make_cap_badge(c))
+            body.addWidget(caps_host)
 
-        # ---- 操作按钮行（右对齐，与原视觉一致）----
-        bottom = QHBoxLayout()
-        bottom.setSpacing(8)
-        bottom.addStretch()
+        # ---- 动作 chip：一个动作一枚实底 chip，横向流式排列、自动换行 ----
+        # 取代此前「· 动作名〔右键菜单〕热键」三标签逐行铺开——动作多的
+        # 插件（如定时任务）逐行能吃掉半屏；chip 化后宽度自适应、可并排。
+        actions = list(getattr(lp, "actions_raw", []) or [])
+        acts_host = QWidget()
+        acts_host.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                QSizePolicy.Policy.Minimum)
+        acts_lay = _FlowLayout(acts_host, spacing=5)
+        if actions:
+            for act in actions:
+                acts_lay.addWidget(self._make_act_chip(act))
+        else:
+            no_act = QLabel("（无注册动作）")
+            no_act.setObjectName("pluginActTag")   # 弱化灰，不与描述抢层级
+            acts_lay.addWidget(no_act)
+        body.addWidget(acts_host)
+
+        main.addLayout(body, 1)
+        v.addLayout(main, 1)
+
+        # ---- 底部操作行（通栏 + 上分隔线、吸底）----
+        # 「停用 / 启用」是唯一次高频开关 → 固定留在左侧；其余三个低频操作
+        # （打开目录 / 查看使用说明 / 卸载）靠右，一屏只有一个视觉重心。
+        foot = QFrame()
+        foot.setObjectName("pluginCardFoot")
+        bottom = QHBoxLayout(foot)
+        bottom.setContentsMargins(12, 9, 14, 10)
+        bottom.setSpacing(6)
 
         toggle_btn = self._make_toggle_btn(lp, actions)
         if toggle_btn is not None:
             bottom.addWidget(toggle_btn)
 
-        open_btn = SmoothButton("📁 打开目录")
-        open_btn.setObjectName("secondaryBtn")
+        bottom.addStretch()
+
+        open_btn = IconButton("folder_open", text="打开目录", icon_size=14,
+                              object_name="textBtn")
         open_btn.clicked.connect(
             lambda _checked=False, p=lp.path: self._on_open_dir(p))
         bottom.addWidget(open_btn)
 
         readme = find_usage_file(lp.path)
         if readme:
-            readme_btn = SmoothButton("📄 查看使用说明")
-            readme_btn.setObjectName("secondaryBtn")
+            readme_btn = IconButton("file_text", text="查看使用说明",
+                                    icon_size=14, object_name="textBtn")
             readme_btn.clicked.connect(
                 lambda _checked=False, p=readme: self._on_open_file(p))
             bottom.addWidget(readme_btn)
@@ -632,21 +817,62 @@ class PluginsPanel(QWidget):
             d=lp.path: self._on_uninstall(p, n, d))
         bottom.addWidget(uninstall_btn)
 
-        v.addLayout(bottom)
+        v.addWidget(foot)
         return card
 
-    def _make_cap_badge(self, cap: str) -> QLabel:
-        """能力胶囊徽章：短文案上卡面，完整语义进悬停提示（三卡共用）"""
+    def _make_act_chip(self, act) -> QWidget:
+        """一枚动作 chip：动作名 +（右键菜单 / 热键）归属（2026-10-02）。
+
+        动作名来自 manifest，普遍带 emoji 前缀（🤖 / 📝 / 🔒），交给
+        :func:`strip_emoji` 在展示层剥离（雅黑缺字形会渲染成豆腐块）；
+        热键用等宽小字 + 浅底，与动作名在视觉上分层。
+        """
+        chip = QFrame()
+        chip.setObjectName("pluginActChip")
+        row = QHBoxLayout(chip)
+        row.setContentsMargins(7, 3, 8, 3)
+        row.setSpacing(5)
+
+        title = QLabel(strip_emoji(getattr(act, "title", "") or act.id))
+        title.setObjectName("pluginActName")
+        row.addWidget(title)
+
+        if getattr(act, "menu", False):
+            menu_tag = QLabel("右键菜单")
+            menu_tag.setObjectName("pluginActTag")
+            row.addWidget(menu_tag)
+
+        hotkey = (getattr(act, "hotkey", None) or "").strip()
+        if hotkey:
+            hk = QLabel(hotkey)
+            hk.setObjectName("pluginActHotkey")
+            row.addWidget(hk)
+        return chip
+
+    def _make_cap_badge(self, cap: str):
+        """能力胶囊徽章：自绘图标 + 短文案，完整语义进悬停提示（三卡共用）。
+
+        文字仍是 ``QLabel#pluginCapBadge``（QSS 胶囊契约与既有断言口径不变）；
+        图标是它左侧的独立 ``IconLabel``，不参与文字度量。
+        """
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        theme = getattr(self._host, "current_theme", None) or DEFAULT_THEME
+        row.addWidget(IconLabel(CAP_ICONS.get(cap, "info"), 12,
+                                get_colors(theme)["secondary_text"]))
         lab = QLabel(CAP_BADGES.get(cap, CAP_LABELS.get(cap, cap)))
         lab.setObjectName("pluginCapBadge")
         lab.setToolTip(CAP_TIPS.get(cap, ""))
-        return lab
+        row.addWidget(lab)
+        return wrap
 
     def _make_store_card(self, entry) -> QWidget:
         """商店里一个可安装包的卡片：名称 + 版本 + 状态 + 描述 + 安装按钮。
 
         三种形态：
-          - 未安装（可用）→ 主按钮「⬇ 安装」
+          - 未安装（可用）→ 主按钮「安装」
           - 已安装       → 按钮禁用，显示「已安装」；同时给「打开目录」
           - 包不合法     → 标红展示 error + 提示，不给安装按钮
         """
@@ -703,7 +929,7 @@ class PluginsPanel(QWidget):
         # ---- 非法包的报错 ----
         error = (getattr(entry, "error", "") or "").strip()
         if error:
-            el = QLabel(f"⚠ {error}")
+            el = QLabel(error)
             el.setObjectName("pluginErrorReason")
             el.setWordWrap(True)
             v.addWidget(el)
@@ -730,18 +956,18 @@ class PluginsPanel(QWidget):
         bottom.setSpacing(8)
         bottom.addStretch()
 
-        install_btn = SmoothButton("⬇ 安装")
-        install_btn.setObjectName("primaryBtn")
+        install_btn = IconButton("download", text="安装", icon_size=14,
+                                 object_name="primaryBtn")
         install_btn.setToolTip(
             "把该插件包解压到插件安装目录并加载；源包保留在商店目录，"
             "卸载后仍可再装")
         if not usable:
             install_btn.setEnabled(False)
-            install_btn.setText("⊘ 无法安装")
+            install_btn.setText("无法安装")
             install_btn.setToolTip("插件包不合法，先按下方提示修正后再试")
         elif installed:
             install_btn.setEnabled(False)
-            install_btn.setText("✓ 已安装")
+            install_btn.setText("已安装")
             install_btn.setToolTip("该插件已装在插件安装目录；如需重装请先卸载")
         else:
             install_btn.clicked.connect(
@@ -749,8 +975,8 @@ class PluginsPanel(QWidget):
                 n=title_text: self._on_install(p, n))
         bottom.addWidget(install_btn)
 
-        open_btn = SmoothButton("📁 打开目录")
-        open_btn.setObjectName("secondaryBtn")
+        open_btn = IconButton("folder_open", text="打开目录", icon_size=14,
+                              object_name="secondaryBtn")
         open_btn.clicked.connect(
             lambda _checked=False, p=getattr(entry, "path", ""):
             self._on_open_dir(os.path.dirname(p) if p else ""))
@@ -772,8 +998,11 @@ class PluginsPanel(QWidget):
         title = QLabel(getattr(fe, "name", "") or getattr(fe, "folder", ""))
         title.setObjectName("pluginErrorTitle")
         head.addWidget(title)
+        # 阶段标签走专用 pluginStageTag（描边胶囊）：正常卡的状态已改成
+        # 「圆点+文字」，失败卡是异常物、可以比正常卡重一点，两者不再共用
+        # 同一个 objectName，改一处不会误伤另一处。
         stage_tag = QLabel(stage_label(getattr(fe, "stage", "")))
-        stage_tag.setObjectName("pluginStatusWarn")
+        stage_tag.setObjectName("pluginStageTag")
         head.addWidget(stage_tag)
         head.addStretch()
         folder = getattr(fe, "folder", "")
@@ -792,7 +1021,7 @@ class PluginsPanel(QWidget):
         # 修复建议
         hint = (getattr(fe, "hint", "") or "").strip()
         if hint:
-            hint_label = QLabel(f"💡 {hint}")
+            hint_label = QLabel(hint)
             hint_label.setObjectName("pluginErrorHint")
             hint_label.setWordWrap(True)
             v.addWidget(hint_label)
@@ -802,8 +1031,8 @@ class PluginsPanel(QWidget):
         if path:
             bottom = QHBoxLayout()
             bottom.addStretch()
-            open_btn = SmoothButton("📁 打开目录")
-            open_btn.setObjectName("secondaryBtn")
+            open_btn = IconButton("folder_open", text="打开目录", icon_size=14,
+                                  object_name="secondaryBtn")
             open_btn.clicked.connect(
                 lambda _checked=False, p=path: self._on_open_dir(p))
             bottom.addWidget(open_btn)
@@ -834,6 +1063,20 @@ class PluginsPanel(QWidget):
             return (f"部分生效 {ok}/{len(actions)}", "pluginStatusWarn")
         return ("已启用", "pluginStatusOn")
 
+    @staticmethod
+    def _state_key(lp) -> str:
+        """卡片状态键（QSS 属性选择器用）：``on`` / ``off`` / ``warn``。
+
+        与 :meth:`_status_of` **同源**（后者给 objectName，本方法映射成属性
+        值），避免「左缘状态条」与「状态文字」各判一次而打架。判定不出来时
+        返回 ``off`` —— 中性灰是最诚实的「未知」表达。
+        """
+        st = PluginsPanel._status_of(lp)
+        if st is None:
+            return "off"
+        return {"pluginStatusOn": "on",
+                "pluginStatusWarn": "warn"}.get(st[1], "off")
+
     def _registry(self):
         """取动作注册表：优先 loader.registry（少一处跨层耦合），
         再退回宿主直挂的几种常见属性名；都拿不到返回 None"""
@@ -863,7 +1106,7 @@ class PluginsPanel(QWidget):
         if not aid or not hasattr(first, "enabled"):
             return None
         on = bool(first.enabled())
-        btn = SmoothButton("⏸ 停用" if on else "▶ 启用")
+        btn = SmoothButton("停用" if on else "启用")
         btn.setObjectName("secondaryBtn")
         btn.setToolTip("停用后不挂右键菜单、不绑热键（不卸载插件模块），"
                        "状态会记住，重启后依然生效")
@@ -1140,7 +1383,7 @@ class PluginStoreDialog(GlassDialog):
 
     def __init__(self, panel):
         self._panel = panel
-        super().__init__(host=panel._host, title="🏪 插件商店",
+        super().__init__(host=panel._host, title="插件商店",
                          subtitle="浏览并安装插件包（安装 = 解压到插件目录）",
                          size=(720, 560))
 
@@ -1163,8 +1406,8 @@ class PluginStoreDialog(GlassDialog):
         body.addWidget(self._installed_hint)
 
         # ---- 在线市场（2026-09-30 起，用户主动点击才联网）----
-        self._online_btn = SmoothButton("🌐 检查在线市场")
-        self._online_btn.setObjectName("secondaryBtn")
+        self._online_btn = IconButton("nav", text="检查在线市场",
+                                      icon_size=14, object_name="secondaryBtn")
         self._online_btn.setToolTip(
             "联网拉取官方插件市场索引（GitHub API）。\n"
             "只在点击这一刻发请求；不点不联网，离线时本地安装不受影响")
@@ -1209,8 +1452,9 @@ class PluginStoreDialog(GlassDialog):
         body.addWidget(scroll, 1)
 
         self.add_footer([
-            ("📁 打开商店目录", "secondaryBtn",
-             lambda _checked=False: self._panel._on_open_store_dir()),
+            ("打开商店目录", "secondaryBtn",
+             lambda _checked=False: self._panel._on_open_store_dir(),
+             "folder_open"),
             ("刷新", "secondaryBtn", self.reload, "refresh"),
             ("关闭", "primaryBtn", self.accept),
         ])
@@ -1234,7 +1478,7 @@ class PluginStoreDialog(GlassDialog):
         except Exception:                          # noqa: BLE001 - 旧 loader 兜底
             store_dir = ""
         if store_dir:
-            self._dir_label.setText("🏪 商店目录：%s" % store_dir)
+            self._dir_label.setText("商店目录：%s" % store_dir)
             self._dir_label.setToolTip(store_dir)
             self._dir_label.setVisible(True)
         else:
@@ -1267,8 +1511,12 @@ class PluginStoreDialog(GlassDialog):
 
         if n_installed:
             self._installed_hint.setText(
-                f"✓ 另有 {n_installed} 个插件包已安装——"
+                f"另有 {n_installed} 个插件包已安装——"
                 f"卸载插件后可回到此处重装")
+            theme = (getattr(self._panel._host, "current_theme", None)
+                     or DEFAULT_THEME)
+            self._installed_hint.setStyleSheet(
+                f"color: {get_colors(theme)['success']};")
             self._installed_hint.setVisible(True)
         else:
             self._installed_hint.setVisible(False)
@@ -1278,7 +1526,7 @@ class PluginStoreDialog(GlassDialog):
             self._empty_label.setText(
                 "商店目录里还没有可安装的插件包\n\n"
                 "把 .fpplug 插件包（或含 manifest.json 的文件夹）\n"
-                "放进上方商店目录，回到本窗口点「🔄 刷新」即可看到"
+                "放进上方商店目录，回到本窗口点「刷新」即可看到"
                 if not entries else
                 "商店里的插件包都已安装\n\n"
                 "卸载插件后，它的源包会回到这里，可随时重装")
@@ -1295,7 +1543,7 @@ class PluginStoreDialog(GlassDialog):
         self._online_btn.setEnabled(not busy)
 
     def _on_check_online(self):
-        """「🌐 检查在线市场」：拉索引 → 拉最新 Release 解析附件 id → 出卡片。
+        """「检查在线市场」：拉索引 → 拉最新 Release 解析附件 id → 出卡片。
 
         两段式的原因：索引只存**文件名**（asset id 每次发版都变），
         下载地址要在运行时从 /releases/latest 里按文件名解析。
@@ -1356,7 +1604,7 @@ class PluginStoreDialog(GlassDialog):
             note += (f"；{len(updatable)} 个有新版本（{names}）——"
                      f"先卸载旧版，再从这里安装新版")
         for p in problems[:2]:
-            note += f"\n⚠ {p}"
+            note += f"\n{p}"
         self._set_online_status(note)
         if not pending:
             self._market_set_busy(False)
@@ -1398,8 +1646,12 @@ class PluginStoreDialog(GlassDialog):
         if not self._market_items:
             self._empty_label.setVisible(False)
 
+    def _make_cap_badge(self, cap: str):
+        """能力徽章：委托面板实现（三卡共用同一渲染，避免重复定义）。"""
+        return self._panel._make_cap_badge(cap)
+
     def _make_online_card(self, it: dict) -> QWidget:
-        """在线市场卡片：与本地商店卡同款骨架，按钮是「⬇ 下载安装」。
+        """在线市场卡片：与本地商店卡同款骨架，按钮是「下载安装」。
 
         刻意不复用 _make_store_card：那张卡的安装按钮走「包已在商店目录」
         的前提（_on_install → install_from_store），在线包还没落地，路径不同。
@@ -1458,8 +1710,8 @@ class PluginStoreDialog(GlassDialog):
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
         bottom.addStretch()
-        btn = SmoothButton("⬇ 下载安装")
-        btn.setObjectName("primaryBtn")
+        btn = IconButton("download", text="下载安装", icon_size=14,
+                         object_name="primaryBtn")
         btn.setToolTip(
             "从 GitHub Releases 下载插件包（sha256 校验后放进商店目录）"
             "并安装；已装插件不会被覆盖")
@@ -1484,7 +1736,7 @@ class PluginStoreDialog(GlassDialog):
             return
         self._market_set_busy(True)
         btn.setEnabled(False)
-        btn.setText("⬇ 下载中…")
+        btn.setText("下载中…")
         self._set_online_status(f"正在下载 {it['name']}（{it['size'] / 1024:.1f} KB）…")
         started = self._market_bytes_getter(
             plugin_market.asset_download_url(asset_id),
@@ -1494,7 +1746,7 @@ class PluginStoreDialog(GlassDialog):
         if not started:
             self._market_set_busy(False)
             btn.setEnabled(True)
-            btn.setText("⬇ 下载安装")
+            btn.setText("下载安装")
 
     def _on_downloaded(self, it: dict, res: dict):
         self._market_set_busy(False)
@@ -1526,4 +1778,4 @@ class PluginStoreDialog(GlassDialog):
         # 包已进商店目录 → 走既有安装（rescan + 商店刷新 + 结果弹窗全覆盖）
         self._set_online_status(f"{it['name']} 已下载并开始安装…")
         self._panel._on_install(it["id"], it["name"])
-        self._set_online_status(f"✓ {it['name']} 已从在线市场安装")
+        self._set_online_status(f"{it['name']} 已从在线市场安装")

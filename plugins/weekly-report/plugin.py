@@ -59,11 +59,11 @@ RANGE_OPTIONS = (
 
 # 碎片内容类别 → 分组标题 + 展示顺序（与 fragment_classifier 的值域对齐）
 CATEGORY_TITLES = (
-    ("link", "🔗 链接"),
-    ("code", "💻 代码"),
-    ("path", "📁 路径"),
-    ("command", "⌨ 命令行"),
-    ("text", "📄 文本"),
+    ("link", "链接"),
+    ("code", "代码"),
+    ("path", "路径"),
+    ("command", "命令行"),
+    ("text", "文本"),
 )
 CATEGORY_ORDER = [key for key, _ in CATEGORY_TITLES]
 CATEGORY_LABEL = dict(CATEGORY_TITLES)
@@ -134,9 +134,9 @@ def build_polish_request(params: dict, draft: str):
         model = str(params.get("model") or "").strip()
         key = str(params.get("api_key") or "").strip()
         if not base:
-            return None, None, None, "后端地址为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, None, "后端地址为空：到 设置 → AI 总配置 填写"
         if not model:
-            return None, None, None, "模型名为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, None, "模型名为空：到 设置 → AI 总配置 填写"
     if not (base.startswith("http://") or base.startswith("https://")):
         return None, None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
     text = str(draft or "").strip()
@@ -168,7 +168,7 @@ def parse_ai_reply(result: dict):
         detail = (result.get("body") or "").strip()[:200]
         hint = ""
         if "HTTP 401" in err or "HTTP 403" in err:
-            hint = "（key 缺失或无效？到 设置 → 🧠 AI 总配置 检查）"
+            hint = "（key 缺失或无效？到 设置 → AI 总配置 检查）"
         elif "HTTP 404" in err:
             hint = "（地址或模型名不对？地址应以 /v1 结尾）"
         elif "timed out" in err.lower() or "timeout" in err.lower():
@@ -218,7 +218,7 @@ def relative_deadline(deadline, today=None):
     if delta == 1:
         return "明天"
     if delta < 0:
-        return f"⚠ 逾期 {abs(delta)} 天"
+        return f"逾期 {abs(delta)} 天"
     return f"{d.month}月{d.day}日（周{_WEEKDAY_CN[d.weekday()]}）"
 
 
@@ -489,7 +489,7 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
 
     body = []
     if inc["done"]:
-        body += ["## ✅ 已完成任务（%d）" % len(done_rows), ""]
+        body += ["## 已完成任务（%d）" % len(done_rows), ""]
         if done_rows:
             for r in done_rows:
                 extra = f" ｜ {r['note']}" if r["note"] else ""
@@ -500,7 +500,7 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
         body.append("")
 
     if inc["open"]:
-        body += ["## 🔄 未完成任务（逾期 / 本周期到期）（%d）" % len(open_rows),
+        body += ["## 未完成任务（逾期 / 本周期到期）（%d）" % len(open_rows),
                  ""]
         if open_rows:
             for r in open_rows:
@@ -511,7 +511,7 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
         body.append("")
 
     if inc["fragments"]:
-        body += ["## 🧩 本周期碎片（%d）" % frag_total, ""]
+        body += ["## 本周期碎片（%d）" % frag_total, ""]
         if frag_total:
             ordered = [c for c in CATEGORY_ORDER if buckets.get(c)]
             ordered += [c for c in sorted(buckets) if c not in CATEGORY_ORDER]
@@ -530,7 +530,7 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
             body.append("")
 
     if inc["notes"]:
-        body += ["## 📝 本周期更新的笔记（%d）" % len(note_rows), ""]
+        body += ["## 本周期更新的笔记（%d）" % len(note_rows), ""]
         if note_rows:
             for _, title in note_rows:
                 body.append(f"- {title}")
@@ -540,7 +540,7 @@ def build_report(tasks, fragments, notes, pomodoro, start, end, *,
 
     if inc["pomodoro"]:
         body += [
-            "## 🍅 专注统计",
+            "## 专注统计",
             "",
             f"- 本周期已完成任务累计专注 **{done_sessions}** 次",
             f"- 未完成任务累计专注 **{open_sessions}** 次",
@@ -683,19 +683,19 @@ class ReportDialog(PluginDialog):
         # vault 未配置 → 置灰并说明原因（不弹窗、不阻断其它按钮）
         vault_ready = bool(self._vault_path())
         created = self.add_footer([
-            ("🕘 最近导出", "secondaryBtn", self._show_recent),
+            ("最近导出", "secondaryBtn", self._show_recent),
             ("关闭", "secondaryBtn", self.accept),
-            ("📋 复制到剪贴板", "secondaryBtn", self._do_copy),
-            ("🧠 AI 润色", "secondaryBtn", self._do_polish),
+            ("复制到剪贴板", "secondaryBtn", self._do_copy),
+            ("AI 润色", "secondaryBtn", self._do_polish),
             ("另存为 .md…", "secondaryBtn", self._do_save_as, "save"),
-            ("🗂 写入 Obsidian vault", "primaryBtn", self._do_vault),
+            ("写入 Obsidian vault", "primaryBtn", self._do_vault),
         ])
         (self._recent_btn, self._close_btn, self._copy_btn,
          self._polish_btn, self._save_btn, self._vault_btn) = created
         if not vault_ready:
             self._vault_btn.setEnabled(False)
             self._vault_btn.setToolTip(
-                "未配置 Obsidian vault 路径：请到 设置 → 📤 导出 → 更改目录")
+                "未配置 Obsidian vault 路径：请到 设置 → 导出 → 更改目录")
 
         # 信号接线统一放到控件就绪之后。
         # 注意：按钮的 clicked 已在 add_footer 内部接好，这里**不要再接一次**
@@ -752,7 +752,7 @@ class ReportDialog(PluginDialog):
         text = build_report(tasks, fragments, notes, pomodoro,
                             start, end, label=label, include=self._include())
         if not data.sources():
-            text += ("\n> ⚠ 宿主未注入任何数据源，以上内容为空"
+            text += ("\n> 宿主未注入任何数据源，以上内容为空"
                      "（需要 tasks / fragments / notes）。\n")
         self._text.setPlainText(text)
         self._last_generated = text
@@ -786,11 +786,11 @@ class ReportDialog(PluginDialog):
         params = self._attached_params()
         if params is None:
             self._status.setText(
-                "尚未接入 AI：到 设置 → 🧠 AI 总配置 配好云端或本地后端，"
+                "尚未接入 AI：到 设置 → AI 总配置 配好云端或本地后端，"
                 "并在「接入插件」里勾选本插件")
             return
         if params.get("mode") == "local" and not params.get("local_ready"):
-            self._status.setText("宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动")
+            self._status.setText("宿主本地服务未就绪：到 设置 → AI 总配置 启动")
             return
         if draft != self._last_generated.strip():
             answer = QMessageBox.question(
@@ -824,11 +824,11 @@ class ReportDialog(PluginDialog):
             self._status.setText(err)
             return
         if not text:
-            self._status.setText("⚠ AI 返回了空结果，预览未改动")
+            self._status.setText("AI 返回了空结果，预览未改动")
             return
         self._text.setPlainText(text)
         self._last_generated = text          # 润色稿成为新基准
-        self._status.setText("✅ AI 润色完成，已替换预览"
+        self._status.setText("AI 润色完成，已替换预览"
                              "（原文可改时间范围重新生成找回）")
 
     # ---------------- 输出动作 ----------------
@@ -839,12 +839,12 @@ class ReportDialog(PluginDialog):
     def _do_copy(self):
         clipboard = QApplication.clipboard()
         if clipboard is None:                      # 离屏/无剪贴板环境兜底
-            self._status.setText("⚠ 当前环境没有剪贴板，复制失败")
+            self._status.setText("当前环境没有剪贴板，复制失败")
             return
         text = self._text.toPlainText()
         clipboard.setText(text)
-        self._status.setText(f"✅ 已复制 {len(text)} 字到剪贴板")
-        flash_button(self._copy_btn, "✅ 已复制")
+        self._status.setText(f"已复制 {len(text)} 字到剪贴板")
+        flash_button(self._copy_btn, "已复制")
 
     def _default_dir(self) -> str:
         vault = self._vault_path()
@@ -865,12 +865,12 @@ class ReportDialog(PluginDialog):
             path += ".md"
         if self._write_file(path):
             record_export(self._ctx, path)     # P3：记入最近导出
-            self._status.setText(f"✅ 已保存：{path}")
+            self._status.setText(f"已保存：{path}")
 
     def _do_vault(self):
         vault = self._vault_path()
         if not vault:
-            self._status.setText("⚠ 未配置 Obsidian vault 路径")
+            self._status.setText("未配置 Obsidian vault 路径")
             return
         target_dir = os.path.join(vault, VAULT_ROOT_NAME, VAULT_SUBDIR)
         start, end, _ = self._range()
@@ -886,7 +886,7 @@ class ReportDialog(PluginDialog):
                 return
         if self._write_file(path):
             record_export(self._ctx, path)     # P3：vault 写入也算导出
-            self._status.setText(f"✅ 已写入 vault：{path}")
+            self._status.setText(f"已写入 vault：{path}")
 
     # ---------------- 最近导出（P3） ----------------
     def _show_recent(self):
@@ -898,13 +898,13 @@ class ReportDialog(PluginDialog):
             empty.setEnabled(False)
         for it in items:
             name = os.path.basename(it["path"]) or it["path"]
-            act = menu.addAction(f"📂 {name}（{it['at'] or '时间未知'}）")
+            act = menu.addAction(f"{name}（{it['at'] or '时间未知'}）")
             act.setToolTip(it["path"])
             act.triggered.connect(
                 lambda _=False, p=it["path"]: self._open_export(p))
         if items:
             menu.addSeparator()
-            clear = menu.addAction("🗑 清空导出记录")
+            clear = menu.addAction("清空导出记录")
             clear.triggered.connect(self._clear_exports)
         menu.exec(self._recent_btn.mapToGlobal(
             self._recent_btn.rect().bottomLeft()))
@@ -913,12 +913,12 @@ class ReportDialog(PluginDialog):
         """打开一条导出记录所在的文件夹（资源管理器）"""
         folder = os.path.dirname(path) or path
         if not os.path.isdir(folder):
-            self._status.setText(f"⚠ 文件所在文件夹不存在：{folder}")
+            self._status.setText(f"文件所在文件夹不存在：{folder}")
             return
         try:
             os.startfile(folder)               # Windows 资源管理器
         except OSError as exc:
-            self._status.setText(f"⚠ 打开文件夹失败：{exc}")
+            self._status.setText(f"打开文件夹失败：{exc}")
 
     def _clear_exports(self):
         if save_exports(self._ctx, []):
@@ -935,7 +935,7 @@ class ReportDialog(PluginDialog):
             return True
         except OSError as exc:
             QMessageBox.warning(self, "写入失败", f"无法写入文件：\n{path}\n\n{exc}")
-            self._status.setText(f"⚠ 写入失败：{exc}")
+            self._status.setText(f"写入失败：{exc}")
             return False
 
 
@@ -946,7 +946,7 @@ class DraftReportAction(BallAction):
     """生成日报 / 周报草稿"""
 
     id = f"{PLUGIN_ID}.draft"
-    title = "📝 生成日报 / 周报草稿"
+    title = "生成日报 / 周报草稿"
 
     def run(self, ctx):
         ctx.logger.info(f"[{PLUGIN_ID}] 打开草稿窗口，数据源="

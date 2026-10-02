@@ -1164,7 +1164,7 @@ class AppEditDialog(QDialog):
     新增 / 编辑软件条目弹窗（模态）。
 
     调用方：AppManageDialog（管理对话框）与 AppLauncherPage
-    （导航页右键菜单「编辑…」/「➕ 新增软件」）。
+    （导航页右键菜单「编辑…」/「新增软件」）。
 
     控件：
       - 软件名称输入框

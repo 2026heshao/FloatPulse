@@ -133,8 +133,8 @@ SESSION_MSG_CHARS = 6000  # 单条消息落盘的最大字符数（快捷指令�
 
 WELCOME_TEXT = (
     "我在。点快捷指令让我读应用内数据做总结，或直接输入问题。\n"
-    "AI 后端在 设置 → 🧠 AI 总配置 管理（云端 / 本地一次配置，"
-    "所有 AI 插件共用）；「📐 规则库」可写入你的长期偏好，"
+    "AI 后端在 设置 → AI 总配置 管理（云端 / 本地一次配置，"
+    "所有 AI 插件共用）；「规则库」可写入你的长期偏好，"
     "我每次对话都会遵守。")
 
 
@@ -494,7 +494,7 @@ _OP_TARGET = {
 # 知识库改删失败时要提示的常见原因：编号会随删除漂移、docx 还能被 Word
 # 外部编辑，所以失败多半是「引用过期」而不是「操作写错了」。
 _KB_FAIL_HINT = ("（该段内容可能已变化，或知识库被外部改动过——"
-                 "请先到知识库页点「🔄 重新加载」再试）")
+                 "请先到知识库页点「重新加载」再试）")
 
 ACTION_PROTOCOL = (
     "\n\n== 你可以执行的应用操作 ==\n"
@@ -757,9 +757,9 @@ def build_request(params: dict, messages: list, max_tokens=None):
         model = str(params.get("model") or "").strip()
         key = str(params.get("api_key") or "").strip()
         if not base:
-            return None, None, "后端地址为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, "后端地址为空：到 设置 → AI 总配置 填写"
         if not model:
-            return None, None, "模型名为空：到 设置 → 🧠 AI 总配置 填写"
+            return None, None, "模型名为空：到 设置 → AI 总配置 填写"
     if not (base.startswith("http://") or base.startswith("https://")):
         return None, None, f"后端地址必须以 http:// 或 https:// 开头：{base}"
     url = f"{base}/chat/completions"
@@ -780,7 +780,7 @@ def parse_reply(result: dict):
         detail = (result.get("body") or "").strip()[:200]
         hint = ""
         if "HTTP 401" in err or "HTTP 403" in err:
-            hint = "（key 缺失或无效？到 设置 → 🧠 AI 总配置 检查）"
+            hint = "（key 缺失或无效？到 设置 → AI 总配置 检查）"
         elif "HTTP 404" in err:
             hint = ("（地址或模型名不对？地址应以 /v1 结尾，"
                     "端口上跑的须是 OpenAI 兼容服务）")
@@ -788,7 +788,7 @@ def parse_reply(result: dict):
             hint = "（模型首次加载较慢，可重试一次）"
         elif "refused" in err.lower():
             hint = ("（端口没有服务在听——本地服务没启动？"
-                    "到 设置 → 🧠 AI 总配置 启动）")
+                    "到 设置 → AI 总配置 启动）")
         return None, f"请求失败：{err}{hint}" + (f"\n{detail}" if detail else "")
     try:
         data = json.loads(result.get("body") or "")
@@ -1152,17 +1152,17 @@ class AiChatPage(QWidget):
         quick_row.addStretch()
         # 停止模型服务（仅本地服务运行中显示）：聊天主界面直接可停，
         # 不必展开后端设置卡——用户反馈「连接后一直跑在后台」没有顺手的停止入口
-        self._stop_model_btn = QPushButton("⏹ 停止模型服务", self)
+        self._stop_model_btn = QPushButton("停止模型服务", self)
         self._stop_model_btn.setObjectName("secondaryBtn")
         self._stop_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_model_btn.setToolTip(
             "结束宿主本地 llama-server 进程并释放显存；"
-            "需要时到 设置 → 🧠 AI 总配置 重新启动")
+            "需要时到 设置 → AI 总配置 重新启动")
         self._stop_model_btn.clicked.connect(self._stop_host_server)
         self._stop_model_btn.setVisible(False)   # ready/starting 才显示
         quick_row.addWidget(self._stop_model_btn)
         # 规则库入口（与 ⚙ 后端设置并排）：展开/收起规则编辑卡
-        self._rules_btn = QPushButton("📐 规则库", self)
+        self._rules_btn = QPushButton("规则库", self)
         self._rules_btn.setObjectName("secondaryBtn")
         self._rules_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._rules_btn.setToolTip(
@@ -1385,7 +1385,7 @@ class AiChatPage(QWidget):
     def _custom_quick_menu(self, btn, prompt: str, pos):
         """自定义指令右键菜单：删除该条（从 config 移除并落盘重建）"""
         menu = QMenu(self)
-        act = menu.addAction(f"🗑 删除「{prompt[:CUSTOM_QUICK_LABEL]}」")
+        act = menu.addAction(f"删除「{prompt[:CUSTOM_QUICK_LABEL]}」")
         act.triggered.connect(lambda: self._remove_custom_quick(prompt))
         menu.exec(btn.mapToGlobal(pos))
 
@@ -1500,7 +1500,7 @@ class AiChatPage(QWidget):
         """构造气泡右键菜单（拆出来便于离屏断言，exec 会阻塞测试）"""
         menu = QMenu(self)
         done = text in self._noted_texts
-        act = menu.addAction("✅ 已存为笔记" if done else "📥 存为笔记")
+        act = menu.addAction("已存为笔记" if done else "存为笔记")
         act.setEnabled(not done)
         act.triggered.connect(lambda: self._save_as_note(text))
         return menu
@@ -1645,7 +1645,7 @@ class AiChatPage(QWidget):
         lines, tokens = [], []
         for act in _order_actions(actions):
             ok, msg, token = self._run_action(act)
-            lines.append(("✅ " if ok else "✗ ") + msg)
+            lines.append(msg)
             if isinstance(token, list):
                 tokens.extend(token)          # clear_tasks：N 条 = N 个令牌
             elif token:
@@ -1664,7 +1664,7 @@ class AiChatPage(QWidget):
         box.addWidget(lab)
         if tokens:
             row = QHBoxLayout()
-            undo_btn = QPushButton("↩ 撤销删除")
+            undo_btn = QPushButton("撤销删除")
             undo_btn.setObjectName("secondaryBtn")
             undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             undo_btn.setToolTip("把刚删掉的内容恢复回来（编号可能变成新的）")
@@ -1682,7 +1682,7 @@ class AiChatPage(QWidget):
         done = sum(1 for t in tokens if self._ctx.manage.undo_delete(t))
         btn.setEnabled(False)
         if done == len(tokens):
-            btn.setText(f"✅ 已恢复 {done} 条")
+            btn.setText(f"已恢复 {done} 条")
             self._status.setText(f"已恢复 {done} 条内容（编号可能变为新的）")
         else:
             btn.setText(f"部分恢复 {done}/{len(tokens)}")
@@ -1695,7 +1695,7 @@ class AiChatPage(QWidget):
         box = QVBoxLayout(card)
         box.setContentsMargins(12, 8, 12, 8)
         box.setSpacing(6)
-        head = QLabel(f"⚠ 待确认：将执行 {len(actions)} 个操作")
+        head = QLabel(f"待确认：将执行 {len(actions)} 个操作")
         head.setObjectName("fieldLabel")
         box.addWidget(head)
         body = BubbleLabel("\n".join(f"- {a['desc']}" for a in actions))
@@ -1850,12 +1850,12 @@ class AiChatPage(QWidget):
         params = self._attached_params()
         if params is None:
             self.add_bubble(
-                "提示", "尚未接入 AI：到 设置 → 🧠 AI 总配置 配好云端或本地"
+                "提示", "尚未接入 AI：到 设置 → AI 总配置 配好云端或本地"
                         "后端，并在「接入插件」里勾选本插件。")
             return
         if params.get("mode") == "local" and not params.get("local_ready"):
             self.add_bubble(
-                "提示", "宿主本地服务未就绪：到 设置 → 🧠 AI 总配置 启动。")
+                "提示", "宿主本地服务未就绪：到 设置 → AI 总配置 启动。")
             return
         url, headers, body = build_request(params, messages)
         if url is None:
@@ -2019,9 +2019,9 @@ class AiChatPage(QWidget):
         """
         self._stop_model_btn.setVisible(status in ("ready", "starting"))
         if status == "ready":
-            self._status.setText("✓ 宿主本地服务就绪，接入的插件即刻可用")
+            self._status.setText("宿主本地服务就绪，接入的插件即刻可用")
         elif status == "error" and detail:
-            self._status.setText(f"⚠ {detail}")
+            self._status.setText(f"{detail}")
 
     def _stop_host_server(self):
         """⏹ 停止宿主本地服务（经 ctx.ai 门面；未授权时安全拒绝）"""
@@ -2058,7 +2058,7 @@ class AiChatPage(QWidget):
 # ====================================================================
 class ChatAction(BallAction):
     id = f"{PLUGIN_ID}.chat"
-    title = "🤖 AI 助手"
+    title = "AI 助手"
 
     def run(self, ctx: PluginContext):
         # 热键路径：run() 在原生事件过滤器里被调用，UI 操作必须延后到

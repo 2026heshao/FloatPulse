@@ -104,7 +104,7 @@ class TestHistoryUI:
         # 历史落盘 + 内存最前
         path = os.path.join(page._ctx.data_dir, plug.HISTORY_FILE)
         assert os.path.isfile(path)
-        assert page._store["history"][0]["label"] == "📌 总结要点"
+        assert page._store["history"][0]["label"] == "总结要点"
         assert "要点一" in page._store["history"][0]["result"]
         assert page._store["history"][0]["source"] == "原始素材文本"
         assert page._pending_meta is None
@@ -122,7 +122,7 @@ class TestHistoryUI:
     def test_history_card_toggle_and_refill(self, page_factory, plug):
         page = page_factory()
         assert not page._history_card.isVisible()
-        page._record_history("summarize", "📌 总结要点", "",
+        page._record_history("summarize", "总结要点", "",
                              "源文摘要", "- 甲\n- 乙")
         page._toggle_history()
         assert page._history_card.isVisible()
@@ -137,7 +137,7 @@ class TestHistoryUI:
 
     def test_task_history_refill_enables_tasks_btn(self, page_factory):
         page = page_factory()
-        page._record_history("extract_tasks", "✅ 提取待办", "", "s",
+        page._record_history("extract_tasks", "提取待办", "", "s",
                              "- [ ] 给客户回电话\n- [ ] 交报表")
         page._toggle_history()
         page._hist_rows[0].click()

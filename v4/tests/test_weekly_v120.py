@@ -76,20 +76,20 @@ class TestInclude:
 
     def test_drop_fragments(self, plug):
         text = _report(plug, include={"fragments": False})
-        assert "🧩" not in text and "想到一个点子" not in text
+        assert "## 本周期碎片" not in text and "想到一个点子" not in text
         assert "碎片" not in text.split("\n")[3]        # 统计行不再列碎片
-        assert "## ✅" in text and "## 📝" in text       # 其他段保留
+        assert "## 已完成任务" in text and "## 本周期更新的笔记" in text       # 其他段保留
 
     def test_drop_tasks_hides_both_sections_and_tail(self, plug):
         text = _report(plug, include={"done": False, "open": False})
-        assert "## ✅" not in text and "## 🔄" not in text
+        assert "## 已完成任务" not in text and "## 未完成任务" not in text
         assert "完成 A" not in text and "推进 B" not in text
-        assert "🍅" in text                              # 专注统计恒保留
+        assert "## 专注统计" in text                      # 专注统计恒保留
 
     def test_drop_notes_and_pomodoro(self, plug):
         text = _report(plug, include={"notes": False, "pomodoro": False})
-        assert "## 📝" not in text and "会议纪要" not in text
-        assert "## 🍅" not in text
+        assert "## 本周期更新的笔记" not in text and "会议纪要" not in text
+        assert "## 专注统计" not in text
 
     def test_normalize_include_dirty(self, plug):
         assert plug.normalize_include(None)["done"] is True
@@ -188,22 +188,22 @@ def page_factory(qapp, plug):
 def test_footer_buttons_intact(page_factory):
     d = page_factory()
     # F6 护卫：既有五个按钮文案与角色不变（新增按钮只加在最左）
-    assert d._recent_btn.text() == "🕘 最近导出"
-    assert d._copy_btn.text() == "📋 复制到剪贴板"
+    assert d._recent_btn.text() == "最近导出"
+    assert d._copy_btn.text() == "复制到剪贴板"
     assert d._save_btn.text() == "另存为 .md…"
-    assert d._vault_btn.text() == "🗂 写入 Obsidian vault"
+    assert d._vault_btn.text() == "写入 Obsidian vault"
 
 
 def test_section_toggles_regenerate(page_factory):
     d = page_factory()
-    assert "## 🧩" in d._text.toPlainText()
+    assert "## 本周期碎片" in d._text.toPlainText()
     d._inc_frag.setChecked(False)
-    assert "## 🧩" not in d._text.toPlainText()
-    assert "## ✅" in d._text.toPlainText()
+    assert "## 本周期碎片" not in d._text.toPlainText()
+    assert "## 已完成任务" in d._text.toPlainText()
     d._inc_tasks.setChecked(False)
-    assert "## ✅" not in d._text.toPlainText()
-    assert "## 🔄" not in d._text.toPlainText()
-    assert "## 🍅" in d._text.toPlainText()
+    assert "## 已完成任务" not in d._text.toPlainText()
+    assert "## 未完成任务" not in d._text.toPlainText()
+    assert "## 专注统计" in d._text.toPlainText()
 
 
 def test_save_as_records_export(page_factory, plug, monkeypatch, tmp_path):

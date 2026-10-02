@@ -793,7 +793,7 @@ def _warn_no_dir(ctx):
         logger.warning(f"[{PLUGIN_ID}] 插件数据目录不可用，规则无法持久化"
                        f"（重启后丢失）")
     try:
-        ctx.show_toast("⚠ 周期任务：无法写入插件数据目录，规则只保存在内存中",
+        ctx.show_toast("周期任务：无法写入插件数据目录，规则只保存在内存中",
                        4200)
     except Exception:                             # noqa: BLE001
         pass
@@ -1083,7 +1083,7 @@ class RuleDialog(PluginDialog):
         rule, err = validate_rule(self._collect())
         if rule is None:
             self._preview.setText("")
-            self._error.setText(f"⚠ {err}")
+            self._error.setText(f"{err}")
             return
         rule["enabled"] = True
         self._error.setText("")
@@ -1098,7 +1098,7 @@ class RuleDialog(PluginDialog):
     def _on_save(self):
         rule, err = validate_rule(self._collect())
         if rule is None:
-            self._error.setText(f"⚠ {err}")
+            self._error.setText(f"{err}")
             return
         self._result = rule
         self.accept()
@@ -1131,7 +1131,7 @@ class CycleTasksPage(QWidget):
         root.setSpacing(10)
 
         head = QHBoxLayout()
-        title = QLabel("🔁 周期任务")
+        title = QLabel("周期任务")
         title.setObjectName("pageTitle")
         head.addWidget(title)
         head.addWidget(make_hint_label(
@@ -1144,24 +1144,24 @@ class CycleTasksPage(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        add_btn = QPushButton("➕ 新建规则")
+        add_btn = QPushButton("新建规则")
         add_btn.setObjectName("primaryBtn")
         add_btn.clicked.connect(self._on_add)
         toolbar.addWidget(add_btn)
 
-        check_btn = QPushButton("✅ 立即检查")
+        check_btn = QPushButton("立即检查")
         check_btn.setObjectName("secondaryBtn")
         check_btn.setToolTip("不等 60s 轮询，马上按规则检查一次")
         check_btn.clicked.connect(self._on_check_now)
         toolbar.addWidget(check_btn)
 
-        export_btn = QPushButton("📤 导出规则")
+        export_btn = QPushButton("导出规则")
         export_btn.setObjectName("secondaryBtn")
         export_btn.setToolTip("把全部规则导出成 JSON 文件（备份 / 换机用）")
         export_btn.clicked.connect(self._on_export)
         toolbar.addWidget(export_btn)
 
-        import_btn = QPushButton("📥 导入规则")
+        import_btn = QPushButton("导入规则")
         import_btn.setObjectName("secondaryBtn")
         import_btn.setToolTip("从导出的 JSON 文件并入规则（重复 rule_id 自动跳过）")
         import_btn.clicked.connect(self._on_import)
@@ -1185,7 +1185,7 @@ class CycleTasksPage(QWidget):
         self._list.setSpacing(10)
         self._empty = QLabel(
             "还没有周期规则\n\n"
-            "点「➕ 新建规则」加一条，例如：\n"
+            "点「新建规则」加一条，例如：\n"
             "  · 每周五 15:00 —— 写周报\n"
             "  · 每月 1 号 09:00 —— 归档上月资料\n"
             "  · 每 14 天 09:00 —— 复盘\n\n"
@@ -1281,18 +1281,18 @@ class CycleTasksPage(QWidget):
         bottom = QHBoxLayout()
         bottom.addStretch(1)
 
-        toggle = QPushButton("⏸ 停用" if rule.get("enabled", True) else "▶ 启用")
+        toggle = QPushButton("停用" if rule.get("enabled", True) else "启用")
         toggle.setObjectName("secondaryBtn")
         toggle.clicked.connect(
             lambda _checked=False, r=dict(rule): self._on_toggle(r))
         bottom.addWidget(toggle)
 
-        edit = QPushButton("✏️ 编辑")
+        edit = QPushButton("编辑")
         edit.setObjectName("secondaryBtn")
         edit.clicked.connect(lambda _checked=False, r=dict(rule): self._on_edit(r))
         bottom.addWidget(edit)
 
-        delete = QPushButton("🗑 删除")
+        delete = QPushButton("删除")
         delete.setObjectName("secondaryBtn")
         delete.clicked.connect(
             lambda _checked=False, r=dict(rule): self._on_delete(r))
@@ -1314,20 +1314,20 @@ class CycleTasksPage(QWidget):
             rules.append(rule)
         sched.set_rules(rules)
         if not sched.save():
-            self._toast("⚠ 规则已生效，但写入磁盘失败（重启后会丢失）")
+            self._toast("规则已生效，但写入磁盘失败（重启后会丢失）")
         self.reload_rules()
 
     def _on_add(self):
         dlg = RuleDialog(self._ctx, None, self._dialog_parent())
         if dlg.exec() and dlg.result_rule():
             self._replace_rule(dlg.result_rule())
-            self._toast("✅ 规则已保存")
+            self._toast("规则已保存")
 
     def _on_edit(self, rule):
         dlg = RuleDialog(self._ctx, rule, self._dialog_parent())
         if dlg.exec() and dlg.result_rule():
             self._replace_rule(dlg.result_rule())
-            self._toast("✅ 规则已更新")
+            self._toast("规则已更新")
 
     def _on_toggle(self, rule):
         rule["enabled"] = not rule.get("enabled", True)
@@ -1356,7 +1356,7 @@ class CycleTasksPage(QWidget):
         created = self._scheduler.check_now()
         self.reload_rules()
         if created:
-            self._toast(f"✅ 已生成 {len(created)} 条任务")
+            self._toast(f"已生成 {len(created)} 条任务")
         else:
             self._toast("没有到点的规则（或今天已经生成过）")
         self._refresh_host_tasks()
@@ -1418,7 +1418,7 @@ class CycleTasksPage(QWidget):
         if added:
             self._scheduler.set_rules(merged)
             if not self._scheduler.save():
-                self._toast("⚠ 规则已生效，但写入磁盘失败（重启后会丢失）")
+                self._toast("规则已生效，但写入磁盘失败（重启后会丢失）")
             self.reload_rules()
         self._toast("导入完成：" + "，".join(parts))
 
@@ -1430,7 +1430,7 @@ class CycleTasksPage(QWidget):
         self._refresh_host_tasks()
 
     def _on_failed(self, text):
-        self._toast(f"⚠ {text}", 4200)
+        self._toast(f"{text}", 4200)
 
     def _refresh_host_tasks(self):
         """生成任务后让宿主任务页 / 悬浮球徽标同步（拿不到就静默跳过）"""
@@ -1459,7 +1459,7 @@ class ManageRulesAction(BallAction):
     """打开周期任务页（在宿主主窗口里）；宿主不支持页面时退回弹窗说明"""
 
     id = f"{PLUGIN_ID}.manage"
-    title = "🔁 周期任务"
+    title = "周期任务"
 
     def run(self, ctx):
         ensure_scheduler(ctx)
@@ -1484,12 +1484,12 @@ class CheckNowAction(BallAction):
     """立即按规则检查一次（不等轮询）"""
 
     id = f"{PLUGIN_ID}.check-now"
-    title = "🔁 立即检查周期任务"
+    title = "立即检查周期任务"
 
     def run(self, ctx):
         sched = ensure_scheduler(ctx)
         created = sched.check_now()
-        _safe_toast(ctx, f"✅ 周期任务：已生成 {len(created)} 条任务" if created
+        _safe_toast(ctx, f"周期任务：已生成 {len(created)} 条任务" if created
                     else "周期任务：没有到点的规则（或今天已经生成过）")
         if created:
             QTimer.singleShot(0, lambda: _refresh_host_tasks(ctx))
@@ -1524,7 +1524,7 @@ def _fallback_dialog(ctx, holder):
     text = QLabel(
         "当前宿主版本不支持插件页面，无法在这里管理规则。\n\n"
         "你仍然可以使用：\n"
-        "  · 悬浮球右键 → 🔁 立即检查周期任务\n"
+        "  · 悬浮球右键 → 立即检查周期任务\n"
         "  · 热键 Ctrl+Alt+R\n\n"
         "规则文件位置：\nfloat_data/plugins/recurring-tasks/rules.json")
     text.setWordWrap(True)

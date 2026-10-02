@@ -30,7 +30,15 @@ show_message() 发托盘气泡——本类只做托盘本体，不持有业务�
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
+from src.constants import DEFAULT_THEME
+from src.icon_render import icon as render_icon
 from src.logger import get_logger
+from src.theme import get_colors, resolve_theme_name
+
+
+# 便签种类 → 自绘图标名（UI 重构 03：托盘便签项补图标位，替代原「📋/📄」
+# 文字前缀）。kind 取值见 Sticky.KINDS；未知种类兜底 notes。
+_STICKY_KIND_ICON = {"note": "notes", "task": "tasks", "fragment": "fragments"}
 
 
 class TrayController:
@@ -82,13 +90,20 @@ class TrayController:
 
         def _rebuild_sticky_menu():
             sticky_menu.clear()
+            # 图标取当前主题次级文字色（config 缺失时回落 DEFAULT_THEME）
+            theme = resolve_theme_name(
+                self._config.get("theme", DEFAULT_THEME)
+                if self._config else DEFAULT_THEME)
+            icon_color = get_colors(theme)["text_secondary"]
             entries = sticky_manager.get_all()
             if not entries:
                 empty = sticky_menu.addAction("（暂无便签）")
                 empty.setEnabled(False)
             else:
-                for sid, title, _aid, _kind in entries:
+                for sid, title, _aid, kind in entries:
                     act = sticky_menu.addAction(title[:24])
+                    act.setIcon(render_icon(
+                        _STICKY_KIND_ICON.get(kind, "notes"), 14, icon_color))
                     act.triggered.connect(
                         lambda _checked=False, s=sid: sticky_manager.raise_sticky(s))
                 sticky_menu.addSeparator()

@@ -145,3 +145,57 @@ def test_overlay_without_action_passes_mouse_to_list():
     # WA_TransparentForMouseEvents 下，命中测试直接穿透到父列表
     child = lst.childAt(es.geometry().center())
     assert child is not es
+
+
+# ====================================================================
+# 4. ★ parent 误传护栏（2026-10-02 实战：屏幕左上角闪黑框）
+# ====================================================================
+def test_no_positional_args_beyond_hint_in_emptystate_calls():
+    """全仓 EmptyState 调用只准前 3 个位置参数（icon/title/hint）。
+
+    第 4 个位置参数是 ``action_text``，**不是** ``parent``。nav_panel 曾写成
+    ``EmptyState("nav", "暂无站点", "...", self)`` —— 于是 ``self``（_NavList）被
+    当成动作钮文本、``parent`` 恒为 None，空态控件成为顶层窗口：首次进入网址
+    导航页（行列表还没填、``_relayout`` 里 show 了一次）会在屏幕左上角闪一个
+    黑框，数据到位后 hide 即消失。改成关键字 ``parent=`` 修复。
+
+    ★ 断言式护栏：源码文本层面禁止位置传参，任何调用点复发即红。
+    """
+    import ast
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    skip = {"__pycache__", "build", "build2", "dist", "dist2", ".pytest_cache"}
+    bad = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for fn in filenames:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn_node = node.func
+                name = getattr(fn_node, "id", None) or getattr(
+                    fn_node, "attr", None)
+                if name == "EmptyState" and len(node.args) > 3:
+                    bad.append(f"{os.path.relpath(path, root)}:{node.lineno}")
+    assert not bad, (
+        "EmptyState 第 4 个位置参数是 action_text 不是 parent，"
+        f"请改用关键字 action_text=/parent=：{bad}")
+
+
+def test_nav_empty_state_is_child_not_toplevel():
+    """网址导航空态必须挂在 _NavList 上，且不得是顶层窗口（黑框复现钉子）。"""
+    from src.nav_panel import _NavList
+    _app()
+    lst = _NavList(None)
+    es = lst._empty_label
+    assert es.parentWidget() is lst
+    assert not es.isWindow()
+    assert es.action is None                    # 位置参数没被当成动作钮
+    es.show()                                   # 即便被 show 也不能变成独立弹窗
+    assert not es.isWindow()
