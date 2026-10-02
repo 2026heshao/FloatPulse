@@ -52,7 +52,7 @@ QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\msyh.ttc")
 _results = []
 PLUGIN_ID = "weekly-report"
 ACTION_ID = f"{PLUGIN_ID}.draft"
-MENU_TITLE = "📝 生成日报 / 周报草稿"
+MENU_TITLE = "生成日报 / 周报草稿"
 
 
 def check(name, cond, detail=""):
@@ -273,7 +273,7 @@ check("B1 as_date 认 ISO / 拒脏值",
       and plug.as_date(None) is None)
 check("B2 relative_deadline 相对文案",
       plug.relative_deadline("2026-09-27", date(2026, 9, 27)) == "今天"
-      and plug.relative_deadline("2026-09-26", date(2026, 9, 27)) == "⚠ 逾期 1 天"
+      and plug.relative_deadline("2026-09-26", date(2026, 9, 27)) == "逾期 1 天"
       and plug.relative_deadline("", date(2026, 9, 27)) == ""
       and "9月29日" in plug.relative_deadline("2026-09-29", date(2026, 9, 27)))
 raw_name = '周报 2026/09: x*?"<>|'
@@ -326,7 +326,7 @@ check("B8 缺完成时间 → 归入文末并标注",
       "完成时间缺失" in dirty and "※" in dirty and "缺完成时间" in dirty,
       dirty[:80])
 check("B9 未知类别归入「其他」、category=None 兜底为文本",
-      "### 其他（1）" in dirty and "### 📄 文本（1）" in dirty)
+      "### 其他（1）" in dirty and "### 文本（1）" in dirty)
 check("B10 空标题/无来源/None 条目不崩（兜底文案）",
       "（无标题）" in dirty and "未知来源" in dirty)
 check("B11 三条日期全脏的已完成任务不被静默丢弃（进文末）",
@@ -334,7 +334,7 @@ check("B11 三条日期全脏的已完成任务不被静默丢弃（进文末）
       and "无法归入任何区间" in dirty)
 check("B12 临时笔记与空标题笔记被跳过", "临时笔记" not in dirty)
 check("B13 远期任务不出现在未完成列表",
-      "远期" not in dirty.split("## 🔄")[1].split("## 🧩")[0])
+      "远期" not in dirty.split("## 未完成任务")[1].split("## 本周期碎片")[0])
 check("B14 番茄计数如实标注「按任务累计」",
       "按任务累计" in dirty and "非时间区间统计" in dirty
       and "当前番茄钟：空闲" in dirty)
@@ -353,12 +353,12 @@ check("C3 逾期任务出现在未完成列表并标红",
       "逾期的任务" in report and "逾期" in report)
 check("C4 远期任务被排除", "远期任务" not in report)
 check("C5 碎片分区含链接与代码两类",
-      "## 🧩 本周期碎片" in report and "🔗 链接" in report and "💻 代码" in report)
+      "## 本周期碎片" in report and "链接" in report and "代码" in report)
 check("C6 笔记分区含周会记录且排除临时笔记",
-      "## 📝 本周期更新的笔记" in report and "周会记录" in report
+      "## 本周期更新的笔记" in report and "周会记录" in report
       and "临时笔记" not in report)
 check("C7 番茄分区存在且含累计次数",
-      "## 🍅 专注统计" in report
+      "## 专注统计" in report
       and "本周期已完成任务累计专注 **2** 次" in report, report[-260:])
 check("C8 范围与来源写进头部",
       "范围：本周" in report and "weekly-report 插件" in report)
@@ -437,9 +437,9 @@ dlg._radios["week"].setChecked(True)
 pump(30)
 check("F5 切回「本周」→ 预览恢复周报", dlg._text.toPlainText().startswith("# 周报"))
 check("F6 三个输出按钮文案正确（另存为已图标化：emoji 前缀剥除，图标走 IconButton）",
-      dlg._copy_btn.text() == "📋 复制到剪贴板"
+      dlg._copy_btn.text() == "复制到剪贴板"
       and dlg._save_btn.text() == "另存为 .md…"
-      and dlg._vault_btn.text() == "🗂 写入 Obsidian vault")
+      and dlg._vault_btn.text() == "写入 Obsidian vault")
 check("F7 vault 未配置 → 写入按钮置灰且给出原因",
       not dlg._vault_btn.isEnabled() and "设置" in dlg._vault_btn.toolTip(),
       dlg._vault_btn.toolTip())

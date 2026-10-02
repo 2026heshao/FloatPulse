@@ -281,7 +281,7 @@ check("C6 数据目录可用（规则能持久化）", sched.store_available() i
 page = plug._STATE.get("page")
 if page is None:                      # load_all 不建页面，按宿主接线方式补建
     page = plug.RecurringTasksPlugin().create_page(sub_ctx)
-    win.register_plugin_page(PAGE_KEY, "🔁 周期任务", page)
+    win.register_plugin_page(PAGE_KEY, "周期任务", page)
     plug._STATE["page"] = page
 pump(200)
 
@@ -358,7 +358,7 @@ check("F2 默认类型=每天 → 三个参数区全隐藏",
       not dlg._week_row.isVisible() and not dlg._month_row.isVisible()
       and not dlg._interval_row.isVisible())
 check("F3 空标题 → 预览区报错、不崩",
-      dlg._error.text().startswith("⚠"), dlg._error.text())
+      "标题不能为空" in dlg._error.text(), dlg._error.text())
 
 dlg._title.setText("交房租")
 dlg._kind.setCurrentIndex(dlg._kind.findData("monthly"))
@@ -378,7 +378,8 @@ check("F6 全角逗号 / 空格都能解析，预览含月末顺延提示",
 
 dlg._month_edit.setText("abc")
 pump(60)
-check("F7 非法号数 → 报错且不关窗", dlg._error.text().startswith("⚠"))
+check("F7 非法号数 → 报错且不关窗",
+      "至少要选一个号数" in dlg._error.text(), dlg._error.text())
 dlg._month_edit.setText("1,31")
 pump(60)
 

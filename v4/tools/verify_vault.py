@@ -235,7 +235,7 @@ check("C0 插件模块可从 sys.modules 取到", plug is not None,
 
 vault = plug.get_vault(sub_ctx)
 page = plug.VaultPage(sub_ctx)
-win.register_plugin_page(PAGE_KEY, "🔒 密码保险箱", page)
+win.register_plugin_page(PAGE_KEY, "密码保险箱", page)
 pump(200)
 
 check("C1 页面注册进主窗口", win.show_plugin_page(PAGE_KEY) is True)

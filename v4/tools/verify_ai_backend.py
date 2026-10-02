@@ -329,7 +329,7 @@ sys.modules[spec.name] = plug
 spec.loader.exec_module(plug)
 
 page = plug.AiWorkshopPage(sub_ctx)
-win.register_plugin_page(f"plugin:{PLUGIN_ID}", "✂ 文本工坊", page)
+win.register_plugin_page(f"plugin:{PLUGIN_ID}", "文本工坊", page)
 win.show_plugin_page(f"plugin:{PLUGIN_ID}")
 pump(200)
 check("G1 接入后工坊页显示「已接入」提示（v1.4 起无自有后端入口）",
@@ -410,7 +410,7 @@ for theme in ("light", "dark"):
         saved_shots.append(f"card_{theme}")
     # 接入后的工坊页（接入提示 + 后端入口隐藏）
     page_t = plug.AiWorkshopPage(ctx_t)
-    win_t.register_plugin_page(f"plugin:{PLUGIN_ID}", "✂ 文本工坊", page_t)
+    win_t.register_plugin_page(f"plugin:{PLUGIN_ID}", "文本工坊", page_t)
     win_t.show_plugin_page(f"plugin:{PLUGIN_ID}")
     pump(300)
     page_t._src_edit.setPlainText("客户电话 13800000000；下周三上午十点开会")

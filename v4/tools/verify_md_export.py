@@ -46,7 +46,7 @@ from src import md_export  # noqa: E402
 
 PASS = 0
 FAIL = 0
-EXPORT_LABEL = "📤 导出到 Obsidian"
+EXPORT_LABEL = "导出到 Obsidian"
 
 
 def check(name, ok, detail=""):
@@ -87,6 +87,13 @@ class _FakeAction:
 
     def isChecked(self):
         return self._checked
+
+    def setIcon(self, _icon):
+        # UI 重构 05：右键「删除」项改为 danger 色自绘图标承载语义
+        pass
+
+    def setEnabled(self, _value):
+        pass
 
 
 class _FakeMenu:

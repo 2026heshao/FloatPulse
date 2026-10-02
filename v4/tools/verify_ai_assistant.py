@@ -572,7 +572,7 @@ pump()
 for _fn in list(_ai_listeners):
     _fn("ready", "本地服务就绪（127.0.0.1:8093）")
 pump()
-check("C17 ready 广播 → 快捷行出现「⏹ 停止模型服务」+ 状态行反馈",
+check("C17 ready 广播 → 快捷行出现「停止模型服务」+ 状态行反馈",
       page2._stop_model_btn.isVisible() and "就绪" in page2._status.text(),
       f"visible={page2._stop_model_btn.isVisible()} "
       f"status={page2._status.text()}")
@@ -696,7 +696,7 @@ check("C29 AI 气泡内不再有常驻按钮（存为笔记已改右键菜单）
 check("C30 AI 气泡挂 CustomContextMenu（右键可存笔记）",
       _long_card.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu)
 _menu_new = page2._build_bubble_menu("__some-new-text__")
-check("C31 右键菜单「📥 存为笔记」可点（未存过）",
+check("C31 右键菜单「存为笔记」可点（未存过）",
       len(_menu_new.actions()) == 1
       and "存为笔记" in _menu_new.actions()[0].text()
       and _menu_new.actions()[0].isEnabled(),
@@ -752,7 +752,7 @@ page2._ctx._http_post_async = fake_bridge        # 换回正常假桥
 
 # ---- 规则库入口（2026-09-28 用户要求：入口让用户自己编辑，不写死）----
 check("C26 规则库按钮存在且卡片默认收起",
-      page2._rules_btn is not None and page2._rules_btn.text() == "📐 规则库"
+      page2._rules_btn is not None and page2._rules_btn.text() == "规则库"
       and not page2._rules_card.isVisible())
 page2._toggle_rules()
 pump(50)
@@ -1045,7 +1045,7 @@ _ai_text = " ".join(lb.text() for w in _cards(pageM, "chatBubbleAI")
 check("C35 add_task 直接执行（任务 +1、标题正确、正文剥离 JSON）",
       len(_titles()) == _n0 + 1 and "AI 建的任务" in _titles()
       and "actions" not in _ai_text and "{" not in _ai_text
-      and _res and any("✅" in lb.text()
+      and _res and any("已新增任务" in lb.text()
                        for lb in _res[-1].findChildren(QLabel)),
       f"titles={_titles()} res={len(_res)} ai={_ai_text!r}")
 
@@ -1067,14 +1067,14 @@ check("C37 确认卡列出将执行的操作（含目标记录标题）",
 # 点「执行」→ 真落库 + 结果卡带撤销按钮
 _btns(pageM, "执行")[-1].click()
 pump(30)
-check("C38 点「执行」→ 真删除 + 结果卡带「↩ 撤销删除」",
-      "待删除的任务" not in _titles() and _btns(pageM, "↩ 撤销删除"),
-      f"titles={_titles()} undo={len(_btns(pageM, '↩ 撤销删除'))}")
+check("C38 点「执行」→ 真删除 + 结果卡带「撤销删除」",
+      "待删除的任务" not in _titles() and _btns(pageM, "撤销删除"),
+      f"titles={_titles()} undo={len(_btns(pageM, '撤销删除'))}")
 
 # 点「撤销删除」→ 内容恢复
-_btns(pageM, "↩ 撤销删除")[-1].click()
+_btns(pageM, "撤销删除")[-1].click()
 pump(30)
-check("C39 点「↩ 撤销删除」→ 内容恢复（重新插入，标题原样回来）",
+check("C39 点「撤销删除」→ 内容恢复（重新插入，标题原样回来）",
       "待删除的任务" in _titles(),
       f"titles={_titles()}")
 
@@ -1211,9 +1211,9 @@ pump(30)
 check("C50a 删除知识库段落落盘（该段消失 + 结果卡带撤销按钮）",
       "知识库第三条内容" not in _kb_texts()
       and len(_kb_texts()) == len(_kb_before) - 1
-      and _btns(pageK, "↩ 撤销删除"),
+      and _btns(pageK, "撤销删除"),
       f"kb={_kb_texts()}")
-_btns(pageK, "↩ 撤销删除")[-1].click()
+_btns(pageK, "撤销删除")[-1].click()
 pump(30)
 check("C50b 撤销 → 内容与**位置**都恢复（不是追加到末尾）",
       _kb_texts() == _kb_before,
@@ -1233,14 +1233,14 @@ check("C51 同批两个删除（升序编号）→ 全部成功（内部按编�
 _kb_ok = [lb.text() for w in _cards(pageK, "chatBubbleHint")
           for lb in w.findChildren(QLabel)]
 check("C51b 结果卡两条都是成功（没有因编号前移而失败）",
-      sum(1 for t in _kb_ok if t.startswith("✅ 已删除")) >= 2,
+      sum(1 for t in _kb_ok if t.startswith("已删除")) >= 2,
       str(_kb_ok[-3:]))
 
 # 太短的内容会被拒（docx 段落最小 4 字）——如实报告失败而不是静默
 _feed(pageK, '```actions\n{"actions":[{"op":"add_knowledge","content":"短"}]}\n```')
 check("C52 过短内容被拒：如实报失败 + 提示可能原因",
       not any(t == "短" for t in _kb_texts())
-      and any("✗" in lb.text() and "知识库" in lb.text()
+      and any("追加知识库失败" in lb.text()
               for w in _cards(pageK, "chatBubbleHint")
               for lb in w.findChildren(QLabel)),
       f"kb={_kb_texts()}")
@@ -1270,14 +1270,14 @@ page.deleteLater()
 # E. 页面注入链路（register_plugin_page / show_plugin_page / last_page）
 # ====================================================================
 page3 = plug.AiChatPage(page_ctx)
-idx1 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page3)
+idx1 = win.register_plugin_page(PAGE_KEY, "AI 助手", page3)
 check("E1 插件页注入：物理索引 ≥ 10（固定页 0-9 之外）", idx1 >= 10, str(idx1))
 check("E2 侧栏出现该页面按钮（插在设置按钮之前）",
       win._nav_btns.get(PAGE_KEY) is not None)
 
 # 幂等：重复注册（rescan 重建路径）= 新 widget 换旧 widget，索引不变
 page4 = plug.AiChatPage(page_ctx)
-idx2 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page4)
+idx2 = win.register_plugin_page(PAGE_KEY, "AI 助手", page4)
 check("E3 幂等注册：同 key 索引不变 + stack 里是新页面",
       idx2 == idx1 and win._stack.widget(idx1) is page4,
       f"{idx1} -> {idx2}")
@@ -1317,7 +1317,7 @@ check("F5 重复注销返回 False（可安全重入）",
 
 # 重新启用：register 走全新注册分支（新索引、新按钮）
 page5 = plug.AiChatPage(page_ctx)
-idx3 = win.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page5)
+idx3 = win.register_plugin_page(PAGE_KEY, "AI 助手", page5)
 check("F6 重新注册：全新分支新索引 + 按钮回归",
       idx3 == idx1 + 1 and win._nav_btns.get(PAGE_KEY) is not None,
       f"{idx1} -> {idx3}")
@@ -1378,7 +1378,7 @@ for theme in ("light", "dark"):
     # 真实时序：先注入主窗口（reparent 到 QSS 作用域内）再显示页面；
     # 反过来先 show 会让页面先成为无 QSS 祖先的顶层窗口，离屏下样式残留
     page_t._toggle_rules()             # 展开规则卡：截图信息量更足
-    win_t.register_plugin_page(PAGE_KEY, "🤖 AI 助手", page_t)
+    win_t.register_plugin_page(PAGE_KEY, "AI 助手", page_t)
     win_t.show_plugin_page(PAGE_KEY)
     pump(300)
     check(f"D-{theme} host 主题=当前主题",

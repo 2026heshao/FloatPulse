@@ -242,7 +242,7 @@ check("B0 插件模块可从 sys.modules 取到", plug is not None,
       f"{[k for k in sys.modules if 'kb_search' in k]}")
 
 page = plug.SearchPage(sub_ctx)
-win.register_plugin_page(PAGE_KEY, "🔍 站内搜索", page)
+win.register_plugin_page(PAGE_KEY, "站内搜索", page)
 pump(200)
 
 check("B1 页面注册进主窗口（物理索引 10+）",

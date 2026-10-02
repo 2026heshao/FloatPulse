@@ -206,11 +206,12 @@ check("K. 失败区显示并展示失败插件",
 # ---------- L. 失败卡展示阶段中文标签 + 修复建议 ----------
 _err_texts = "\n".join(
     w.text() for w in p4._error_box.findChildren(QLabel))
+_hint_texts = [w.text().strip() for w in p4._error_box.findChildren(QLabel)
+               if w.objectName() == "pluginErrorHint" and w.text().strip()]
 check("L. 失败卡含阶段标签与修复建议",
-      stage_label("manifest_read") in _err_texts
-      and "💡" in _err_texts,
+      stage_label("manifest_read") in _err_texts and bool(_hint_texts),
       f"含阶段={stage_label('manifest_read') in _err_texts} "
-      f"含建议={'💡' in _err_texts}")
+      f"含建议={bool(_hint_texts)}")
 
 # ---------- M. 空态在有失败项时隐藏（避免「什么都没有」的误导） ----------
 check("M. 有失败项时空态隐藏（不再显示「还没安装任何插件」）",
@@ -248,13 +249,13 @@ def _toggle_btns(panel):
 
 p4._toggle_plugin(list(_loader.loaded_plugins()[0].actions_raw), False)
 check("Q. 禁用后启停按钮变为「启用」（说明当前处于停用态）",
-      "▶ 启用" in _toggle_btns(p4),
+      "启用" in _toggle_btns(p4),
       f"btns={_toggle_btns(p4)}")
 
 # ---------- Q2. 恢复启用后按钮回到「停用」 ----------
 p4._toggle_plugin(list(_loader.loaded_plugins()[0].actions_raw), True)
 check("Q2. 重新启用后启停按钮回到「停用」",
-      "⏸ 停用" in _toggle_btns(p4),
+      "停用" in _toggle_btns(p4),
       f"btns={_toggle_btns(p4)}")
 
 # ---------- Q3. 状态标签文本在两种态下都正确（用 _status_of 纯逻辑判定） ----------

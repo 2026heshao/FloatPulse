@@ -252,7 +252,7 @@ CLIP_TEXT = "客户电话 13800000000；下周三上午十点开评审会；记�
 _app.clipboard().setText(CLIP_TEXT)
 
 page = plug.AiWorkshopPage(sub_ctx)
-idx = win.register_plugin_page(PAGE_KEY, "✂ 文本工坊", page)
+idx = win.register_plugin_page(PAGE_KEY, "文本工坊", page)
 check("E1 页面注册：索引在插件页区（≥10）+ 侧栏按钮存在",
       idx >= 10 and win._nav_btns.get(PAGE_KEY) is not None, f"idx={idx}")
 
@@ -403,7 +403,7 @@ for theme in ("light", "dark"):
     page_t._result_edit.setPlainText(SAMPLE_RESULT)
     page_t._copy_btn.setEnabled(True)
     page_t._status.setText("✓ 完成，共 96 字")
-    win_t.register_plugin_page(PAGE_KEY, "✂ 文本工坊", page_t)
+    win_t.register_plugin_page(PAGE_KEY, "文本工坊", page_t)
     win_t.show_plugin_page(PAGE_KEY)
     pump(300)
     check(f"D-{theme} host 主题=当前主题",
