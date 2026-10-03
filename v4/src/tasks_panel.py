@@ -10,7 +10,6 @@
   - B1 截止日期改为日历选择器（QDateEdit）
   - A1/A2 行内勾选框 + 完成反馈动画（自定义 delegate 自绘），
     动画时长 = motion.duration(CHECK_ANIM_MS, anim_speed)
-  - A3 误勾撤销条（UndoBar，5 秒）
   - B3 相对时间提示（今天/明天/逾期N天/M月D日（周X））
   - C1 分组排序（get_tasks_grouped：逾期→今天→本周→以后→无日期→已完成）
   - C3 状态判定统一（task_state，脏日期视为无日期）
@@ -39,7 +38,7 @@ from src.task_manager import (
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle, UndoBar
+from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 from src.constants import CHECK_ANIM_MS
 from src.date_picker import DateField
 from src import motion
@@ -59,8 +58,6 @@ class TasksPanel(QWidget):
         self._anim_speed = self._resolve_anim_speed()
         # 当前正在播放勾选动画的 task_id（None 表示空闲）
         self._anim_task_id = None
-        # 最近一次操作（供撤销还原）：(task_id, prev_done)
-        self._undo_target = None
         # 窗口化渲染状态（成熟化 3.6）：行描述符表 + 分块决策状态机
         self._rows = None                  # 行描述符表（refresh 时重建）
         self._row_pos = 0                  # 已建到的描述符下标
@@ -183,10 +180,6 @@ class TasksPanel(QWidget):
 
         v.addLayout(bottom)
 
-        # ---- 误勾撤销条（浮动子控件，底部居中） ----
-        self._undo_bar = UndoBar(self)
-        self._undo_bar.undo_clicked.connect(self._on_undo)
-
     def _init_animation(self):
         """初始化面板级单个勾选动画与延时重建定时器。"""
         self._anim = QVariantAnimation(self)
@@ -305,10 +298,6 @@ class TasksPanel(QWidget):
         # 日期框的自绘图标 + 日历弹层同样不在 QSS 管辖内，必须手动刷
         self._task_deadline.apply_theme()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._undo_bar.update_position()
-
     # ==================================================================
     # 行内勾选：数据变更 → 动画 → 延时重建 → 双视图 & 角标刷新
     # ==================================================================
@@ -327,8 +316,6 @@ class TasksPanel(QWidget):
             self._delegate.set_check_progress(
                 self._anim_task_id, float(self._anim.endValue()))
 
-        self._undo_target = (task_id, prev_done)
-
         # 启动勾选动画（完成：0→1；取消完成：1→0）
         self._anim.stop()
         self._rebuild_timer.stop()
@@ -344,9 +331,6 @@ class TasksPanel(QWidget):
         self._task_list.viewport().update()
         self._anim.start()
 
-        # 撤销条立即显示（不必等移组）
-        self._undo_bar.show_for(task_id, task.title)
-
         # 数据变更立即广播（角标 / 小卡片 / 托盘口径同步）
         self._host.data_changed.emit("task")
 
@@ -360,22 +344,6 @@ class TasksPanel(QWidget):
         """动画播完 → 延时约 250ms 再重建（不立即移入已完成组）。"""
         self._anim_task_id = None
         self._rebuild_timer.start(self.REBUILD_DELAY_MS)
-
-    def _on_undo(self, task_id: int):
-        """撤销最近一次完成操作（还原为操作前的完成态）。"""
-        prev_done = False
-        if self._undo_target and self._undo_target[0] == task_id:
-            prev_done = bool(self._undo_target[1])
-        self._task_manager.set_done(task_id, prev_done)
-        self._undo_target = None
-
-        # 停止动画、清理进度并立即重建
-        self._anim.stop()
-        self._rebuild_timer.stop()
-        self._anim_task_id = None
-        self._delegate.clear_progress_except(None)
-        self.refresh()
-        self._host.data_changed.emit("task")
 
     # ==================================================================
     # 添加 / 编辑 / 右键 / 批量
@@ -443,8 +411,6 @@ class TasksPanel(QWidget):
         self._anim.stop()
         self._rebuild_timer.stop()
         self._anim_task_id = None
-        self._undo_target = None
-        self._undo_bar.hide()
         self._delegate.clear_progress_except(None)
 
     def _pin_sticky(self, task_id: int):

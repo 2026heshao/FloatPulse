@@ -428,6 +428,11 @@ def _hex_rgb(hex_color):
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def popup_instance():
+    """模块级单例访问（与 show_reminder 同级的转发入口）。"""
+    return TaskReminderPopup.popup_instance()
+
+
 def show_reminder(overdue, due, undated, theme=""):
     """模块级入口：显示/刷新任务提醒弹窗（单例）。返回弹窗实例。"""
     inst = TaskReminderPopup.popup_instance()
