@@ -14,9 +14,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QStyledItemDelegate,
 )
 from PyQt6.QtCore import QRectF, Qt, QTimer
-from PyQt6.QtGui import QColor, QPainter, QPen
-
-from datetime import datetime
+from PyQt6.QtGui import QPainter, QPen
 
 from src.glass_dialog import make_dialog_buttons
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
@@ -29,6 +27,7 @@ from src.constants import (
     NOTE_PREVIEW_LEN,
 )
 from src.note_manager import Note
+from src.time_format import format_relative_time
 from src.theme import DEFAULT_THEME, get_colors
 from src.icon_render import icon as render_icon
 from src.controls import tune_list_scrolling, EmptyState, IconButton, PageTitle
@@ -67,7 +66,7 @@ class _NoteListDelegate(QStyledItemDelegate):
             colors = get_colors(theme)
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setPen(QPen(QColor(colors["primary_a30"]), 1))
+            painter.setPen(QPen(_to_color(colors["primary_a30"]), 1))
             # panel_fill 是 QSS rgba 字符串，QColor 不认 —— 必须经 _to_color
             # 解析（直接 QColor("rgba(...)") 会得到无效色，绘制出来是黑色）
             painter.setBrush(_to_color(colors["panel_fill"]))
@@ -79,27 +78,12 @@ class _NoteListDelegate(QStyledItemDelegate):
 
 
 def _format_relative_time(ts: str) -> str:
-    """把 "YYYY-MM-DD HH:MM" 转成相对时间描述；解析失败则原样返回"""
-    if not ts:
-        return "未知时间"
-    try:
-        dt = datetime.strptime(ts.strip(), _TS_FORMAT)
-    except ValueError:
-        return ts
-    secs = (datetime.now() - dt).total_seconds()
-    if secs < 0:
-        return ts                      # 时间在当前之后（系统时钟被改）→ 原样显示
-    if secs < 60:
-        return "刚刚"
-    if secs < 3600:
-        return f"{int(secs // 60)} 分钟前"
-    if secs < 86400:
-        return f"{int(secs // 3600)} 小时前"
-    if secs < 86400 * 2:
-        return f"昨天 {dt.strftime('%H:%M')}"
-    if secs < 86400 * 7:
-        return f"{int(secs // 86400)} 天前"
-    return ts
+    """统一实现见 src/time_format.py（与 kb-search 结果页共用同一份）。
+
+    口径 2026-10-02 起有一处可见变化：≥7 天不再原样返回 16 字符全格式，
+    同年显示 MM-DD HH:MM、跨年才原样（其余六档与原实现逐字一致）。
+    """
+    return format_relative_time(ts)
 
 
 class NotesPanel(QWidget):
