@@ -115,12 +115,13 @@ class LaunchSplash(QWidget):
         self._wake_cbs = []       # 焦点交接回调（三段接力 ①→②）
 
         # ---- 主题色（构造时定死；闪屏存续期间全局主题不会变）----
-        from src.theme import get_colors
+        from src.theme import (FALLBACK_ACCENT, FALLBACK_ACCENT_DEEP,
+                               get_colors)
         c = get_colors(theme if theme in ("light", "dark") else "light")
         self._c_bg = _css_color(c.get("glass_fill"), "#F2FFFFFF")
-        self._c_border = _css_color(c.get("primary_border"), "#5BC0BE")
-        self._c_primary = QColor(str(c.get("primary", "#5BC0BE")))
-        self._c_primary_deep = QColor(str(c.get("primary_deep", "#3D9E9C")))
+        self._c_border = _css_color(c.get("primary_border"), FALLBACK_ACCENT)
+        self._c_primary = QColor(str(c.get("primary", FALLBACK_ACCENT)))
+        self._c_primary_deep = QColor(str(c.get("primary_deep", FALLBACK_ACCENT_DEEP)))
         self._c_text = QColor(str(c.get("text", "#2C3E50")))
         self._c_placeholder = QColor(str(c.get("text_placeholder", "#6E6D67")))
         self._c_shadow = _css_color(c.get("shadow"), "#64000000")

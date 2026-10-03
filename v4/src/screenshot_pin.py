@@ -36,7 +36,7 @@ from PyQt6.QtGui import (
 import math
 
 from src.logger import get_logger
-from src.theme import get_colors, get_menu_qss
+from src.theme import FALLBACK_ACCENT, get_colors, get_menu_qss
 
 # 选区最小边长（逻辑像素），小于该值视为误触
 _MIN_SELECTION = 12
@@ -66,7 +66,7 @@ class SnipOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setGeometry(screen_geo)
-        self._accent = QColor(get_colors(theme).get("primary", "#5BC0BE"))
+        self._accent = QColor(get_colors(theme).get("primary", FALLBACK_ACCENT))
 
     # ---------------- 事件 ----------------
     def event(self, e):
@@ -220,7 +220,7 @@ class PinWindow(QWidget):
         self._pix = pixmap
         self._theme = theme
         self._drag_offset = None
-        self._accent = QColor(get_colors(theme).get("primary", "#5BC0BE"))
+        self._accent = QColor(get_colors(theme).get("primary", FALLBACK_ACCENT))
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -268,7 +268,7 @@ class PinWindow(QWidget):
     # ---------------- 主题 ----------------
     def apply_theme(self, theme: str):
         self._theme = theme
-        self._accent = QColor(get_colors(theme).get("primary", "#5BC0BE"))
+        self._accent = QColor(get_colors(theme).get("primary", FALLBACK_ACCENT))
         self.update()
 
     # ---------------- 事件 ----------------
@@ -788,7 +788,7 @@ class ScreenshotPinController(QObject):
             try:
                 self._overlay._theme = theme
                 self._overlay._accent = QColor(
-                    get_colors(theme).get("primary", "#5BC0BE")
+                    get_colors(theme).get("primary", FALLBACK_ACCENT)
                 )
                 self._overlay.update()
             except RuntimeError:

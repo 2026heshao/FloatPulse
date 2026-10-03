@@ -38,7 +38,7 @@ from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
-from src.theme import get_colors
+from src.theme import FALLBACK_ACCENT, get_colors
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 from src.constants import (
     DATETIME_DATE_LEN,
@@ -68,8 +68,9 @@ CAT_ROLE = Qt.ItemDataRole.UserRole + 2
 # ★ 存 token 而不是 QColor：条目前景色是**创建时取色**烘进 item 的，
 #   QSS 覆盖不到；换主题时必须按 token 重新取色（见 apply_theme），
 #   否则列表停留在旧主题配色，要切一次页面（触发 refresh）才恢复。
-#   token 与色值同源（light.primary=#5BC0BE / link=#1976D2，
-#   dark.primary=#6FFFE9 / link=#64B5F6），替换掉原先的 theme 三元表达式。
+#   token 与色值同源（light/dark 的 primary 与 link 两主题各取对应
+#   token 值，见 theme.THEMES；字面量已按铁律收口到 theme 常量），
+#   替换掉原先的 theme 三元表达式。
 COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 3
 
 # 类别 → 主题色 token：真相源已上移到 fragment_classifier.CATEGORY_TOKENS
@@ -103,9 +104,9 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         """
         self._base_color = QColor(colors.get("text", "#E4E8EE"))
         self._time_color = QColor(colors.get("text_placeholder", "#98A2AE"))
-        bg = QColor(colors.get("primary", "#6FFFE9"))
+        bg = QColor(colors.get("primary", FALLBACK_ACCENT))
         if not bg.isValid():
-            bg = QColor("#6FFFE9")
+            bg = QColor(FALLBACK_ACCENT)
         bg.setAlpha(85)
         self._hl_bg = bg
         self._line_color = QColor(str(colors.get("line", "#E4E2DB")))
@@ -240,8 +241,19 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
 # ====================================================================
 # 右侧内嵌预览面板
 # ====================================================================
+# 就地编辑自动保存的去抖毫秒数（与笔记面板/临时笔记的自动保存同节奏）
+_EDIT_SAVE_MS = 800
+
+
 class _PreviewPane(QWidget):
-    """单击碎片即显示完整内容（免去右键 → 详情 → 关闭三步）"""
+    """单击碎片即显示完整内容，且**就地可编辑**（停止输入自动保存）
+
+    v 行为变更（2026-10-03）：原「只读预览 + 编辑按钮 → 玻璃弹窗」改为
+    预览区直接编辑——按钮触发的弹窗链路已删（右键菜单「编辑内容」与
+    详情弹窗的编辑入口保留）。保存语义：停止输入 800ms 自动写回
+    （FragmentManager.update_fragment，内容变化时类别自动重算）；
+    切换选中 / 无变化 / 空内容的边界见 _commit_edit。
+    """
 
     def __init__(self, panel: "FragmentsPanel"):
         super().__init__()
@@ -284,31 +296,38 @@ class _PreviewPane(QWidget):
         pv.addWidget(self._meta)
         pv.addWidget(make_separator())
 
+        # 就地编辑：预览区即编辑区
         self._content = QTextEdit()
-        self._content.setReadOnly(True)
+        self._content.setReadOnly(False)
         pv.addWidget(self._content, 1)
 
         btns = QHBoxLayout()
         btns.setSpacing(8)
         self._copy_btn = SmoothButton("复制")
         self._copy_btn.setObjectName("secondaryBtn")
-        self._edit_btn = IconButton("edit", text="编辑", icon_size=14,
-                                    object_name="secondaryBtn")
-        for b in (self._copy_btn, self._edit_btn):
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            btns.addWidget(b)
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btns.addWidget(self._copy_btn)
         btns.addStretch()
         pv.addLayout(btns)
 
         self._copy_btn.clicked.connect(self._on_copy)
-        self._edit_btn.clicked.connect(self._on_edit)
+
+        # 自动保存：停止输入 800ms 落盘；切换选中 / 收起预览前先 flush
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(_EDIT_SAVE_MS)
+        self._save_timer.timeout.connect(self._commit_edit)
+        self._content.textChanged.connect(self._on_content_changed)
         self._stack.addWidget(page)
 
         self.show_fragment(None)
 
     # ---- 对外 ----
     def show_fragment(self, frag):
-        """frag 为 None 时回到占位页"""
+        """frag 为 None 时回到占位页；切换前先把未保存的修改落盘"""
+        if self._frag is not None and self._save_timer.isActive():
+            self._save_timer.stop()
+            self._commit_edit()
         self._frag = frag
         if frag is None:
             self._stack.setCurrentIndex(0)
@@ -321,7 +340,12 @@ class _PreviewPane(QWidget):
         self._meta.setText(meta)
         text = frag.content or ""
         self._stat.setText(f"{len(text)} 字")
-        self._content.setPlainText(text)
+        # 文本一致时不重写：就地编辑自动保存后 refresh 会回到这里，
+        # 重设 setPlainText 会把用户光标打回开头（连续打长段必踩）
+        if self._content.toPlainText() != text:
+            self._content.blockSignals(True)
+            self._content.setPlainText(text)
+            self._content.blockSignals(False)
         self._stack.setCurrentIndex(1)
 
     # ---- 内部 ----
@@ -331,10 +355,32 @@ class _PreviewPane(QWidget):
         self._panel._copy_content(self._frag)
         flash_button(self._copy_btn, "已复制")
 
-    def _on_edit(self):
+    def _on_content_changed(self):
+        """就地编辑：字数实时刷新；停止输入 800ms 后自动保存"""
         if self._frag is None:
             return
-        self._panel._edit_fragment(self._frag.fragment_id)
+        self._stat.setText(f"{len(self._content.toPlainText())} 字")
+        self._save_timer.start()
+
+    def _commit_edit(self):
+        """把预览区当前文本写回碎片（无变化不落盘、不刷列表）"""
+        frag = self._frag
+        if frag is None:
+            return
+        text = self._content.toPlainText()
+        if text == (frag.content or ""):
+            return
+        if not text.strip():
+            # 空内容 update_fragment 拒收（防空碎片）：原文保留在数据层，
+            # 编辑框暂留用户输入，切换/重载时由 show_fragment 复原
+            return
+        if self._panel._fragment_manager.update_fragment(
+                frag.fragment_id, content=text):
+            fresh = self._panel._fragment_manager.get_fragment(frag.fragment_id)
+            if fresh is not None:
+                self._frag = fresh          # category 已随内容重算
+            # 左侧行预览文本与类别圆点跟着内容走（保留浏览位置与选中）
+            self._panel.refresh(preserve_view=True)
 
 
 class FragmentsPanel(QWidget):

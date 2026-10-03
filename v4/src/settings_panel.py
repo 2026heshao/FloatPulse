@@ -38,6 +38,8 @@ from src.app_version import APP_VERSION
 from src.app_paths import get_data_dir
 from src.theme import (resolve_theme_name, apply_app_font, get_colors,
                        UI_SCALE_VALUES)
+from src import accent
+from src import wallpaper
 from src import motion
 from src import icon_render
 from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
@@ -353,6 +355,130 @@ class SettingsPanel(QWidget):
         add_row(gv, "小卡片图标大小", "悬浮球旁小卡片里软件图标的边长，"
                 "每档 4px；不影响主窗口软件导航页",
                 self._set_mini_icon_size, last=True)
+
+        # ================= 1.5 主题配色（2026-10-03 主题扩展）=================
+        # 单独成卡而不是挤进「外观与主题」：那张卡已有 6 行（主题 / 缩放 /
+        # 透明度 / 动画 / 减弱动效），再加两项会把它撑成需要滚很久的长卡。
+        gv = group(cv, "主题配色")
+
+        accent_ctl = QWidget()
+        accent_h = QHBoxLayout(accent_ctl)
+        accent_h.setContentsMargins(0, 0, 0, 0)
+        accent_h.setSpacing(8)
+        self._accent_swatch = QLabel()
+        self._accent_swatch.setFixedSize(20, 20)
+        self._accent_swatch.setObjectName("accentSwatch")
+        self._set_accent = QComboBox()
+        for spec in accent.accent_specs():
+            self._set_accent.addItem(spec.label, spec.spec_id)
+        self._set_accent.addItem("自定义…", accent.CUSTOM_ACCENT)
+        self._set_accent.setCurrentIndex(max(
+            0, self._set_accent.findData(
+                self._config.get("accent", accent.DEFAULT_ACCENT))))
+        self._set_accent.currentIndexChanged.connect(self._on_accent_changed)
+        accent_h.addWidget(self._accent_swatch)
+        accent_h.addWidget(self._set_accent, 1)
+        add_row(gv, "强调色",
+                "按钮底色、选中态、强调数字用的主色调；浅色与深色各取一支，"
+                "浅的那支会自动压暗到可读",
+                accent_ctl)
+
+        custom_ctl = QWidget()
+        custom_v = QVBoxLayout(custom_ctl)
+        custom_v.setContentsMargins(0, 0, 0, 0)
+        custom_v.setSpacing(4)
+        custom_h = QHBoxLayout()
+        custom_h.setContentsMargins(0, 0, 0, 0)
+        custom_h.setSpacing(8)
+        self._set_accent_custom = QLineEdit(
+            self._config.get("accent_custom", ""))
+        self._set_accent_custom.setPlaceholderText("#RRGGBB")
+        self._set_accent_custom.setMaxLength(7)
+        self._accent_apply = SmoothButton("应用")
+        self._accent_apply.clicked.connect(self._on_accent_custom_apply)
+        custom_h.addWidget(self._set_accent_custom, 1)
+        custom_h.addWidget(self._accent_apply)
+        custom_v.addLayout(custom_h)
+        self._accent_status = QLabel("")
+        self._accent_status.setObjectName("settingDesc")
+        self._accent_status.setWordWrap(True)
+        custom_v.addWidget(self._accent_status)
+        add_row(gv, "自定义强调色",
+                "上面选「自定义…」后填入十六进制色值；过浅的颜色会被自动"
+                "压暗，直到文字仍能看清",
+                custom_ctl, last=True)
+        self._sync_accent_rows()
+        self._refresh_accent_swatch()
+
+        # ================= 1.6 背景图（2026-10-03 主题扩展）=================
+        gv = group(cv, "背景图")
+
+        file_ctl = QWidget()
+        file_wrap = QWidget()
+        file_h = QHBoxLayout(file_ctl)
+        file_h.setContentsMargins(0, 0, 0, 0)
+        file_h.setSpacing(8)
+        self._set_wallpaper = QComboBox()
+        self._set_wallpaper.currentIndexChanged.connect(
+            self._on_wallpaper_changed)
+        self._wallpaper_import = SmoothButton("导入图片")
+        self._wallpaper_import.clicked.connect(self._on_wallpaper_import)
+        file_h.addWidget(self._set_wallpaper, 1)
+        file_h.addWidget(self._wallpaper_import)
+        self._wallpaper_status = QLabel("")
+        self._wallpaper_status.setObjectName("settingDesc")
+        self._wallpaper_status.setWordWrap(True)
+        file_v = QVBoxLayout(file_wrap)
+        file_v.setContentsMargins(0, 0, 0, 0)
+        file_v.setSpacing(4)
+        file_v.addWidget(file_ctl)
+        file_v.addWidget(self._wallpaper_status)
+        add_row(gv, "背景图片",
+                "主窗口与小卡片的背景图；导入会复制到数据目录，原图此后可以删除",
+                file_wrap)
+        self._refresh_wallpaper_list()
+
+        self._set_wallpaper_mode = QComboBox()
+        for mode in wallpaper.MODES:
+            self._set_wallpaper_mode.addItem(wallpaper.MODE_LABELS[mode], mode)
+        self._set_wallpaper_mode.setCurrentIndex(max(
+            0, self._set_wallpaper_mode.findData(
+                self._config.get("wallpaper_mode", wallpaper.DEFAULT_MODE))))
+        self._set_wallpaper_mode.currentIndexChanged.connect(
+            self._on_wallpaper_param_changed)
+        add_row(gv, "适配方式",
+                "图片与窗口尺寸不符时的处理方式：裁切铺满 / 完整显示 / "
+                "拉伸 / 平铺 / 居中原始大小",
+                self._set_wallpaper_mode)
+
+        self._set_wallpaper_veil = Stepper(
+            0, 100, int(self._config.get("wallpaper_veil",
+                                         wallpaper.DEFAULT_VEIL)),
+            suffix="%", step=5)
+        self._set_wallpaper_veil.valueChanged.connect(
+            self._on_wallpaper_param_changed)
+        add_row(gv, "主题色遮罩",
+                "压在图片上的一层底色，调低更像原图、调高更接近纯色；"
+                "默认 82% 兼顾观感与文字可读性",
+                self._set_wallpaper_veil)
+
+        self._set_wallpaper_blur = Stepper(
+            0, wallpaper.MAX_BLUR, int(self._config.get(
+                "wallpaper_blur", wallpaper.DEFAULT_BLUR)),
+            suffix="px", step=2)
+        self._set_wallpaper_blur.valueChanged.connect(
+            self._on_wallpaper_param_changed)
+        add_row(gv, "图片模糊", "给背景加一层柔化，文字更容易从画面里跳出来",
+                self._set_wallpaper_blur)
+
+        self._set_wallpaper_opacity = Stepper(
+            0, 100, int(self._config.get("wallpaper_opacity",
+                                         wallpaper.DEFAULT_OPACITY)),
+            suffix="%", step=5)
+        self._set_wallpaper_opacity.valueChanged.connect(
+            self._on_wallpaper_param_changed)
+        add_row(gv, "图片不透明度", "图片本身的浓淡，100% 为原始强度",
+                self._set_wallpaper_opacity, last=True)
 
         # ================= 2. 悬浮球 =================
         cv = self._new_category_page("ball")
@@ -1026,6 +1152,129 @@ class SettingsPanel(QWidget):
             self._apply_theme_btn_icons()
         self._reapply_status_tones()
         self._apply_about_icon_color()
+        # 强调色在浅/深两套主题里取的是**不同的一支**，换主题必须重画色块
+        self._refresh_accent_swatch()
+
+    # ==================================================================
+    # 主题扩展：强调色 / 背景图（2026-10-03）
+    # ==================================================================
+    def _sync_accent_rows(self):
+        """自定义色值输入框只在「自定义…」时可用（灰化而非隐藏，位置稳定）"""
+        if not hasattr(self, "_set_accent_custom"):
+            return
+        custom = self._set_accent.currentData() == accent.CUSTOM_ACCENT
+        self._set_accent_custom.setEnabled(custom)
+        self._accent_apply.setEnabled(custom)
+
+    def _refresh_accent_swatch(self):
+        """色板：永远是「当前主题下的实际主色」，不是用户填的原始值"""
+        if not hasattr(self, "_accent_swatch"):
+            return
+        colors = get_colors(self._host.current_theme)
+        self._accent_swatch.setStyleSheet(
+            "background-color: %s; border: 1px solid %s; border-radius: 4px;"
+            % (colors.get("primary", "#0F6E56"),
+               colors.get("line_2", "#D3D1C7")))
+
+    def _apply_accent_live(self):
+        """写进配置 → 让宿主全链路重刷（含悬浮球与小卡片的广播）"""
+        # refresh_appearance 内部重走 _apply_theme，Presenter 里就是薄薄一层，
+        # 但主版本号、主题链、广播三件事必须在这里一次性做完。
+        self._host.refresh_appearance()
+        self._refresh_accent_swatch()
+
+    def _on_accent_changed(self, index: int):
+        ident = self._set_accent.itemData(index)
+        if not ident:
+            return
+        self._config.set("accent", ident)
+        self._sync_accent_rows()
+        if ident != accent.CUSTOM_ACCENT:
+            self._accent_status.setText("")
+        self._apply_accent_live()
+
+    def _on_accent_custom_apply(self):
+        raw = self._set_accent_custom.text().strip()
+        hex_value = accent.normalize_hex(raw)
+        if not hex_value:
+            self._accent_status.setText(
+                "色值无效：需要 #RRGGBB 六位十六进制，例如 #15607F")
+            return
+        self._config.set("accent_custom", hex_value)
+        self._set_accent_custom.setText(hex_value)
+        # 告诉用户「实际用的不一定是这一个」——安全网会为可读性微调，
+        # 不说明的话改了半天看不到自己填的颜色会以为坏了。
+        actual = accent.build_accent_override(
+            accent.CUSTOM_ACCENT, self._host.current_theme,
+            hex_value).get("primary", hex_value)
+        if actual.upper() == hex_value.upper():
+            self._accent_status.setText("已应用")
+        else:
+            self._accent_status.setText(
+                "已应用；为保证文字可读，实际主色调整为 %s" % actual)
+        self._apply_accent_live()
+
+    def _refresh_wallpaper_list(self):
+        """重填图片下拉：首项是「不使用」，其后是数据目录里的实际文件"""
+        if not hasattr(self, "_set_wallpaper"):
+            return
+        current = self._config.get("wallpaper", "") or ""
+        self._set_wallpaper.blockSignals(True)
+        self._set_wallpaper.clear()
+        self._set_wallpaper.addItem("不使用", "")
+        for name in wallpaper.list_images():
+            self._set_wallpaper.addItem(name, name)
+        idx = self._set_wallpaper.findData(current)
+        if idx < 0 and current:
+            # 配了但文件没了（例如数据目录被清理）：收敛成「不使用」，
+            # 而不是留一个显示为空的选中项
+            self._set_wallpaper.setCurrentIndex(0)
+            self._wallpaper_status.setText(
+                "原背景图文件已不存在，已自动关闭背景图")
+        else:
+            self._set_wallpaper.setCurrentIndex(max(0, idx))
+        self._set_wallpaper.blockSignals(False)
+
+    def _apply_wallpaper_live(self):
+        """壁纸参数改动后的即时生效（写盘交给各 setter，这里只管刷新）"""
+        self._host.refresh_appearance()
+
+    def _on_wallpaper_changed(self, index: int):
+        name = self._set_wallpaper.itemData(index)
+        if name is None:
+            return
+        self._config.set("wallpaper", name)
+        self._wallpaper_status.setText("")
+        self._apply_wallpaper_live()
+
+    def _on_wallpaper_param_changed(self, _index_or_value=None):
+        self._config.set("wallpaper_mode",
+                         self._set_wallpaper_mode.currentData()
+                         or wallpaper.DEFAULT_MODE)
+        self._config.set("wallpaper_veil",
+                         int(self._set_wallpaper_veil.value()))
+        self._config.set("wallpaper_blur",
+                         int(self._set_wallpaper_blur.value()))
+        self._config.set("wallpaper_opacity",
+                         int(self._set_wallpaper_opacity.value()))
+        self._apply_wallpaper_live()
+
+    def _on_wallpaper_import(self):
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "选择背景图片", "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)")
+        if not path:
+            return
+        name, err = wallpaper.import_image(path)
+        if err:
+            self._wallpaper_status.setText("导入失败：%s" % err)
+            return
+        self._config.set("wallpaper", name)
+        self._refresh_wallpaper_list()
+        self._set_wallpaper.setCurrentIndex(
+            max(0, self._set_wallpaper.findData(name)))
+        self._wallpaper_status.setText("已导入 %s" % name)
+        self._apply_wallpaper_live()
 
     def _sync_auto_hide_rows(self):
         """同步「自动隐藏」相关行的可用性：总开关关闭时秒数步进器灰化。

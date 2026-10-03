@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
 from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
 from src.controls import SmoothButton, IconButton
-from src.theme import get_colors, get_menu_qss
+from src.theme import FALLBACK_ACCENT_DEEP, get_colors, get_menu_qss
 from src.icon_render import icon as render_icon
 from src.app_paths import get_data_dir, get_screen_geometry
 from src.task_manager import task_state, format_relative_deadline
@@ -518,7 +518,7 @@ class StickyNoteWindow(QWidget):
             if state == "overdue":
                 color = str(colors.get("danger", "#D6483A"))
             elif state == "today":
-                color = str(colors.get("primary_deep", "#3D9E9C"))
+                color = str(colors.get("primary_deep", FALLBACK_ACCENT_DEEP))
             else:
                 color = str(colors.get("text", "#888888"))
         self._chip.setStyleSheet(

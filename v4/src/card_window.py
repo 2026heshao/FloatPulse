@@ -49,7 +49,7 @@ from PyQt6.QtCore import (
     Qt, QTimer, QDate, QPoint, QSize, pyqtSignal, QVariantAnimation,
     QEasingCurve, QPropertyAnimation, QRectF, QMimeData,
 )
-from PyQt6.QtGui import QColor, QAction, QDesktopServices, QPainter, QPixmap, QFontMetrics, QFont, QIcon, QDrag, QImageReader, QShortcut, QKeySequence
+from PyQt6.QtGui import QColor, QAction, QDesktopServices, QPainter, QPainterPath, QPixmap, QFontMetrics, QFont, QIcon, QDrag, QImageReader, QShortcut, QKeySequence
 from PyQt6.QtCore import QUrl
 
 from src.glass_dialog import make_dialog_buttons
@@ -71,7 +71,8 @@ from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
 from src.icon_render import icon as render_icon
 from src.assets_panel import EXT_ICON
-from src.glass import NavIndicator, draw_soft_shadow
+from src.glass import NavIndicator, SurfaceBackground, draw_soft_shadow
+from src import appearance
 from src.date_picker import DateField
 from src.app_paths import get_screen_geometry
 from src.constants import (
@@ -639,6 +640,8 @@ class CardWindow(QWidget):
 
         # 指示器初始化守卫（防止首次显示时动画到错误位置）
         self._indicator_ready = False
+        # 自定义背景图图层（默认空；与主窗 GlassPanel 共用同一份实现）
+        self._background = SurfaceBackground()
 
         self._init_window()
         self._init_ui()
@@ -678,7 +681,51 @@ class CardWindow(QWidget):
             self.CARD_RADIUS,
             layers=6, max_alpha=alpha, offset_y=6.0,
         )
+        # 自定义背景图（2026-10-03）：画在阴影之上、卡片壳之下。
+        # 剪到圆角内是必须的 —— 否则方角图片会从圆角处顶出来。
+        if self._background.enabled:
+            path = QPainterPath()
+            path.addRoundedRect(
+                QRectF(m, m, self.WINDOW_WIDTH, self.WINDOW_HEIGHT),
+                self.CARD_RADIUS, self.CARD_RADIUS)
+            painter.save()
+            painter.setClipPath(path)
+            painter.translate(m, m)
+            self._background.paint(painter, self.WINDOW_WIDTH,
+                                   self.WINDOW_HEIGHT)
+            painter.restore()
         painter.end()
+
+    def set_background(self, path: str = "", mode: str = "cover",
+                       opacity: int = 100, blur: int = 0, veil: int = 82,
+                       veil_color: str = "#FFFFFF") -> bool:
+        """设置/关闭自定义背景图；返回是否实质变化（变了才 update + 重刷壳）。
+
+        与主窗不同，小卡片的壳是 **QSS 实底** `cardContainer`，不把底色调
+        成半透明就永远看不到背后的图 —— 所以这里改完要连带
+        ``_apply_style()`` 一起重来。
+        """
+        changed = self._background.configure(
+            path, mode, opacity, blur, veil, veil_color)
+        if changed:
+            self._apply_style()
+            self.update()
+        return changed
+
+    def _background_veil(self) -> int:
+        """当前遮罩百分比（供 :meth:`_apply_style` 换算壳的实底保底值）"""
+        return self._background.veil
+
+    def apply_background_from_config(self, config) -> bool:
+        """读 config 刷新背景图（入口给宿主在数据/主题刷新时调用）。
+
+        ``config`` 只需支持 ``.get()``；没配壁纸时走空串 → 关闭背景。
+        """
+        spec = appearance.wallpaper_spec(config)
+        colors = get_colors(self._theme)
+        return self.set_background(
+            spec["path"], spec["mode"], spec["opacity"], spec["blur"],
+            spec["veil"], colors.get("surface", "#1E2126"))
 
     def _init_ui(self):
         # 卡片壳容器（UI 重构 03）：玻璃拟态退役 → 普通 QWidget，实底
@@ -1157,8 +1204,8 @@ class CardWindow(QWidget):
         self._task_title_input.returnPressed.connect(self._on_add_task)
 
         # 2026-10-02：与主窗任务页同一套自绘日历弹层（src/date_picker.py）。
-        # 主题显式传入 —— CardWindow 只有私有 _theme，没有 current_theme 可读；
-        # 且它的 apply_theme 在「主题未变」时提前返回，构造期就必须给对。
+        # 主题显式传入 —— CardWindow 只有私有 _theme，没有 current_theme
+        # 可读，构造期就必须给对。
         self._task_deadline = DateField(theme=self._theme, parent=self,
                                         object_name="taskDate")
         self._task_deadline.setFixedWidth(120)
@@ -1637,8 +1684,19 @@ class CardWindow(QWidget):
         # 基础卡片 QSS + 本包自持覆盖（实底壳 $surface/$line_2、页标题
         # 15px/500、空态标题 sectionLabel）—— 覆盖层不写进 theme.py，
         # 避免与 01/02/04/05 并行会话抢文件（全局指挥裁决）。
-        self._container.setStyleSheet(
-            get_card_window_qss(self._theme) + _card_shell_qss(colors))
+        shell = get_card_window_qss(self._theme) + _card_shell_qss(colors)
+        # 挂了背景图时，实底壳要让位 —— 但只让到「遮罩 + 部分实底」的程度：
+        # 卡片比主窗小得多，文字密度更高，这里最低保留 55% 的底色，避免
+        # 用户把遮罩拉到 0 时条目文字直接压在照片上。
+        if self._background.enabled:
+            keep = max(55, 100 - self._background_veil() // 2)
+            base = QColor(colors.get("surface", "#1E2126"))
+            base.setAlphaF(keep / 100.0)
+            shell += ("QWidget#cardContainer {\n"
+                      "    background-color: rgba(%d, %d, %d, %d);\n"
+                      "}\n" % (base.red(), base.green(), base.blue(),
+                               base.alpha()))
+        self._container.setStyleSheet(shell)
         # P1：图标按钮（侧 Tab / 关闭钮 / 碎片行复制·删除）的位图颜色
         # 不在 QSS 管辖内
         for btn in self.findChildren(IconButton):
@@ -1655,10 +1713,17 @@ class CardWindow(QWidget):
     def apply_theme(self, theme_name: str):
         if theme_name not in ("light", "dark"):
             return
-        if theme_name == self._theme:
-            return
+        # 不做「主题未变提前返回」：强调色变化时主窗 refresh_appearance
+        # 以**原主题名**重广播 theme_changed，主窗/悬浮球/便签/快捕条
+        # 都是收到就无条件重设，卡片若在这里短路就整批停在旧强调色上
+        # （卡片 QSS 由 get_card_window_qss 现读 accent 生成，重设即
+        # 同步；重复调用只是低频多一次 repolish，无正确性影响）。
         self._theme = theme_name
         self._apply_style()
+        # 背景图的遮罩色取自当前主题的 $surface，换主题必须重捞一次
+        # （没有配壁纸时 apply_background_from_config 是空操作，零开销）
+        if getattr(self, "_config_manager", None) is not None:
+            self.apply_background_from_config(self._config_manager)
         self._apply_pages_background()
         self._menu.setStyleSheet(get_menu_qss(self._theme))
         # 同步指示器颜色
@@ -1921,6 +1986,10 @@ class CardWindow(QWidget):
         self._config_manager = cm
         # 换配置源 → 缓存的图标尺寸作废，让 mini_icon_size 按新源重读
         self._mini_icon_size = None
+        # 配置源就位时也把壁纸读进来（首次注入时若已经配了壁纸，
+        # 不必等到第一次换主题才生效）
+        if cm is not None:
+            self.apply_background_from_config(cm)
 
     def set_asset_manager(self, am):
         """注入临时素材管理器"""

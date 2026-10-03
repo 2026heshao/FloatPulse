@@ -55,6 +55,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from src import icon_render
 from src import motion
 from src.controls import IconButton, SmoothButton
 from src.plugin_api import BallAction, BallPlugin, PluginContext
@@ -1132,6 +1133,45 @@ class AiChatPage(QWidget):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         root.addWidget(self._scroll, 1)
 
+        # ---- 贴底跟随（2026-10-03 用户要求「和聊天窗口一样自动定位到最新」）----
+        # _stick_bottom=True 表示「视角本来就贴着底」，新内容到达就跟随到底；
+        # 用户主动往上翻历史时置 False，此时**不抢滚动条**（否则正在读的上
+        # 半屏会被硬拽走）。距底 _stick_eps 以内都算贴着底，避免滚轮差几像素
+        # 就被判成「离开底部」。
+        self._stick_bottom = True
+        self._stick_eps = 8
+        # 程序内 setValue 会连带触发 valueChanged，用它把自己发的那次跳过去，
+        # 否则「自动滚到底」会被误判成「用户主动滚到底」（后果倒是相同，但
+        # 反过来会掩盖真实的用户滚动意图）
+        self._self_scrolling = False
+        _bar = self._scroll.verticalScrollBar()
+        _bar.rangeChanged.connect(self._on_scroll_range_changed)
+        _bar.valueChanged.connect(self._on_scroll_value_changed)
+
+        # ---- 「↓ 回到最新」浮按钮（2026-10-03 P2）----
+        # 用户翻上去看历史时右下角浮现一键回底；贴底时隐藏。**不进 root
+        # layout**（进 layout 会占高度挤压消息流），挂在滚动区上（子级
+        # 坐标不随内容滚动），resizeEvent 里按视口右下角重定位。图标
+        # icon_render 自绘（禁 emoji），组件走 SmoothButton（插件页禁
+        # 裸 QPushButton 铁律）；显隐直接 show/hide（淡入淡出会抢戏）。
+        self._back_btn = SmoothButton(self._scroll)
+        self._back_btn.setObjectName("backToLatestBtn")
+        self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._back_btn.setToolTip("回到最新")
+        self._back_btn.setFixedSize(44, 44)
+        self._back_btn.clicked.connect(
+            lambda _checked=False: self._scroll_to_bottom(force=True))
+        self._retint_back_btn()
+        self._back_btn.setVisible(False)    # 初始贴底状态
+        self._place_back_btn()
+        # 主题切换重刷图标色（ThinkingDots 同款 callable 守卫订阅）
+        try:
+            sig = getattr(self._host(), "theme_changed", None)
+            if sig is not None and callable(getattr(sig, "connect", None)):
+                sig.connect(self._retint_back_btn)
+        except Exception:                     # noqa: BLE001 - 订阅失败只影响配色
+            pass
+
         # ---- 快捷指令 + 设置开关 ----
         quick_row = QHBoxLayout()
         quick_row.setSpacing(8)
@@ -1295,6 +1335,8 @@ class AiChatPage(QWidget):
         self._history = self._history[-MAX_HISTORY:]
         if not self._session["messages"]:
             self.add_bubble("AI", WELCOME_TEXT)
+        # 重建 = 新开一段视角（切会话 / 新建 / 启动恢复），无条件落到最新
+        self._scroll_to_bottom(force=True)
 
     def _persist_turn(self, user_content: str, user_display: str,
                       assistant_text: str):
@@ -1763,9 +1805,99 @@ class AiChatPage(QWidget):
         else:
             self._status.setText("存入笔记失败（详见 app.log）")
 
-    def _scroll_to_bottom(self):
+    def _scroll_to_bottom(self, force: bool = False):
+        """把消息流定位到「最新消息 + AI 即将输出的位置」。
+
+        ``force=True`` 用于「用户自己发了消息 / 切换会话」这类**明确要看
+        最新**的时刻，会重新贴底并立刻滚到底；否则只有当前本来就贴着底才
+        跟随 —— 用户正在往上翻历史时不抢滚动条。
+        """
+        if force:
+            self._stick_bottom = True
+            self._update_back_btn()       # force 必贴底：浮按钮随之隐藏
+        elif not self._stick_bottom:
+            return
         bar = self._scroll.verticalScrollBar()
-        QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+        self._pin(bar)
+        # 补一拍：widgetResizable 的 QScrollArea 要等一次布局传递才算出新
+        # 的 maximum，add_bubble 当下读到的是**上一轮**的旧值 —— 只 setValue
+        # 一次会停在「离底一张气泡」的位置（实测差 44px）。
+        QTimer.singleShot(0, lambda: self._pin(bar))
+
+    def _pin(self, bar):
+        """滚到当前底部（不判断贴底状态；由调用方决定要不要跟）"""
+        if bar is None:
+            return
+        target = bar.maximum()
+        if bar.value() == target:
+            return
+        self._self_scrolling = True
+        try:
+            bar.setValue(target)
+        finally:
+            self._self_scrolling = False
+
+    def _on_scroll_range_changed(self, _minimum, maximum):
+        """内容变高（新气泡 / 文本重排 / 窗口缩放）时把视角补钉到底部。
+
+        这是修掉「差一张气泡」的关键钩子：真正的 maximum 只有等布局算完
+        才知道，rangeChanged 那一刻才拿得到准确值。
+        """
+        if not self._stick_bottom:
+            return
+        self._pin(self._scroll.verticalScrollBar())
+
+    def _on_scroll_value_changed(self, value):
+        """按用户滚动结果更新贴底状态（自己 setValue 的那次跳过）"""
+        if self._self_scrolling:
+            return
+        bar = self._scroll.verticalScrollBar()
+        self._stick_bottom = (bar.maximum() - value) <= self._stick_eps
+        self._update_back_btn()
+
+    # ---------------- 「↓ 回到最新」浮按钮（2026-10-03 P2） ----------------
+
+    def _update_back_btn(self):
+        """浮按钮显隐跟随贴底状态：贴底隐藏、离底浮现（直接 show/hide）"""
+        btn = getattr(self, "_back_btn", None)
+        if btn is not None:
+            btn.setVisible(not self._stick_bottom)
+
+    def _place_back_btn(self):
+        """按滚动区右下角重定位（AiChatPage.resizeEvent 调用；16px 边距，
+        与竖向滚动条列错开——按钮右缘距滚动区右缘 16px，不遮滚动条）"""
+        btn = getattr(self, "_back_btn", None)
+        if btn is None:
+            return
+        sc = self._scroll
+        btn.move(sc.width() - btn.width() - 16,
+                 sc.height() - btn.height() - 16)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_back_btn()
+
+    def _back_btn_color(self) -> QColor:
+        """宿主主题 $text；拿不到时用深灰兜底（不画黑）"""
+        try:
+            from src.theme import get_colors
+            theme = "light"
+            getter = getattr(self._ctx, "parent_window", None)
+            win = getter() if callable(getter) else None
+            t = getattr(win, "current_theme", None)
+            if t in ("light", "dark"):
+                theme = t
+            c = (get_colors(theme) or {}).get("text")
+            if isinstance(c, str) and c.startswith("#") and len(c) in (4, 7):
+                return QColor(c)
+        except Exception:                     # noqa: BLE001 - 取不到就用兜底
+            pass
+        return QColor("#2C2C2A")
+
+    def _retint_back_btn(self, *_args):
+        """按当前主题重刷浮按钮图标色（theme_changed 跟随重绘）"""
+        self._back_btn.setIcon(icon_render.icon(
+            "chevron_down", 18, self._back_btn_color()))
 
     # ---------------- 思考动画（2026-09-28 用户要求；v1.11.0 自绘化） ----------------
 
@@ -1836,6 +1968,9 @@ class AiChatPage(QWidget):
 
     def _dispatch(self, display_text: str, data_block, prompt: str):
         """统一发送入口；data_block 非空 = 快捷指令（附加数据）"""
+        # 用户主动发起（手动发送 / 快捷指令）→ 视角无条件回到最新：哪怕此前
+        # 正在翻历史，此刻他想看的也是这一轮的结果（含下面的「未接入」提示）
+        self._stick_bottom = True
         user_content = prompt
         if data_block:
             user_content = f"{prompt}\n\n{data_block}"
@@ -2051,6 +2186,7 @@ class AiChatPage(QWidget):
             if w is not None:
                 w.deleteLater()
         self.add_bubble("AI", "当前会话已清空。")
+        self._scroll_to_bottom(force=True)
 
 
 # ====================================================================
@@ -2076,7 +2212,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.11.0"
+    version = "1.14.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]

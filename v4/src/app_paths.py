@@ -180,6 +180,25 @@ def get_temp_assets_dir(base_dir: str = None) -> str:
     return assets_dir
 
 
+WALLPAPER_DIRNAME = "backgrounds"        # 壁纸目录（float_data/backgrounds/）
+
+
+def get_backgrounds_dir(base_dir: str = None) -> str:
+    """获取壁纸目录（float_data/backgrounds/），不存在则创建。
+
+    壁纸是**用户导入的素材**（不是程序生成的数据），但必须跟着数据根走：
+    便携版要跟着 exe 目录、安装版要落在 %APPDATA%，否则换机就丢。
+    base_dir 语义同 get_data_dir。
+    """
+    data_dir = get_data_dir(base_dir)
+    bg_dir = os.path.join(data_dir, WALLPAPER_DIRNAME)
+    try:
+        os.makedirs(bg_dir, exist_ok=True)
+    except OSError:
+        pass
+    return bg_dir
+
+
 def get_docx_path(base_dir: str = None) -> str:
     """获取知识库.docx 完整路径（float_data/知识库.docx，不检查存在性）。
 

@@ -41,14 +41,15 @@ from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
     QStackedWidget, QButtonGroup,
     QFrame, QMenu, QApplication, QFileDialog,
-    QScrollArea, QSpacerItem, QSizePolicy,
+    QScrollArea, QSpacerItem, QSizePolicy, QTextBrowser,
 )
 from PyQt6.QtCore import (
     Qt, QPoint, pyqtSignal, QTimer, QRect, QRectF, QEvent,
     QPropertyAnimation, QEasingCurve, QParallelAnimationGroup,
     QSequentialAnimationGroup, QSize,
 )
-from PyQt6.QtGui import QColor, QPainter, QAction, QIcon, QShortcut, QKeySequence
+from PyQt6.QtGui import (QColor, QFont, QPainter, QAction, QIcon, QShortcut,
+                         QKeySequence)
 
 from src.theme import get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
@@ -67,6 +68,7 @@ from src.nav_layout import (
     reorder_within_group,
 )
 from src.glass import GlassPanel, NavIndicator, NavGroupHeader
+from src import appearance
 from src.controls import IconButton, PageTitle, ScreenToast, SmoothButton
 from src.app_paths import find_icon_file, get_screen_geometry
 from src.fragments_panel import FragmentsPanel
@@ -2817,6 +2819,17 @@ class MainWindow(QWidget):
         """
         self._apply_theme()
 
+    def refresh_appearance(self):
+        """强调色 / 壁纸改动后的统一刷新（设置面板调用）。
+
+        与 :meth:`reapply_theme` 的区别：那里刻意不广播（广播时机由调用
+        方决定），而改了强调色必须广播 —— 悬浮球、小卡片、右键菜单的
+        配色都是各自监听 ``theme_changed`` 后再 ``get_colors()`` 取的，
+        不广播它们会整批停在旧强调色上。
+        """
+        self._apply_theme()
+        self.theme_changed.emit(self._theme)
+
     @property
     def allow_close(self) -> bool:
         """是否允许下一次 closeEvent 直接关闭（程序主动退出路径用）。
@@ -2897,7 +2910,17 @@ class MainWindow(QWidget):
     # ==================================================================
     def _apply_theme(self):
         """应用当前主题的 QSS + 玻璃壳配色"""
+        # 主题扩展（2026-10-03）：**必须排在第一次 get_colors 之前** ——
+        # sync 会把 accent 推进 theme 模块，之后所有取色（含下面的 QSS）
+        # 才带得上新强调色；顺序反了就会用到上一次的值。
+        bg_spec = appearance.sync_theme_extras(self._config)
         colors = get_colors(self._theme)
+        # 自定义背景图挂在玻璃壳的绘制管线里（未配置时是一次布尔判断的开销）
+        if isinstance(self._container, GlassPanel):
+            self._container.set_background(
+                bg_spec["path"], bg_spec["mode"], bg_spec["opacity"],
+                bg_spec["blur"], bg_spec["veil"],
+                colors.get("bg", "#FAFAF8"))
         qss = get_main_window_qss(self._theme)
         self._container.setStyleSheet(qss)
         # 玻璃壳（填充/描边/高光/噪点）由 GlassPanel 手绘，需同步配色
@@ -3084,7 +3107,7 @@ class MainWindow(QWidget):
         <li><b>自动收集</b>：复制文本、复制文件路径时自动入库；按 [[Ctrl+Alt+K]] 也可手动快速捕捉</li>
         <li><b>类型筛选</b>：全部类型 / 剪贴板文本 / 剪贴板路径 / 文件拾取 / 知识段落</li>
         <li><b>搜索</b>：输入即筛（去抖 250ms），命中的关键词在条目里高亮</li>
-        <li><b>预览</b>：选中左侧条目，右侧显示完整内容，可「复制」「编辑」</li>
+        <li><b>预览</b>：选中左侧条目，右侧显示完整内容，可直接修改（停止输入 800ms 自动保存），也可「复制」</li>
         <li><b>多选批量</b>：勾选多条后可「合并选中」（可合并成一条并直接存为笔记）、「复制选中」、「删除选中」、「清空全部」</li>
         <li><b>右键单条</b>：查看详情 / 编辑内容 / 复制内容 / 存为笔记 / 加入知识库 / 添加至网址导航 / 删除</li>
         </ul>
@@ -3268,6 +3291,19 @@ class MainWindow(QWidget):
         ("data", "folder", "数据与迁移"),
     )
 
+    # 目录分组（2026-10-03 目录化设计）：左栏从 17 枚按钮换成 6 组纯文字
+    # 目录。组名只用于目录展示；成员键序必须与 HELP_CATEGORIES 严格同序
+    # （test_help_nav 双向钉死：并集 = 17 键、拼接序 = 主表键序）。
+    HELP_TOC_GROUPS = (
+        ("开始使用", ("overview", "hotkeys")),
+        ("悬浮球与小卡片", ("ball", "card")),
+        ("功能面板", ("fragments", "tasks", "notes", "knowledge", "assets")),
+        ("导航与工具", ("nav", "apps", "shot")),
+        ("插件", ("pluginhub", "builtin")),
+        ("系统与数据", ("tray", "settings", "data")),
+    )
+    HELP_TOC_WIDTH = 168   # 目录栏宽（设计稿 §四；含自身滚动条）
+
     @classmethod
     def _help_html_sections(cls) -> dict:
         """把整篇 _help_html() 按 <h3> 切成 {章节标题: 含 h3 的片段}。
@@ -3307,119 +3343,259 @@ class MainWindow(QWidget):
     def _build_help_page(self):
         """构建使用说明页面（嵌入 QStackedWidget，与其它页面同层级切换）
 
-        2026-10-02 重构：13 个章节此前挤在一条长滚动里，翻找全靠滚轮；
-        改成与设置页同款「左侧分类导航 + 右侧分类页」，每章独立滚动。
-        切换实现与 SettingsPanel 完全同构（QButtonGroup 互斥 + stack 换页），
-        左栏按钮与分隔线复用 settingsNavBtn / settingsNavDivider 的 QSS 与
-        IconButton 悬停配色钩子 —— 那是「页内次导航」的统一样式收口，两页
-        共用一份视觉语言。正文取色仍由 _apply_help_content_color 在
-        _apply_theme 里统一重放（findChildren(IconButton) 一并刷导航图标）。
-        同日内容扩充至 16 章节（17 个分类含总览），切片原文缓存在
-        _help_raw，[[热键]] 键帽与主题色统一在 _decorate_help_html 注入。
+        2026-10-02 重构：13 个章节此前挤在一条长滚动里，改成与设置页
+        同款「左侧分类导航 + 右侧分类页」，每章独立滚动。
+        2026-10-03 目录化：17 枚 settingsNavBtn 按钮换成 6 组纯文字目录
+        （TOC，形态=目录不是按钮），右侧 17 章合并为**单个 QTextBrowser
+        长滚动**——点目录跳章（动画滚动条），滚动正文时目录高亮跟随
+        （scrollspy）。正文管线零改动：切片原文缓存 _help_raw，
+        [[热键]] 键帽与主题色统一在 _decorate_help_html 注入。
         """
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(8, 0, 8, 0)
         outer.setSpacing(8)
 
-        # 标题与设置页同款：PageTitle 顶格通栏（原居中排版随长滚动退役）
+        # 标题与设置页同款：PageTitle 顶格通栏
         outer.addWidget(PageTitle("help", "FloatPulse 使用说明", self))
         outer.addSpacing(8)
 
-        # ---- 中部：左分类导航 + 右章节页，每章独立滚动 ----
+        # ---- 中部：左目录 + 1px 分隔线 + 右单页长滚动 ----
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(14)
-        body.addWidget(self._build_help_nav_rail())
+        body.addWidget(self._build_help_toc_rail())
         divider = QFrame()
         divider.setObjectName("settingsNavDivider")
         divider.setFixedWidth(1)
         body.addWidget(divider)
-        self._help_stack = QStackedWidget()
-        body.addWidget(self._help_stack, 1)
+        browser = QTextBrowser()
+        browser.setOpenLinks(False)      # 正文无链接，点击不做导航
+        browser.setFrameShape(QFrame.Shape.NoFrame)
+        browser.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        browser.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; }")
+        browser.verticalScrollBar().valueChanged.connect(self._help_scrollspy)
+        browser.verticalScrollBar().rangeChanged.connect(self._help_scrollspy)
+        self._help_browser = browser
+        body.addWidget(browser, 1)
         outer.addLayout(body, 1)
 
-        self._help_contents = []
+        # ---- 正文组装：17 章切片合并，每章前置命名锚点 ch_<key> ----
         self._help_raw = {}   # key → 切片原文；装饰与取色在 _apply_help_content_color 统一做
         for key, _icon, _label in self.HELP_CATEGORIES:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setStyleSheet(
-                "QScrollArea { background: transparent; border: none; }"
-                "QScrollArea > QWidget > QWidget { background: transparent; }"
-                "QLabel { background: transparent; }"
-            )
-            content = QLabel()
-            content.setWordWrap(True)
-            content.setTextFormat(Qt.TextFormat.RichText)
             self._help_raw[key] = self._help_section_html(key)
-            scroll.setWidget(content)
-            self._help_contents.append(content)
-            self._help_stack.addWidget(scroll)
-
-        # 初始落在第一分类（与设置页同口径：不做跨会话记忆）
-        self.show_help_category(self.HELP_CATEGORIES[0][0])
+        # scrollspy / 跳章动画状态（章内定位缓存随视口宽重算，见 _help_locate_chapters）
+        self._help_chapter_y = {}
+        self._help_chapter_geo = None
+        self._help_active_key = None
+        self._help_scroll_anim = None
         self._apply_help_content_color()
+        first = self.HELP_CATEGORIES[0][0]
+        self._help_toc_btns[first].setChecked(True)
+        self._help_active_key = first
         return page
 
-    def _build_help_nav_rail(self) -> QWidget:
-        """说明页左分类导航：与 SettingsPanel._build_nav_rail 同构。
+    def _build_help_toc_rail(self) -> QWidget:
+        """说明页左目录（TOC）：6 组纯文字目录，替代 17 枚按钮（2026-10-03）。
 
-        objectName 复用 settingsNavBtn —— 「页内次导航」的统一样式钩子
-        （QSS / IconButton 悬停淡染 / 圆角都按这个名字收口），两页共用
-        而不是各抄一份。图标三态取色与设置页逐字相同。
+        目录项是 checkable QPushButton（objectName=helpTocItem，纯 QSS：
+        常态 text_secondary 纯文字无图标无底色块、hover primary_a08 淡染、
+        选中 accent_soft 底 + 主色加粗 + 左缘 3px 竖条——与 settingsNavBtn
+        按钮形态明确区分）。目录自身可滚，小窗高度不再裁切。
         """
-        rail = QWidget()
-        rv = QVBoxLayout(rail)
-        rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(2)   # 17 个分类比设置页多一半，紧凑行距防小窗高度裁切
-        self._help_btns = {}
-        self._help_index = {}
-        self._help_group = QButtonGroup(self)
-        self._help_group.setExclusive(True)
-        for idx, (key, icon, label) in enumerate(self.HELP_CATEGORIES):
-            btn = IconButton(icon, icon_size=16, text=label,
-                             object_name="settingsNavBtn", checkable=True,
-                             host=self,
-                             off_color="text_secondary", hover_color="text",
-                             on_color="primary")
-            btn.clicked.connect(
-                lambda _checked=False, k=key: self.show_help_category(k))
-            self._help_group.addButton(btn)
-            self._help_btns[key] = btn
-            self._help_index[key] = idx
-            rv.addWidget(btn)
-        rv.addStretch()
-        rail.setFixedWidth(140)
-        return rail
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedWidth(self.HELP_TOC_WIDTH)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }")
+        self._help_toc_scroll = scroll
+        inner = QWidget()
+        rv = QVBoxLayout(inner)
+        rv.setContentsMargins(0, 0, 4, 2)
+        rv.setSpacing(0)
+        labels = dict((c[0], c[2]) for c in self.HELP_CATEGORIES)
+        self._help_toc_btns = {}
+        self._help_toc_group = QButtonGroup(self)
+        self._help_toc_group.setExclusive(True)
+        for gi, (group_name, keys) in enumerate(self.HELP_TOC_GROUPS):
+            if gi > 0:
+                # 组间分隔（用户反馈 2026-10-03）：纯文字列表 17 项容易
+                # 糊成一条，组与组之间加 1px hairline——复用 settingsNavDivider
+                # 统一钩子（$hair 中性色）；首组贴页标题不加。
+                rv.addSpacing(7)
+                gdiv = QFrame()
+                gdiv.setObjectName("settingsNavDivider")
+                gdiv.setFixedHeight(1)
+                rv.addWidget(gdiv)
+                rv.addSpacing(2)
+            glabel = QLabel(group_name)
+            glabel.setObjectName("helpTocGroup")
+            # 组标题细节提示（用户反馈 2026-10-03）：主色小刻度（3×10 圆角
+            # 竖条，primary_a30——与选中项左缘竖条同语系但降一档权重）+
+            # 1.5px 字距（QSS 无 letter-spacing，走 QFont；中文目录的
+            # 「小型大写间距」等价物），让 11px 灰字读作组头而非目录项。
+            f = glabel.font()
+            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+            glabel.setFont(f)
+            row = QWidget()
+            rh = QHBoxLayout(row)
+            rh.setContentsMargins(0, 0, 0, 0)
+            rh.setSpacing(6)
+            tick = QFrame()
+            tick.setObjectName("helpTocTick")
+            tick.setFixedSize(3, 10)
+            rh.addWidget(tick, 0, Qt.AlignmentFlag.AlignVCenter)
+            rh.addWidget(glabel, 0, Qt.AlignmentFlag.AlignVCenter)
+            rh.addStretch(1)
+            rv.addWidget(row)
+            for key in keys:
+                btn = QPushButton(labels[key])
+                btn.setObjectName("helpTocItem")
+                btn.setCheckable(True)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(
+                    lambda _checked=False, k=key: self.show_help_category(k))
+                self._help_toc_group.addButton(btn)
+                self._help_toc_btns[key] = btn
+                rv.addWidget(btn)
+        rv.addStretch(1)
+        scroll.setWidget(inner)
+        return scroll
 
     def show_help_category(self, key: str):
-        """切到指定章节；未知 key 静默忽略（导航点击与外部深链共用入口）"""
-        btn = self._help_btns.get(key)
+        """跳到指定章节（目录点击与外部深链共用入口）；未知 key 静默忽略。
+
+        选中态交给目录按钮（QButtonGroup 互斥）；正文跳章 = 章节块定位
+        + 动画 scrollbar.value（QTextBrowser.scrollToAnchor 是瞬跳，平滑
+        滚动靠动画实现；reduce_motion / 时长归零直接落位，扫块失败回退
+        原生 scrollToAnchor）。动画在途时 scrollspy 挂起（终点即目标章，
+        避免中途误高亮），连点由 _help_stop_scroll_anim 掐掉上一条。
+        """
+        btn = self._help_toc_btns.get(key)
         if btn is None:
             return
-        btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
-        self._help_stack.setCurrentIndex(self._help_index[key])
+        btn.setChecked(True)
+        self._help_active_key = key
+        sb = self._help_browser.verticalScrollBar()
+        top = self._help_chapter_top(key)
+        if top is None:
+            self._help_stop_scroll_anim()
+            self._help_browser.scrollToAnchor(f"ch_{key}")
+            return
+        end = max(0, min(int(top) - 6, sb.maximum()))
+        ms = motion.duration(motion.MOTION["base"], self.anim_speed)
+        if ms <= 0 or motion.reduce_motion():
+            self._help_stop_scroll_anim()
+            sb.setValue(end)
+            return
+        self._help_stop_scroll_anim()
+        anim = QPropertyAnimation(sb, b"value", self)
+        anim.setDuration(ms)
+        anim.setStartValue(sb.value())
+        anim.setEndValue(end)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(self._help_scroll_anim_done)
+        self._help_scroll_anim = anim
+        anim.start()
+
+    def _help_scroll_anim_done(self):
+        """跳章动画收尾：解锁 scrollspy 并按终点位置同步一次高亮"""
+        self._help_scroll_anim = None
+        self._help_scrollspy()
+
+    def _help_stop_scroll_anim(self):
+        """掐掉在途跳章动画（stop 会发 finished，先摘引用防重入）"""
+        anim, self._help_scroll_anim = self._help_scroll_anim, None
+        if anim is not None:
+            anim.stop()
+
+    def _help_chapter_top(self, key: str):
+        """章节标题块的文档 y 坐标（缓存随视口宽/文档高失效重算）"""
+        self._help_locate_chapters()
+        return self._help_chapter_y.get(key)
+
+    def _help_locate_chapters(self):
+        """扫块定位 17 个章节标题（h3 渲染为文本=章节名的块）。
+
+        动画跳章需要先拿到章节的文档 y；标题文本与左栏名逐字同源
+        （两表一致由 test_help_nav 钉死），按块文本匹配安全，每章只取
+        首次出现。视口宽或文档高变了才重扫（resize / 重渲染自动失效）。
+        """
+        browser = self._help_browser
+        geo = (browser.viewport().width(),
+               browser.document().size().height())
+        if self._help_chapter_geo == geo and self._help_chapter_y:
+            return
+        labels = dict((c[2], c[0]) for c in self.HELP_CATEGORIES)
+        layout = browser.document().documentLayout()
+        ys = {}
+        block = browser.document().firstBlock()
+        while block.isValid():
+            key = labels.get(block.text().strip())
+            if key and key not in ys:
+                ys[key] = layout.blockBoundingRect(block).top()
+            block = block.next()
+        # 总览没有 h3 标题块（导语段），文档顶就是它的章首
+        ys.setdefault("overview", 0.0)
+        self._help_chapter_y = ys
+        self._help_chapter_geo = geo
+
+    def _help_scrollspy(self, _value=None):
+        """正文滚动 → 视口顶部所在章节 → 目录高亮跟随（scrollspy）。
+
+        跳章动画在途时挂起（终点本身就是目标章节）；高亮变化时把目录
+        项滚到可见（ensureWidgetVisible，目录自身可滚）。
+        """
+        if (self._help_scroll_anim is not None
+                or not getattr(self, "_help_toc_btns", None)):
+            return
+        self._help_locate_chapters()
+        pos = self._help_browser.verticalScrollBar().value() + 40.0
+        current = None
+        for key, _icon, _label in self.HELP_CATEGORIES:
+            y = self._help_chapter_y.get(key)
+            if y is not None and y <= pos:
+                current = key
+        if current is None:
+            current = self.HELP_CATEGORIES[0][0]
+        if current == self._help_active_key:
+            return
+        self._help_active_key = current
+        btn = self._help_toc_btns.get(current)
+        if btn is not None:
+            btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个
+            self._help_toc_scroll.ensureWidgetVisible(btn, 0, 16)
+
+    def _help_full_html(self) -> str:
+        """17 章切片合并为单文档（每章前置命名锚点 ch_<key>）——
+        单 QTextBrowser 渲染的唯一原文来源，主题色另行注入。"""
+        return "".join(
+            f'<a name="ch_{key}"></a>{self._help_raw.get(key, "")}'
+            for key, _icon, _label in self.HELP_CATEGORIES)
 
     def _apply_help_content_color(self):
         """使用说明正文重渲染（切主题时由 _apply_theme 调用）。
 
         Qt 富文本不吃 QSS，颜色只能行内注入；每次主题变化都用
-        _decorate_help_html 从 _help_raw 的切片原文重新装饰一遍——
-        原文是唯一真相源，避免上次注入的行内样式叠进本次输出。
+        _decorate_help_html 从 17 章合并原文重新装饰——原文是唯一真相
+        源，避免上次注入的行内样式叠进本次输出。重渲染会重置滚动位置：
+        按滚动比例恢复（读在哪一章附近，换主题后还在哪一章附近）。
         """
-        if not getattr(self, "_help_contents", None):
+        browser = getattr(self, "_help_browser", None)
+        if browser is None:
             return
         colors = get_colors(self._theme)
-        text_color = colors.get("text", "#2C2C2A")
-        style = (f"font-size: 13px; line-height: 1.6; "
-                 f"color: {text_color}; background: transparent;")
-        for (key, _icon, _label), content in zip(
-                self.HELP_CATEGORIES, self._help_contents):
-            content.setStyleSheet(style)
-            content.setText(self._decorate_help_html(
-                self._help_raw.get(key, ""), colors))
+        sb = browser.verticalScrollBar()
+        ratio = (sb.value() / sb.maximum()) if sb.maximum() > 0 else 0.0
+        browser.setHtml(self._decorate_help_html(self._help_full_html(),
+                                                 colors))
+        sb.setValue(int(ratio * sb.maximum()))
+        self._help_chapter_geo = None   # 新文档宽高未定 → 下次定位重扫
+        self._help_scrollspy()
 
     @staticmethod
     def _decorate_help_html(raw: str, colors: dict) -> str:
@@ -3459,9 +3635,19 @@ class MainWindow(QWidget):
             out.append(cap % (bg, fg, key.strip()))
             rest = rest2
         html = "".join(out)
+        # 章节化（2026-10-03 目录化：单页长滚动的章界视觉）——标题上距
+        # 22px 拉开章间距；标题下 1px 分隔线。Qt 富文本不支持块级 border
+        # 与 <hr>，背景色细行最薄也要 ~10px（最小行高钳制）——用「透明
+        # 单元格的 border-bottom」实现：块高 ~11px 但可见的只有 1px 线
+        # （离屏像素竖扫验证：整行唯一暗行）。
+        line = colors.get("line", "#E4E2DB")
+        divider = (f'<table width="100%" cellspacing="0" cellpadding="0">'
+                   f'<tr><td style="border-bottom:1px solid {line}; '
+                   f'font-size:1px;">&nbsp;</td></tr></table>')
         html = (html
-                .replace("<h3>", '<h3><span style="color:%s; font-size:15px;">' % primary)
-                .replace("</h3>", "</span></h3>"))
+                .replace("<h3>", '<h3 style="margin-top:22px;">'
+                         '<span style="color:%s; font-size:15px;">' % primary)
+                .replace("</h3>", "</span></h3>" + divider))
         return html
 
     def _toggle_help_page(self):

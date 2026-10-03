@@ -21,7 +21,7 @@ from PyQt6.QtGui import QGuiApplication, QCursor, QKeyEvent, QShortcut, QKeySequ
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QLabel
 
 from src.logger import get_logger
-from src.theme import get_colors
+from src.theme import FALLBACK_ACCENT, get_colors
 
 
 class QuickCaptureWindow(QWidget):
@@ -250,7 +250,7 @@ class QuickCaptureWindow(QWidget):
             f" border-radius: 14px;"
             f" padding: 0 16px;"
             f" font-size: 14px;"
-            f" selection-background-color: {c.get('primary', '#5BC0BE')};"
+            f" selection-background-color: {c.get('primary', FALLBACK_ACCENT)};"
             f" }}"
             f"QLineEdit::placeholder {{ color: {c.get('text_placeholder', '#AAB4BF')}; }}"
         )
@@ -265,5 +265,5 @@ class QuickCaptureWindow(QWidget):
             handle.setStyleSheet(
                 f"color: {c.get('text_secondary', '#8B96A3')};"
                 f"font-size: 15px; background: transparent;"
-                f"#qcDragHandle:hover {{ color: {c.get('primary', '#5BC0BE')}; }}"
+                f"#qcDragHandle:hover {{ color: {c.get('primary', FALLBACK_ACCENT)}; }}"
             )

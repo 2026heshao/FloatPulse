@@ -73,6 +73,8 @@ from src.constants import (
     MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT,
 )
 from src.theme import THEME_VALUES
+from src import accent
+from src import wallpaper
 from src.data_backups import rotate_backup
 from src.json_store import (STORE_VERSIONS, CONFIG_VERSION_KEY,
                             migrate_data)
@@ -108,6 +110,14 @@ DEFAULT_CONFIG = {
     "first_run_done":       False,        # 已完成三步欢迎向导（onboarding.should_show 判定）
     "ui_scale":             100,          # 界面缩放百分比（85-150，只缩放全局字号）
     "window_opacity":       100,          # 主窗口不透明度百分比（50-100，100=不透明）
+    # ===== 强调色 / 壁纸（2026-10-03 主题扩展）=====
+    "accent":               accent.DEFAULT_ACCENT,  # 强调色 id（accent.ACCENT_IDS）
+    "accent_custom":        "",           # 自定义强调色 #RRGGBB（accent=custom 时生效）
+    "wallpaper":            "",           # 壁纸文件名（空=关闭；图存 float_data/backgrounds/）
+    "wallpaper_mode":       wallpaper.DEFAULT_MODE,     # cover/contain/stretch/tile/center
+    "wallpaper_opacity":    wallpaper.DEFAULT_OPACITY,  # 图片不透明度 %
+    "wallpaper_blur":       wallpaper.DEFAULT_BLUR,     # 模糊强度 px（0=不模糊）
+    "wallpaper_veil":       wallpaper.DEFAULT_VEIL,     # 主题色遮罩 %（越高越偏纯色底）
     # ===== 更新检查（2.3 被动提示；只查不下载，失败静默）=====
     "auto_check_updates":   True,         # 启动后每天最多静默检查一次新版本
     "last_update_check":    "",           # 最近一次检查日期 "YYYY-MM-DD"（空=从未检查）
@@ -184,6 +194,13 @@ _CONFIG_TYPES = {
     "first_run_done":       bool,
     "ui_scale":             int,
     "window_opacity":       int,
+    "accent":               str,
+    "accent_custom":        str,
+    "wallpaper":            str,
+    "wallpaper_mode":       str,
+    "wallpaper_opacity":    int,
+    "wallpaper_blur":       int,
+    "wallpaper_veil":       int,
     "auto_check_updates":   bool,
     "last_update_check":    str,
     "latest_known_version": str,
@@ -260,6 +277,11 @@ _CONFIG_RANGES = {
     # 主窗口不透明度：与设置页「窗口透明度」Stepper 范围 50-100（每档 5%）一致；
     # 下限 50 保证文字仍可读（Qt windowOpacity 为 0 时窗口不可点击）
     "window_opacity":       (50, 100),
+    # 强调色 / 壁纸（2026-10-03 主题扩展）：范围与 wallpaper.py 的常量同源，
+    # 避免 EOS Delta 的两侧步长漂移
+    "wallpaper_opacity":    (0, 100),
+    "wallpaper_blur":       (0, wallpaper.MAX_BLUR),
+    "wallpaper_veil":       (0, 100),
     # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
     "ai_local_port":        (1024, 65535),
     # 本地模型上下文长度：llama-server -c 硬边界（越界由 ai_server.sanitize_ctx_size
@@ -272,6 +294,10 @@ _CONFIG_RANGES = {
 # 系统）后收敛于此，防止手改 config.json 塞进垃圾值静默破坏主题链路。
 _CONFIG_VALUE_WHITELISTS = {
     "theme": THEME_VALUES,
+    # 强调色：id 必须是 accent 模块认得的（“custom” 走 accent_custom 的 HEX）
+    "accent": accent.ACCENT_IDS,
+    # 壁纸适配模式：五选一，越界一律回落到 cover
+    "wallpaper_mode": wallpaper.MODES,
 }
 
 

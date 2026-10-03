@@ -26,7 +26,22 @@ v3 视觉规范（UI 重构 00/01，对照 `设计稿/ui-redesign-preview.html`�
 
 from string import Template
 
+from src import accent
 from src.constants import DEFAULT_THEME
+
+# ---- 旧薄荷硬编码兜底（强调色系统 2026-10-03 收口）----
+# 强调色可被 override（8 套预设 + 自定义 HEX），散落各处的旧薄荷字面量
+# fallback 一旦生效就是错色。统一从这里 import；除本文件的常量定义行与
+# 仍为活 token 的 primary_lite / primary_deep 行外，源码任何位置禁止再
+# 出现这三个值（test_theme_accent 源码扫描护栏）。
+FALLBACK_ACCENT = "#5BC0BE"        # 旧薄荷（primary 兜底）
+FALLBACK_ACCENT_DEEP = "#3D9E9C"   # 旧薄荷深（primary_deep 兜底）
+FALLBACK_ACCENT_LITE = "#6FFFE9"   # 旧薄荷亮（primary_lite 兜底）
+
+# 强调色运行时状态 + merge 结果缓存（key = 主题名, accent id, custom hex）
+_ACTIVE_ACCENT = accent.DEFAULT_ACCENT
+_ACTIVE_CUSTOM = ""
+_ACCENT_CACHE = {}
 
 
 # ====================================================================
@@ -263,7 +278,7 @@ THEMES = {
         "list_item_selected": "rgba(93, 202, 165, 0.18)",
 
         # ---- 主色底上的文字色 ----
-        # 深色主色中亮：深墨 #04342C 压底 6.8:1（旧 #6FFFE9 需深墨的强约束放宽）
+        # 深色主色中亮：深墨 #04342C 压底 6.8:1（旧薄荷亮色 fallback 需深墨的强约束放宽）
         "on_primary":        "#04342C",
         "on_disabled":       "rgba(255, 255, 255, 180)",
         # ---- 次按钮（secondaryBtn）文字色 ----
@@ -739,6 +754,52 @@ QFrame#settingsNavDivider {
     border: none;
 }
 
+/* ---- 使用说明页目录（2026-10-03 目录化）：纯文字 TOC，与按钮形态区分 ----
+   目录项是「目录的一行」不是按钮：无图标无底色块，常态纯文字；当前
+   位置用左缘竖条表达（QSS 唯一可行画法：3px 左描边，常态透明占位保证
+   文字对齐不跳）；分组标签 11px 灰字。圆角取 4——左缘有 3px 描边，
+   沿用 $r_panel 会让竖条跟着大圆角拐弯。 */
+QLabel#helpTocGroup {
+    color: $text_placeholder;
+    font-size: $fs_xs;
+    padding: 10px 10px 3px 0;
+}
+/* 组标题主色小刻度：与选中项左缘竖条同语系、降一档权重（a30），
+   3×10px 圆角小条——组头在纯文字列表里的「这是标题」提示 */
+QFrame#helpTocTick {
+    background-color: $primary_a30;
+    border: none;
+    border-radius: 1px;
+}
+QPushButton#helpTocItem {
+    background-color: transparent;
+    color: $text_secondary;
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: 4px;
+    padding: 3px 10px 3px 7px;
+    text-align: left;
+    font-size: 12px;
+}
+QPushButton#helpTocItem:hover {
+    background-color: $primary_a08;
+    color: $text;
+}
+QPushButton#helpTocItem:checked {
+    background-color: $accent_soft;
+    color: $primary;
+    border-left: 3px solid $primary;
+    font-weight: 600;
+}
+QPushButton#helpTocItem:focus {
+    /* 键盘可达性：焦点环描上/右/下三边（全局 border 会盖掉左缘竖条，
+       与 checked 的位置语义冲突），左缘保持竖条/透明占位不动 */
+    border-top: 1px solid $focus_ring;
+    border-right: 1px solid $focus_ring;
+    border-bottom: 1px solid $focus_ring;
+    outline: none;
+}
+
 /* ---- 插件中心 ---- */
 QFrame#pluginCard {
     /* 实底 + 左缘 3px 状态条（属性选择器按状态换色，2026-10-02 卡片重设计）：
@@ -802,6 +863,19 @@ QTextBrowser#usageViewer {
     border-radius: $r_panel;
     padding: 8px;
     font-size: 13px;
+}
+/* AI 助手「↓ 回到最新」浮按钮（2026-10-03 P2）：消息流右下角的 44px
+   圆钮，浮在内容上必须实底（$surface）才可读；hover 换 $surface_2 +
+   主色描边提示可点。图标色走 $text（plugin.py 经 icon_render 自绘）。 */
+QPushButton#backToLatestBtn {
+    background-color: $surface;
+    border: 1px solid $line_2;
+    border-radius: 22px;
+    padding: 0;
+}
+QPushButton#backToLatestBtn:hover {
+    background-color: $surface_2;
+    border: 1px solid $primary_a30;
 }
 /* 动作 chip（2026-10-02 卡片重设计）：一个动作一枚「实底 chip」——
    动作名 + 热键（等宽小字）+「右键菜单」归属，由 _FlowLayout 横向排列
@@ -1956,14 +2030,48 @@ def resolve_theme_name(config_value, style_hints=None) -> str:
 # ====================================================================
 # 公开接口
 # ====================================================================
+def set_accent(accent_id, custom_hex: str = "") -> None:
+    """设置当前强调色（全局单点），之后所有 ``get_colors()`` 自动带上。
+
+    走「模块级当前值」而不是给 ``get_colors`` 加参数，是因为全仓有数十处
+    调用点（含插件），逐一传参会漏。默认 ``default`` 时 override 为空、
+    返回 THEMES 原字典，旧行为逐字节不变。
+    """
+    global _ACTIVE_ACCENT, _ACTIVE_CUSTOM
+    ident = accent_id if accent_id in accent.ACCENT_IDS else accent.DEFAULT_ACCENT
+    if (ident, custom_hex) == (_ACTIVE_ACCENT, _ACTIVE_CUSTOM):
+        return
+    _ACTIVE_ACCENT = ident
+    _ACTIVE_CUSTOM = custom_hex or ""
+    _ACCENT_CACHE.clear()
+
+
+def get_accent() -> tuple:
+    """当前强调色 ``(id, custom_hex)``（供设置面板回填 UI 状态）"""
+    return (_ACTIVE_ACCENT, _ACTIVE_CUSTOM)
+
+
 def get_colors(theme_name: str = DEFAULT_THEME) -> dict:
     """获取指定主题的配色字典。
 
     ``theme_name`` 允许直接传 config 的原始取值（含 "follow"）：
     先经 resolve_theme_name 解析成具体主题再查表，未知值仍回退默认
     主题——调用方无需关心 "follow" 的存在。
+
+    叠加了 `set_accent()` 设置的强调色；未设置强调色时直接返回 THEMES
+    里的原字典（不是副本，保持既有语义）。
     """
-    return THEMES.get(resolve_theme_name(theme_name), THEMES[DEFAULT_THEME])
+    name = resolve_theme_name(theme_name)
+    if _ACTIVE_ACCENT == accent.DEFAULT_ACCENT and not _ACTIVE_CUSTOM:
+        return THEMES.get(name, THEMES[DEFAULT_THEME])
+    key = (name, _ACTIVE_ACCENT, _ACTIVE_CUSTOM)
+    merged = _ACCENT_CACHE.get(key)
+    if merged is None:
+        merged = dict(THEMES.get(name, THEMES[DEFAULT_THEME]))
+        merged.update(accent.build_accent_override(
+            _ACTIVE_ACCENT, name, _ACTIVE_CUSTOM))
+        _ACCENT_CACHE[key] = merged
+    return merged
 
 
 def get_main_window_qss(theme_name: str = DEFAULT_THEME) -> str:

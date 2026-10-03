@@ -61,7 +61,7 @@ from PyQt6.QtCore import Qt, QSize, QFileInfo, pyqtSignal
 from PyQt6.QtGui import (QPixmap, QPainter, QColor, QPen, QPixmapCache,
                          QGuiApplication, QIcon)
 
-from src.theme import get_main_window_qss, get_colors
+from src.theme import FALLBACK_ACCENT, get_main_window_qss, get_colors
 from src.constants import DEFAULT_THEME
 from src import win_icons
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
@@ -105,7 +105,7 @@ def draw_placeholder_icon(size: int = 64) -> QPixmap:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     # 背景圆角方块（主题主色）
-    painter.setBrush(QColor("#5BC0BE"))
+    painter.setBrush(QColor(FALLBACK_ACCENT))
     painter.setPen(Qt.PenStyle.NoPen)
     corner = int(size * 0.18)
     painter.drawRoundedRect(0, 0, size, size, corner, corner)
