@@ -61,7 +61,7 @@ from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
 from src.controls import (
-    tune_list_scrolling, SmoothButton, IconButton, IconLabel, UndoBar,
+    tune_list_scrolling, SmoothButton, IconButton, IconLabel,
     EmptyState,
 )
 from src.fragment_classifier import CATEGORY_ORDER, CATEGORY_TOKENS
@@ -634,7 +634,6 @@ class CardWindow(QWidget):
 
         # 日程任务：勾选动画状态（与主窗口任务页同构）
         self._task_anim_task_id = None      # 正在动画的 task_id（None=空闲）
-        self._task_undo_target = None       # (task_id, prev_done)
         self._task_anim = None              # QVariantAnimation（_build_task_page 创建）
         self._task_rebuild_timer = None     # 延时重建定时器
 
@@ -1189,10 +1188,6 @@ class CardWindow(QWidget):
         hint = QLabel("点击勾选框完成 | 右键任务：编辑 / 删除")
         hint.setObjectName("hintLabel")
         v.addWidget(hint)
-
-        # 误勾撤销条（浮动子控件，贴底居中）
-        self._task_undo_bar = UndoBar(page)
-        self._task_undo_bar.undo_clicked.connect(self._on_task_undo)
 
         # 勾选动画 + 延时重建定时器
         self._task_anim = QVariantAnimation(self)
@@ -2150,8 +2145,6 @@ class CardWindow(QWidget):
             self._task_delegate.set_check_progress(
                 self._task_anim_task_id, float(self._task_anim.endValue()))
 
-        self._task_undo_target = (task_id, prev_done)
-
         self._task_anim.stop()
         self._task_rebuild_timer.stop()
         self._task_anim_task_id = task_id
@@ -2166,7 +2159,6 @@ class CardWindow(QWidget):
         self._task_list.viewport().update()
         self._task_anim.start()
 
-        self._task_undo_bar.show_for(task_id, task.title)
         self.data_changed.emit("task")
 
     def _on_task_anim_tick(self, value):
@@ -2179,29 +2171,13 @@ class CardWindow(QWidget):
         self._task_anim_task_id = None
         self._task_rebuild_timer.start(250)
 
-    def _on_task_undo(self, task_id: int):
-        """撤销最近一次完成操作。"""
-        if not self._task_manager:
-            return
-        prev_done = False
-        if self._task_undo_target and self._task_undo_target[0] == task_id:
-            prev_done = bool(self._task_undo_target[1])
-        self._task_manager.set_done(task_id, prev_done)
-        self._task_undo_target = None
-        self._stop_task_animations()
-        self._refresh_task_list()
-        self.data_changed.emit("task")
-
     def _stop_task_animations(self):
-        """停止动画、清空进度与撤销状态（非动画路径的数据变更）。"""
+        """停止动画、清空进度（非动画路径的数据变更）。"""
         if self._task_anim is not None:
             self._task_anim.stop()
         if self._task_rebuild_timer is not None:
             self._task_rebuild_timer.stop()
         self._task_anim_task_id = None
-        self._task_undo_target = None
-        if getattr(self, "_task_undo_bar", None) is not None:
-            self._task_undo_bar.hide()
         if getattr(self, "_task_delegate", None) is not None:
             self._task_delegate.clear_progress_except(None)
 

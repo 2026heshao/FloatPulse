@@ -158,8 +158,6 @@ THEMES = {
         "task_done":         "#9AA5B1",                    # 已完成（次级灰）
         "task_none":         "#2C3E50",                    # 无截止 / 普通行
         "task_check":        "#1F8A4C",                    # 勾选框对勾/填充
-        "undo_bg":           "rgba(44, 62, 80, 235)",      # 撤销条底色
-        "undo_text":         "#FFFFFF",                    # 撤销条文字
 
         # ---- 日期选择器弹层（自绘，见 src/date_picker.py）----
         # 弹层不走 QSS 而是 QPainter 自绘，配色只能从本表取 —— 这几个键
@@ -298,8 +296,6 @@ THEMES = {
         "task_done":         "#8892A0",                    # 已完成（次级灰）
         "task_none":         "#E4E8EE",                    # 无截止 / 普通行
         "task_check":        "#2ECC71",                    # 勾选框对勾/填充
-        "undo_bg":           "rgba(40, 44, 58, 242)",      # 撤销条底色
-        "undo_text":         "#E4E8EE",                    # 撤销条文字
 
         # ---- 日期选择器弹层（自绘；理由与浅色处注释同源）----
         # 弹层是独立窗口，底色必须实底 —— 取 surface_3（深色下页面底同值）
@@ -1445,31 +1441,6 @@ QScrollArea > QWidget > QWidget {
     background-color: transparent;
 }
 
-/* ---- 撤销提示条（UndoBar，浮动子控件；行内容由 delegate 自绘）---- */
-QWidget#undoBar {
-    background-color: $undo_bg;
-    border: 1px solid $primary_a30;
-    border-radius: $r_panel;
-}
-QLabel#undoBarLabel {
-    color: $undo_text;
-    font-size: 12px;
-    background: transparent;
-}
-QPushButton#undoUndoBtn {
-    background-color: transparent;
-    color: $primary_lite;
-    border: 1px solid $primary_lite;
-    border-radius: $r_ctl;
-    padding: 3px 12px;
-    font-size: 12px;
-    font-weight: 600;
-}
-QPushButton#undoUndoBtn:hover {
-    /* 背景（$primary_lite 实底）过渡走 SmoothButton overlay，文字色保持即时 */
-    color: $on_primary;
-}
-
 /* ====================================================================
    ---- 键盘焦点态（UI 强化方案 A4）----
    纪律一：**只改 border-color，绝不增删边框宽度、绝不改 padding/margin**。
@@ -1802,31 +1773,6 @@ QToolButton#appLaunchBtn:disabled {
     color: $text_disabled;
 }
 
-/* ---- 撤销提示条（UndoBar，小卡片任务页浮动子控件）---- */
-QWidget#undoBar {
-    background-color: $undo_bg;
-    border: 1px solid $primary_a30;
-    border-radius: $r_panel;
-}
-QLabel#undoBarLabel {
-    color: $undo_text;
-    font-size: 11px;
-    background: transparent;
-}
-QPushButton#undoUndoBtn {
-    background-color: transparent;
-    color: $primary_lite;
-    border: 1px solid $primary_lite;
-    border-radius: $r_ctl;
-    padding: 2px 10px;
-    font-size: 11px;
-    font-weight: 600;
-}
-QPushButton#undoUndoBtn:hover {
-    /* 背景（$primary_lite 实底）过渡走 SmoothButton overlay，文字色保持即时 */
-    color: $on_primary;
-}
-
 /* ====================================================================
    ---- 键盘焦点态（A4）---- 规则同主窗口：只改 border-color。
    卡片窗是常驻悬浮窗，Tab 键在这里是真实的导航路径（7 个模式 Tab +
@@ -1850,11 +1796,6 @@ QPushButton#taskAddBtn:focus {
 QPushButton#cardCloseBtn:focus,
 QPushButton#fragDelBtn:focus {
     border: 1px solid $danger;
-    outline: none;
-}
-QPushButton#undoUndoBtn:focus {
-    /* 撤销条底色是深色自定义底（$undo_bg），环沿用其亮青文字色 */
-    border: 1px solid $primary_lite;
     outline: none;
 }
 QDateEdit#taskDate:focus,

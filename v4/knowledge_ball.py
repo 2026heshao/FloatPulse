@@ -79,6 +79,7 @@ from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
     apply_app_font
 from src.controls import ScreenToast
 from src import icon_render
+from src import motion
 from src.icons import strip_leading_emoji, has_icon as icon_exists
 from src import task_reminder_popup
 from src.constants import sanitize_filename, DEFAULT_THEME
@@ -608,6 +609,7 @@ class FloatingBall(QWidget):
         self._hidden_to_edge = False
         self._edge_side = None
         self._anim = None                # 宿主位移动画（吸边/滑出）
+        self._startup_pop_anims = []     # 启动压轴浮现动画（持引用防 GC）
         self._out_count = 0
         # 空闲吸边自动隐藏总开关（设置页可关）：关闭后球始终完整显示，
         # 贴边不再半隐藏。启动时由 _apply_auto_hide_config() 从配置读取覆盖。
@@ -839,6 +841,34 @@ class FloatingBall(QWidget):
     def open_main_window(self):
         """公开入口：打开主窗口（供插件上下文等外部调用）"""
         self._open_main_window()
+
+    def play_startup_pop(self):
+        """启动接力压轴：OutBack 弹性浮现（球心不动 scale 0.7→1.0 + 淡入）。
+
+        仅启动链路调用（main() 在主窗 show 后 ball_delay 调度）；托盘 /
+        唤醒等后续显示走既有 setVisible 路径，不重复播放。reduce_motion
+        或时长归 0 → 瞬显。动画引用落实例属性，防中途被 GC 掐断。
+        """
+        pop_ms = motion.duration(motion.MOTION["ball_pop"], self._anim_speed)
+        if pop_ms <= 0:
+            self._surface.scale = 1.0
+            self.setWindowOpacity(1.0)
+            self.show()
+            return
+        self._surface.scale = 0.7        # 球心不动，从 70% 弹到 100%
+        self.setWindowOpacity(0.0)
+        self.show()
+        fade = QPropertyAnimation(self, b"windowOpacity", self)
+        fade.setDuration(pop_ms)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade.start()
+        self._startup_pop_anims = [
+            fade,
+            self._surface.animate_scale(1.0, pop_ms,
+                                        QEasingCurve.Type.OutBack),
+        ]
 
     def show_card_mode(self, mode: str) -> bool:
         """公开入口：弹出小卡片并切到指定模式
@@ -2462,10 +2492,17 @@ def main():
     # _mark 在每个阶段开始时调用：结算上一段耗时 → 更新闪屏文案 →
     # 泵一次事件循环（动画在同步段之间才有机会转起来）。
     from src.splash import LaunchSplash
-    splash = LaunchSplash(theme=_resolved_theme)
+    try:
+        _boot_speed = float(config_manager.get("anim_speed", 1.0))
+    except (TypeError, ValueError):
+        _boot_speed = 1.0
+    splash = LaunchSplash(theme=_resolved_theme, anim_speed=_boot_speed)
     splash.start()
     _boot = {"t0": time.monotonic(), "last": time.monotonic(),
-             "stage": "初始准备"}
+             "stage": "初始准备", "n": 0}
+    # 阶段总数 = main() 源码的 _mark 调用数（本机现行 11 档）。
+    # 增删 _mark 调用时必须同步此数与 tests/test_splash_anim.py 的钉死值。
+    _BOOT_STAGE_TOTAL = 11
 
     def _mark(stage: str):
         now = time.monotonic()
@@ -2474,7 +2511,8 @@ def main():
             f"（累计 {(now - _boot['t0']) * 1000:.0f}ms）")
         _boot["last"] = now
         _boot["stage"] = stage
-        splash.set_stage(f"{stage}…")
+        _boot["n"] += 1
+        splash.set_stage(f"{stage}…", _boot["n"], _BOOT_STAGE_TOTAL)
         app.processEvents()
 
     _mark("检查数据完整性")
@@ -2571,9 +2609,8 @@ def main():
         fragment_manager, docx_manager, config_manager,
         clipboard_monitor, main_window, temp_asset_manager
     )
-    # 根据配置决定悬浮球是否显示（默认显示）
-    if config_manager.get("ball_visible", True):
-        ball.show()
+    # 球不再在此处 show：启动接力里主窗 show 后 ball_delay 才 OutBack
+    # 压轴浮现（2026-10-03 方案 D）；ball_visible 判断移至 _reveal_main_window。
 
     # ---- 全屏应用检测（B8）：全屏时自动让位，退出全屏恢复 ----
     _mark("接线与托盘")
@@ -3568,14 +3605,35 @@ def main():
     _hb_timer.timeout.connect(_ui_heartbeat)
     _hb_timer.start()
 
-    # ---- 启动时直接显示主窗口 ----
-    main_window.show()
+    # ---- 三段接力启动编排（2026-10-03 方案 D）----
+    # ① 第 11 档打点：闪屏充能满格并苏醒（弹跳 + 光晕）；
+    # ② 苏醒完成 → 主窗 show（入场 fade/rise，焦点交接）；
+    # ③ show 后 splash_hold(120ms) 闪屏才淡出（splash_out）、
+    #    ball_delay(160ms) 悬浮球 OutBack 压轴浮现（球心不动 0.7→1.0）。
+    # 焦点先交接后离场；reduce_motion 下三段全瞬显（时长归零口径）。
     _mark("显示主窗口")
-    get_logger().info("主窗口已显示，进入事件循环")
-    # 启动收尾：结算最后一段 → 总耗时日志 → 闪屏淡出
-    now = time.monotonic()
-    logger.info(f"[启动] 全部完成 总计 {now - _boot['t0']:.2f}s")
-    splash.finish()
+    _relay_shown = {"flag": False}
+
+    def _reveal_main_window():
+        """满格苏醒完成 → show 主窗 → 编排闪屏淡出与悬浮球压轴（幂等）"""
+        if _relay_shown["flag"]:
+            return
+        _relay_shown["flag"] = True
+        main_window.show()
+        get_logger().info("主窗口已显示，进入事件循环")
+        now = time.monotonic()
+        logger.info(f"[启动] 全部完成 总计 {now - _boot['t0']:.2f}s")
+        QTimer.singleShot(
+            motion.duration(motion.MOTION["splash_hold"], _boot_speed),
+            splash.finish)
+        if config_manager.get("ball_visible", True):
+            QTimer.singleShot(
+                motion.duration(motion.MOTION["ball_delay"], _boot_speed),
+                ball.play_startup_pop)
+
+    splash.after_wake(_reveal_main_window)
+    # 兜底：闪屏链路万一卡死（异常/平台差异），5s 强制显示主窗
+    QTimer.singleShot(5000, _reveal_main_window)
 
     # ---- 3.4 首启引导：首次使用时弹出三步欢迎向导（设置页「🚀 启动与
     # 系统 → 🔄 重看引导」可重看，同一 dialog）----

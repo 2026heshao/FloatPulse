@@ -864,22 +864,31 @@ class MainWindow(QWidget):
         self.setWindowOpacity(self._target_window_opacity())
 
     def _play_entrance_animation(self):
-        """首次显示：淡入 + 16px 上移（「浮起来」的品牌观感，只播一次）"""
+        """首次显示：淡入 + 16px 上移（「浮起来」的品牌观感，只播一次）
+
+        时长收口到 motion token（enter_fade / enter_rise，2026-10-03）；
+        reduce_motion 下入场瞬显（不再设 0 透明度起点，避免闪黑）。
+        """
         if self._entrance_played:
             return
         self._entrance_played = True
+        fade_ms = motion.duration(motion.MOTION["enter_fade"], self.anim_speed)
+        rise_ms = motion.duration(motion.MOTION["enter_rise"], self.anim_speed)
+        if motion.reduce_motion() or fade_ms <= 0 or rise_ms <= 0:
+            self.setWindowOpacity(self._target_window_opacity())
+            return
         end_pos = self.pos()
         start_pos = QPoint(end_pos.x(), end_pos.y() + 16)
 
         fade = QPropertyAnimation(self, b"windowOpacity", self)
-        fade.setDuration(200)
+        fade.setDuration(fade_ms)
         fade.setStartValue(0.0)
         # 淡入终点 = 配置的目标透明度（用户设了半透明时入场直接到位）
         fade.setEndValue(self._target_window_opacity())
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         slide = QPropertyAnimation(self, b"pos", self)
-        slide.setDuration(320)
+        slide.setDuration(rise_ms)
         slide.setStartValue(start_pos)
         slide.setEndValue(end_pos)
         slide.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -3010,23 +3019,40 @@ class MainWindow(QWidget):
         2026-10-02 内容补充：新增「截图钉屏 / 插件中心 / 内置插件」三章
         （此前这三个功能整块没有文档）；悬浮球右键菜单、日程任务
         「专注此任务」、笔记「钉到桌面」按实际界面补齐。
+        2026-10-03 内容形态升级：按每章内容的性质选用六种信息形态——
+        导语（PHCOLOR 灰字定位句）、步骤 <ol>、并列 <ul>、热键两列表、
+        提示块（bgcolor=TIPBG 通栏底色 + PRIMCOLOR 前缀）、色块行与
+        等宽路径（DANGERCOLOR/WARNCOLOR/PHCOLOR）；主题色一律写成
+        固定占位 token，渲染时由 _decorate_help_html replace 成主题
+        真值，源稿保持纯静态。16 个 <h3> 标题与各章锚点文案逐字不动
+        （test_help_nav 钉两表一致与切片语义）。
         """
         return """
-        <p>FloatPulse 是一款常驻桌面的悬浮球效率工具：所有碎片、任务、笔记、素材都保存在本机，不联网、不登录。左栏按「快捷键 → 悬浮球 → 小卡片 → 各功能面板 → 截图钉屏 → 插件 → 托盘与设置」分类，点左侧分类即可跳转，不用再滚长页找内容。</p>
+        <p>FloatPulse 是一款常驻桌面的悬浮球效率工具：所有碎片、任务、笔记、素材都保存在本机，不联网、不登录。</p>
+        <p><b>三步上手</b>：</p>
+        <ol>
+        <li>正常复制文字或文件 → 碎片工作台<b>自动入库</b>，随手翻随手取；</li>
+        <li>把图片或文件<b>拖到悬浮球上</b> → 收进「临时素材」；</li>
+        <li>有截止日期的事 → 「日程任务」添加一条，到期托盘会提醒。</li>
+        </ol>
+        <p>左栏点分类直达对应页面；[[F1]] 随时回到本页。</p>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　本页不参与「记住上次页面」——从说明页退出总是回到进入前的那个分类。</td></tr></table>
 
         <h3>全局快捷键</h3>
-        <ul>
-        <li><b>[[Esc]]</b>：退出程序（主窗口与小卡片中都生效）</li>
-        <li><b>[[Ctrl+W]] / [[Ctrl+H]]</b>：隐藏主窗口（程序继续在托盘后台运行）</li>
-        <li><b>[[Ctrl+T]]</b>：切换浅色 / 深色主题</li>
-        <li><b>[[Ctrl+K]]</b>：站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）</li>
-        <li><b>[[F1]]</b>：进入使用说明页；再按一次返回进入前的页面</li>
-        <li><b>[[Ctrl+1]] ~ [[Ctrl+8]]</b>：依次切换到左栏第 1~8 个功能页（含插件中心）</li>
-        <li><b>[[Ctrl+Alt+K]]</b>：呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭；热键与开关可在设置中修改）</li>
-        <li><b>[[Ctrl+Alt+S]]</b>：截图钉屏——框选屏幕区域，松开即生成置顶参考浮窗（详见「截图钉屏」分类；热键与开关可在设置中修改）</li>
-        </ul>
+        <table width="100%">
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Esc]]</td><td style="padding:4px 0;">退出程序（主窗口与小卡片中都生效）</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+W]] / [[Ctrl+H]]</td><td style="padding:4px 0;">隐藏主窗口（程序继续在托盘后台运行）</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+T]]</td><td style="padding:4px 0;">切换浅色 / 深色主题</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+K]]</td><td style="padding:4px 0;">站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[F1]]</td><td style="padding:4px 0;">进入使用说明页；再按一次返回进入前的页面</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+1]] ~ [[Ctrl+8]]</td><td style="padding:4px 0;">依次切换到左栏第 1~8 个功能页（含插件中心）</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+Alt+K]]</td><td style="padding:4px 0;">呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭）</td></tr>
+        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+Alt+S]]</td><td style="padding:4px 0;">截图钉屏——框选屏幕区域，松开即生成置顶参考浮窗（详见「截图钉屏」分类）</td></tr>
+        </table>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　快速捕捉与截图钉屏的热键与开关可在「设置 → 全局工具」修改；其它全局键为固定键位。</td></tr></table>
 
         <h3>悬浮球</h3>
+        <p style="color:PHCOLOR; font-size:12px;">桌面角落的那颗球：看卡、翻卡、收文件、跑番茄钟，全在球上完成。</p>
         <ul>
         <li><b>鼠标悬停</b>：自动弹出小卡片（首次随机抽一张知识卡，之后恢复上次离开时的页签）</li>
         <li><b>左键点击</b>：卡片已弹出 → 切到下一张；未弹出 → 随机抽一张并弹出</li>
@@ -3040,6 +3066,7 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>小卡片</h3>
+        <p style="color:PHCOLOR; font-size:12px;">悬浮球弹出的七页迷你面板：轻量看内容、随手记，编辑仍回主窗口。</p>
         <ul>
         <li><b>七个页签</b>（左侧竖排图标）：碎片 / 知识卡片 / 日程任务 / 临时笔记 / 网址导航 / 临时素材 / 软件导航</li>
         <li><b>弹出与收起</b>：悬停球自动弹出；鼠标移出「球 + 卡片」区域后自动收起（勾选设置里的「小卡片保持显示」可常驻）</li>
@@ -3052,60 +3079,78 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>碎片工作台</h3>
+        <p style="color:PHCOLOR; font-size:12px;">本机的「随手存」池子：复制即入库，需要时搜出来、合起来、存成笔记。</p>
         <ul>
-        <li><b>自动收集</b>：复制文本、复制文件路径时自动入库（被过滤的应用除外）；按 [[Ctrl+Alt+K]] 也可手动快速捕捉</li>
+        <li><b>自动收集</b>：复制文本、复制文件路径时自动入库；按 [[Ctrl+Alt+K]] 也可手动快速捕捉</li>
         <li><b>类型筛选</b>：全部类型 / 剪贴板文本 / 剪贴板路径 / 文件拾取 / 知识段落</li>
         <li><b>搜索</b>：输入即筛（去抖 250ms），命中的关键词在条目里高亮</li>
         <li><b>预览</b>：选中左侧条目，右侧显示完整内容，可「复制」「编辑」</li>
         <li><b>多选批量</b>：勾选多条后可「合并选中」（可合并成一条并直接存为笔记）、「复制选中」、「删除选中」、「清空全部」</li>
         <li><b>右键单条</b>：查看详情 / 编辑内容 / 复制内容 / 存为笔记 / 加入知识库 / 添加至网址导航 / 删除</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　个别应用里复制不生效？它可能被过滤了——过滤名单在「设置 → 剪贴板与碎片」。</td></tr></table>
 
         <h3>日程任务</h3>
+        <p style="color:PHCOLOR; font-size:12px;">按截止日自动分组的事清单：逾期红、今日橙，到期托盘提醒。</p>
+        <p><b>新增一条任务</b>：</p>
+        <ol>
+        <li>填写任务标题；</li>
+        <li>点日期框弹出日历选截止日期（周一开头，点月标题右侧 ▼ 可直选月份；「清除」= 无日期，「今天」= 回今天）；</li>
+        <li>点「添加」。</li>
+        </ol>
+        <p><b>分组与颜色</b>：</p>
         <ul>
-        <li><b>新增</b>：填写标题 + 选择截止日期 → 点「添加」</li>
-        <li><b>截止日期</b>：点日期框弹出日历（周一开头，可点月标题右侧的 ▼ 直选月份）；底部「<b>清除</b>」= 设为无日期，「<b>今天</b>」= 一键回到今天</li>
         <li><b>分组顺序</b>：逾期 → 今天 → 本周（明天 ~ 本周日）→ 以后 → 无日期 → 已完成</li>
-        <li><b>颜色</b>：<b>红色</b>已逾期 &nbsp; <b>橙色</b>今日到期 &nbsp; <b>灰色</b>已完成</li>
+        <li><b>颜色</b>：<span style="background-color:DANGERCOLOR; font-size:11px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>红色已逾期　<span style="background-color:WARNCOLOR; font-size:11px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>橙色今日到期　<span style="background-color:PHCOLOR; font-size:11px;">&nbsp;&nbsp;&nbsp;&nbsp;</span>灰色已完成</li>
         <li><b>行尾文案</b>：未完成显示相对截止（今天 / 明天 / 逾期N天 / M月D日（周X））；<b>已完成只显示完成日期</b>，不再显示逾期</li>
         <li><b>批量操作</b>：「批量完成」「批量删除」「清除已完成」</li>
-        <li><b>右键单条</b>：标记完成 / 取消完成 / 编辑 / 删除</li>
-        <li><b>专注此任务</b>：右键任务 → 专注此任务，悬浮球进度环开始绑定式专注（番茄钟）</li>
-        <li><b>到期提醒</b>：程序启动后与每日 9:00 通过托盘气泡提示（可在设置中关闭）</li>
+        <li><b>右键单条</b>：标记完成 / 取消完成 / 编辑 / 删除；「专注此任务」会让悬浮球进度环开始绑定式专注（番茄钟）</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　到期提醒在程序启动后与每日 9:00 通过托盘气泡提示，可在设置中关闭。</td></tr></table>
 
         <h3>笔记管理</h3>
+        <p style="color:PHCOLOR; font-size:12px;">带自动保存的本地笔记：停止输入 800ms 即落盘，还能钉成桌面便签。</p>
         <ul>
         <li><b>新建 / 删除</b>：「新建笔记」「删除当前」</li>
         <li><b>列表</b>：只显示标题；鼠标悬停可看到 标题 + 修改时间 + 内容预览</li>
-        <li><b>改名</b>：双击列表项或按 F2 就地改名；按内容自动生成的标题会随内容更新，手动改过的则不再自动变（右键菜单可切换：「标题跟随内容」/「锁定标题（不随内容更新）」）</li>
+        <li><b>改名</b>：双击列表项或按 F2 就地改名</li>
         <li><b>自动保存</b>：停止输入 800ms 落盘；退出程序前会强制保存未落盘的改动</li>
         <li><b>状态栏</b>：显示「刚刚 / N 分钟前 / 3 小时前 / 昨天 HH:MM / N 天前」，有未保存改动时前面加「● 未保存」</li>
         <li><b>搜索</b>：匹配标题与内容；若正在编辑的笔记被搜索条件过滤掉，状态栏会明确提示</li>
         <li><b>桌面便签</b>：右键笔记 → 钉到桌面，把当前笔记钉成常驻桌面的便签（同时有数量上限，可从托盘唤回管理）</li>
         <li><b>右键</b>：编辑标题… / 删除此笔记</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　按内容自动生成的标题会随内容更新；手动改过的标题不再自动变——右键菜单可随时切换「标题跟随内容」/「锁定标题（不随内容更新）」。</td></tr></table>
 
         <h3>知识库</h3>
+        <p style="color:PHCOLOR; font-size:12px;">一本 Word 文档就是卡片库：外部编辑，程序里看卡，改完重载即生效。</p>
+        <p><b>外部编辑流程</b>：</p>
+        <ol>
+        <li>用 Word/WPS 打开程序目录 <span style="font-family:Consolas,'Courier New',monospace">float_data/</span> 内的「知识库.docx」直接修改（源码运行放项目根 float_data/ 内，打包后放 exe 同目录 float_data/ 内）；</li>
+        <li>保存文档；</li>
+        <li>面板提示「检测到外部修改，建议重新加载」时点「重新加载」即生效（程序启动时也会自动检测）。</li>
+        </ol>
         <ul>
-        <li><b>数据来源</b>：程序目录 <b>float_data/</b> 文件夹内的「知识库.docx」，主窗口与卡片共用。文件名固定，<b>源码运行放项目根的 float_data/ 内</b>，<b>打包后放 exe 同目录的 float_data/ 内</b>；改名或移走会导致知识卡片无内容（程序仍可运行）</li>
-        <li><b>外部编辑</b>：可直接用 Word/WPS 打开该 docx 修改并保存 → 面板提示「检测到外部修改，建议重新加载」时点「重新加载」即生效，程序启动时也会自动检测。每个非空段落（去空格后 ≥ 4 字）就是一张知识卡片，过短段落自动忽略</li>
+        <li><b>卡片粒度</b>：每个非空段落（去空格后 ≥ 4 字）就是一张知识卡片，过短段落自动忽略</li>
         <li><b>重新加载</b>：点「重新加载」重新读取 docx</li>
         <li><b>新增内容</b>：「新增知识」追加到 docx 末尾；「加入碎片池」把选中段落送进碎片工作台</li>
         <li><b>右键段落</b>：编辑 / 删除 / 在此后新增 / 加入碎片池（删除与重新加载有玻璃风格确认框）</li>
         <li><b>搜索</b>：输入去抖 250ms 实时过滤段落，无结果时显示占位提示；双击段落可直接编辑</li>
-        <li><b>状态提示</b>：检测到 docx 被外部程序改动时提示「检测到外部修改，建议重新加载」。float_data/docx_meta.json 是程序自动维护的指纹缓存，请勿手工编辑</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">注意</b>　「知识库.docx」文件名固定，改名或移走会导致知识卡片无内容（程序仍可运行）；<span style="font-family:Consolas,'Courier New',monospace">float_data/docx_meta.json</span> 是程序自动维护的指纹缓存，请勿手工编辑。</td></tr></table>
 
         <h3>临时素材</h3>
+        <p style="color:PHCOLOR; font-size:12px;">拖进来的图片和文件的落脚点：有上限、有保质期，到点自动清理。</p>
         <ul>
         <li><b>收录方式</b>：拖图片 / 文件到悬浮球；复制图片到剪贴板（Excel、Word 一类图文混排仍按文本收集）</li>
         <li><b>打开</b>：双击用系统默认程序打开；右键 打开 / 另存为 / 删除</li>
         <li><b>批量</b>：「打开素材文件夹」「刷新」「清空全部」</li>
-        <li><b>容量</b>：条数上限与保留天数在「设置 → 临时素材上限 / 素材保留天数」调整（0 天表示不按天数清理）</li>
+        <li><b>容量</b>：条数上限与保留天数在「设置 → 临时素材上限 / 素材保留天数」调整</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　保留天数填 0 表示不按天数清理，只受条数上限约束。</td></tr></table>
 
         <h3>网址导航</h3>
+        <p style="color:PHCOLOR; font-size:12px;">常用的网址一格一站，碎片里的链接也能一键收进来。</p>
         <ul>
         <li><b>添加站点</b>：填名称 + URL，地址会自动补全 http:// 或 https://</li>
         <li><b>整理</b>：拖拽行可排序；右键站点：打开 / 编辑 / 删除</li>
@@ -3114,6 +3159,7 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>软件导航</h3>
+        <p style="color:PHCOLOR; font-size:12px;">常用软件的一键启动台：点卡片即启动，图标尺寸随你调。</p>
         <ul>
         <li><b>启动</b>：左键点击卡片即用系统默认方式启动对应的 exe（需要管理员权限的程序会提示提权启动）</li>
         <li><b>管理</b>：点「管理软件列表」新增 / 编辑 / 删除条目，可填 名称、exe 路径、图标（.ico / .png）、备注</li>
@@ -3122,25 +3168,32 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>截图钉屏</h3>
+        <p style="color:PHCOLOR; font-size:12px;">把屏幕一角「钉」在最上面当参考图：对照着抄内容、比尺寸都方便。</p>
+        <p><b>钉一张参考图</b>：</p>
+        <ol>
+        <li>按 [[Ctrl+Alt+S]]（可在设置 → 全局工具改键 / 关闭，或右键悬浮球 → 截图钉屏）；</li>
+        <li>全屏变暗进入框选，拖选要钉住的范围；</li>
+        <li>松开即钉屏，生成置顶参考浮窗。</li>
+        </ol>
         <ul>
-        <li><b>呼出</b>：[[Ctrl+Alt+S]]（可在设置 → 全局工具改键 / 关闭），或右键悬浮球 → 截图钉屏</li>
-        <li><b>框选</b>：全屏变暗进入框选，拖选要钉住的范围，松开即钉屏；Esc 或右键取消</li>
         <li><b>钉图浮窗</b>：置顶参考窗——左键拖动移动位置，右下角抓手等比例改窗框大小，双击关闭</li>
         <li><b>批注</b>：画笔 / 箭头 / 马赛克，[[Ctrl+Z]] 撤销；复制 / 保存时自动合成批注</li>
-        <li><b>退出</b>：Esc 关闭钉图（已拦截全局 Esc，不会误退整个程序）</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　Esc 关闭钉图——钉图期间全局 Esc 已被拦截，只关钉图，不会误退整个程序；框选阶段 Esc 或右键 = 取消。</td></tr></table>
 
         <h3>插件中心</h3>
+        <p style="color:PHCOLOR; font-size:12px;">装插件、管插件的地方；商店与本地 .fpplug 都从这进。</p>
         <ul>
         <li><b>入口</b>：左栏「插件中心」（[[Ctrl+8]]）</li>
         <li><b>本地插件</b>：每张卡显示版本 / 描述 / 能力 / 动作热键，可启用 / 停用、卸载；加载失败的卡会单独标出，不影响其它插件</li>
         <li><b>插件商店</b>：独立窗口列出商店目录里的 .fpplug 可安装包，每个包一个「安装」按钮，已装的标记「已安装」</li>
         <li><b>手动安装</b>：把 .fpplug 插件包放进安装目录或商店目录，点「重新扫描」即可用</li>
         <li><b>管理</b>：「打开插件目录」定位插件文件夹；「重新扫描」重新装配全部插件</li>
-        <li><b>总闸</b>：设置 → 悬浮球 →「悬浮球插件总闸」，关闭后插件一律不加载</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　总闸在「设置 → 悬浮球 → 悬浮球插件总闸」：关闭后所有插件一律不加载。</td></tr></table>
 
         <h3>内置插件</h3>
+        <p style="color:PHCOLOR; font-size:12px;">出厂自带的六个插件：搜索、周期任务、AI 三件套、保险箱与周报。</p>
         <ul>
         <li><b>站内搜索</b>（[[Ctrl+Alt+F]]）：知识库 / 笔记 / 碎片 / 任务 / 素材全文检索，自研中文分词 + 倒排索引 + BM25 排序，命中片段带高亮，点结果标题跳转；[[Ctrl+K]] 是同一入口</li>
         <li><b>周期任务</b>（[[Ctrl+Alt+R]]）：只给规则（每天 / 每周几 / 每月几号 / 每 N 天 / 每 N 周），到点自动生成任务；错过的补一次、同一天不重复生成</li>
@@ -3151,6 +3204,7 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>托盘与后台</h3>
+        <p style="color:PHCOLOR; font-size:12px;">关了窗口它还在：托盘常驻、单实例，行为都在这一章。</p>
         <ul>
         <li><b>单击托盘图标</b>：显示 / 隐藏主窗口</li>
         <li><b>右键托盘图标</b>：显示 / 隐藏主窗口、显示 / 隐藏悬浮球、退出程序</li>
@@ -3159,8 +3213,9 @@ class MainWindow(QWidget):
         </ul>
 
         <h3>设置</h3>
+        <p style="color:PHCOLOR; font-size:12px;">十个分类各管一摊，改动即生效；恢复默认的入口在页底常驻栏。</p>
         <ul>
-        <li><b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——外观 / 悬浮球 / 剪贴板与碎片 / 临时素材 / 全局工具 / 番茄钟 / 启动与系统 / 导出 / AI 配置 / 关于，点分类即切换</li>
+        <li><b>分类导航</b>：外观 / 悬浮球 / 剪贴板与碎片 / 临时素材 / 全局工具 / 番茄钟 / 启动与系统 / 导出 / AI 配置 / 关于，点左侧分类即切换，右侧只显示当前分类、各自独立滚动</li>
         <li><b>外观</b>：浅色 / 深色主题一键切换、动画速度、软件卡片尺寸</li>
         <li><b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸</li>
         <li><b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片</li>
@@ -3171,15 +3226,17 @@ class MainWindow(QWidget):
         <li><b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）</li>
         <li><b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）</li>
         <li><b>关于</b>：版本信息与快捷键速查；点「检查更新」仅在你点击时访问一次 GitHub Releases API（不携带任何本机数据），发现新版只给下载页入口、不自动下载，离线不影响任何功能</li>
-        <li><b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」在<b>页底常驻栏</b>（任何分类下都可见），恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　所有设置实时保存，无需手动保存；「↺ 恢复默认设置」在<b>页底常驻栏</b>（任何分类下都可见），恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）。</td></tr></table>
 
         <h3>数据与迁移</h3>
+        <p style="color:PHCOLOR; font-size:12px;">数据全在本机一个文件夹里：拷走文件夹 = 完整备份。</p>
         <ul>
-        <li>全部数据都在本地：程序目录的 <b>float_data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）</li>
+        <li>全部数据都在本地：程序目录的 <span style="font-family:Consolas,'Courier New',monospace">float_data/</span>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）</li>
         <li>换电脑时把整个程序文件夹拷走即可，数据跟着走</li>
         <li>程序不联网、不登录、不上传任何内容，断网状态下所有功能照常可用</li>
         </ul>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　定期备份 = 复制一份程序文件夹（或仅 <span style="font-family:Consolas,'Courier New',monospace">float_data/</span>），粘到哪里都行。</td></tr></table>
         """
 
     # ------------------------------------------------------------------
@@ -3366,15 +3423,25 @@ class MainWindow(QWidget):
 
     @staticmethod
     def _decorate_help_html(raw: str, colors: dict) -> str:
-        """把说明页切片原文装饰成最终富文本（主题色 + 热键键帽）。
+        """把说明页切片原文装饰成最终富文本（主题色 + 热键键帽 + 形态）。
 
         - [[键位]] → 等宽字体键帽样式（bg_level2 底 + text 字色），
           未闭合的 [[ 按原文保留（容错，结构性错误由 test_help_nav 拦）；
-        - <h3> 章节标题染主题主色。
+        - <h3> 章节标题染主题主色；
+        - 形态占位 token（2026-10-03，源稿零主题色的固定字面量）：
+          TIPBG→bg_level2（提示块底）、PHCOLOR→text_placeholder（导语
+          灰字与灰色色块）、PRIMCOLOR→primary（提示前缀）、
+          DANGERCOLOR→danger、WARNCOLOR→warn（任务色块行红 / 橙）。
         """
         bg = colors.get("bg_level2", "#F1EFE8")
         fg = colors.get("text", "#2C2C2A")
         primary = colors.get("primary", "#0F6E56")
+        raw = (raw
+               .replace("TIPBG", bg)
+               .replace("PHCOLOR", colors.get("text_placeholder", "#6E6D67"))
+               .replace("PRIMCOLOR", primary)
+               .replace("DANGERCOLOR", colors.get("danger", "#A32D2D"))
+               .replace("WARNCOLOR", colors.get("warn", "#854F0B")))
         cap = ('<span style="font-family:Consolas,\'Courier New\',monospace; '
                'background-color:%s; color:%s;">&nbsp;%s&nbsp;</span>')
         out = []
