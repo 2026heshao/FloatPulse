@@ -55,6 +55,10 @@
                           纯渲染派生，**不落库**，关闭即回退平铺）
   - asset_group_gap_seconds: 会话分组的间隔阈值（秒，10-3600，默认 120）——
                           相邻两素材添加时间差**严格小于**它即归入同一堆
+  - triage_min_days:      碎片规则清仓的天数阈值（1-3650，默认 30）——
+                          碎片存放天数 ≥ 该值才可能进「清仓建议」清单
+  - triage_max_len:       碎片规则清仓的长度阈值（字符，1-500，默认 40）——
+                          内容长度 ≤ 该值才可能进「清仓建议」清单
   - schema_version:       config.json 结构版本（系统保留键，非用户设置；
                           变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移）
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
@@ -112,6 +116,12 @@ DEFAULT_CONFIG = {
     # （护栏硬约束：新分支默认值必须等价现有行为）；开启后启动即进
     # 「按天」视图（按活跃天把当天碎片/任务/素材/专注还原）。
     "fragment_day_view":    False,
+    # ===== 碎片「规则清仓」判定阈值（2026-10-03 第 6 卡 inbox-triage）=====
+    # 建议清理规则：≥ triage_min_days 天 **且** 从未被搜索命中 **且**
+    # 内容长度 ≤ triage_max_len。「未搜索命中」由 Fragment.hit_count 支撑，
+    # 是布尔门槛，无数值范围（bool 不进下面 _CONFIG_RANGES）。
+    "triage_min_days":      30,           # 天数阈值（1-3650，UI 可调）
+    "triage_max_len":       40,           # 长度阈值（字符，1-500，UI 可调）
     # ===== 碎片「一键粘回」（2026-10-03 第 3 卡 reuse）=====
     # 默认 True = 选中碎片「粘回」时自动还原焦点并发 Ctrl+V（本次新增能力）；
     # 关掉则「粘回」退化为仅复制到剪贴板（与原「复制」逐项等价）。
@@ -209,6 +219,8 @@ _CONFIG_TYPES = {
     "asset_group_enabled":  bool,
     "asset_group_gap_seconds": int,
     "fragment_day_view":    bool,
+    "triage_min_days":      int,
+    "triage_max_len":       int,
     "fragment_paste_enabled": bool,
     "ball_visible":         bool,
     "apps":                 list,
@@ -292,6 +304,11 @@ _CONFIG_RANGES = {
     # 下限 10 防"1 秒阈值把一次连拍切成 20 堆"，上限 1 小时防"整天聚成 1 堆"。
     # bool 不进 RANGES（asset_group_enabled 无数值范围）。
     "asset_group_gap_seconds": (10, 3600),
+    # 碎片清仓天数阈值：下限 1 防「0 天把所有碎片都算陈旧」，上限 3650
+    # （足够覆盖十年老数据）。只加数值，bool 门槛（未命中）不进 RANGES。
+    "triage_min_days":      (1, 3650),
+    # 碎片清仓长度阈值（字符）：下限 1、上限 500（再长就不算「短碎片」了）
+    "triage_max_len":       (1, 500),
     # 软件卡片尺寸：与主窗口设置页步进器范围 60-140（每档 4px）保持一致
     "app_card_size":        (60, 140),
     # 小卡片软件图标边长：范围取自 src.constants（与设置页步进器、

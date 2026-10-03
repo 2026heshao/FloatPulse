@@ -230,11 +230,17 @@ def test_to_dict_roundtrip_pinned():
     assert Fragment.from_dict(d).pinned is True
 
 
-def test_to_dict_has_seven_keys():
+def test_to_dict_has_eight_keys():
+    """键集**恰好**这 8 个 —— 兼作「schema 无意漂移」的闸门。
+
+    本断言在 2026-10-03 第 6 卡（inbox-triage）加 ``hit_count`` 时如实变红
+    （7 → 8），是护栏按设计工作的证据，不是误报。日后若再加字段，同样应当
+    在这里显式扩容 —— 而不是让 to_dict 静默多出键。
+    """
     f = Fragment(1, "clipboard_text", "a", "s", "2026-10-03 09:00")
     assert set(f.to_dict().keys()) == {
         "fragment_id", "type", "content", "source", "created_at",
-        "category", "pinned"}
+        "category", "pinned", "hit_count"}
 
 
 # ====================================================================

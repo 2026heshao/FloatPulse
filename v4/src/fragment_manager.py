@@ -19,6 +19,9 @@
   8. 提供 trim_to_max() 在剪贴板历史超限时 FIFO 淘汰
   9. pinned 可选字段（2026-10-03 第 3 卡 reuse）：置顶碎片常驻，
      不参与 trim_to_max 的年龄淘汰；旧数据读时默认 False（零迁移）
+ 10. hit_count 计数字段（2026-10-03 第 6 卡 inbox-triage）：累计该碎片
+     被搜索命中的次数，支撑「从未被搜索命中」的清仓判定条件；旧数据读时
+     默认 0（零迁移）。仅由 note_search_hit() 记账，不参与其它逻辑
 
 碎片类型常量：
   - TYPE_CLIPBOARD_TEXT    : 剪贴板文本（Ctrl+C 复制的文本）
@@ -141,10 +144,15 @@ class Fragment:
     pinned：置顶标记（2026-10-03 reuse 卡）。置顶碎片在面板列表顶部
     常驻，且**不参与** trim_to_max 的年龄淘汰；旧数据无此字段时读作
     False（``from_dict`` 默认值），不写任何迁移代码。
+
+    hit_count：被搜索命中的累计次数（2026-10-03 inbox-triage 卡）。
+    为「从未被搜索命中」这一清仓判定条件提供持久依据（碎片面板内联
+    子串过滤此前从不回写任何命中记录）。旧数据无此字段时读作 0
+    （``from_dict`` 默认值），同样是零迁移。
     """
 
     def __init__(self, fragment_id, ftype, content, source, created_at,
-                 category=None, pinned=False):
+                 category=None, pinned=False, hit_count=0):
         self.fragment_id = fragment_id          # 唯一主键，自增不复用
         self.type = ftype                       # 碎片类型（见 TYPE_*）
         self.content = content                   # 碎片内容
@@ -157,6 +165,11 @@ class Fragment:
             self.category = classify(content)
         # 置顶标记：bool 收敛（非布尔脏值一律按假处理）
         self.pinned = bool(pinned)
+        # 搜索命中计数：脏值 / 缺省收敛为 0（0 = 从未被搜索命中）
+        try:
+            self.hit_count = int(hit_count or 0)
+        except (TypeError, ValueError):
+            self.hit_count = 0
 
     def to_dict(self):
         """序列化为字典"""
@@ -168,6 +181,7 @@ class Fragment:
             "created_at": self.created_at,
             "category": self.category,
             "pinned": self.pinned,
+            "hit_count": self.hit_count,
         }
 
     @classmethod
@@ -177,6 +191,7 @@ class Fragment:
         category：缺失或非法时由构造器按内容自动重算（旧数据迁移）
         pinned：缺失即 False —— 老 fragments.json 读出来照常工作，
                 不写迁移代码（天然的零迁移结构）
+        hit_count：缺失即 0 —— 同上，老数据零迁移
         """
         return cls(
             fragment_id=int(d.get("fragment_id", 0) or 0),
@@ -186,6 +201,7 @@ class Fragment:
             created_at=str(d.get("created_at", "")),
             category=d.get("category"),
             pinned=bool(d.get("pinned", False)),
+            hit_count=d.get("hit_count", 0),
         )
 
     def preview(self, max_len: int = 50) -> str:
@@ -483,6 +499,29 @@ class FragmentManager:
             return self.get_all_fragments()
         return [f for f in self.get_all_fragments()
                 if kw in f.content.lower() or kw in f.source.lower()]
+
+    def note_search_hit(self, fragment_ids) -> int:
+        """给给定 id 的碎片累计一次「被搜索命中」（inbox-triage 卡）。
+
+        - ``fragment_ids`` 为空 / None → 安全返回 0（不触发写盘）
+        - 脏 id（不存在 / 类型不对）→ 静默跳过，不抛异常
+        - 命中任意一条即 mark_dirty()（去抖写盘），返回真正 +1 的条数
+
+        仅由搜索路径在**「真搜索」（关键词非空且与上次不同）**时调用一次，
+        避免反复 refresh 把计数刷爆（见 fragments_panel.refresh）。
+        本方法只做记账，**不触发任何删除 / 备份动作**。
+        """
+        if not fragment_ids:
+            return 0
+        id_set = set(fragment_ids)
+        touched = 0
+        for f in self._fragments:
+            if f.fragment_id in id_set:
+                f.hit_count += 1
+                touched += 1
+        if touched:
+            self.mark_dirty()
+        return touched
 
     # ---------------- 容量管理 ----------------
     def count(self) -> int:

@@ -41,8 +41,10 @@ from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import FALLBACK_ACCENT, get_colors
-from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
+from src.controls import (tune_list_scrolling, SmoothButton, EmptyState,
+                          IconButton, PageTitle, Stepper)
 from src import day_recall
+from src import inbox_triage
 from src import paste_helper as _paste_helper
 from src.constants import (
     DATETIME_DATE_LEN,
@@ -641,6 +643,11 @@ class FragmentsPanel(QWidget):
         self._row_pos = 0                  # 已建到的描述符下标
         self._windowing = ListWindowing()  # 分块决策（首屏块大小/追加/重置）
         self._building = False             # 重建中标志：屏蔽滚动触发的追加
+        # 上一次「真搜索」记账过的关键词（inbox-triage 卡）：refresh 会被
+        # 删除后/切筛选等非搜索场景反复调用，只有**关键词非空且与上次不同**
+        # 才 note_search_hit，否则同词反复刷新会把 hit_count 刷爆，
+        # 让「从未被搜索命中」这个清仓条件失效。
+        self._last_counted_keyword = ""
         self._build_ui()
         self._start_foreground_tracker()
         self._connect_secret_guard()
@@ -725,6 +732,14 @@ class FragmentsPanel(QWidget):
         self._guard_btn.setVisible(False)
         self._guard_btn.clicked.connect(self._open_guard_dialog)
         toolbar.addWidget(self._guard_btn)
+
+        # 规则清仓入口（inbox-triage）：点开是**只读**建议清单，逐条决策。
+        # 用 filter 图标（语义=「按规则筛出候选」），面板禁 emoji / 裸按钮。
+        self._triage_btn = IconButton("filter", text="清仓建议", icon_size=14,
+                                      object_name="secondaryBtn")
+        self._triage_btn.setToolTip("按规则筛出可清理的陈旧碎片（只读清单，逐条确认删除）")
+        self._triage_btn.clicked.connect(self._open_triage_dialog)
+        toolbar.addWidget(self._triage_btn)
 
         refresh_btn = IconButton("refresh", text="刷新", icon_size=14,
                                  object_name="secondaryBtn")
@@ -840,6 +855,25 @@ class FragmentsPanel(QWidget):
     def _on_search_text_changed(self, _text: str):
         """输入时只重启定时器，停手 250ms 后才真正过滤（避免逐字符全量重建）"""
         self._search_timer.start()
+
+    def _note_search_hits(self, fragments, keyword):
+        """给本次命中的碎片记一次搜索命中（inbox-triage 卡）。
+
+        同关键词不重复记账：``refresh`` 会被删除后 / 切筛选等非搜索场景
+        反复调用，若每次都 +1，用户随便切几下筛选就能把 hit_count 刷爆，
+        「从未被搜索命中」这个清仓条件就彻底失效。故只在关键词**与上次
+        记账过的不同**时才落一次，并更新 ``_last_counted_keyword``。
+        关键词被清空时重置记录，让用户重新搜同一词时能再记一次。
+        """
+        if not keyword:
+            self._last_counted_keyword = ""
+            return
+        if keyword == self._last_counted_keyword:
+            return
+        self._last_counted_keyword = keyword
+        if fragments:
+            self._fragment_manager.note_search_hit(
+                [f.fragment_id for f in fragments])
 
     def apply_external_keyword(self, keyword: str):
         """外部（全局搜索跳转）带入关键词：立即过滤，不等去抖"""
@@ -972,6 +1006,10 @@ class FragmentsPanel(QWidget):
             kw = keyword.lower()
             fragments = [f for f in fragments
                          if kw in f.content.lower() or kw in f.source.lower()]
+            # 真搜索命中记账（inbox-triage 卡）：只有关键词非空且与上次
+            # 记账过的**不同**时才 +1，避免删除/切筛选触发的 refresh 把
+            # hit_count 刷爆，从而让「从未被搜索命中」条件失效。
+            self._note_search_hits(fragments, keyword)
 
         # 记录视图状态（滚动位置 + 选中项）
         scroll_value = self._frag_list.verticalScrollBar().value()
@@ -1584,6 +1622,173 @@ class FragmentsPanel(QWidget):
         ])
         dlg.exec()
         self._refresh_guard_entry()
+
+    # ==================================================================
+    # 规则清仓建议（inbox-triage 卡）
+    # ==================================================================
+    def _open_triage_dialog(self):
+        """打开「清仓建议」对话框：只读候选清单 + 单条二次确认删除。
+
+        红线（用户拍板「审查模式」，一条都不能破）：
+          · 清单**只读展示**，本身**不含任何删除按钮**——删除入口只在每条
+            自己的「删除」按钮上，且每条独立二次确认；
+          · 删除只走 ``delete_fragment()``（单条）。**绝不调
+            delete_fragments()**（批量）与 **rotate_backup()**（快照），
+            不做回收站 / 软删除；
+          · 清单**每次实时算**（``inbox_triage.collect_candidates``），
+            不落缓存文件——缓存与真实数据不一致会建议错。
+        """
+        mgr = self._fragment_manager
+        if mgr is None:
+            return
+
+        dlg = GlassDialog(self._host, title="清仓建议",
+                          subtitle="按规则筛出可清理的碎片", size=(720, 560))
+        body = dlg.body_layout
+
+        hint = QLabel(
+            "以下碎片同时满足三个条件：存放时间久、**从未被搜索命中**、内容较短。"
+            "清单仅供复核，**不会自动删除**；若要清理，请逐条点击该条的「删除」。")
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        body.addWidget(hint)
+
+        # ---- 三个可调条件：天数 / 长度 + 未命中门槛说明 ----
+        cond_row = QHBoxLayout()
+        cond_row.setSpacing(10)
+        days_label = QLabel("存放 ≥")
+        days_label.setObjectName("fieldLabel")
+        cond_row.addWidget(days_label)
+        days_stepper = Stepper(1, 3650, self._triage_min_days(), suffix="天")
+        cond_row.addWidget(days_stepper)
+        len_label = QLabel("内容 ≤")
+        len_label.setObjectName("fieldLabel")
+        cond_row.addWidget(len_label)
+        len_stepper = Stepper(1, 500, self._triage_max_len(), suffix="字")
+        cond_row.addWidget(len_stepper)
+        cond_row.addStretch()
+        body.addLayout(cond_row)
+
+        # 「未搜索命中」是布尔门槛，不做开关，用一行说明表达即可
+        gate = QLabel("另需满足：从未被搜索命中（hit_count = 0）")
+        gate.setObjectName("hintLabel")
+        body.addWidget(gate)
+
+        # ---- 只读候选清单（每次重算，不缓存）----
+        count_label = QLabel("")
+        count_label.setObjectName("hintLabel")
+        body.addWidget(count_label)
+
+        list_holder = QWidget()
+        list_grid = QGridLayout(list_holder)
+        list_grid.setContentsMargins(0, 0, 0, 0)
+        cand_list = QListWidget()
+        tune_list_scrolling(cand_list)
+        cand_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        list_grid.addWidget(cand_list, 0, 0)
+
+        empty = EmptyState(
+            "fragments", "没有需要清理的碎片",
+            "当前阈值下，没有同时满足「存放久 + 从未被搜索命中 + 内容短」\n"
+            "的碎片。放宽上面的条件再看看。")
+        empty.setVisible(False)
+        list_grid.addWidget(empty, 0, 0)
+        body.addWidget(list_holder, 1)
+
+        # 本条对话框的「实时重算」状态（改阈值 / 删一条都重算，绝不落盘缓存）
+        state = {"items": []}
+
+        def _current_thresholds():
+            """读取当前阈值：优先步进器的实时值，异常回退配置默认。"""
+            return (inbox_triage.sanitize_min_days(days_stepper.value(),
+                                                   self._triage_min_days()),
+                    inbox_triage.sanitize_max_len(len_stepper.value(),
+                                                  self._triage_max_len()))
+
+        def _rebuild():
+            """实时算候选清单并重建只读行（含每条自己的删除按钮）。"""
+            min_days, max_len = _current_thresholds()
+            frags = mgr.get_all_fragments()
+            cands = inbox_triage.collect_candidates(
+                frags, min_days=min_days, max_len=max_len)
+            state["items"] = cands
+            cand_list.clear()
+            count_label.setText("共 %d 条建议清理" % len(cands))
+            empty.setVisible(len(cands) == 0)
+            if not cands:
+                empty.setGeometry(cand_list.geometry())
+                empty.raise_()
+                return
+            for frag in cands:
+                wrapper = QWidget()
+                row = QHBoxLayout(wrapper)
+                row.setContentsMargins(2, 2, 2, 2)
+                row.setSpacing(8)
+                text = QLabel(
+                    "%s\n%s · %s" % (
+                        frag.preview(FRAGMENT_PREVIEW_LEN),
+                        inbox_triage.candidate_reason(
+                            frag, min_days=min_days, max_len=max_len),
+                        frag.created_at or "—"))
+                text.setWordWrap(True)
+                row.addWidget(text, 1)
+                del_btn = IconButton("trash", text="删除", icon_size=13,
+                                     object_name="dangerBtn")
+                del_btn.setToolTip("删除这一条（会二次确认，不可撤销）")
+                del_btn.clicked.connect(
+                    lambda _c=False, fid=frag.fragment_id: _on_delete_one(fid))
+                row.addWidget(del_btn)
+                item = QListWidgetItem()
+                item.setSizeHint(wrapper.sizeHint())
+                cand_list.addItem(item)
+                cand_list.setItemWidget(item, wrapper)
+
+        def _on_delete_one(fid):
+            """单条删除：独立二次确认（话术沿用「此操作不可撤销！」口径）。"""
+            frag = mgr.get_fragment(fid)
+            if frag is None:
+                _rebuild()
+                return
+            ret = QMessageBox.question(
+                dlg, "确认删除",
+                "确认删除这条碎片？此操作不可撤销！\n\n%s"
+                % frag.preview(FRAGMENT_PREVIEW_LEN),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+            # ★ 只走单条 delete_fragment；绝不触碰 delete_fragments / rotate_backup
+            mgr.delete_fragment(fid)
+            _rebuild()
+            self.refresh(preserve_view=True)
+
+        # 改阈值 → 实时重算（不缓存）
+        days_stepper.valueChanged.connect(lambda _v: _rebuild())
+        len_stepper.valueChanged.connect(lambda _v: _rebuild())
+
+        # 挂到对话框上，便于离屏脚本直连而无需真正 exec 模态
+        dlg._triage_rebuild = _rebuild
+        dlg._triage_delete_one = _on_delete_one
+        dlg._triage_candidates = lambda: list(state["items"])
+        dlg._triage_days_stepper = days_stepper
+        dlg._triage_len_stepper = len_stepper
+
+        _rebuild()
+        dlg.add_footer([
+            ("关闭", "secondaryBtn", dlg.accept),
+        ])
+        dlg.exec()
+
+    def _triage_min_days(self) -> int:
+        """读清仓天数阈值（配置兜底。缺失 / 越界由 inbox_triage 收敛）。"""
+        return inbox_triage.sanitize_min_days(
+            self._host._config.get("triage_min_days",
+                                   inbox_triage.DEFAULT_MIN_DAYS))
+
+    def _triage_max_len(self) -> int:
+        """读清仓长度阈值（配置兜底；越界由 inbox_triage 收敛）。"""
+        return inbox_triage.sanitize_max_len(
+            self._host._config.get("triage_max_len",
+                                   inbox_triage.DEFAULT_MAX_LEN))
 
     def _start_foreground_tracker(self):
         """低频记录"非本程序的前台窗口"，供「粘回」还原焦点。
