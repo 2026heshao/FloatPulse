@@ -17,6 +17,8 @@
   6. 所有增删改先操作内存列表，完毕统一调用 _save() 写盘
   7. 删除严格按 fragment_id 过滤
   8. 提供 trim_to_max() 在剪贴板历史超限时 FIFO 淘汰
+  9. pinned 可选字段（2026-10-03 第 3 卡 reuse）：置顶碎片常驻，
+     不参与 trim_to_max 的年龄淘汰；旧数据读时默认 False（零迁移）
 
 碎片类型常量：
   - TYPE_CLIPBOARD_TEXT    : 剪贴板文本（Ctrl+C 复制的文本）
@@ -135,10 +137,14 @@ class Fragment:
     fragment_classifier）。与 type（来源渠道）是两个独立维度：
     type 说明"这条碎片怎么进来的"，category 说明"它是什么东西"。
     旧数据无此字段时按内容自动重算（无缝迁移）。
+
+    pinned：置顶标记（2026-10-03 reuse 卡）。置顶碎片在面板列表顶部
+    常驻，且**不参与** trim_to_max 的年龄淘汰；旧数据无此字段时读作
+    False（``from_dict`` 默认值），不写任何迁移代码。
     """
 
     def __init__(self, fragment_id, ftype, content, source, created_at,
-                 category=None):
+                 category=None, pinned=False):
         self.fragment_id = fragment_id          # 唯一主键，自增不复用
         self.type = ftype                       # 碎片类型（见 TYPE_*）
         self.content = content                   # 碎片内容
@@ -149,6 +155,8 @@ class Fragment:
             self.category = category
         else:
             self.category = classify(content)
+        # 置顶标记：bool 收敛（非布尔脏值一律按假处理）
+        self.pinned = bool(pinned)
 
     def to_dict(self):
         """序列化为字典"""
@@ -159,6 +167,7 @@ class Fragment:
             "source": self.source,
             "created_at": self.created_at,
             "category": self.category,
+            "pinned": self.pinned,
         }
 
     @classmethod
@@ -166,6 +175,8 @@ class Fragment:
         """从字典反序列化，带类型校验防止损坏数据崩溃
 
         category：缺失或非法时由构造器按内容自动重算（旧数据迁移）
+        pinned：缺失即 False —— 老 fragments.json 读出来照常工作，
+                不写迁移代码（天然的零迁移结构）
         """
         return cls(
             fragment_id=int(d.get("fragment_id", 0) or 0),
@@ -174,6 +185,7 @@ class Fragment:
             source=str(d.get("source", "")),
             created_at=str(d.get("created_at", "")),
             category=d.get("category"),
+            pinned=bool(d.get("pinned", False)),
         )
 
     def preview(self, max_len: int = 50) -> str:
@@ -362,7 +374,10 @@ class FragmentManager:
         """
         返回全部碎片，按创建时间倒序（最新在前）。
 
-        排序键：(created_at, fragment_id) 双键倒序。
+        排序键：(pinned, created_at, fragment_id) 三键。
+        pinned 置顶（True 在前）—— 置顶碎片在面板顶部常驻，
+        不随年龄下沉；其余（pinned=False）保持既有 (created_at,
+        fragment_id) 倒序。
         原因：created_at 只有分钟精度（%Y-%m-%d %H:%M），同一分钟内
         连续添加的多条碎片时间戳相同，若只用单键排序，稳定排序会
         保持添加顺序（旧的在前），导致新碎片"插在中间"而非置顶。
@@ -371,7 +386,7 @@ class FragmentManager:
         """
         return sorted(
             self._fragments,
-            key=lambda f: (f.created_at, f.fragment_id),
+            key=lambda f: (f.pinned, f.created_at, f.fragment_id),
             reverse=True,
         )
 
@@ -413,6 +428,37 @@ class FragmentManager:
         self.mark_dirty()
         return True
 
+    def set_pinned(self, fragment_id: int, pinned: bool) -> bool:
+        """设置碎片的置顶状态（面板置顶入口），无变化返回 False。
+
+        置顶碎片在面板顶部常驻，且不参与 trim_to_max 的年龄淘汰。
+        """
+        frag = self.get_fragment(fragment_id)
+        if frag is None:
+            return False
+        value = bool(pinned)
+        if frag.pinned == value:
+            return False
+        frag.pinned = value
+        self.mark_dirty()
+        return True
+
+    def toggle_pinned(self, fragment_id: int) -> bool:
+        """翻转碎片置顶状态，返回翻转后的状态（碎片不存在时返回 False）。"""
+        frag = self.get_fragment(fragment_id)
+        if frag is None:
+            return False
+        self.set_pinned(fragment_id, not frag.pinned)
+        return frag.pinned
+
+    def get_pinned_fragments(self) -> list:
+        """返回全部置顶碎片（按 get_all_fragments 同款倒序）"""
+        return [f for f in self.get_all_fragments() if f.pinned]
+
+    def pinned_count(self) -> int:
+        """返回置顶碎片条数"""
+        return sum(1 for f in self._fragments if f.pinned)
+
     def get_fragment(self, fragment_id: int):
         """按 fragment_id 获取单条碎片，不存在返回 None"""
         for f in self._fragments:
@@ -452,18 +498,30 @@ class FragmentManager:
         超限时 FIFO 淘汰最早的碎片。
         返回被淘汰的条数。
 
+        置顶碎片（pinned=True）**不参与淘汰**：它们常驻，永远不会被
+        trim 挤掉（这也是置顶的意义）。因此淘汰从非置顶碎片里按年龄挑。
+
         排序键与 get_all_fragments 保持一致（created_at + fragment_id 双键）：
         created_at 只有分钟精度，同一分钟内新增的多条碎片必须靠自增 id
         区分先后，否则淘汰顺序不确定（可能出现"该留的被删、该删的留下"）。
         """
-        if max_count <= 0 or len(self._fragments) <= max_count:
+        if max_count <= 0:
             return 0
+        if len(self._fragments) <= max_count:
+            return 0
+        # 淘汰候选只含非置顶碎片（置顶常驻豁免）
+        candidates = [f for f in self._fragments if not f.pinned]
         # 按 (创建时间, 自增 id) 升序（最早在前）
-        sorted_frags = sorted(self._fragments,
+        sorted_frags = sorted(candidates,
                               key=lambda f: (f.created_at, f.fragment_id))
         to_remove = len(self._fragments) - max_count
+        # 候选不足时最多删光全部非置顶（置顶一个不动）
+        remove_count = min(to_remove, len(sorted_frags))
+        if remove_count <= 0:
+            return 0
         # 取出要淘汰的 fragment_id
-        remove_ids = {f.fragment_id for f in sorted_frags[:to_remove]}
-        self._fragments = [f for f in self._fragments if f.fragment_id not in remove_ids]
+        remove_ids = {f.fragment_id for f in sorted_frags[:remove_count]}
+        self._fragments = [f for f in self._fragments
+                           if f.fragment_id not in remove_ids]
         self.mark_dirty()
-        return to_remove
+        return remove_count

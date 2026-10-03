@@ -111,6 +111,10 @@ DEFAULT_CONFIG = {
     # （护栏硬约束：新分支默认值必须等价现有行为）；开启后启动即进
     # 「按天」视图（按活跃天把当天碎片/任务/素材/专注还原）。
     "fragment_day_view":    False,
+    # ===== 碎片「一键粘回」（2026-10-03 第 3 卡 reuse）=====
+    # 默认 True = 选中碎片「粘回」时自动还原焦点并发 Ctrl+V（本次新增能力）；
+    # 关掉则「粘回」退化为仅复制到剪贴板（与原「复制」逐项等价）。
+    "fragment_paste_enabled": True,
     "ball_visible":         True,         # 悬浮球是否显示
     "apps":                 [],           # 软件导航条目列表
     "app_card_size":        96,           # 软件卡片边长（像素）
@@ -199,6 +203,7 @@ _CONFIG_TYPES = {
     "asset_group_enabled":  bool,
     "asset_group_gap_seconds": int,
     "fragment_day_view":    bool,
+    "fragment_paste_enabled": bool,
     "ball_visible":         bool,
     "apps":                 list,
     "app_card_size":        int,

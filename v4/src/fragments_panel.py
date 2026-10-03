@@ -41,6 +41,7 @@ from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import FALLBACK_ACCENT, get_colors
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 from src import day_recall
+from src import paste_helper as _paste_helper
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -52,6 +53,11 @@ from src.constants import (
 
 # 搜索去抖间隔（毫秒）：避免每敲一个字符就全量过滤 + 重建列表
 SEARCH_DEBOUNCE_MS = 250
+
+# 前台窗口记忆刷新间隔（毫秒）：FloatPulse 不在前台时，低频记录"最近
+# 一个非本程序的前台窗口"，供「粘回」还原焦点。600ms 足够跟上用户切窗，
+# 单次开销仅一次 ctypes 调用（可忽略）。
+FOREIGN_FOREGROUND_POLL_MS = 600
 
 
 # ====================================================================
@@ -623,12 +629,18 @@ class FragmentsPanel(QWidget):
         self._docx_manager = host._docx_manager
         self._nav_manager = host._nav_manager
         self._clipboard_monitor = host._clipboard_monitor
+        # 一键粘回（reuse 卡）：纯 ctypes 执行器 + 重复复制计数埋点
+        self._paste_helper = _paste_helper.PasteHelper()
+        self._reuse_counter = _paste_helper.default_counter()
+        # 最近一个"非本程序"的前台窗口句柄（粘回时还原焦点目标）
+        self._last_foreign_hwnd = 0
         # 窗口化渲染状态（成熟化 3.6）：行描述符表 + 分块决策状态机
         self._rows = None                  # 行描述符表（refresh 时重建）
         self._row_pos = 0                  # 已建到的描述符下标
         self._windowing = ListWindowing()  # 分块决策（首屏块大小/追加/重置）
         self._building = False             # 重建中标志：屏蔽滚动触发的追加
         self._build_ui()
+        self._start_foreground_tracker()
 
     # ---- UI 构建 ----
     def _build_ui(self):
@@ -791,6 +803,13 @@ class FragmentsPanel(QWidget):
         copy_btn.setObjectName("secondaryBtn")
         copy_btn.clicked.connect(self._on_copy)
         bottom.addWidget(copy_btn)
+
+        # 粘回选中：复制到剪贴板 + 还原焦点 + 发 Ctrl+V（reuse 卡）
+        paste_btn = IconButton("copy", text="粘回选中", icon_size=14,
+                               object_name="secondaryBtn")
+        paste_btn.setToolTip("复制到剪贴板，并自动粘回到你刚才用的窗口")
+        paste_btn.clicked.connect(self._on_paste)
+        bottom.addWidget(paste_btn)
 
         bottom.addStretch()
 
@@ -1068,6 +1087,9 @@ class FragmentsPanel(QWidget):
                      if len(created) >= DATETIME_MIN_LEN
                      else created[DATETIME_TIME_START:])
         preview_text = f.preview(FRAGMENT_PREVIEW_LEN)
+        # 置顶条目加文字前缀标记（不用 emoji，避免离屏/精简系统字体缺失）
+        if f.pinned:
+            preview_text = "★ " + preview_text
         # 内容与时间分开：时间存独立 role，由绘制代理右对齐固定显示
         item = QListWidgetItem(f"   {preview_text}")
         item.setData(Qt.ItemDataRole.UserRole, f.fragment_id)
@@ -1080,6 +1102,8 @@ class FragmentsPanel(QWidget):
         label = TYPE_LABELS.get(f.type, "未知")
         cat_label = CATEGORY_LABELS.get(f.category, f.category)
         tip_lines = [f"类型: {label}", f"类别: {cat_label}"]
+        if f.pinned:
+            tip_lines.append("已置顶（不参与自动淘汰）")
         if f.source:
             tip_lines.append(f"来源: {f.source}")
         tip_lines.append(f"时间: {created}")
@@ -1137,9 +1161,13 @@ class FragmentsPanel(QWidget):
             return
         menu = QMenu(self)
         menu.setStyleSheet(self._host._container.styleSheet())
+        frag = self._fragment_manager.get_fragment(fid)
+        act_pin = menu.addAction("取消置顶" if (frag and frag.pinned)
+                                 else "置顶")
         act_detail = menu.addAction("查看详情")
         act_edit = menu.addAction("编辑内容")
         act_copy = menu.addAction("复制内容")
+        act_paste = menu.addAction("粘回到刚才的窗口")
         menu.addSeparator()
         act_to_note = menu.addAction("存为笔记")
         act_to_kb = menu.addAction("加入知识库")
@@ -1158,7 +1186,10 @@ class FragmentsPanel(QWidget):
         menu.addSeparator()
         act_delete = menu.addAction("删除")
         action = menu.exec(self._frag_list.mapToGlobal(pos))
-        if action == act_detail:
+        if action == act_pin:
+            if self._fragment_manager.toggle_pinned(fid):
+                self.refresh(preserve_view=True)
+        elif action == act_detail:
             self._show_detail(fid)
         elif action == act_edit:
             self._edit_fragment(fid)
@@ -1166,6 +1197,8 @@ class FragmentsPanel(QWidget):
             frag = self._fragment_manager.get_fragment(fid)
             if frag:
                 self._copy_content(frag)
+        elif action == act_paste:
+            self._paste_fragment(fid)
         elif action == act_to_note:
             self._to_note(fid)
         elif action == act_to_sticky:
@@ -1193,6 +1226,7 @@ class FragmentsPanel(QWidget):
     def _copy_content(self, frag):
         """复制单条碎片内容到剪贴板"""
         self._clipboard_monitor.put_text(frag.content)
+        self._reuse_counter.record(frag.content)
 
     def _edit_fragment(self, fragment_id):
         """编辑碎片内容（保存后刷新列表与预览，保留浏览位置）"""
@@ -1415,6 +1449,81 @@ class FragmentsPanel(QWidget):
         fragments = self._fragment_manager.get_fragments_by_ids(ids)
         text = "\n\n".join(f.content for f in fragments)
         self._clipboard_monitor.put_text(text)
+        self._reuse_counter.record(text)
+
+    # ---- 一键粘回（reuse 卡）----
+    def _start_foreground_tracker(self):
+        """低频记录"非本程序的前台窗口"，供「粘回」还原焦点。
+
+        为什么不等点击时再取前台窗口：点击发生在 FloatPulse 面板内，
+        此时前台窗口就是本程序自己，取到的目标毫无意义。故必须持续跟
+        踪"用户最近一次用的外部窗口"——本程序不在前台时才刷新句柄。
+        """
+        self._fg_timer = QTimer(self)
+        self._fg_timer.setInterval(FOREIGN_FOREGROUND_POLL_MS)
+        self._fg_timer.timeout.connect(self._poll_foreign_foreground)
+        self._fg_timer.start()
+
+    def _self_window(self):
+        """返回本面板所属顶层窗口（无则回退宿主）"""
+        win = self.window()
+        return win if win is not None else self._host
+
+    def _poll_foreign_foreground(self):
+        """本程序不在前台时，把当前前台窗口记为「最近外部窗口」。
+
+        自己在前台（用户正在操作 FloatPulse）时**不覆盖**，否则会把
+        目标刷成本程序自身。
+        """
+        win = self._self_window()
+        try:
+            if win is not None and win.isActiveWindow():
+                return
+        except Exception:
+            pass
+        hwnd = self._paste_helper.capture_foreground()
+        if hwnd:
+            self._last_foreign_hwnd = hwnd
+
+    def _on_paste(self):
+        """粘回选中碎片：复制 → 还原焦点 → Ctrl+V；失败降级为仅复制。"""
+        ids = self._get_selected_ids()
+        if not ids:
+            self._host.show_toast("请先选中一条碎片")
+            return
+        fragments = self._fragment_manager.get_fragments_by_ids(ids)
+        if not fragments:
+            return
+        text = "\n\n".join(f.content for f in fragments)
+        self._paste_text(text)
+
+    def _paste_fragment(self, fragment_id):
+        """右键菜单入口：粘回单条碎片内容"""
+        frag = self._fragment_manager.get_fragment(fragment_id)
+        if frag is None:
+            return
+        self._paste_text(frag.content)
+
+    def _paste_text(self, text: str):
+        """粘回公共路径：复制到剪贴板 + 还原焦点发键，失败降级为仅复制。"""
+        # 埋点：同一内容的重复复制计数（产品指标）
+        self._reuse_counter.record(text)
+        self._clipboard_monitor.put_text(text)
+
+        # 用户关掉了自动粘贴 → 只复制（与旧「复制」等价）
+        if not bool(self._host._config.get("fragment_paste_enabled", True)):
+            self._host.show_toast("已复制到剪贴板")
+            return
+
+        hwnd = self._last_foreign_hwnd
+        ok, reason = self._paste_helper.paste_to(hwnd)
+        if ok:
+            return
+        # 降级：内容已在剪贴板，提示用户手动粘贴（不卡住、不抛异常）
+        if reason == _paste_helper.REASON_NOT_WINDOWS:
+            self._host.show_toast("已复制到剪贴板（当前系统不支持自动粘贴）")
+        else:
+            self._host.show_toast("已复制到剪贴板，请手动 Ctrl+V 粘贴")
 
     def _on_delete(self):
         """删除选中的碎片"""
