@@ -57,11 +57,11 @@ import sys
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
+    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
     QTextBrowser, QToolTip, QVBoxLayout, QWidget,
 )
 
-from src.controls import IconButton
+from src.controls import IconButton, SmoothButton
 from src.plugin_api import BallAction, BallPlugin
 from src.plugin_ui import make_hint_label
 
@@ -935,7 +935,7 @@ class SearchPage(QWidget):
         cap.setObjectName("hintLabel")
         lay.addWidget(cap)
         for word in self._history:
-            btn = QPushButton(word, self._recent_row)
+            btn = SmoothButton(word, self._recent_row)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(f"重新搜索「{word}」\n右键可删除这条历史")
@@ -945,7 +945,7 @@ class SearchPage(QWidget):
             btn.customContextMenuRequested.connect(
                 lambda pos, b=btn, w_=word: self._history_menu(b, w_, pos))
             lay.addWidget(btn)
-        clear = QPushButton("清空", self._recent_row)
+        clear = SmoothButton("清空", self._recent_row)
         clear.setObjectName("secondaryBtn")
         clear.setCursor(Qt.CursorShape.PointingHandCursor)
         clear.setToolTip("清空全部搜索历史")

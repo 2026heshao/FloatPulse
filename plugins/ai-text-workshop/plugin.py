@@ -47,9 +47,10 @@ from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QMenu, QPlainTextEdit, QPushButton,
+    QApplication, QFrame, QHBoxLayout, QMenu, QPlainTextEdit,
     QScrollArea, QVBoxLayout, QWidget, QLineEdit,
 )
+from src.controls import SmoothButton
 from src.plugin_api import BallAction, BallPlugin, PluginContext
 from src.plugin_ui import (
     flash_button, make_hint_label, make_section_label,
@@ -395,7 +396,7 @@ class AiWorkshopPage(QWidget):
         action_row.addWidget(make_section_label("动作"))
         self._action_btns = {}
         for key, label, instruction in WORK_ACTIONS:
-            btn = QPushButton(label, self)
+            btn = SmoothButton(label, self)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(instruction)
@@ -406,7 +407,7 @@ class AiWorkshopPage(QWidget):
             action_row.addWidget(btn)
         action_row.addStretch(1)
         # 「🕘 历史」开关（W1）：展开/收起历史卡
-        self._history_btn = QPushButton("历史", self)
+        self._history_btn = SmoothButton("历史", self)
         self._history_btn.setObjectName("secondaryBtn")
         self._history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._history_btn.setToolTip("最近 20 次动作结果，点击可回看再利用")
@@ -424,7 +425,7 @@ class AiWorkshopPage(QWidget):
         hist_head.addWidget(make_section_label("最近结果"))
         hist_head.addWidget(make_hint_label("点击一条填回结果区（可编辑/复制/落库）；右键删除该条"))
         hist_head.addStretch(1)
-        self._hist_clear_btn = QPushButton("清空历史", self)
+        self._hist_clear_btn = SmoothButton("清空历史", self)
         self._hist_clear_btn.setObjectName("secondaryBtn")
         self._hist_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hist_clear_btn.clicked.connect(self._clear_history)
@@ -456,12 +457,12 @@ class AiWorkshopPage(QWidget):
             "自定义指令（如：把这段话改写成三条朋友圈文案）…")
         self._custom_edit.returnPressed.connect(self._run_custom)
         custom_row.addWidget(self._custom_edit, 1)
-        self._custom_btn = QPushButton("执行", self)
+        self._custom_btn = SmoothButton("执行", self)
         self._custom_btn.setObjectName("primaryBtn")
         self._custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom_btn.clicked.connect(self._run_custom)
         custom_row.addWidget(self._custom_btn)
-        self._fav_btn = QPushButton("收藏指令", self)
+        self._fav_btn = SmoothButton("收藏指令", self)
         self._fav_btn.setObjectName("secondaryBtn")
         self._fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._fav_btn.setToolTip(
@@ -487,7 +488,7 @@ class AiWorkshopPage(QWidget):
         src_head.addWidget(make_section_label("原文"))
         src_head.addWidget(make_hint_label("打开时自动带入剪贴板，可编辑"))
         src_head.addStretch(1)
-        self._grab_btn = QPushButton("带入剪贴板", self)
+        self._grab_btn = SmoothButton("带入剪贴板", self)
         self._grab_btn.setObjectName("secondaryBtn")
         self._grab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._grab_btn.clicked.connect(self._on_grab_clicked)
@@ -522,10 +523,10 @@ class AiWorkshopPage(QWidget):
         foot = QHBoxLayout()
         foot.setSpacing(8)
         foot.addStretch(1)
-        self._copy_btn = QPushButton("复制结果", self)
-        self._frag_btn = QPushButton("存为碎片", self)
-        self._note_btn = QPushButton("存为笔记", self)
-        self._tasks_btn = QPushButton("转任务", self)
+        self._copy_btn = SmoothButton("复制结果", self)
+        self._frag_btn = SmoothButton("存为碎片", self)
+        self._note_btn = SmoothButton("存为笔记", self)
+        self._tasks_btn = SmoothButton("转任务", self)
         self._tasks_btn.setObjectName("primaryBtn")
         for btn in (self._copy_btn, self._frag_btn, self._note_btn):
             btn.setObjectName("secondaryBtn")
@@ -759,7 +760,7 @@ class AiWorkshopPage(QWidget):
             ts = fmt_history_ts(h.get("ts") or "")
             head = f"[{h.get('label') or '动作'}{' ' + ts if ts else ''}]"
             preview = self._hist_preview(h.get("result") or "")
-            btn = QPushButton(f"{head} {preview}", self._hist_body)
+            btn = SmoothButton(f"{head} {preview}", self._hist_body)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(str(h.get("result") or "")[:400])
@@ -842,7 +843,7 @@ class AiWorkshopPage(QWidget):
         self._preset_widget.setVisible(bool(presets))
         for p in presets:
             text = str(p.get("text") or "")
-            btn = QPushButton(f"{text[:16]}" + ("…" if len(text) > 16 else ""),
+            btn = SmoothButton(f"{text[:16]}" + ("…" if len(text) > 16 else ""),
                               self._preset_widget)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)

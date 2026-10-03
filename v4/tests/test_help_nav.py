@@ -165,6 +165,24 @@ class TestHelpDecorate:
         assert '<h3><span style="color:#0F6E56' in html
         assert html.endswith("</span></h3>")
 
+    def test_form_tokens_replaced_with_theme_colors(self):
+        """2026-10-03 形态 token：提示块底 / 导语灰字 / 前缀主色 / 色块行。"""
+        colors = {"bg_level2": "#EEE", "text": "#111", "primary": "#0F6E56",
+                  "text_placeholder": "#888", "danger": "#D00", "warn": "#D80"}
+        html = MainWindow._decorate_help_html(
+            '<td bgcolor="TIPBG"><b style="color:PRIMCOLOR">提示</b>'
+            '<span style="color:PHCOLOR">lead</span>'
+            '<span style="background-color:DANGERCOLOR">红</span>'
+            '<span style="background-color:WARNCOLOR">橙</span></td>', colors)
+        for token in ("TIPBG", "PHCOLOR", "PRIMCOLOR",
+                      "DANGERCOLOR", "WARNCOLOR"):
+            assert token not in html
+        assert 'bgcolor="#EEE"' in html
+        assert "color:#0F6E56" in html
+        assert "color:#888" in html
+        assert "background-color:#D00" in html
+        assert "background-color:#D80" in html
+
     def test_empty_section_renders_empty(self):
         assert MainWindow._decorate_help_html("", {}) == ""
 
@@ -267,3 +285,16 @@ class TestHelpNavPanel:
         labels = window._help_stack.widget(idx).findChildren(QLabel)
         assert "[[" not in labels[0].text()
         assert "background-color:" in labels[0].text()   # 键帽行内样式已注入
+
+    def test_form_tokens_rendered_not_literal(self, window):
+        """全部 17 章渲染后不许残留形态 token 字面量（TIPBG 等漏替换
+        会以原文上墙；提示块/导语/色块行全是本轮新形态，回归闸同款）。"""
+        from src.theme import get_colors
+        colors = get_colors(window._theme)
+        tokens = ("TIPBG", "PHCOLOR", "PRIMCOLOR", "DANGERCOLOR", "WARNCOLOR")
+        for key, _icon, _label in CATS:
+            html = window._decorate_help_html(
+                window._help_raw.get(key, ""), colors)
+            for token in tokens:
+                assert token not in html, (
+                    "章节 %r 残留未替换 token %r" % (key, token))

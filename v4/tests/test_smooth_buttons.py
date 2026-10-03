@@ -108,7 +108,7 @@ def test_named_hover_rules_have_no_background_color_left():
         'QPushButton#iconBtn[danger="true"]:hover',
         "QPushButton#settingsNavBtn:hover", "QPushButton#stepBtn:hover",
         "QPushButton#stepBtn:pressed", "QPushButton#tableOpenBtn:hover",
-        "QPushButton#undoUndoBtn:hover", "QPushButton#sideTabIconBtn:hover",
+        "QPushButton#sideTabIconBtn:hover",
         "QPushButton#cardCloseBtn:hover", "QPushButton#nextBtn:hover",
         "QPushButton#taskAddBtn:hover", "QPushButton#navSiteCard:hover",
         "QPushButton#fragCopyBtn:hover", "QPushButton#fragDelBtn:hover",
@@ -411,3 +411,139 @@ def test_tune_list_scrolling_pixel_mode_and_step():
             == view.verticalScrollMode().ScrollPerPixel)
     assert view.verticalScrollBar().singleStep() == SMOOTH_SCROLL_STEP_PX
     view.deleteLater()
+
+
+# ====================================================================
+# F. 实底 hover 内容可见性（2026-10-03 用户报障）
+# ====================================================================
+# 实底 255 端点的 overlay 是不透明色块，旧实现直接盖在 QSS 外观上 ——
+# hover 一瞬间文字/图标全消失（「下一张」「添加」与全部无名按钮）。
+# 修复两件套：① _paint_overlay 在实底端点补画 CE_PushButtonLabel；
+# ② IconButton hover 图标色缺省改 auto（_auto_hover_color 按端点现算）。
+# 本节把「hover 后内容必须还在」钉成护栏。
+
+def _wcag_lum(c):
+    """WCAG 2.x 相对亮度（与 test_theme_contrast 同公式，独立实现）。"""
+    def lin(u):
+        u /= 255.0
+        return u / 12.92 if u <= 0.04045 else ((u + 0.055) / 1.055) ** 2.4
+    return (0.2126 * lin(c.red()) + 0.7152 * lin(c.green())
+            + 0.0722 * lin(c.blue()))
+
+
+def _wcag_contrast(a, b):
+    la, lb = _wcag_lum(a), _wcag_lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_auto_hover_color_solid_endpoint_picks_on_primary():
+    """auto 哨兵（未显式传 hover_color）：实底 primary_hover 端点上取
+    on_primary —— 字面量钉死，防「主色图标画在主色底上隐形」回归。"""
+    from src.theme import get_colors
+    _app()
+    b = IconButton("plus", text="新建笔记")     # 无名 → None 兜底实底组
+    try:
+        assert b._hover_spec is None, "未传 hover_color 应落 auto 哨兵"
+        light = get_colors("light")
+        dark = get_colors("dark")
+        # 端点 primary_hover light=#227A64（深）→ 白；dark=#68CFAC（浅）
+        # → 深墨。与 QSS 同底文字色（$on_primary）选色一致。
+        assert b._auto_hover_color(light) == "#FFFFFF"
+        assert b._auto_hover_color(dark) == "#04342C"
+    finally:
+        b.deleteLater()
+
+
+def test_auto_hover_color_washed_endpoint_keeps_primary():
+    """淡染端点（iconBtn/stepBtn 系 a12/a46 淡底）维持主色图标 —— 既有
+    视觉契约不随本次修复漂移；中性浅面实色组（surface_2/3）返回 None，
+    由调用方回退常态 off 色。"""
+    from src.theme import get_colors
+    _app()
+    colors = get_colors("light")
+    wash = IconButton("moon", size=36, icon_size=16, object_name="iconBtn")
+    solid_surface = IconButton("copy", object_name="fragCopyBtn")
+    try:
+        assert wash._hover_spec is None
+        assert wash._auto_hover_color(colors) == colors["primary"]
+        # fragCopyBtn 站点实际显式传了 hover_color="text"；这里只钉
+        # auto 算法本身对 surface 实底端点的判定
+        assert solid_surface._auto_hover_color(colors) is None
+    finally:
+        wash.deleteLater()
+        solid_surface.deleteLater()
+
+
+def _count_content_px(img, endpoint, inset=4, tol=60):
+    """数与端点色距离 > tol 的内容像素（跳过圆角边缘的 inset 带）。"""
+    diff = 0
+    er, eg, eb = endpoint.red(), endpoint.green(), endpoint.blue()
+    for yy in range(inset, img.height() - inset):
+        for xx in range(inset, img.width() - inset):
+            c = img.pixelColor(xx, yy)
+            if ((c.red() - er) ** 2 + (c.green() - eg) ** 2
+                    + (c.blue() - eb) ** 2) > tol ** 2:
+                diff += 1
+    return diff
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_solid_hover_keeps_label_painted(theme):
+    """绘制层护栏：实底组按钮在 hover 终态（_hp=1）grab 里必须有内容
+    像素 —— overlay 补画 label 缺失时本测试红灯（2026-10-03 回归钉）。"""
+    from src.theme import get_colors, get_main_window_qss
+    _app()
+    b = SmoothButton("下一张")
+    b.setObjectName("nextBtn")
+    b.setStyleSheet(get_main_window_qss(theme))
+    b.resize(120, 34)
+    b._hp = 1.0
+    try:
+        img = b.grab().toImage()
+        endpoint = QColor(str(get_colors(theme)["primary_hover"]))
+        assert _count_content_px(img, endpoint) >= 50, (
+            "%s 主题：nextBtn hover 终态整板只剩端点色，文字被 overlay "
+            "盖掉（_paint_overlay 的实底 label 补画丢失？）" % theme
+        )
+    finally:
+        b.deleteLater()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_solid_hover_keeps_iconbutton_content(theme):
+    """IconButton 同款（图标+文字）：hover 终态两者都必须可见 ——
+    _auto_hover_color 选色错误（图标融底）时红灯。"""
+    from src.theme import get_colors, get_main_window_qss
+    _app()
+    b = IconButton("plus", text="新建笔记")
+    b.setStyleSheet(get_main_window_qss(theme))
+    b.resize(120, 34)
+    b._hovered = True
+    b._refresh_icon()
+    b._hp = 1.0
+    try:
+        img = b.grab().toImage()
+        endpoint = QColor(str(get_colors(theme)["primary_hover"]))
+        assert _count_content_px(img, endpoint) >= 50, (
+            "%s 主题：无名 IconButton hover 终态无内容像素（图标/文字"
+            "被盖或融底）" % theme
+        )
+    finally:
+        b.deleteLater()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_solid_hover_text_contrast_contract(theme):
+    """token 层护栏：实底端点（hover/pressed）与文字色 $on_primary 的
+    WCAG 对比度 ≥4.5 —— 端点改值必须同步验证文字仍可读。"""
+    from src.theme import get_colors
+    colors = get_colors(theme)
+    on = QColor(str(colors["on_primary"]))
+    for token in ("primary", "primary_hover", "primary_pressed"):
+        bg = QColor(str(colors[token]))
+        ratio = _wcag_contrast(on, bg)
+        assert ratio >= 4.5, (
+            "%s 主题：on_primary 对 %s（%s）对比度 %.2f < 4.5 —— 实底钮"
+            "文字不可读" % (theme, token, colors[token], ratio)
+        )

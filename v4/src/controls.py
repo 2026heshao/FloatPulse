@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QPropertyAnimation
 
 from src.app_paths import get_screen_geometry
-from src.constants import (RADIUS_CTL, RADIUS_CHIP, RADIUS_PANEL, UNDO_BAR_MS)
+from src.constants import RADIUS_CTL, RADIUS_CHIP, RADIUS_PANEL
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.theme import DEFAULT_THEME, get_colors
 from src import icon_render
@@ -102,7 +102,6 @@ _SMOOTH_OVERLAYS = {
     # 同上：碎片页页脚复制钮 → 中性 hover 淡底
     "fragCopyBtn":      (("surface_2", 255), ("surface_3", 255)),
     "tableOpenBtn":     (("primary", 46), ("primary", 77)),
-    "undoUndoBtn":      (("primary_lite", 255), ("primary_lite", 255)),
     # S4：侧栏导航行。端点对照 navBtn:hover/:pressed 被删的 a08/a18；
     # 拖拽态（[dragging="true"] 的 a18 底）仍归 QSS（静态状态，无过渡需求）。
     "navBtn":           (("primary", 20), ("primary", 46)),
@@ -116,7 +115,7 @@ _OVERLAY_RADIUS = {
     "modeBtn": RADIUS_CTL, "cardCloseBtn": RADIUS_CHIP,
     "nextBtn": RADIUS_CTL, "iconBtn": RADIUS_PANEL,
     "sideTabIconBtn": RADIUS_PANEL, "settingsNavBtn": RADIUS_PANEL,
-    "tableOpenBtn": RADIUS_CTL, "undoUndoBtn": RADIUS_CTL,
+    "tableOpenBtn": RADIUS_CTL,
     "fragCopyBtn": RADIUS_CTL, "fragDelBtn": RADIUS_CTL,
     "fragEditBtn": RADIUS_CTL,
     "navBtn": RADIUS_PANEL, "secondaryBtn": RADIUS_CTL,
@@ -289,6 +288,20 @@ class SmoothButton(QPushButton):
         painter.setBrush(color)
         radius = _OVERLAY_RADIUS.get(self.objectName(), _DEFAULT_RADIUS)
         painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
+        if max_alpha >= 250 and progress > _PROGRESS_EPS:
+            # ★实底端点（255）的 overlay 是不透明色块，会把 super().paintEvent
+            #   画好的文字与图标一并盖掉 —— 表现为「hover 时字与按钮同色、
+            #   内容消失」（2026-10-03 用户报；nextBtn / taskAddBtn / 无名
+            #   IconButton 兜底 / cardCloseBtn / fragCopyBtn 等全部实底组
+            #   均受影响，淡染端点 <250 不走此分支）。盖完底色后按当前
+            #   QSS 状态（:hover 的文字色已由 QSS 反映进 palette）补画一层
+            #   label（图标+文字），透明度跟随 progress 与底色同步淡入。
+            opt = QStyleOptionButton()
+            self.initStyleOption(opt)
+            painter.setOpacity(max(0.0, min(1.0, float(progress))))
+            self.style().drawControl(
+                QStyle.ControlElement.CE_PushButtonLabel, opt, painter, self)
+            painter.setOpacity(1.0)
 
     # ---------------- 取色与映射 ----------------
     def _overlay_specs(self):
@@ -514,91 +527,6 @@ class Stepper(QWidget):
             return
         self.step_by(1 if event.angleDelta().y() > 0 else -1)
         event.accept()
-
-
-class UndoBar(QWidget):
-    """误勾撤销提示条（A3）。
-
-    作为任务面板 / 小卡片任务页的**浮动子控件**：底部居中、``raise_()``、
-    ``UNDO_BAR_MS`` 后自动隐藏；含「撤销」按钮，命中后 emit
-    ``undo_clicked(task_id)``。
-
-    - 两处入口（大窗口任务页 / 小卡片任务页）共用本组件，避免重复实现；
-    - **只保留最近一次操作**：新的 ``show_for`` 会覆盖旧的并重置计时；
-    - 颜色一律走 theme.py 的 ``#undoBar / #undoBarLabel / #undoUndoBtn``
-      QSS（由宿主容器的样式表级联），组件不写死颜色。
-    """
-
-    undo_clicked = pyqtSignal(int)   # 点击撤销，参数为 task_id
-    TIMEOUT_MS = UNDO_BAR_MS
-    HEIGHT = 36
-    BOTTOM_GAP = 12                  # 距父控件底部间距
-    SIDE_GAP = 12                    # 距父控件左右最小间距
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._task_id = None
-        self.setObjectName("undoBar")
-        self.setFixedHeight(self.HEIGHT)
-
-        h = QHBoxLayout(self)
-        h.setContentsMargins(12, 0, 8, 0)
-        h.setSpacing(10)
-
-        self._label = QLabel("")
-        self._label.setObjectName("undoBarLabel")
-        h.addWidget(self._label)
-
-        self._btn = SmoothButton("撤销")
-        self._btn.setObjectName("undoUndoBtn")
-        self._btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn.setToolTip("撤销刚才的完成操作")
-        self._btn.clicked.connect(self._on_clicked)
-        h.addWidget(self._btn)
-
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self.hide)
-
-        self.setVisible(False)
-
-    # ---------------- 对外 ----------------
-    def show_for(self, task_id: int, title: str = ""):
-        """显示撤销条（覆盖上一次），并在超时后自动隐藏。"""
-        self._task_id = int(task_id)
-        self._label.setText(f"已完成「{title}」")
-        self._reposition()
-        self.show()
-        self.raise_()
-        self._timer.start(self.TIMEOUT_MS)
-
-    def update_position(self):
-        """宿主尺寸变化时重新贴底居中（由宿主的 resizeEvent 调用）。"""
-        if self.isVisible():
-            self._reposition()
-
-    # ---------------- 内部 ----------------
-    def hideEvent(self, event):
-        self._timer.stop()
-        super().hideEvent(event)
-
-    def _reposition(self):
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        hint_w = self.sizeHint().width()
-        max_w = max(120, parent.width() - self.SIDE_GAP * 2)
-        width = min(hint_w, max_w)
-        self.setFixedWidth(width)
-        x = (parent.width() - width) // 2
-        y = parent.height() - self.HEIGHT - self.BOTTOM_GAP
-        self.move(max(0, x), max(0, y))
-
-    def _on_clicked(self):
-        task_id = self._task_id
-        self.hide()
-        if task_id is not None:
-            self.undo_clicked.emit(int(task_id))
 
 
 class ToggleSwitch(QAbstractButton):
@@ -963,7 +891,10 @@ class IconButton(SmoothButton):
         self._icon_size = max(4, int(icon_size))
         self._host = host
         self._off_spec = off_color or "text_secondary"
-        self._hover_spec = hover_color or ("danger" if danger else "primary")
+        # hover 图标缺省色：显式传参优先；danger 系维持 danger；其余给
+        # 「auto」哨兵 —— 刷新时按 overlay 端点现算（实底端点上画 primary
+        # 图标会融进底色，2026-10-03，见 _auto_hover_color）。
+        self._hover_spec = hover_color or ("danger" if danger else None)
         self._on_spec = on_color or "primary"
         self._theme_override = None
         self._hovered = False
@@ -1019,11 +950,40 @@ class IconButton(SmoothButton):
         colors = get_colors(theme)
         off = self._resolve(self._off_spec, colors)
         if self._hovered:
-            off = self._resolve(self._hover_spec, colors)
+            hover = self._resolve(self._hover_spec, colors)
+            if hover is None:
+                # 「auto」哨兵：按 overlay 悬停端点现算（见 _auto_hover_color）
+                hover = self._auto_hover_color(colors) or off
+            off = hover
         self.setIcon(icon_render.icon(
             self._icon_name, self._icon_size, off,
             on_color=self._resolve(self._on_spec, colors),
             disabled_color=colors["text_disabled"]))
+
+    def _auto_hover_color(self, colors):
+        """hover 图标缺省色（无显式 hover_color 时按 overlay 端点现算）。
+
+        旧缺省「恒 primary」在两类端点上出问题（2026-10-03）：
+        - **主色实底**（未命名 IconButton 兜底 primary_hover）—— primary
+          图标画在主色实底上融进底色 → 取 ``on_primary``（与主按钮 QSS
+          :hover 的文字色同源）；
+        - **中性浅面实色**（cardCloseBtn / fragCopyBtn 系 surface_2/3）
+          —— 图标跟端点 token 会与底同色隐形 → 返回 None，调用方回退
+          常态 off 色（浅面上 secondary 色可读，也是 06 号重构「hover
+          只叠一层浅面」的既定视觉）。
+        - **淡染主色**（iconBtn / stepBtn / sideTabIconBtn 系）→ 端点
+          token 色 primary，与 QSS ``:hover`` 文字色一致、与旧缺省等价。
+        """
+        # ★取 [0]（hover 端点）：图标色跟随的是悬停底色的归宿；[1] 是
+        #   press 端点，仅因现有表项 hover/press 同族才结果碰巧一致，
+        #   对未来 hover/press 异族的表项（如 textBtn 之类再扩一组）
+        #   是陷阱 —— 2026-10-03 修正。
+        hover_token, hover_alpha = self._overlay_specs()[0]
+        if hover_alpha >= 250:
+            if str(hover_token).startswith("primary"):
+                return colors["on_primary"]
+            return None                       # 中性浅面 → 维持 off 色
+        return colors.get(hover_token, colors["primary"])
 
     def _on_theme_changed(self, _theme=None):
         self._refresh_icon()

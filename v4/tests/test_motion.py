@@ -46,7 +46,12 @@ class TestTokens:
     def test_motion_keys_complete(self):
         """约定键一个都不能少（新增动效按语义取档，不允许各自造数）"""
         assert set(motion.MOTION) == {
-            "instant", "fast", "base", "slow", "stagger"}
+            "instant", "fast", "base", "slow", "stagger",
+            # 启动链路（高仿真设计稿 2026-10-03 方案 D）
+            "spark_fly", "progress_tween", "wake_pop", "wake_halo",
+            "splash_out", "splash_hold", "enter_fade", "enter_rise",
+            "ball_delay", "ball_pop",
+        }
 
     def test_motion_values_are_non_negative_ints(self):
         for key, value in motion.MOTION.items():
@@ -62,7 +67,8 @@ class TestTokens:
         assert motion.MOTION["fast"] < motion.MOTION["base"] < motion.MOTION["slow"]
 
     def test_ease_keys_complete(self):
-        assert set(motion.EASE) == {"out", "out_quint", "in_out"}
+        assert set(motion.EASE) == {"out", "out_quint", "in_out",
+                                    "in", "out_back"}
 
     def test_ease_values_are_valid_qt_names(self):
         """缓动必须是 Qt QEasingCurve.Type 的真实成员名（拼错会 getattr 崩）"""
@@ -76,6 +82,61 @@ class TestTokens:
         ast.parse(config_src)  # 语法自检：确认读到的是有效源码
         assert "anim_speed" in config_src
         assert (motion.SPEED_MIN, motion.SPEED_MAX) == (0.5, 2.0)
+
+
+# ====================================================================
+# 1.5 启动链路 token 钉死（高仿真设计稿 2026-10-03 方案 D 定稿值）
+# ====================================================================
+class TestStartupTokens:
+    """方案 D 定稿值：数值改动 = 动效设计变更，必须过设计稿评审"""
+
+    def test_startup_token_values(self):
+        expected = {
+            "spark_fly": 180,       # 光点环端→球心（InCubic 吸入）
+            "progress_tween": 200,  # 光点到达后球/环插值
+            "wake_pop": 220,        # 满格弹跳
+            "wake_halo": 320,       # 满格光晕
+            "splash_out": 240,      # 闪屏淡出
+            "splash_hold": 120,     # 主窗 show → 闪屏淡出交接延迟
+            "enter_fade": 200,      # 主窗入场淡入
+            "enter_rise": 320,      # 主窗入场 16px 上浮
+            "ball_delay": 160,      # 主窗 show → 悬浮球浮现延迟
+            "ball_pop": 260,        # 悬浮球 OutBack 弹性浮现
+        }
+        for key, value in expected.items():
+            assert motion.MOTION[key] == value, \
+                f"{key} 应为 {value}ms，实为 {motion.MOTION[key]}ms"
+
+    def test_startup_ease_values(self):
+        assert motion.EASE["in"] == "InCubic"          # 光点吸入
+        assert motion.EASE["out_back"] == "OutBack"    # 球浮现过冲
+
+    def test_relay_ordering_holds(self):
+        """接力节奏约束：交接延迟 < 球延迟，淡出短于入场上升——交叠不抢戏"""
+        assert motion.MOTION["splash_hold"] < motion.MOTION["ball_delay"]
+        assert motion.MOTION["splash_out"] < motion.MOTION["enter_rise"]
+
+
+class TestStartupChainWiring:
+    """启动链路动效接线：token 消费点必须走 motion（禁止字面量回流）"""
+
+    def test_splash_uses_motion_tokens(self):
+        src = (V4_ROOT / "src" / "splash.py").read_text(encoding="utf-8")
+        for token in ("base", "fast", "spark_fly", "progress_tween",
+                      "wake_pop", "wake_halo", "splash_out"):
+            assert f'"{token}"' in src, f"splash.py 未消费 token {token}"
+
+    def test_main_window_entrance_uses_enter_tokens(self):
+        src = (V4_ROOT / "src" / "main_window.py").read_text(encoding="utf-8")
+        assert 'motion.MOTION["enter_fade"]' in src
+        assert 'motion.MOTION["enter_rise"]' in src
+
+    def test_relay_wired_in_entrypoint(self):
+        src = (V4_ROOT / "knowledge_ball.py").read_text(encoding="utf-8")
+        assert "after_wake" in src                 # 苏醒 → show 主窗
+        assert 'motion.MOTION["splash_hold"]' in src
+        assert 'motion.MOTION["ball_delay"]' in src
+        assert "play_startup_pop" in src           # 悬浮球压轴浮现
 
 
 # ====================================================================

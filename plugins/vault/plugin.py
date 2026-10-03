@@ -34,11 +34,11 @@ import time
 from PyQt6.QtCore import QObject, Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from src.controls import IconButton
+from src.controls import IconButton, SmoothButton
 from src.plugin_api import BallAction, BallPlugin
 from src.plugin_ui import (
     PluginDialog, flash_button, make_hint_label, make_section_label,
@@ -206,7 +206,7 @@ def copy_with_autoclear(text: str, seconds: int = CLIPBOARD_CLEAR_SECONDS) -> bo
 def _qbtn(text: str, object_name: str = "secondaryBtn", tooltip: str = "",
           checkable: bool = False, danger: bool = False):
     """文字按钮（QSS 契约站点；vault 的图标库里没有 eye/copy，文字更明确）"""
-    btn = QPushButton(text)
+    btn = SmoothButton(text)
     btn.setObjectName(object_name)
     btn.setCheckable(checkable)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)

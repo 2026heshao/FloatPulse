@@ -64,7 +64,6 @@ REQUIRED_CARD = {
     "QPushButton#fragCopyBtn:focus",
     "QPushButton#fragDelBtn:focus",
     "QToolButton#appLaunchBtn:focus",
-    "QPushButton#undoUndoBtn:focus",
     "QLineEdit#taskInput:focus",
     "QTextEdit#noteEdit:focus",
     "QDateEdit#taskDate:focus",

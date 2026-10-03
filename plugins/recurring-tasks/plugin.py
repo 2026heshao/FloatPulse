@@ -46,10 +46,11 @@ from datetime import date, datetime, timedelta
 from PyQt6.QtCore import QObject, Qt, QTime, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QTimeEdit,
+    QLineEdit, QMessageBox, QScrollArea, QTimeEdit,
     QVBoxLayout, QWidget,
 )
 
+from src.controls import SmoothButton
 from src.plugin_api import BallAction, BallPlugin
 from src.plugin_ui import PluginDialog, make_hint_label, make_section_label
 
@@ -1144,24 +1145,24 @@ class CycleTasksPage(QWidget):
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        add_btn = QPushButton("新建规则")
+        add_btn = SmoothButton("新建规则")
         add_btn.setObjectName("primaryBtn")
         add_btn.clicked.connect(self._on_add)
         toolbar.addWidget(add_btn)
 
-        check_btn = QPushButton("立即检查")
+        check_btn = SmoothButton("立即检查")
         check_btn.setObjectName("secondaryBtn")
         check_btn.setToolTip("不等 60s 轮询，马上按规则检查一次")
         check_btn.clicked.connect(self._on_check_now)
         toolbar.addWidget(check_btn)
 
-        export_btn = QPushButton("导出规则")
+        export_btn = SmoothButton("导出规则")
         export_btn.setObjectName("secondaryBtn")
         export_btn.setToolTip("把全部规则导出成 JSON 文件（备份 / 换机用）")
         export_btn.clicked.connect(self._on_export)
         toolbar.addWidget(export_btn)
 
-        import_btn = QPushButton("导入规则")
+        import_btn = SmoothButton("导入规则")
         import_btn.setObjectName("secondaryBtn")
         import_btn.setToolTip("从导出的 JSON 文件并入规则（重复 rule_id 自动跳过）")
         import_btn.clicked.connect(self._on_import)
@@ -1281,18 +1282,18 @@ class CycleTasksPage(QWidget):
         bottom = QHBoxLayout()
         bottom.addStretch(1)
 
-        toggle = QPushButton("停用" if rule.get("enabled", True) else "启用")
+        toggle = SmoothButton("停用" if rule.get("enabled", True) else "启用")
         toggle.setObjectName("secondaryBtn")
         toggle.clicked.connect(
             lambda _checked=False, r=dict(rule): self._on_toggle(r))
         bottom.addWidget(toggle)
 
-        edit = QPushButton("编辑")
+        edit = SmoothButton("编辑")
         edit.setObjectName("secondaryBtn")
         edit.clicked.connect(lambda _checked=False, r=dict(rule): self._on_edit(r))
         bottom.addWidget(edit)
 
-        delete = QPushButton("删除")
+        delete = SmoothButton("删除")
         delete.setObjectName("secondaryBtn")
         delete.clicked.connect(
             lambda _checked=False, r=dict(rule): self._on_delete(r))

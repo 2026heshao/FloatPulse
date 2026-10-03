@@ -36,6 +36,18 @@ MOTION = {
     "base": 180,       # 通用位移、淡入（= NAV_DROP_MS）
     "slow": 280,       # 展开 / 折叠等长过渡（侧栏分组已解耦：220/170）
     "stagger": 18,     # 逐条错峰步长（侧栏分组已解耦：12）
+
+    # ---- 启动链路（高仿真设计稿 2026-10-03 方案 D）----
+    "spark_fly": 180,       # 闪屏光点：环端 → 球心（InCubic 吸入）
+    "progress_tween": 200,  # 光点到达后：球体 r/glow + 前景环插值
+    "wake_pop": 220,        # 满格苏醒：球弹跳（sin 半波）
+    "wake_halo": 320,       # 满格苏醒：光晕扩散
+    "splash_out": 240,      # 闪屏淡出（主窗入场播 splash_hold 后才启动）
+    "splash_hold": 120,     # 主窗 show → 闪屏淡出的焦点交接延迟
+    "enter_fade": 200,      # 主窗入场淡入（原字面量收口）
+    "enter_rise": 320,      # 主窗入场 16px 上浮（原字面量收口）
+    "ball_delay": 160,      # 主窗 show → 悬浮球浮现延迟
+    "ball_pop": 260,        # 悬浮球 OutBack 弹性浮现
 }
 
 # ---- 缓动名（Qt ``QEasingCurve.Type`` 的成员名）----
@@ -43,6 +55,8 @@ EASE = {
     "out": "OutCubic",        # 通用：进入 / 落位
     "out_quint": "OutQuint",  # 强调：分组展开等需要「急起缓停」的场景
     "in_out": "InOutCubic",   # 往复：展开 ↔ 折叠共用一条曲线
+    "in": "InCubic",          # 吸入：闪屏光点飞向球心（加速汇聚）
+    "out_back": "OutBack",    # 过冲：悬浮球浮现的弹性回弹
 }
 
 # ---- 档位（anim_speed）合法区间，与 config.py 的 _CONFIG_RANGES 对齐 ----

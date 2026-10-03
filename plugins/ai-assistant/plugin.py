@@ -51,12 +51,12 @@ from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics, QPainter
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
+    QLineEdit, QMenu, QPlainTextEdit, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
 from src import motion
-from src.controls import IconButton
+from src.controls import IconButton, SmoothButton
 from src.plugin_api import BallAction, BallPlugin, PluginContext
 from src.plugin_ui import PluginDialog, make_hint_label
 
@@ -1136,7 +1136,7 @@ class AiChatPage(QWidget):
         quick_row = QHBoxLayout()
         quick_row.setSpacing(8)
         for text, kind, prompt in QUICK_COMMANDS:
-            btn = QPushButton(text, self)
+            btn = SmoothButton(text, self)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, k=kind, p=prompt:
@@ -1152,7 +1152,7 @@ class AiChatPage(QWidget):
         quick_row.addStretch()
         # 停止模型服务（仅本地服务运行中显示）：聊天主界面直接可停，
         # 不必展开后端设置卡——用户反馈「连接后一直跑在后台」没有顺手的停止入口
-        self._stop_model_btn = QPushButton("停止模型服务", self)
+        self._stop_model_btn = SmoothButton("停止模型服务", self)
         self._stop_model_btn.setObjectName("secondaryBtn")
         self._stop_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_model_btn.setToolTip(
@@ -1162,7 +1162,7 @@ class AiChatPage(QWidget):
         self._stop_model_btn.setVisible(False)   # ready/starting 才显示
         quick_row.addWidget(self._stop_model_btn)
         # 规则库入口（与 ⚙ 后端设置并排）：展开/收起规则编辑卡
-        self._rules_btn = QPushButton("规则库", self)
+        self._rules_btn = SmoothButton("规则库", self)
         self._rules_btn.setObjectName("secondaryBtn")
         self._rules_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._rules_btn.setToolTip(
@@ -1178,7 +1178,7 @@ class AiChatPage(QWidget):
             "问点什么…（Enter 发送，Shift+Enter 换行）")
         self._input.setFixedHeight(68)
         input_row.addWidget(self._input, 1)
-        self._send_btn = QPushButton("发送", self)
+        self._send_btn = SmoothButton("发送", self)
         self._send_btn.setObjectName("primaryBtn")
         self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._send_btn.clicked.connect(self._on_send_clicked)
@@ -1357,7 +1357,7 @@ class AiChatPage(QWidget):
         for prompt in self._cfg.get("custom_quick") or []:
             label = prompt[:CUSTOM_QUICK_LABEL] + \
                 ("…" if len(prompt) > CUSTOM_QUICK_LABEL else "")
-            btn = QPushButton(label, self._custom_quick_host)
+            btn = SmoothButton(label, self._custom_quick_host)
             btn.setObjectName("secondaryBtn")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(f"自定义指令：{prompt}\n点击直接发送；右键删除")
@@ -1664,7 +1664,7 @@ class AiChatPage(QWidget):
         box.addWidget(lab)
         if tokens:
             row = QHBoxLayout()
-            undo_btn = QPushButton("撤销删除")
+            undo_btn = SmoothButton("撤销删除")
             undo_btn.setObjectName("secondaryBtn")
             undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             undo_btn.setToolTip("把刚删掉的内容恢复回来（编号可能变成新的）")
@@ -1703,10 +1703,10 @@ class AiChatPage(QWidget):
         box.addWidget(body)
 
         row = QHBoxLayout()
-        yes = QPushButton("执行")
+        yes = SmoothButton("执行")
         yes.setObjectName("primaryBtn")
         yes.setCursor(Qt.CursorShape.PointingHandCursor)
-        no = QPushButton("取消")
+        no = SmoothButton("取消")
         no.setObjectName("secondaryBtn")
         no.setCursor(Qt.CursorShape.PointingHandCursor)
 
