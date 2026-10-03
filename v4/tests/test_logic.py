@@ -538,11 +538,15 @@ class TestFormatRelativeDeadline:
         assert format_relative_deadline("2026-09-24", self.TODAY) == "明天"
 
     def test_overdue_days(self):
-        assert format_relative_deadline("2026-09-20", self.TODAY) == "逾期3天"
+        assert format_relative_deadline("2026-09-20", self.TODAY) == "逾期 3 天"
 
-    def test_future_month_day_weekday(self):
-        # 2026-09-25 是周五
-        assert format_relative_deadline("2026-09-25", self.TODAY) == "9月25日（周五）"
+    def test_future_in_week_weekday_only(self):
+        # 2026-09-25 是周五，仍在本周（周日 09-27 收尾）→ 只显示星期
+        assert format_relative_deadline("2026-09-25", self.TODAY) == "周五"
+
+    def test_future_beyond_week_month_day(self):
+        # 出了本周 → 月日（数字两侧留空格），不再带星期后缀
+        assert format_relative_deadline("2026-10-12", self.TODAY) == "10 月 12 日"
 
     def test_empty_returns_blank(self):
         assert format_relative_deadline("", self.TODAY) == ""
@@ -551,7 +555,8 @@ class TestFormatRelativeDeadline:
     def test_week_end_and_title(self):
         # 2026-09-23 周三 → 本周日为 2026-09-27
         assert current_week_end(self.TODAY).isoformat() == "2026-09-27"
-        assert group_title(GROUP_WEEK, self.TODAY) == "本周（至 9 月 27 日）"
+        # 高仿真稿起组标题回归纯组名（计数由 UI 独立渲染）
+        assert group_title(GROUP_WEEK, self.TODAY) == "本周"
         # 非本周组标题不含日期
         assert group_title(GROUP_OVERDUE, self.TODAY) == "逾期"
 
@@ -563,11 +568,11 @@ class TestFormatCompletedDate:
 
     def test_full_datetime(self):
         # 2026-09-26 是周六：完整 "YYYY-MM-DD HH:MM" 只取日期部分
-        assert format_completed_date("2026-09-26 14:30") == "9月26日（周六）"
+        assert format_completed_date("2026-09-26 14:30") == "9 月 26 日"
 
     def test_date_only(self):
         # 旧数据可能只存日期
-        assert format_completed_date("2026-09-20") == "9月20日（周日）"
+        assert format_completed_date("2026-09-20") == "9 月 20 日"
 
     def test_empty_returns_blank(self):
         assert format_completed_date("") == ""

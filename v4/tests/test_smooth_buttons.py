@@ -187,17 +187,28 @@ def test_overlay_tokens_resolve_in_both_themes():
 
 
 def test_key_overlay_endpoints_are_pinned():
-    """端点值钉死：这些值 = 被删的 QSS :hover/:pressed 旧端点，
+    """端点值钉死：这些值 = 各按钮的视觉端点契约，
     改任何一个都意味着视觉端点漂移，必须过肉眼校验再改这里。"""
     assert _SMOOTH_OVERLAYS["secondaryBtn"] == (("primary", 18), None)
     assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 26), ("danger", 46))
     assert _SMOOTH_OVERLAYS["iconBtn"] == (("primary", 31), ("primary", 46))
-    assert _SMOOTH_OVERLAYS["modeBtn"] == (
-        ("primary_hover", 255), ("primary_pressed", 255))
+    # 2026-10-02 悬停配色优化：modeBtn 常态是 ghost（$primary_a12），hover
+    # 端点从 primary_hover 实底改淡染（46/77，与 stepBtn 同档）—— ghost→
+    # 实底突跳 + 未选中态主色文字叠主色底都随此修复；tableOpenBtn 同理
+    # 保持 ghost 语系（QSS :hover 只加深描边，见 theme.py）。
+    assert _SMOOTH_OVERLAYS["modeBtn"] == (("primary", 46), ("primary", 77))
+    assert _SMOOTH_OVERLAYS["tableOpenBtn"] == (("primary", 46), ("primary", 77))
     assert _SMOOTH_OVERLAYS["stepBtn"] == (("primary", 46), ("primary", 77))
     # S4：侧栏导航行（端点 = 被删的 navBtn:hover a08 / 按下 a18）
     assert _SMOOTH_OVERLAYS["navBtn"] == (("primary", 20), ("primary", 46))
-    # 未命名按钮兜底 = 被删的全局 QPushButton:hover/:pressed 端点
+    # 实底主色钮：hover/pressed 仍走 primary_hover/pressed 实底端点
+    # （token 值已从「压暗」改「轻提亮」，见 test_theme_contrast 的
+    # test_primary_hover_is_a_lift_not_a_darken）
+    assert _SMOOTH_OVERLAYS["nextBtn"] == (
+        ("primary_hover", 255), ("primary_pressed", 255))
+    assert _SMOOTH_OVERLAYS["taskAddBtn"] == (
+        ("primary_hover", 255), ("primary_pressed", 255))
+    # 未命名按钮兜底（primaryBtn 等全局 QPushButton 用）= 同上
     assert _SMOOTH_OVERLAYS[None] == (
         ("primary_hover", 255), ("primary_pressed", 255))
     # S2 收编的按钮都要有圆角契约（overlay 形状跟 QSS border-radius 对齐）

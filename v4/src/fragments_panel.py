@@ -32,7 +32,7 @@ from PyQt6.QtGui import QColor, QFontMetrics, QBrush
 from src.fragment_manager import TYPE_LABELS
 from src.fragment_classifier import (
     CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
-    CATEGORY_LABELS, CATEGORY_ORDER,
+    CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TOKENS,
 )
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
@@ -72,16 +72,10 @@ CAT_ROLE = Qt.ItemDataRole.UserRole + 2
 #   dark.primary=#6FFFE9 / link=#64B5F6），替换掉原先的 theme 三元表达式。
 COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 3
 
-# 类别 -> 主题色 token 映射（色条颜色唯一来源，token 定义见 theme.py）：
-#   链接=link(蓝) / 代码=primary(青) / 路径=warn(橙) / 命令=danger(红) /
-#   文本=text_secondary(灰，弱化"普通"存在感)
-_CATEGORY_TOKENS = {
-    CAT_LINK:    "link",
-    CAT_CODE:    "primary",
-    CAT_PATH:    "warn",
-    CAT_COMMAND: "danger",
-    CAT_TEXT:    "text_secondary",
-}
+# 类别 → 主题色 token：真相源已上移到 fragment_classifier.CATEGORY_TOKENS
+# （小卡片碎片页也要按同一份映射画类别圆点，放两份必然漂移）。
+# 这里保留私有别名，让本模块既有引用零改动。
+_CATEGORY_TOKENS = CATEGORY_TOKENS
 
 
 # ====================================================================

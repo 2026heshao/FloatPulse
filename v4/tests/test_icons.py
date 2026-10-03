@@ -335,6 +335,36 @@ def test_every_nav_icon_value_names_a_real_icon():
     assert icons.has_icon(icons.PLUGIN_PAGE_ICON)
 
 
+def test_plugin_icons_map_values_are_registered_icons():
+    """P5 插件图标映射：值必须是已登记图标，键非空（2026-10-02 批次）。"""
+    assert icons.PLUGIN_ICONS, "PLUGIN_ICONS 不应为空"
+    for plugin_id, name in icons.PLUGIN_ICONS.items():
+        assert isinstance(plugin_id, str) and plugin_id
+        assert icons.has_icon(name), "插件 %r 映射到未登记的图标 %r" % (plugin_id, name)
+
+
+def test_plugin_page_icon_resolves_map_and_falls_back():
+    """映射命中返回专属图标；未知插件 / 空 id / 非字符串一律落回通用占位。"""
+    for plugin_id, name in icons.PLUGIN_ICONS.items():
+        # 完整导航键（plugin:<id>）与裸 id 两种写法都查得到
+        assert icons.plugin_page_icon("plugin:" + plugin_id) == name
+        assert icons.plugin_page_icon(plugin_id) == name
+    fallback = icons.PLUGIN_PAGE_ICON
+    assert icons.plugin_page_icon("plugin:demo") == fallback, "未映射插件必须落回占位"
+    assert icons.plugin_page_icon("plugin:") == fallback
+    assert icons.plugin_page_icon("nope") == fallback
+    assert icons.plugin_page_icon("") == fallback
+    assert icons.plugin_page_icon(None) == fallback
+    assert icons.plugin_page_icon(123) == fallback
+
+
+def test_plugin_icons_cover_bundled_page_plugins():
+    """出厂页面插件必须有专属图标；weekly-report 无 page 不进导航，不要求。"""
+    for plugin_id in ("kb-search", "recurring-tasks", "ai-assistant",
+                      "vault", "ai-text-workshop"):
+        assert plugin_id in icons.PLUGIN_ICONS, "出厂插件 %s 缺专属图标" % plugin_id
+
+
 def test_has_icon_is_defensive():
     assert icons.has_icon("tasks") is True
     assert icons.has_icon("nope") is False

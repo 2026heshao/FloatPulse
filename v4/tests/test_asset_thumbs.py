@@ -254,3 +254,189 @@ def test_motion_gate_still_governs_fade_duration():
     finally:
         motion.set_reduce_motion(False)
     assert motion.duration(140, 1.0) == 140
+
+
+# ====================================================================
+# 5. 素材卡配色与右键菜单（2026-10-02 修复回归）
+# ====================================================================
+# 背景：UI 重构 05 给 delegate 换自绘配色时，把 QSS 的 rgba() 令牌直接喂
+# QColor —— QColor 不认函数式写法，得到**无效色**，画出来是纯黑：
+#   · hover 卡变成"黑块卡"（用户报障的第二个问题）
+#   · 缩略图描边 / 失效占位底同样发黑
+# 同一时段，右键菜单给删除项上 danger 色图标时调了 delegate 才有的
+# `_colors`，AssetsPanel 没有这个属性 → 一右键就 AttributeError。
+# --------------------------------------------------------------------
+
+_PAINT_TOKENS = (
+    "primary", "primary_a12", "primary_a08", "primary_a30",
+    "hair", "panel_fill", "text", "text_secondary", "danger",
+)
+
+
+class TestDelegateColors:
+    def test_every_paint_token_parses_to_a_valid_color(self):
+        """paint() 用到的全部令牌，两个主题下都必须解析成**有效** QColor。
+
+        钉的是「无效色 = 画出来纯黑」这条失败模式：只要有一个令牌解析
+        失败，悬停卡就会回到黑块。
+        """
+        from src.glass import _to_color
+        from src.theme import THEMES
+        for theme in ("light", "dark"):
+            for key in _PAINT_TOKENS:
+                assert key in THEMES[theme], (theme, key)
+                c = _to_color(THEMES[theme][key])
+                assert c.isValid(), "%s 主题 %s(%r) 解析成无效色" % (
+                    theme, key, THEMES[theme][key])
+
+    def test_translucent_tokens_keep_their_alpha(self):
+        """淡主色底/细环的价值就在那点透明度 —— 解析时不能被弄丢。"""
+        from src.glass import _to_color
+        from src.theme import THEMES
+        for theme in ("light", "dark"):
+            t = THEMES[theme]
+            assert _to_color(t["primary_a08"]).alpha() < 60
+            assert _to_color(t["primary_a30"]).alpha() < 120
+            assert _to_color(t["hair"]).alpha() < 60
+
+
+def _qcolor_subscript_lines(source: str):
+    """AST 扫描：找出所有 ``QColor(<colors/c 字典下标>)`` 形式的调用行号。"""
+    import ast
+    hits = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "QColor"
+                and node.args):
+            continue
+        arg = node.args[0]
+        if (isinstance(arg, ast.Subscript)
+                and isinstance(arg.value, ast.Name)
+                and arg.value.id in ("colors", "c")):
+            hits.append(node.lineno)
+    return hits
+
+
+def test_delegate_never_feeds_theme_tokens_into_qcolor_directly():
+    """★ 静态护栏：本文件禁止再出现 ``QColor(colors[...])``。
+
+    这类写法在 hex 令牌上是碰巧能跑的（QColor 认 #RRGGBB），等哪天有人把
+    某个令牌换成 rgba() 写法，界面就悄悄变黑块 —— 所以按 kb-search 那次
+    假护栏的教训，直接用 AST 钉死调用形态，而不是比较某个具体取值。
+    """
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    src_path = os.path.join(os.path.dirname(here), "src", "assets_panel.py")
+    with open(src_path, encoding="utf-8") as f:
+        source = f.read()
+    assert _qcolor_subscript_lines(source) == [], (
+        "assets_panel.py 存在 QColor(主题令牌下标) 的直接调用（行 %s），"
+        "rgba() 写法会解析成无效色并画成黑块；请改走 glass._to_color"
+        % _qcolor_subscript_lines(source))
+
+    # 反向验证：扫描器真的认得这种形态（否则上面那条是恒真假护栏）
+    assert len(_qcolor_subscript_lines("def f(colors):\n"
+                                       "    return QColor(colors['hair'])\n")) == 1
+
+
+class _StubAction:
+    def __init__(self, text):
+        self.text = text
+
+    def setIcon(self, icon):
+        self.icon = icon
+
+
+class _StubMenu:
+    """QMenu 替身：只验证「菜单能构造出来」，不真弹（exec 不进事件循环）。"""
+
+    last_qss = None
+
+    def __init__(self, parent=None):
+        self.actions = []
+
+    def setStyleSheet(self, qss):
+        _StubMenu.last_qss = qss
+
+    def addAction(self, text):
+        self.actions.append(_StubAction(text))
+        return self.actions[-1]
+
+    def addSeparator(self):
+        return None
+
+    def exec(self, pos):
+        return None
+
+
+class _HostWithShell(_Host):
+    """_Host + 右键菜单要用的 _container.styleSheet()。"""
+
+    def __init__(self, mgr):
+        super().__init__(mgr)
+        from PyQt6.QtWidgets import QWidget
+        self._container = QWidget()
+        self._container.setStyleSheet("QWidget { color: #000000; }")
+
+
+def test_context_menu_builds_without_attribute_error(env, monkeypatch):
+    """★ 右键素材必须能弹出菜单（曾因误用 delegate 的 _colors 直接炸）。"""
+    import src.assets_panel as ap
+    from PyQt6.QtCore import QPoint
+    mgr, ids = env
+    panel = ap.AssetsPanel(_HostWithShell(mgr))
+    panel._valid_ids = set(ids)
+    panel.refresh()
+    monkeypatch.setattr(ap, "QMenu", _StubMenu)
+
+    item = panel._asset_list.item(0)
+    assert item is not None
+    r = panel._asset_list.visualItemRect(item)
+    # 不抛异常即通过；菜单项齐备 = 打开/另存为/删除
+    panel._on_context_menu(QPoint(r.width() // 2, r.height() // 2))
+
+
+def test_panel_has_its_own_colors_entry(env):
+    """面板层必须有 `_colors`（右键菜单取 danger 色的入口）。"""
+    import src.assets_panel as ap
+    mgr, _ = env
+    panel = ap.AssetsPanel(_Host(mgr))
+    colors = panel._colors()
+    assert isinstance(colors, dict) and colors.get("danger")
+    # 主题跟随宿主
+    panel._host.current_theme = "dark"
+    assert panel._colors() is not colors          # 换主题后是重新取的色板
+
+
+def test_hover_paint_is_visible_against_normal(env):
+    """悬停必须有可感知的视觉反馈（曾因黑块被用户点名，修完不能没有反馈）。"""
+    from PyQt6.QtGui import QImage, QPainter
+    from PyQt6.QtCore import QRect, Qt
+    from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem
+    import src.assets_panel as ap
+    mgr, _ = env
+    panel = ap.AssetsPanel(_HostWithShell(mgr))
+    panel._valid_ids = {a.asset_id for a in mgr.get_all_assets()}
+    panel.refresh()
+    _drain(_app(), panel)
+
+    d = panel._thumb_delegate
+    index = panel._asset_list.model().index(0, 0)
+    assert index.data(Qt.ItemDataRole.UserRole) is not None
+
+    def render(state):
+        img = QImage(d.CELL_W, d.CELL_H, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, d.CELL_W, d.CELL_H)
+        opt.state = state
+        d.paint(p, opt, index)
+        p.end()
+        return img
+
+    base = QStyle.StateFlag.State_Enabled
+    normal = render(base)
+    hover = render(base | QStyle.StateFlag.State_MouseOver)
+    assert normal != hover, "hover 与常态渲染完全一致 = 悬停没有反馈"

@@ -759,3 +759,287 @@ class TestPluginContract:
         assert mod.PAGE_KEY == f"plugin:{manifest['id']}"
         assert mod.KbSearchPlugin().version == manifest["version"]
         assert callable(mod.KbSearchPlugin().create_page)
+
+
+# ====================================================================
+# I 碎片行重构（v1.3.0）：meta 行 / 类别色条 / 按需省略号 / 展开全文
+# ====================================================================
+def _frag_hits(kb, text, query=None, title="碎片 · 剪贴板", uid="fragment:1"):
+    """构造 fragment 命中：走真实索引，保证 spans/matched 形状与生产一致"""
+    idx = kb.SearchIndex()
+    idx.add(uid, text, kind="fragment", title=title)
+    idx.finalize()
+    hits = idx.search(query or text)
+    assert hits, "构造数据必须能命中"
+    return hits
+
+
+# 跨年时间戳 → format_relative_time 原样返回，断言不依赖真实时钟
+_FULL_META = {"source": "拖拽拾取", "category": "link",
+              "created_at": "2025-01-01 08:00"}
+
+
+class TestFragmentRow:
+    def test_kind_appears_once(self, kb):
+        """旧版 head 是 "[碎片] 碎片 · 剪贴板"：kind 出现两次、来源当标题。
+        新版 meta 行 kind 只在第一位，旧 title 不再渲染"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python")
+        assert "[碎片]" not in out
+        assert "碎片 · 剪贴板" not in out
+        assert ">碎片<" in out          # kind 段仍在：混排结果里认得出是碎片
+
+    def test_meta_row_segments(self, kb):
+        """meta 行 = 碎片 · 来源 · 类别 · 时间"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python",
+            metas={"fragment:1": _FULL_META})
+        assert "碎片 · 拖拽拾取 · 链接 · 2025-01-01 08:00" in out
+
+    def test_source_default_hidden(self, kb):
+        """97% 的碎片来自剪贴板，恒显示是噪音 → source=剪贴板 不上屏"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python",
+            metas={"fragment:1": {**_FULL_META, "source": "剪贴板"}})
+        assert "剪贴板" not in out
+        assert "碎片 · 链接 · 2025-01-01 08:00" in out
+
+    @pytest.mark.parametrize("category,token_color", [
+        ("link", "#185FA5"), ("code", "#0F6E56"), ("path", "#854F0B"),
+        ("command", "#A32D2D"), ("text", "#5F5E5A"),
+    ])
+    def test_category_bar_fallback_literals(self, kb, category, token_color):
+        """色条取 CATEGORY_TOKENS 真相源；不传 colors 时走 light 兜底
+        字面量（与 theme.THEMES 逐值同源，AST 护栏见 TestFallbackGuardrails）"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python",
+            metas={"fragment:1": {**_FULL_META, "category": category}})
+        assert f'bgcolor="{token_color}"' in out
+
+    def test_category_bar_host_colors_win(self, kb):
+        """传了宿主主题色 dict 时用真值（主题切换不靠兜底表）"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python",
+            metas={"fragment:1": _FULL_META}, colors={"link": "#123456"})
+        assert 'bgcolor="#123456"' in out
+        assert 'bgcolor="#185FA5"' not in out
+
+    def test_unknown_category_placeholder(self, kb):
+        """类别未知 / meta 缺失：不画色条，但占位列保留（行首对齐不塌）"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python",
+            metas={"fragment:1": {**_FULL_META, "category": ""}})
+        assert '<td width="3"></td>' in out
+        assert "bgcolor" not in out
+        out2 = mod.render_results_html(
+            _frag_hits(kb, "python 脚本整理"), "python")
+        assert '<td width="3"></td>' in out2
+
+    def test_prewrap_keeps_newlines(self, kb):
+        """正文 white-space:pre-wrap：多行内容不再被旧版压平"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "def a():\n    return 1", "def a"), "def a",
+            metas={"fragment:1": _FULL_META})
+        assert "white-space:pre-wrap" in out
+        # "def" 被命中 span 包住，断言换行所在的后半段原样保留
+        assert "a():\n    return 1" in out
+
+    def test_ellipsis_only_when_truncated(self, kb):
+        """旧版恒加 "…"（82% 碎片整条放得下也谎报截断）：按需、两侧独立"""
+        mod = _load_plugin_module(kb)
+        short = _frag_hits(kb, "python")
+        assert "…" not in mod.render_results_html(short, "python")
+        mid = _frag_hits(kb, "甲" * 40 + "python" + "乙" * 40, query="python")
+        assert mod.render_results_html(mid, "python").count("…") == 2
+        head = _frag_hits(kb, "python" + "乙" * 40, query="python")
+        out = mod.render_results_html(head, "python")
+        assert out.count("…") == 1
+        # 前导无省略号：fbody 锚点后紧跟命中段
+        assert (f'<a class="plain" href="{mod.RESULT_SCHEME}:0">'
+                f'<span class="hit">python</span>') in out
+
+    def test_score_not_in_html(self, kb):
+        """分数挪进悬停提示：既没有失效的 opacity 也没有分数节点"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(_frag_hits(kb, "python 脚本"), "python")
+        assert "opacity" not in out
+        assert 'class="score"' not in out
+
+    def test_result_anchor_wraps_meta_and_body(self, kb):
+        """整行可点：meta 行与正文各包一个 fp-result 锚点（color:inherit）"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(
+            _frag_hits(kb, "python 脚本"), "python",
+            metas={"fragment:1": _FULL_META})
+        assert out.count(f'href="{mod.RESULT_SCHEME}:0"') == 2
+
+    def test_no_metas_still_renders(self, kb):
+        """向后兼容：旧签名（不传 metas/colors/expanded）不抛、正文照常"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(_frag_hits(kb, "python 脚本"), "python")
+        assert '<span class="hit">python</span>' in out
+        assert mod.accent_for("light") in out
+
+
+class TestExpandFullText:
+    def test_truncated_row_has_expand_anchor(self, kb):
+        mod = _load_plugin_module(kb)
+        hits = _frag_hits(kb, "python" + "尾" * 120, query="python")
+        out = mod.render_results_html(hits, "python")
+        assert f'href="{mod.EXPAND_SCHEME}:0"' in out
+        assert "展开全文" in out
+
+    def test_full_snippet_has_no_anchor(self, kb):
+        """snippet 已是全文（82% 的情况）→ 不给展开锚点，不添噪音"""
+        mod = _load_plugin_module(kb)
+        out = mod.render_results_html(_frag_hits(kb, "python"), "python")
+        assert mod.EXPAND_SCHEME not in out
+
+    def test_expanded_shows_full_text_and_collapse(self, kb):
+        """展开态：全文上屏、高亮按全文坐标系重算、锚点变「收起」、
+        省略号全部消失"""
+        mod = _load_plugin_module(kb)
+        hits = _frag_hits(kb, "python" + "尾" * 120, query="python")
+        out = mod.render_results_html(hits, "python", expanded={0})
+        assert "收起" in out
+        assert "展开全文" not in out
+        assert "…" not in out
+        assert hits[0].text.endswith("尾" * 20)      # 构造 sanity
+        assert "尾" * 20 in out                       # 被截断丢掉的尾部回来了
+        assert '<span class="hit">python</span>' in out
+
+    def test_collapsed_again_shows_expand(self, kb):
+        """expanded 不含下标 = 片段态：「展开全文」回来、「收起」不出现"""
+        mod = _load_plugin_module(kb)
+        hits = _frag_hits(kb, "python" + "尾" * 120, query="python")
+        out = mod.render_results_html(hits, "python")
+        assert "展开全文" in out and "收起" not in out
+
+    def test_expand_parse(self, kb):
+        mod = _load_plugin_module(kb)
+        assert mod.parse_expand_anchor("fp-expand:3") == 3
+        assert mod.parse_expand_anchor("fp-expand:0") == 0
+        assert mod.parse_expand_anchor("fp-expand:-1") is None
+        assert mod.parse_expand_anchor("fp-expand:x") is None
+        assert mod.parse_expand_anchor("") is None
+        assert mod.parse_expand_anchor(None) is None
+
+    def test_schemes_do_not_cross_parse(self, kb):
+        """两个 scheme 互不解析：解析串了 = 点展开却跳走（静默错）"""
+        mod = _load_plugin_module(kb)
+        assert mod.parse_result_anchor("fp-expand:0") is None
+        assert mod.parse_expand_anchor("fp-result:0") is None
+
+
+class TestFragmentMetaCollect:
+    def test_collects_three_fields(self, kb):
+        mod = _load_plugin_module(kb)
+        data = _FakeData(fragments=[
+            {"fragment_id": 7, "content": "x", "source": "拖拽拾取",
+             "category": "path", "created_at": "2026-09-30 21:00"},
+            {"fragment_id": 8, "content": "y"},        # 缺字段 → 空串兜底
+        ])
+        meta = mod.collect_fragment_meta(data)
+        assert meta["fragment:7"] == {"source": "拖拽拾取", "category": "path",
+                                      "created_at": "2026-09-30 21:00"}
+        assert meta["fragment:8"] == {"source": "", "category": "",
+                                      "created_at": ""}
+
+    def test_skips_dirty_entries(self, kb):
+        mod = _load_plugin_module(kb)
+        data = _FakeData(fragments=[None, 42, {"content": "no id"},
+                                     {"fragment_id": 9, "content": "ok"}])
+        assert list(mod.collect_fragment_meta(data)) == ["fragment:9"]
+
+    def test_broken_snapshot_returns_empty(self, kb):
+        """快照读取失败只降级显示（无 meta 行），不能拖垮搜索页"""
+        mod = _load_plugin_module(kb)
+
+        class _Boom:
+            def fragments(self):
+                raise RuntimeError("boom")
+
+        assert mod.collect_fragment_meta(_Boom()) == {}
+
+
+# ====================================================================
+# J 兜底字面量同源护栏（v1.3.0，仿 accent 三件套：AST 钉 + 兜底可达）
+# ====================================================================
+def _module_level_literal(name):
+    """从 plugin.py 源码用 AST 取模块级字面量。
+
+    为什么绕开运行分支：测试跑在 v4/ 下 try-import 必然成功，
+    运行时断言比较的是「theme 与它自己」，恒真 —— 真正会漏网的是
+    插件独立分发时才走到的兜底字面量（accent 三钉的老教训）。
+    用 walk 而不是只扫 tree.body：_CAT_TOKENS/_CAT_LABELS 的兜底赋值
+    在 try/except 的 handler 里，不在模块顶层。
+    """
+    import ast
+    with open(PLUGIN_PATH, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name
+                for t in node.targets):
+            return ast.literal_eval(node.value)
+    return None
+
+
+class TestFallbackGuardrails:
+    @pytest.mark.parametrize("theme", ["light", "dark"])
+    def test_category_fallback_matches_theme_tokens(self, theme):
+        """_CATEGORY_FALLBACK 逐 token 等于 theme 真值。插件独立分发时
+        用的就是这个值：宿主改主题色而插件忘同步 → 真机色条停旧值，
+        全量测试却照样全绿 —— 只有 AST 钉字面量能抓"""
+        from src.theme import THEMES
+        literal = _module_level_literal("_CATEGORY_FALLBACK")
+        assert isinstance(literal, dict), "未找到 _CATEGORY_FALLBACK 字面量"
+        for token in ("link", "primary", "warn", "danger",
+                      "text_secondary", "text", "text_placeholder"):
+            assert literal[theme][token] == THEMES[theme][token], (
+                f"{theme}.{token} 兜底色 {literal[theme][token]} 与 theme "
+                f"{THEMES[theme][token]} 漂移")
+
+    def test_category_tables_fallback_matches_host(self):
+        """独立分发时的 _CAT_TOKENS/_CAT_LABELS 字面量 = 宿主真相表"""
+        from src.fragment_classifier import CATEGORY_LABELS, CATEGORY_TOKENS
+        assert _module_level_literal("_CAT_TOKENS") == CATEGORY_TOKENS
+        assert _module_level_literal("_CAT_LABELS") == CATEGORY_LABELS
+
+    def test_category_fallback_branch_reachable(self, kb, monkeypatch):
+        """屏蔽 src.fragment_classifier 模拟独立分发 → 必须回落字面量表
+        且渲染不抛（否则护栏保护的是死代码）"""
+        _load_plugin_module(kb)                  # 常规实例先就位
+        monkeypatch.setitem(sys.modules, "src.fragment_classifier", None)
+        reloaded = _load_plugin_module(kb)       # 重新 exec → 走 except 分支
+        assert reloaded._CAT_TOKENS == _module_level_literal("_CAT_TOKENS")
+        assert reloaded._CAT_LABELS["text"] == "普通文本"
+        out = reloaded.render_results_html(
+            _frag_hits(kb, "python 脚本"), "python",
+            metas={"fragment:1": _FULL_META})
+        assert 'bgcolor="#185FA5"' in out        # 兜底表真被用上了
+
+    def test_time_uses_host_implementation(self, kb):
+        """正常路径 meta_time_for 就是 src.time_format 那个函数（同源）"""
+        from src import time_format
+        mod = _load_plugin_module(kb)
+        assert mod._fmt_time is time_format.format_relative_time
+        assert mod.meta_time_for("2026-09-01 09:00") == \
+            time_format.format_relative_time("2026-09-01 09:00")
+
+    def test_time_fallback_branch_reachable(self, kb, monkeypatch):
+        """屏蔽 src.time_format → 内嵌实现顶上，基础行为一致"""
+        _load_plugin_module(kb)
+        monkeypatch.setitem(sys.modules, "src.time_format", None)
+        reloaded = _load_plugin_module(kb)
+        assert reloaded._fmt_time is None
+        assert reloaded.meta_time_for("2025-01-01 08:00") == "2025-01-01 08:00"
+        assert reloaded.meta_time_for("") == "未知时间"
+        assert reloaded.meta_time_for("坏格式") == "坏格式"

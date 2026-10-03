@@ -30,6 +30,21 @@ v1.1.0 增强：
     在全库分数算好后按范围排除 → 勾选即时生效、排序与不过滤一致
   - K2 跳转自愈：碎片/笔记跳转前先模拟目标页的子串过滤（与宿主面板
     同口径），必空（bigram 交叉召回）则只切页显示全部并 toast 说明
+
+v1.3.0 碎片行重构（2026-10-02）：
+  - 碎片行 = 3px 类别色条（CATEGORY_TOKENS 真相源，与碎片面板/小卡片
+    同源）+ meta 行（碎片 · 来源 · 类别 · 时间）+ 正文 —— kind 不再在
+    标题里出现两次，快照里有却被丢弃的 category / created_at 用起来了
+  - meta 行颜色用 text_placeholder（时间戳/提示专用 token，11px）
+  - 正文 white-space:pre-wrap 保留换行缩进；省略号按需（snippet 是
+    原文真子串才加，两侧独立判断）—— 旧版恒加 "…"，82% 的碎片整条
+    放得下也被谎报截断
+  - 分数不再占行内位置（旧 .score 的 opacity 在 QTextBrowser 静默失效，
+    分数混进标题）→ 悬停结果行时 QToolTip 显示
+  - 超长内容尾部「展开全文」锚点（fp-expand:<下标>）：点击行内展开/
+    收起，与「点标题跳转」走两个互不解析的 scheme，不抢语义
+  - 来源只在 ≠ 剪贴板 时显示（97% 的碎片来自剪贴板，恒显示是噪音）
+  - 非碎片行（知识库/笔记/任务/素材）head 行与 v1.2 同构
 ====================================================================
 """
 
@@ -40,9 +55,10 @@ import os
 import sys
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton,
-    QTextBrowser, QVBoxLayout, QWidget,
+    QTextBrowser, QToolTip, QVBoxLayout, QWidget,
 )
 
 from src.controls import IconButton
@@ -88,6 +104,14 @@ KIND_LABEL = {
 # 不会被系统浏览器抢走。
 RESULT_SCHEME = "fp-result"
 
+# 「展开全文」锚点用的 scheme：点击是行内展开/收起（改渲染状态），不是
+# 跳转，所以必须与 RESULT_SCHEME 区分开 —— 两个 scheme 各有独立解析
+# 函数，互相解析返回 None（钉在测试里），点了展开绝不会被当成跳转。
+EXPAND_SCHEME = "fp-expand"
+
+# meta 行不显示的默认来源：97% 的碎片来自剪贴板，恒显示是噪音
+SOURCE_DEFAULT = "剪贴板"
+
 # ---------------- 搜索历史（K3，v1.2.0） ----------------
 # 最近搜索词存插件私有目录（重启不丢）；输入框为空时在下方显示「最近」行。
 # 上限刻意收紧：历史是「快速重搜」不是「搜索日志」，防文件无限膨胀。
@@ -101,6 +125,40 @@ HISTORY_CHARS = 60         # 单条搜索词的最大字符数
 #   dark #5DCAA5 深底约 7.6:1）。
 _ACCENT_FALLBACK = {"light": "#0C5A47", "dark": "#5DCAA5"}
 DEFAULT_THEME = "light"
+
+# ---------------- 碎片类别（真相源在宿主，独立分发走字面量兜底）-----
+# try-import 与 accent_for 同款约定：宿主在时用 src.fragment_classifier
+# 的 CATEGORY_TOKENS / CATEGORY_LABELS（碎片面板与小卡片共用的那张表，
+# 在这里再抄一份必然漂移）；import 不到（插件独立分发）才走字面量。
+# ⚠ 两份字面量由 test_kb_search_core 用 AST 钉死与 theme.THEMES 同源，
+#   宿主改主题色而插件忘同步会直接红灯。
+try:
+    from src.fragment_classifier import (
+        CATEGORY_LABELS as _CAT_LABELS, CATEGORY_TOKENS as _CAT_TOKENS)
+except Exception:                             # noqa: BLE001 - 独立分发兜底
+    _CAT_TOKENS = {"link": "link", "code": "primary", "path": "warn",
+                   "command": "danger", "text": "text_secondary"}
+    _CAT_LABELS = {"text": "普通文本", "link": "链接", "code": "代码",
+                   "path": "路径", "command": "命令"}
+
+# 类别色条用的主题 token → 色值兜底（light/dark 各一套，与 theme.py 对应
+# token 的字面量逐值一致；AST 护栏见 test_fallback_literal_matches_theme）
+_CATEGORY_FALLBACK = {
+    "light": {"link": "#185FA5", "primary": "#0F6E56", "warn": "#854F0B",
+              "danger": "#A32D2D", "text_secondary": "#5F5E5A",
+              "text": "#2C2C2A", "text_placeholder": "#6E6D67"},
+    "dark":  {"link": "#85B7EB", "primary": "#5DCAA5", "warn": "#EF9F27",
+              "danger": "#F09595", "text_secondary": "#A8ADA5",
+              "text": "#E9EAE7", "text_placeholder": "#8A8F88"},
+}
+
+# ---------------- 统一时间函数（src/time_format.py）----------------
+# 笔记面板与搜索结果 meta 行共用同一份实现；import 不到时走
+# _fmt_time_fallback（内嵌同款，行为由 test 钉住同源）。
+try:
+    from src.time_format import format_relative_time as _fmt_time
+except Exception:                             # noqa: BLE001 - 独立分发兜底
+    _fmt_time = None
 
 
 def accent_for(theme) -> str:
@@ -121,6 +179,65 @@ def accent_for(theme) -> str:
     except Exception:                             # noqa: BLE001 - 取不到就用兜底
         pass
     return _ACCENT_FALLBACK[theme]
+
+
+def category_color_for(category, theme=DEFAULT_THEME, colors=None) -> str:
+    """碎片内容类别 → 色条色值（渲染端唯一取色入口）。
+
+    ``colors`` 是宿主主题色 dict（SearchPage 每次渲染时取），取得到就
+    用真值；取不到（独立分发 / 调用方省略）走 _CATEGORY_FALLBACK 字面量。
+    未知类别返回 ""（渲染端画空占位列对齐，不画色条）。
+    """
+    token = _CAT_TOKENS.get(category or "", "")
+    if not token:
+        return ""
+    if isinstance(colors, dict):
+        value = colors.get(token)
+        if isinstance(value, str) and value.startswith("#"):
+            return value
+    table = _CATEGORY_FALLBACK.get(
+        theme if theme in _CATEGORY_FALLBACK else DEFAULT_THEME, {})
+    return table.get(token, "")
+
+
+def _fmt_time_fallback(ts) -> str:
+    """内嵌时间格式化：只在 import 不到 src.time_format 时被用。
+
+    与宿主 time_format.format_relative_time 七段口径逐段一致
+    （test_time_fallback_matches_host 钉行为同源）。
+    """
+    from datetime import datetime
+    if not ts:
+        return "未知时间"
+    try:
+        dt = datetime.strptime(str(ts).strip(), "%Y-%m-%d %H:%M")
+    except ValueError:
+        return ts
+    secs = (datetime.now() - dt).total_seconds()
+    if secs < 0:
+        return ts                      # 时间在当前之后（系统时钟被改）→ 原样
+    if secs < 60:
+        return "刚刚"
+    if secs < 3600:
+        return f"{int(secs // 60)} 分钟前"
+    if secs < 86400:
+        return f"{int(secs // 3600)} 小时前"
+    if secs < 86400 * 2:
+        return f"昨天 {dt.strftime('%H:%M')}"
+    if secs < 86400 * 7:
+        return f"{int(secs // 86400)} 天前"
+    if dt.year == datetime.now().year:
+        return dt.strftime("%m-%d %H:%M")
+    return ts
+
+
+def meta_time_for(ts) -> str:
+    """meta 行的时间段文案：宿主在时走统一实现，独立分发走内嵌同款"""
+    fn = _fmt_time or _fmt_time_fallback
+    try:
+        return fn(ts)
+    except Exception:                         # noqa: BLE001 - 时间段不许炸渲染
+        return str(ts or "")
 
 
 def theme_of(host) -> str:
@@ -270,6 +387,33 @@ def collect_documents(data):
             for uid, kind, title, text in docs]
 
 
+def collect_fragment_meta(data):
+    """碎片元数据旁路：``fragment:<id>`` → {source, category, created_at}。
+
+    为什么走旁路而不是改 collect_documents / Hit：Hit 是 ``__slots__``
+    纯数据类（附加属性会 AttributeError），collect_documents 的四元组
+    形状被索引与多处测试钉死；meta 只影响显示，采集失败返回空表 ——
+    显示降级为「无 meta 行 / 无色条」（正文照搜），不能拖垮搜索页。
+    """
+    out = {}
+    try:
+        frags = data.fragments() or []
+    except Exception:                         # noqa: BLE001
+        return out
+    for frag in frags:
+        if not isinstance(frag, dict):
+            continue
+        fid = frag.get("fragment_id")
+        if fid is None:
+            continue
+        out[f"fragment:{fid}"] = {
+            "source": str(frag.get("source") or ""),
+            "category": str(frag.get("category") or ""),
+            "created_at": str(frag.get("created_at") or ""),
+        }
+    return out
+
+
 def build_index(docs, index=None):
     """（重）建索引；传入已有 index 时先清空再填（复用对象）"""
     idx = index if index is not None else core.SearchIndex()
@@ -283,54 +427,163 @@ def build_index(docs, index=None):
 # ====================================================================
 # 结果渲染（HTML 高亮）
 # ====================================================================
-def render_results_html(hits, query, accent=None):
+def render_results_html(hits, query, accent=None, metas=None, colors=None,
+                        expanded=None):
     """把命中列表渲染成一段 HTML。
 
     - **一律 html.escape**：命中片段是用户自己的原文，里面必然有 ``<``
       ``&``（贴代码是常态），不转义会被 QTextBrowser 当标签吃掉
     - 命中区间用 ``<span>`` 着色加粗；用 ``core.split_by_spans`` 算区间，
       核心层只给下标、不知道渲染方式（控件换了也不用改核心）
-    - **每条结果的标题行是一个锚点** ``fp-result:<下标>``：点它就跳转到
-      对应面板（下标由渲染顺序决定，调用方必须缓存同一份 hits 列表来反查）
+    - **每条结果是一个锚点** ``fp-result:<下标>``：点它就跳转到对应面板
+      （下标由渲染顺序决定，调用方必须缓存同一份 hits 列表来反查）
     - ⚠ 锚点标签是**我们自己生成的**，不进 html.escape；用户文本（标题、
       片段）照旧全部转义——两者混在一起时最容易漏掉一处
     - ``accent`` 是主题相关的强调色（QTextBrowser 不认 QSS，只能行内注入）；
       不传则用 light 主题的值，保证纯函数调用方（测试）行为稳定
-    - 分数也显示出来（保留 2 位）：调参和判断「为什么这条排前」时有用
+    - v1.3.0：碎片行走 ``_render_fragment_row``（类别色条 + meta 行 +
+      pre-wrap 正文），其余数据源 head 行与 v1.2 同构。
+      ``metas`` 是 ``collect_fragment_meta`` 的返回值（碎片元数据旁路），
+      ``colors`` 是宿主主题色 dict，``expanded`` 是处于展开态的下标集合；
+      三者都可省略 —— 省略时碎片行退化为「无色条 / 无 meta 信息段」，
+      调用向后兼容
+    - 分数不再渲染进 HTML（旧版 .score 的 opacity 在 QTextBrowser 静默
+      失效，分数混进标题）：悬停结果行由 SearchPage._on_link_hovered
+      用 QToolTip 显示
     """
     if not hits:
         return ""
     color = accent or _ACCENT_FALLBACK[DEFAULT_THEME]
+    mc = _token_color("text_placeholder", colors)
+    tc = _token_color("text", colors)
+    metas = metas if isinstance(metas, dict) else {}
+    expanded = expanded if isinstance(expanded, (set, frozenset)) else set()
     blocks = []
     for i, hit in enumerate(hits):
+        if hit.kind == "fragment":
+            blocks.append(_render_fragment_row(
+                i, hit, metas.get(hit.uid), mc, tc, colors, expanded))
+            continue
         kind = KIND_LABEL.get(hit.kind, hit.kind or "其它")
         head = html.escape(f"[{kind}] {hit.title}")
-        pieces = []
-        for text, is_hit in core.split_by_spans(hit.snippet, hit.spans):
-            esc = html.escape(text)
-            pieces.append(f'<span class="hit">{esc}</span>' if is_hit
-                          else esc)
         blocks.append(
             f'<p class="head">'
-            f'<a class="res" href="{RESULT_SCHEME}:{i}">{head}</a>'
-            f'<span class="score">　{hit.score:.2f}</span></p>'
-            f'<p class="body">…{"".join(pieces)}…</p>')
+            f'<a class="res" href="{RESULT_SCHEME}:{i}">{head}</a></p>'
+            f'<p class="body">{_body_html(hit.snippet, hit.spans, hit.text)}'
+            f'</p>')
     return ("<style>"
             ".head{font-weight:600;margin:10px 0 2px}"
-            ".score{font-size:11px;opacity:.55}"
             ".body{margin:0 0 8px;line-height:1.55}"
             f".hit{{font-weight:700;color:{color}}}"
             f".res{{color:{color};text-decoration:underline}}"
+            f".meta{{color:{mc};font-size:11px;margin:0 0 2px}}"
+            f".fbody{{margin:0;line-height:1.5;color:{tc};"
+            "white-space:pre-wrap}"
+            f".exp{{color:{mc};font-size:11px;margin:2px 0 0}}"
+            "a.plain{color:inherit;text-decoration:none}"
+            f"a.explink{{color:{mc};text-decoration:underline}}"
             "</style>" + "".join(blocks))
 
 
-def parse_result_anchor(url_text):
-    """``fp-result:<下标>`` → 下标；不是本插件的锚点返回 ``None``。
+def _token_color(token, colors) -> str:
+    """主题 token → 色值：宿主色表优先，取不到走字面量兜底（不抛）"""
+    if isinstance(colors, dict):
+        value = colors.get(token)
+        if isinstance(value, str) and value.startswith("#"):
+            return value
+    return _CATEGORY_FALLBACK.get(DEFAULT_THEME, {}).get(token, "")
 
-    单独抽出来是因为这里错起来是静默的：解析歪一点就会跳到**另一条**结果上，
-    用户只会觉得「点了没反应 / 点错了」，不会报错。纯函数便于直接钉住。
+
+def _body_html(snippet, spans, full_text=""):
+    """正文 HTML：命中处高亮 + **按需**省略号（两侧独立判断）。
+
+    旧版恒加 "…"：82% 的碎片整条放得下也被谎报截断（"…Python…"）。
+    现在只有 snippet 真是 full_text 的中间截断时才在对应侧加省略号。
     """
-    prefix = f"{RESULT_SCHEME}:"
+    pieces = "".join(
+        f'<span class="hit">{html.escape(text)}</span>' if is_hit
+        else html.escape(text)
+        for text, is_hit in core.split_by_spans(snippet, spans))
+    full = full_text if isinstance(full_text, str) else ""
+    lead = "…" if full and not full.startswith(snippet) else ""
+    tail = "…" if full and not full.endswith(snippet) else ""
+    return f"{lead}{pieces}{tail}"
+
+
+def _render_fragment_row(index, hit, meta, mc, tc, colors, expanded):
+    """碎片行：3px 类别色条 + meta 行（碎片 · 来源 · 类别 · 时间）+ 正文。
+
+    - 色条真相源是 CATEGORY_TOKENS（与碎片面板/小卡片同一张表）；
+      meta 缺失或类别未知时画空占位列，与其他行保持对齐
+    - meta 行与正文都包 fp-result 锚点（整行可点；``color:inherit``
+      让链接不抢文字色）。「展开全文」是独立的 fp-expand 锚点
+    - meta 行 kind 恒在第一位：混排结果里认出「这是碎片」全靠它
+      （碎片行没有标题文字，色条是内容类别、不是数据源）
+    - 展开态正文用全文重算高亮（``_full_text_with_spans``）
+    """
+    is_expanded = index in expanded
+    if is_expanded:
+        body_text, spans = _full_text_with_spans(hit)
+        body = _body_html(body_text, spans, "")
+    else:
+        body = _body_html(hit.snippet, hit.spans, hit.text)
+    meta = meta if isinstance(meta, dict) else {}
+    bits = [KIND_LABEL.get(hit.kind, hit.kind or "其它")]
+    source = str(meta.get("source") or "").strip()
+    if source and source != SOURCE_DEFAULT:
+        bits.append(source)
+    label = _CAT_LABELS.get(meta.get("category") or "")
+    if label:
+        bits.append(label)
+    created = str(meta.get("created_at") or "").strip()
+    if created:
+        # 空时间戳直接省略该段（「未知时间」是 notes_panel 列表的语义，
+        # 搜索 meta 行缺失即省略，不占位）
+        stamp = meta_time_for(created)
+        if stamp:
+            bits.append(stamp)
+    link = f"{RESULT_SCHEME}:{index}"
+    bar = category_color_for(meta.get("category"), colors=colors)
+    parts = ['<table width="100%" cellspacing="0" cellpadding="0"><tr>',
+             '<td width="3"></td>' if not bar
+             else f'<td width="3" bgcolor="{bar}"></td>',
+             '<td style="padding-left:8px">',
+             f'<p class="meta"><a class="plain" href="{link}">'
+             f'{html.escape(" · ".join(bits))}</a></p>',
+             f'<p class="fbody"><a class="plain" href="{link}">'
+             f'{body}</a></p>']
+    if hit.text and hit.snippet != hit.text:
+        lbl = "收起" if is_expanded else "展开全文"
+        parts.append(f'<p class="exp"><a class="explink" '
+                     f'href="{EXPAND_SCHEME}:{index}">{lbl}</a></p>')
+    parts.append("</td></tr></table>")
+    return "".join(parts)
+
+
+def _full_text_with_spans(hit):
+    """展开态：全文 + 命中高亮区间。
+
+    复用 core.make_snippet 把 radius 拉到全长 —— 它的 lo/hi 钳制逻辑
+    天然返回整段原文与全文坐标系下的 spans，UI 层不用重写定位。
+    没有字面命中的（bigram 交叉召回）spans 为空，展示全文不高亮。
+    """
+    text = hit.text if isinstance(hit.text, str) else str(hit.text or "")
+    try:
+        snippet, spans, _matched = core.make_snippet(
+            text, hit.matched, radius=max(len(text), 1))
+    except Exception:                         # noqa: BLE001
+        return text, []
+    return snippet, spans
+
+
+def _parse_scheme_anchor(url_text, scheme):
+    """``<scheme>:<下标>`` → 下标；不是该 scheme 的锚点返回 ``None``。
+
+    单独抽出来是因为这里错起来是静默的：解析歪一点就会跳到**另一条**
+    结果上，用户只会觉得「点了没反应 / 点错了」，不会报错。纯函数便于
+    直接钉住。
+    """
+    prefix = f"{scheme}:"
     text = url_text if isinstance(url_text, str) else str(url_text or "")
     if not text.startswith(prefix):
         return None
@@ -339,6 +592,20 @@ def parse_result_anchor(url_text):
     except ValueError:
         return None
     return idx if idx >= 0 else None
+
+
+def parse_result_anchor(url_text):
+    """``fp-result:<下标>`` → 下标；不是本插件的锚点返回 ``None``"""
+    return _parse_scheme_anchor(url_text, RESULT_SCHEME)
+
+
+def parse_expand_anchor(url_text):
+    """``fp-expand:<下标>`` → 下标；不是展开锚点返回 ``None``。
+
+    与 fp-result **互不解析**（钉在测试里：两个解析函数对对方的 scheme
+    都返回 None）—— 解析串了就会「点了展开却跳走了」，同样是静默错。
+    """
+    return _parse_scheme_anchor(url_text, EXPAND_SCHEME)
 
 
 def pick_jump_keyword(matched, fallback=""):
@@ -441,6 +708,11 @@ class SearchPage(QWidget):
         self._docs = 0
         # 渲染顺序的命中列表：锚点 href 里存的是它的下标，点击时靠它反查
         self._hits = []
+        # 碎片元数据旁路（uid → source/category/created_at），重建索引时刷新
+        self._frag_meta = {}
+        # 处于「展开全文」态的结果下标。下标是渲染序，hits 一换代意义
+        # 就变，所以 _run_search 每次都要清空
+        self._expanded = set()
         # 搜索历史（K3）：最新在前，存插件私有目录
         self._history = load_history(ctx)
         self._build_ui()
@@ -535,13 +807,16 @@ class SearchPage(QWidget):
         self._view.setOpenLinks(False)           # 不让浏览器自己导航
         self._view.setFrameShape(QFrame.Shape.NoFrame)
         self._view.anchorClicked.connect(self._on_anchor)
+        # 悬停锚点时 highlighted 发出 href（离开时发空串）→ 显示分数 tooltip
+        self._view.highlighted.connect(self._on_link_hovered)
         box_lay.addWidget(self._view)
         root.addWidget(box, 1)
 
         self._empty = QLabel("输入关键词开始搜索\n\n"
                              "· 支持中文短语与英文单词混合，例如「月报 归档」\n"
-                             "· 命中处加粗着色，右边的数字是相关度分数\n"
-                             "· 点结果标题跳转到对应面板（知识库会定位到那一段）")
+                             "· 命中处加粗着色，悬停结果行可查看相关度分数\n"
+                             "· 点结果标题跳转到对应面板（知识库会定位到那一段）\n"
+                             "· 超长碎片点「展开全文」查看全部内容")
         self._empty.setObjectName("pluginEmptyHint")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
@@ -562,6 +837,8 @@ class SearchPage(QWidget):
             return
         self._docs = len(docs)
         build_index(docs, self._index)
+        # 碎片 meta 旁路：与索引同一份快照，失败只降级显示（见函数 docstring）
+        self._frag_meta = collect_fragment_meta(self._ctx.data)
         self.index_ready.emit(len(docs))
         if verbose:
             self._toast(f"索引已重建（{len(docs)} 条）")
@@ -612,8 +889,11 @@ class SearchPage(QWidget):
         # ⚠ 必须与 render_results_html 用的是**同一个列表**：锚点 href 里存的
         # 是它在列表里的下标，渲染完再改列表就会点错行
         self._hits = hits
+        self._expanded.clear()     # 下标是渲染序，hits 换代必须清展开态
         self._empty.setVisible(not hits)
-        self._view.setHtml(render_results_html(hits, query, self._accent))
+        self._view.setHtml(render_results_html(
+            hits, query, self._accent, self._frag_meta,
+            self._theme_colors(), self._expanded))
         self._remember_history(query)             # K3：有效检索记入历史
         scope = ""
         if kind_arg is not None:
@@ -711,17 +991,59 @@ class SearchPage(QWidget):
 
     # ---------------- 跳转 ----------------
     def _on_anchor(self, url):
-        """点结果标题 → 跳转到对应面板（QTextBrowser 的锚点回调）。
+        """锚点分发：fp-expand → 行内展开/收起；fp-result → 跳转面板。
 
-        宿主侧只暴露一个**公开入口** ``show_search_result(kind, keyword, num)``
-        （与 ``show_plugin_page`` 同款约定）；宿主没有这个入口时提示一句，
+        两个 scheme 各有独立解析函数且**互不解析**（见 parse_expand_anchor），
+        所以点「展开全文」绝不会被当成跳转，反之亦然。宿主侧只暴露一个
+        **公开入口** ``show_search_result(kind, keyword, num)``（与
+        ``show_plugin_page`` 同款约定）；宿主没有这个入口时提示一句，
         不让点击静默失败。
         """
         text = url.toString() if hasattr(url, "toString") else str(url)
+        idx = parse_expand_anchor(text)
+        if idx is not None:
+            if 0 <= idx < len(self._hits):
+                if idx in self._expanded:
+                    self._expanded.discard(idx)
+                else:
+                    self._expanded.add(idx)
+                self._rerender_results()
+            return
         idx = parse_result_anchor(text)
         if idx is None or idx >= len(self._hits):
             return
         self._jump_to(self._hits[idx])
+
+    def _theme_colors(self):
+        """宿主主题色 dict（QTextBrowser 内部只认行内样式，颜色必须每次
+        渲染时从主题取）；取不到返回 None，渲染端走字面量兜底"""
+        try:
+            from src.theme import get_colors
+            return get_colors(theme_of(_host_window(self._ctx)))
+        except Exception:                     # noqa: BLE001
+            return None
+
+    def _rerender_results(self):
+        """展开/收起后的重渲染：不重建索引、不记历史、不动命中列表"""
+        if not self._hits:
+            return
+        self._view.setHtml(render_results_html(
+            self._hits, self._input.text().strip(), self._accent,
+            self._frag_meta, self._theme_colors(), self._expanded))
+
+    def _on_link_hovered(self, href):
+        """悬停结果行 → QToolTip 显示相关度分数。
+
+        v1.3.0 起分数不再占行内位置（旧 .score 的 opacity 在 QTextBrowser
+        静默失效，分数混进标题）。highlighted 在离开锚点时发空串 → 隐藏。
+        """
+        text = href.toString() if hasattr(href, "toString") else str(href or "")
+        idx = parse_result_anchor(text)
+        if idx is None or not (0 <= idx < len(self._hits)):
+            QToolTip.hideText()
+            return
+        QToolTip.showText(QCursor.pos(),
+                          f"相关度 {self._hits[idx].score:.2f}", self._view)
 
     def _jump_to(self, hit):
         """把一条命中转成宿主跳转调用"""
@@ -776,7 +1098,7 @@ class SearchPage(QWidget):
 class KbSearchPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "站内搜索"
-    version = "1.2.0"
+    version = "1.3.0"
 
     def create_actions(self, ctx):
         return [OpenSearchAction()]

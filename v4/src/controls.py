@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QPropertyAnimation
 
 from src.app_paths import get_screen_geometry
-from src.constants import RADIUS_CTL, RADIUS_PANEL, UNDO_BAR_MS
+from src.constants import (RADIUS_CTL, RADIUS_CHIP, RADIUS_PANEL, UNDO_BAR_MS)
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.theme import DEFAULT_THEME, get_colors
 from src import icon_render
@@ -73,19 +73,35 @@ _SMOOTH_OVERLAYS = {
     "secondaryBtn":     (("primary", 18), None),
     "textBtn":          (("primary", 20), ("primary", 31)),
     "dangerBtn":        (("danger", 26), ("danger", 46)),
-    "fragDelBtn":       (("danger", 255), ("danger", 255)),
-    "cardCloseBtn":     (("danger", 255), ("danger", 255)),
+    # 小卡片碎片页页脚两个按钮（UI 重构 06）：随页脚一起从「行内彩色小胶囊」
+    # 改成高仿真 .mini-foot .ib 的「裸露图标钮」—— 常态透明无边框，hover 只
+    # 叠一层淡底。故端点从实底（danger/primary 255）换成 surface_2/3 实色。
+    # 注：theme.py 里 #fragDelBtn:hover 的历史 `color: white` 未同步删除
+    # （那是文字色；纯图标钮的图标色由 IconButton 的 QIcon::Active 位图负责，
+    #  QSS color 不参与绘制），保留以免误触 test_smooth_buttons 的既有契约。
+    "fragDelBtn":       (("danger", 26), ("danger", 46)),
+    # 小卡片右上角关闭钮（UI 重构 06）：随页眉一起改成高仿真 .mini-head .x 的
+    # 中性图标钮 —— 常态透明、hover 只叠一层浅面，红底实心已是历史。
+    "cardCloseBtn":     (("surface_2", 255), ("surface_3", 255)),
+    # 页脚新增的「编辑」钮，与复制钮同为中性 hover；未收录会掉进兜底
+    # （primary_hover 实底）→ hover 变绿，与本页脚风格冲突。
+    "fragEditBtn":      (("surface_2", 255), ("surface_3", 255)),
     "iconBtn":          (("primary", 31), ("primary", 46)),
     "iconBtn_danger":   (("danger", 26), ("danger", 46)),   # iconBtn[danger="true"] 属性变体
     "sideTabIconBtn":   (("primary", 31), ("primary", 46)),
     "settingsNavBtn":   (("primary", 20), ("primary", 31)),
     "stepBtn":          (("primary", 46), ("primary", 77)),
     "navSiteCard":      (("primary", 46), ("primary", 77)),
-    "modeBtn":          (("primary_hover", 255), ("primary_pressed", 255)),
+    # 2026-10-02 悬停配色优化：modeBtn 常态是 ghost（$primary_a12），hover
+    # 端点从 primary_hover 实底改淡染 —— 否则 ghost→实底突跳，且未选中态
+    # 主色文字叠 primary_hover 底几乎不可读；淡染端点叠在选中态实底上与
+    # 底同色（视觉 no-op，选中钮不再跳色）。tableOpenBtn 同理保持 ghost 语系。
+    "modeBtn":          (("primary", 46), ("primary", 77)),
     "taskAddBtn":       (("primary_hover", 255), ("primary_pressed", 255)),
     "nextBtn":          (("primary_hover", 255), ("primary_pressed", 255)),
-    "fragCopyBtn":      (("primary", 255), ("primary_pressed", 255)),
-    "tableOpenBtn":     (("primary", 255), ("primary_pressed", 255)),
+    # 同上：碎片页页脚复制钮 → 中性 hover 淡底
+    "fragCopyBtn":      (("surface_2", 255), ("surface_3", 255)),
+    "tableOpenBtn":     (("primary", 46), ("primary", 77)),
     "undoUndoBtn":      (("primary_lite", 255), ("primary_lite", 255)),
     # S4：侧栏导航行。端点对照 navBtn:hover/:pressed 被删的 a08/a18；
     # 拖拽态（[dragging="true"] 的 a18 底）仍归 QSS（静态状态，无过渡需求）。
@@ -97,11 +113,12 @@ _SMOOTH_OVERLAYS = {
 # RADIUS_CTL。UI 重构 01 起取 constants.RADIUS_* 与 QSS 的 $r_* 同源 ——
 # theme.py 圆角四档收敛后这里的像素值全部随之更新，两边不再可能漂移。
 _OVERLAY_RADIUS = {
-    "modeBtn": RADIUS_CTL, "cardCloseBtn": RADIUS_CTL,
+    "modeBtn": RADIUS_CTL, "cardCloseBtn": RADIUS_CHIP,
     "nextBtn": RADIUS_CTL, "iconBtn": RADIUS_PANEL,
     "sideTabIconBtn": RADIUS_PANEL, "settingsNavBtn": RADIUS_PANEL,
     "tableOpenBtn": RADIUS_CTL, "undoUndoBtn": RADIUS_CTL,
     "fragCopyBtn": RADIUS_CTL, "fragDelBtn": RADIUS_CTL,
+    "fragEditBtn": RADIUS_CTL,
     "navBtn": RADIUS_PANEL, "secondaryBtn": RADIUS_CTL,
     "textBtn": RADIUS_CTL,
 }
@@ -854,7 +871,8 @@ def tune_list_scrolling(view):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setPen(QPen(QColor(colors["primary_a30"]), 1))
+        # primary_a30 是 QSS rgba 字符串，QColor 不认（无效色 → 画成黑环）
+        p.setPen(QPen(_to_color(colors["primary_a30"]), 1))
         p.setBrush(fill)
         p.drawRoundedRect(r, r.height() / 2.0, r.height() / 2.0)
         p.setPen(QColor(colors["text"]))

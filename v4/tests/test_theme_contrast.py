@@ -172,6 +172,36 @@ def test_base_button_text_is_readable_in_both_themes():
             )
 
 
+def test_primary_hover_is_a_lift_not_a_darken():
+    """2026-10-02 悬停配色优化：实底主色钮 hover =「轻提亮」语义 ——
+    两个主题的 primary_hover 都必须比 primary 亮（旧压暗端点 #0C5A47
+    大色块发闷，是本次优化动因），pressed 仍下沉；字面量一并钉死。
+
+    反向验证：把任一 hover 值改暗（如复用旧 #0C5A47）、或把 light/dark
+    字面量互换，钉死断言与亮度关系断言各有一个必然红灯。
+    """
+    assert THEMES["light"]["primary_hover"] == "#227A64"
+    assert THEMES["light"]["primary_pressed"] == "#0C5A47"
+    assert THEMES["dark"]["primary_hover"] == "#68CFAC"
+
+    def _hsl_lightness(hex_color: str) -> float:
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return (max(r, g, b) + min(r, g, b)) / 2
+
+    for theme in ("light", "dark"):
+        c = THEMES[theme]
+        base = _hsl_lightness(c["primary"])
+        assert _hsl_lightness(c["primary_hover"]) > base, (
+            "%s 主题 primary_hover(%s) 必须比 primary(%s) 亮（轻提亮语义）"
+            % (theme, c["primary_hover"], c["primary"])
+        )
+        assert _hsl_lightness(c["primary_pressed"]) < base, (
+            "%s 主题 primary_pressed(%s) 必须比 primary(%s) 暗（下沉语义）"
+            % (theme, c["primary_pressed"], c["primary"])
+        )
+
+
 def test_danger_and_disabled_states_still_use_their_own_colors():
     """守卫改动边界：danger 按钮用 $danger（文字按钮，不做红胶囊）、disabled
     的灰字都不该被顺手改掉。

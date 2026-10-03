@@ -28,12 +28,13 @@ from PyQt6.QtCore import (
     QVariantAnimation, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QColor, QImageReader, QPainter, QPainterPath, QPen, QPixmap,
+    QImageReader, QPainter, QPainterPath, QPen, QPixmap,
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
 from src.icon_render import icon as render_icon, paint_icon
 from src.controls import EmptyState, IconButton, PageTitle
+from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src import motion
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）。
@@ -189,12 +190,18 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         # ---- 单元背景卡（选中/hover/常态）----
+        # ★ 色值一律走 _to_color：这里 4 个令牌是 QSS 的 rgba() 写法，
+        #   QColor("rgba(...)") 会得到**无效色**，画出来是纯黑 —— hover 变
+        #   "黑块卡"的根因（notes_panel/controls 同款坑早已用 _to_color 收口，
+        #   本文件在 UI 重构 05 改 delegate 时漏了这层）。
         if selected:
-            painter.setPen(QPen(QColor(colors["primary"]), 1.4))
-            painter.setBrush(QColor(colors["primary_a12"]))
+            painter.setPen(QPen(_to_color(colors["primary"]), 1.4))
+            painter.setBrush(_to_color(colors["primary_a12"]))
         elif hover:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(colors["primary_a08"]))
+            # 悬停 = 淡主色底 + 1px 主色细环，与主窗输入框 hover（$primary_a30
+            # 环）同一语言；只铺底色的话白底缩略图几乎看不出悬停反馈。
+            painter.setPen(QPen(_to_color(colors["primary_a30"]), 1))
+            painter.setBrush(_to_color(colors["primary_a08"]))
         else:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -217,12 +224,12 @@ class _AssetThumbDelegate(QStyledItemDelegate):
                 painter.setOpacity(max(0.0, float(fade)))   # 到货淡入
             painter.drawPixmap(trect.toRect(), pix)
             painter.restore()
-            painter.setPen(QPen(QColor(colors["hair"]), 1))
+            painter.setPen(QPen(_to_color(colors["hair"]), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(trect, 8, 8)
         else:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(colors["panel_fill"]))
+            painter.setBrush(_to_color(colors["panel_fill"]))
             painter.drawRoundedRect(trect, 8, 8)
             if not exists:
                 icon_name, sub = "warning", "文件已失效"
@@ -243,7 +250,7 @@ class _AssetThumbDelegate(QStyledItemDelegate):
             sub_f = painter.font()
             sub_f.setPointSize(8)
             painter.setFont(sub_f)
-            painter.setPen(QColor(colors["text_secondary"]))
+            painter.setPen(_to_color(colors["text_secondary"]))
             painter.drawText(QRectF(trect.left(), trect.bottom() - 20,
                                     trect.width(), 16),
                              Qt.AlignmentFlag.AlignHCenter, sub)
@@ -251,7 +258,7 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         # ---- 文件名 ----
         painter.setFont(option.font)
         fm = painter.fontMetrics()
-        painter.setPen(QColor(colors["text"]))
+        painter.setPen(_to_color(colors["text"]))
         name = fm.elidedText(asset.original_name,
                              Qt.TextElideMode.ElideMiddle,
                              int(rect.width() - self.PAD * 2))
@@ -267,7 +274,7 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         meta_f = painter.font()
         meta_f.setPointSize(max(8, meta_f.pointSize() - 1))
         painter.setFont(meta_f)
-        painter.setPen(QColor(colors["text_secondary"]))
+        painter.setPen(_to_color(colors["text_secondary"]))
         meta = f"{asset.size_display()} · {time_display}"
         meta_fm = painter.fontMetrics()
         meta = meta_fm.elidedText(meta, Qt.TextElideMode.ElideMiddle,
@@ -369,6 +376,17 @@ class AssetsPanel(QWidget):
         v.addWidget(self._stack, 1)
 
     # ---- 主题联动 ----
+    def _colors(self) -> dict:
+        """面板级取色（右键菜单这类"非 delegate"场景用）。
+
+        ★ 同名方法在 `_AssetThumbDelegate` 上还有一个 —— 那是 delegate 自己
+          的；本方法补的是**面板这层**的入口。2026-10-02 右键菜单给删除项
+          上 danger 色图标时误用了 delegate 的入口，`AssetsPanel` 没有这个
+          属性，一右键就 AttributeError 弹程序异常窗。
+        """
+        theme = getattr(self._host, "current_theme", None) or DEFAULT_THEME
+        return get_colors(theme)
+
     def apply_theme(self):
         """主题切换后重绘（delegate 每帧动态取色，无需重建）"""
         self._asset_list.viewport().update()
