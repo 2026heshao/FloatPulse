@@ -5,10 +5,12 @@
   A. 默认关闭：首屏条目集合 = 全部素材（等价改动前平铺）
   B. 开启分组：条目集合与平铺**逐项相等**（只重排，不增删）
   C. 真聚类：5 张同刻连拍 → 1 堆，堆名 "5 张 · HH:MM"
-  D. 阈值可调：改 asset_group_gap_seconds 改变堆数（配置生效，非写死）
+  D. 阈值可调：改 asset_group_gap_seconds 改变堆结构（配置生效，非写死）
   E. 分组模式真出像素：堆标题栏区域与平铺模式**渲染不同**（切片比对）
   F. 切回平铺：条目顺序复原
   G. 不落库：开关分组前后 temp_assets.json 字节不变
+  H. 观感返工（2026-10-03）：单张堆不画标题 / 堆内非首格挂序号 /
+     标题条走专属高度且平铺态单元尺寸一字不变
 
 运行（offscreen）：
   python tools/run_gui_check.py tools/verify_asset_grouping.py
@@ -208,18 +210,28 @@ def main():
         bad("E 截图落盘失败: %s" % exc)
 
     # D. 阈值可调（配置生效；用范围内值，≥10）
-    #    5 张连拍间隔 15 秒 + 2 张晚片间隔 1 秒：
+    #    5 张连拍间隔 15 秒 + 2 张晚片间隔 1 秒（gap 与「堆标题数」已解耦：
+    #    单张堆不画标题，故额外用「堆内非首格数」的阶梯一起判）：
     #      gap=10  → 连拍各自独立(5) + 晚片并 1 堆 = 6 堆
+    #                → 标题 1（只有晚片那对 ≥2）、序号 1（晚片第二张）
     #      gap=600 → 连拍并 1 堆 + 晚片并 1 堆 = 2 堆
+    #                → 标题 2、序号 5（4 + 1）
     cfg.set("asset_group_gap_seconds", 10)
     panel.refresh()
     n_small = len(panel._thumb_delegate._header_texts)
+    o_small = len(panel._thumb_delegate._member_ordinals)
     cfg.set("asset_group_gap_seconds", 600)
     panel.refresh()
     n_big = len(panel._thumb_delegate._header_texts)
-    check(n_small == 6, "D gap=10s → 6 堆（15 秒间隔断开）(实际 %d)" % n_small)
-    check(n_big == 2, "D gap=600s → 2 堆（连拍并拢）(实际 %d)" % n_big)
-    check(n_small != n_big, "D 阈值改动确实改变堆数（配置生效，非写死）")
+    o_big = len(panel._thumb_delegate._member_ordinals)
+    check(n_small == 1, "D gap=10s → 仅晚片 1 堆有标题（连拍的 5 张都是单张）"
+                        "(实际 %d)" % n_small)
+    check(n_big == 2, "D gap=600s → 2 堆都有标题 (实际 %d)" % n_big)
+    check(o_small == 1 and o_big == 5,
+          "D 序号阶梯 1 → 5（阈值改动真改变堆结构，非写死）(实际 %d/%d)"
+          % (o_small, o_big))
+    check(n_small != n_big and o_small != o_big,
+          "D 阈值改动确实改变分组结果（配置生效，非写死）")
     # 越界值被拒（护栏：阈值有范围）
     check(cfg.set("asset_group_gap_seconds", 5) is False, "D 阈值 <10 被配置拒绝")
     check(cfg.set("asset_group_gap_seconds", 99999) is False, "D 阈值 >3600 被配置拒绝")
@@ -234,6 +246,59 @@ def main():
     # G. 不落库
     d1 = digest(json_path) if os.path.exists(json_path) else None
     check(d0 == d1, "G 全程 temp_assets.json 字节不变（零落库）")
+
+    # ---- H. 观感返工（2026-10-03 用户目检反馈）----
+    # H1. 标题条走**专属**高度：分组态单元高 = 平铺 + HEADER_H，缩略图不变
+    panel.set_grouping(False)
+    pump(app, 30)
+    flat_h = panel._thumb_delegate.CELL_H
+    panel.set_grouping(True)
+    pump(app, 30)
+    d = panel._thumb_delegate
+    check(d.CELL_H == flat_h + d.HEADER_H,
+          "H1 分组态单元高 %d = 平铺 %d + 标题条 %d (实际 %d)"
+          % (flat_h + d.HEADER_H, flat_h, d.HEADER_H, d.CELL_H))
+    check(d.THUMB_H == flat_h - 64,
+          "H1 缩略图尺寸不随分组变 (THUMB_H=%d)" % d.THUMB_H)
+
+    # H2. 三张各隔 1 小时（全单张堆）→ 一个标题都不许有，但必须逐张铺出
+    mgr2 = TempAssetManager(tmp)
+    img2 = make_image(os.path.join(tmp, "solo.png"), 200)
+    mgr2._assets = [AssetInfo(i, "solo%d.png" % i, img2, True, 10, t_str(i * 3600))
+                    for i in range(1, 4)]
+    mgr2._next_id = 4
+    cfg.set("asset_group_gap_seconds", 120)
+    panel2 = AssetsPanel(Host(mgr2, cfg))
+    panel2._valid_ids = {a.asset_id for a in mgr2._assets}
+    panel2.set_grouping(True)
+    pump(app, 30)
+    d2 = panel2._thumb_delegate
+    check(d2._header_texts == {},
+          "H2 单张堆不画标题条 (实际 %r)" % (d2._header_texts,))
+    check(d2._member_ordinals == {}, "H2 单张堆无堆内序号")
+    check(panel2._asset_list.count() == 3, "H2 单张堆仍逐张铺出（不丢图）")
+    check(d2.CELL_H == d2.THUMB_H + 64 + d2.HEADER_H,
+          "H2 有单张堆时整批仍统一垫高（否则同排缩略图错位）")
+
+    # H3. 堆内非首格挂 "#2" 序号，堆首保留真实文件名
+    cfg.set("asset_group_gap_seconds", 900)
+    panel.refresh()
+    ords = panel._thumb_delegate._member_ordinals
+    check(sorted(ords.values()) == ["#2", "#2", "#3", "#4", "#5"],
+          "H3 两组各自从 #2 起编号（5 张 → #2..#5，2 张 → #2）(实际 %r)"
+          % (sorted(ords.values()),))
+    check(not (set(panel._thumb_delegate._header_texts) & set(ords)),
+          "H3 堆首格不挂序号（保留真实文件名）")
+
+    # H4. 切回平铺：两张表都清空（分组态残留不许带回去）
+    panel.set_grouping(False)
+    pump(app, 30)
+    check(panel._thumb_delegate._header_texts == {}
+          and panel._thumb_delegate._member_ordinals == {},
+          "H4 平铺态无标题、无序号")
+    check(panel._thumb_delegate._group_mode is False
+          and panel._thumb_delegate.CELL_H == flat_h,
+          "H4 平铺态单元高回到 %d" % flat_h)
 
     print("\n==== 结果：%d 通过 / %d 失败 ====" % (PASS, FAIL))
     sys.stdout.flush()
