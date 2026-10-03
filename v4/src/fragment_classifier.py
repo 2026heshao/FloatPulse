@@ -41,6 +41,19 @@ CATEGORY_LABELS = {
 # UI 下拉的展示顺序（全部内容 / 链接 / 代码 / 路径 / 命令 / 普通文本）
 CATEGORY_ORDER = [CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND, CAT_TEXT]
 
+# 类别 → 主题色 token 名（**展示层取色唯一真相源**，token 定义见 theme.py）：
+#   链接=link(蓝) / 代码=primary(青) / 路径=warn(橙) / 命令=danger(红) /
+#   文本=text_secondary(灰，弱化"普通"存在感)
+# 主窗口碎片工作台的类别色条（fragments_panel）与小卡片的类别圆点
+# （card_window）共用本表 —— 两处此前各自持有/约定，加类别时会漏改一边。
+CATEGORY_TOKENS = {
+    CAT_LINK:    "link",
+    CAT_CODE:    "primary",
+    CAT_PATH:    "warn",
+    CAT_COMMAND: "danger",
+    CAT_TEXT:    "text_secondary",
+}
+
 # 合法类别集合（数据层校验用：from_dict 拿到非法值时兜底重算）
 VALID_CATEGORIES = frozenset(CATEGORY_LABELS.keys())
 
