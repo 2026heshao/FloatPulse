@@ -6,9 +6,11 @@
   B 合法插件 → 动作进注册表、菜单出现、QAction.trigger() 真能驱动插件 run()
   C 坏插件（requires=requests / 抢核心热键 / 抢已占热键）→ 全部跳过 + 日志有记录
   D .fpplug（zip）→ 自动解压后加载，原文件保留
-  E 右键菜单顺序：打开主窗口 | [番茄钟项] | [插件动作] | 运行时追加项 | 退出程序（固定垫底）
+  E 右键菜单三段结构（文本 + icon_name 签名断言）：进入段=打开主窗口/小卡片▸
+    → 执行段=番茄钟项/追加项/插件功能▸ → 退出段=退出程序（固定垫底）
   F deactivate → 菜单回到无插件基线；activate → 恢复且模块未重导入
   G 插件 run() 抛异常 → 球不崩（注册表兜住），菜单/其他插件不受影响
+  I 菜单护栏（2026-10-02 图标化）：文本零 emoji；切主题后子菜单 QSS 跟随
 
 跑法：python tools/run_gui_check.py tools/verify_plugin_loader.py
 """
@@ -190,33 +192,78 @@ check("F0 run() 抛异常被兜住", registry.trigger("boom.act", ctx) is False
 
 # ====================================================================
 # E：悬浮球右键菜单数据驱动
+#   2026-10-02 菜单图标化：断言从「文本列表」升级成 (text, icon_name)
+#   签名 —— 只比文本的话，忘记 setIcon 不会红灯，图标也必须是契约。
 # ====================================================================
 ball = FloatingBall([])
 _extra_calls = []
-ball.add_context_action("✂ 截图钉屏", lambda: _extra_calls.append(1))
+ball.add_context_action("截图钉屏", lambda: _extra_calls.append(1),
+                        icon="screenshot")
 ball.set_action_registry(registry, ctx)
 
-texts = [a.text() for a in ball._menu.actions()]
-print(f"    菜单项：{texts}", flush=True)
 
-# v2026-10-01 分组收纳：插件动作收进「🧩 插件功能」子菜单（用户拍板，
-# Win11「新建 >」同款层级）——一级菜单里插件段只剩一个子菜单项
-expected = ["🖥  打开主窗口", "", "🍅 开始专注", "", "🧩 插件功能",
-            "", "✂ 截图钉屏", "", "退出程序"]
-check("E1 插件功能子菜单插在「打开主窗口」与「退出程序」之间", texts == expected,
-      f"{texts}")
-check("E2 退出程序固定垫底，截图钉屏插在它之前",
-      texts[-1] == "退出程序" and texts[-3] == "✂ 截图钉屏",
+def menu_signature(menu):
+    """菜单 → [(text, icon_name)]；分隔线记 ("", "")。"""
+    out = []
+    for a in menu.actions():
+        if a.isSeparator():
+            out.append(("", ""))
+        else:
+            out.append((a.text(), str(a.property("icon_name") or "")))
+    return out
+
+
+def print_sig(sig):
+    parts = []
+    for t, i in sig:
+        if not t:
+            parts.append("---")
+        else:
+            parts.append(f"{t}[{i}]" if i else t)
+    print("    " + " | ".join(parts), flush=True)
+
+
+texts = [a.text() for a in ball._menu.actions()]
+sig = menu_signature(ball._menu)
+print_sig(sig)
+
+# 三段结构（方案 A）：进入段=打开主窗口/小卡片▸，执行段=番茄钟/追加项/插件▸，
+# 退出段=退出程序；段间各一条分隔线。
+expected = [
+    ("打开主窗口", "window"), ("小卡片", "ball"), ("", ""),
+    ("开始专注", "pomodoro"), ("截图钉屏", "screenshot"),
+    ("插件功能", "plugins"), ("", ""),
+    ("退出程序", "power"),
+]
+check("E1 插件功能子菜单插在执行段末尾、退出程序之前（文本+图标签名）",
+      sig == expected, f"{sig}")
+check("E2 退出程序固定垫底，截图钉屏落执行段（插件功能之前）",
+      texts[-1] == "退出程序"
+      and texts.index("截图钉屏") < texts.index("插件功能"),
       f"{texts[-4:]}")
 _submenu = next((a.menu() for a in ball._menu.actions()
-                 if a.text() == "🧩 插件功能"), None)
-check("E2b 子菜单真实存在且收纳全部插件动作",
+                 if a.text() == "插件功能"), None)
+check("E2b 子菜单真实存在且收纳全部插件动作（兜底 plugin 图标）",
       _submenu is not None
-      and [a.text() for a in _submenu.actions()] == ["屏幕取色"],
-      f"{[a.text() for a in _submenu.actions()] if _submenu else None}")
+      and menu_signature(_submenu) == [("屏幕取色", "plugin")],
+      f"{menu_signature(_submenu) if _submenu else None}")
+_card_sub = next((a.menu() for a in ball._menu.actions()
+                  if a.text() == "小卡片"), None)
+check("E2c 小卡片子菜单收录 7 个模式（图标复用 card_modes）",
+      _card_sub is not None
+      and menu_signature(_card_sub) == [
+          ("碎片", "fragments"), ("知识卡片", "knowledge"),
+          ("日程任务", "tasks"), ("临时笔记", "notes"),
+          ("网址导航", "nav"), ("临时素材", "assets"),
+          ("软件导航", "apps")],
+      f"{menu_signature(_card_sub) if _card_sub else None}")
 
-# 基线（无插件）与设计一致：打开主窗口 | 🍅 开始专注 | 截图钉屏 | 退出程序
-baseline = ["🖥  打开主窗口", "", "🍅 开始专注", "", "✂ 截图钉屏", "", "退出程序"]
+# 基线（无插件）：进入段 | 开始专注/截图钉屏 | 退出程序
+baseline = [
+    ("打开主窗口", "window"), ("小卡片", "ball"), ("", ""),
+    ("开始专注", "pomodoro"), ("截图钉屏", "screenshot"), ("", ""),
+    ("退出程序", "power"),
+]
 
 # 通过菜单 QAction 真触发插件 run()
 action_item = [a for a in _submenu.actions() if a.text() == "屏幕取色"] \
@@ -230,7 +277,7 @@ check("E4 点击菜单项真的驱动了插件 run()",
 
 # 追加项回调仍然只有它自己触发
 check("E5 触发插件动作不会误触运行时追加项", _extra_calls == [])
-[a for a in ball._menu.actions() if a.text() == "✂ 截图钉屏"][0].trigger()
+[a for a in ball._menu.actions() if a.text() == "截图钉屏"][0].trigger()
 check("E6 运行时追加项回调可正常触发", _extra_calls == [1])
 
 # ====================================================================
@@ -238,14 +285,14 @@ check("E6 运行时追加项回调可正常触发", _extra_calls == [1])
 # ====================================================================
 n = loader.deactivate()
 ball.refresh_plugin_menu()
-after_off = [a.text() for a in ball._menu.actions()]
+after_off = menu_signature(ball._menu)
 check("F1 deactivate 摘掉全部插件动作（demo.pick + boom.act，"
       ".fpplug 动作已不存在）", n == 2, f"摘除 {n}")
 check("F2 菜单回到无插件基线", after_off == baseline, f"{after_off}")
 
 loader.activate()
 ball.refresh_plugin_menu()
-after_on = [a.text() for a in ball._menu.actions()]
+after_on = menu_signature(ball._menu)
 check("F3 activate 恢复动作且菜单复原", after_on == expected, f"{after_on}")
 check("F4 activate 未重新导入模块（同一模块对象）",
       sys.modules.get("floatpulse_plugin_01_demo") is mod)
@@ -265,6 +312,42 @@ check("G2 悬浮球右键菜单对象仍可用", ball._menu is not None
       and len(ball._menu.actions()) == len(expected))
 check("G3 球体未因插件异常被破坏（可见性与尺寸正常）",
       ball._host_size > 0 and ball._ball_size > 0)
+
+# ====================================================================
+# I：菜单图标化护栏（2026-10-02 缺陷 #1 / #2 的钉子）
+#   I1 菜单文本不得含 emoji（含子菜单，防豆腐块回潮）
+#   I2 护栏自检：两主题 QSS 不同 + 失配可检出（否则 I3/I4 是恒真假护栏）
+#   I3/I4 切主题后一级 + 子菜单 QSS 全部跟随
+#      （此前 apply_theme 只刷一级菜单：先切主题再右键，子菜单停留在
+#        建菜单那一刻的主题 —— 实测过的真缺陷）
+# ====================================================================
+from PyQt6.QtWidgets import QMenu as _QMenu          # noqa: E402
+from src.icons import _is_leading_glyph              # noqa: E402
+from src.theme import get_menu_qss                   # noqa: E402
+
+_all_menus = lambda: [ball._menu] + ball._menu.findChildren(_QMenu)  # noqa: E731
+
+bad_glyph = [(a.text(), ch) for m in _all_menus() for a in m.actions()
+             for ch in (a.text() or "") if _is_leading_glyph(ch)]
+check("I1 菜单文本（含子菜单）不得含 emoji / 字形前缀", not bad_glyph,
+      f"{bad_glyph}")
+
+qss_light = get_menu_qss("light")
+_subs = ball._menu.findChildren(_QMenu)
+_probe = _subs[0]
+_probe.setStyleSheet(get_menu_qss("dark"))       # 故意改坏 → 比较必须能变红
+_mismatch_seen = any(m.styleSheet() != qss_light for m in _all_menus())
+_probe.setStyleSheet(qss_light)
+check("I2 护栏自检：两主题 QSS 不同且失配可检出（I3/I4 非恒真）",
+      qss_light != get_menu_qss("dark") and _mismatch_seen)
+
+ball.apply_theme("light")
+check("I3 切浅色后一级 + 子菜单 QSS 全部跟随",
+      all(m.styleSheet() == qss_light for m in _all_menus()),
+      f"菜单数={len(_all_menus())}（含一级）")
+ball.apply_theme("dark")
+check("I4 切回深色后一级 + 子菜单 QSS 全部跟随",
+      all(m.styleSheet() == get_menu_qss("dark") for m in _all_menus()))
 
 ball.deleteLater()
 
