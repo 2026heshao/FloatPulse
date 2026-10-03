@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QFrame, QMessageBox, QTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication,
+    QCheckBox, QRadioButton, QButtonGroup,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, QRect
 from PyQt6.QtGui import QColor, QFontMetrics, QBrush
@@ -34,6 +35,7 @@ from src.fragment_classifier import (
     CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
     CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TOKENS,
 )
+from src import secret_guard
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.list_windowing import ListWindowing, attach_scroll_loader
@@ -641,6 +643,7 @@ class FragmentsPanel(QWidget):
         self._building = False             # 重建中标志：屏蔽滚动触发的追加
         self._build_ui()
         self._start_foreground_tracker()
+        self._connect_secret_guard()
 
     # ---- UI 构建 ----
     def _build_ui(self):
@@ -714,6 +717,14 @@ class FragmentsPanel(QWidget):
         self._preview_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._preview_btn.toggled.connect(self._on_preview_toggled)
         toolbar.addWidget(self._preview_btn)
+
+        # 凭证哨兵回溯入口（clipboard-guard）：平时隐藏，有命中时出现
+        self._guard_btn = IconButton("lock", text="凭证 0", icon_size=14,
+                                     object_name="secondaryBtn")
+        self._guard_btn.setToolTip("有 0 条复制命中了凭证检测")
+        self._guard_btn.setVisible(False)
+        self._guard_btn.clicked.connect(self._open_guard_dialog)
+        toolbar.addWidget(self._guard_btn)
 
         refresh_btn = IconButton("refresh", text="刷新", icon_size=14,
                                  object_name="secondaryBtn")
@@ -1452,6 +1463,128 @@ class FragmentsPanel(QWidget):
         self._reuse_counter.record(text)
 
     # ---- 一键粘回（reuse 卡）----
+    # ==================================================================
+    # 凭证哨兵回溯（clipboard-guard）
+    # ==================================================================
+    def _connect_secret_guard(self):
+        """接线凭证哨兵信号：命中即刷新入口按钮计数。
+
+        剪贴板监听是后台自动的，弹窗会打断用户 —— 故命中时哨兵已按
+        **保守策略（遮蔽占位）落盘**，这里只把入口按钮点亮（不弹窗），
+        用户想回溯改判时再自己点开。入口可见 = 命中「不会被静默吞掉」。
+        """
+        mon = self._clipboard_monitor
+        sig = getattr(mon, "secret_guarded", None) if mon is not None else None
+        if sig is not None:
+            try:
+                sig.connect(self._on_secret_guarded)
+            except (TypeError, RuntimeError):
+                pass
+        self._refresh_guard_entry()
+
+    def _on_secret_guarded(self, _info):
+        """命中事件 → 只更新入口按钮（不弹窗、不打断）。"""
+        self._refresh_guard_entry()
+        self._host.show_toast("检测到疑似凭证，已按遮蔽处理；可点「凭证」入口查看")
+
+    def _refresh_guard_entry(self):
+        """刷新凭证入口按钮的可见性与计数文案。"""
+        btn = getattr(self, "_guard_btn", None)
+        mon = self._clipboard_monitor
+        if btn is None or mon is None:
+            return
+        pending = getattr(mon, "guard_pending", None)
+        if pending is None:
+            btn.setVisible(False)
+            return
+        count = len(pending())
+        btn.setText(f"凭证 {count}")
+        btn.setToolTip(f"有 {count} 条复制命中了凭证检测，点击查看并改判" if count
+                       else "暂无命中凭证的复制")
+        btn.setVisible(count > 0)
+
+    def _open_guard_dialog(self):
+        """打开凭证回溯对话框：逐条列出命中，让用户三选一改判。"""
+        mon = self._clipboard_monitor
+        if mon is None or not hasattr(mon, "guard_pending"):
+            return
+        pending = mon.guard_pending()
+        if not pending:
+            self._host.show_toast("没有待处理的凭证命中")
+            return
+
+        dlg = GlassDialog(self._host, title="凭证哨兵",
+                          subtitle=f"待处理 {len(pending)} 条", size=(620, 500))
+        body = dlg.body_layout
+
+        hint = QLabel("以下复制命中了凭证检测（API key / token 等）。"
+                      "已按遮蔽处理，原文未落明文。逐条选择处置：")
+        hint.setObjectName("hintLabel")
+        hint.setWordWrap(True)
+        body.addWidget(hint)
+
+        # 「本次记住」：勾选后本次处置同时作为本进程默认（不写持久配置）
+        remember = QCheckBox("本次记住（仅本进程，不写配置）")
+        remember.setChecked(False)
+        body.addWidget(remember)
+
+        mode_labels = (
+            (secret_guard.MODE_MASK, "保持遮蔽"),
+            (secret_guard.MODE_ALLOW, "仅本次记录原文"),
+            (secret_guard.MODE_DENY, "删除该条"),
+        )
+        # 每条一个单选组：默认「保持遮蔽」（= 当前实际状态，不选即不动）
+        groups = []
+        for i, info in enumerate(pending):
+            card = QFrame()
+            card.setObjectName("glassCard")
+            cbox = QVBoxLayout(card)
+            cbox.setContentsMargins(12, 10, 12, 10)
+            cbox.setSpacing(6)
+            rule = info.get("rule", "?")
+            preview = (info.get("preview") or "").splitlines()[0][:80]
+            title = QLabel(f"#{i + 1}  （规则：{rule}）")
+            body_lbl = QLabel(preview or "（空）")
+            body_lbl.setObjectName("hintLabel")
+            body_lbl.setWordWrap(True)
+            cbox.addWidget(title)
+            cbox.addWidget(body_lbl)
+            row = QHBoxLayout()
+            group = QButtonGroup(card)
+            for mode, text in mode_labels:
+                rb = QRadioButton(text)
+                rb.setProperty("guard_mode", mode)
+                if mode == secret_guard.MODE_MASK:
+                    rb.setChecked(True)
+                group.addButton(rb)
+                row.addWidget(rb)
+            row.addStretch()
+            cbox.addLayout(row)
+            body.addWidget(card)
+            groups.append(group)
+
+        def _apply():
+            for idx in range(len(pending) - 1, -1, -1):
+                group = groups[idx]
+                checked = group.checkedButton()
+                mode = checked.property("guard_mode") if checked else None
+                if mode:
+                    mon.resolve_guard(idx, mode)
+            if remember.isChecked():
+                mon.remember_guard_mode(secret_guard.MODE_MASK)
+            self._refresh_guard_entry()
+            self.refresh(preserve_view=True)
+
+        # 挂到对话框上，便于离屏测试直连「应用」而无需真正 exec 模态
+        dlg._guard_apply = _apply
+
+        dlg.add_footer([
+            ("应用", "primaryBtn", _apply, "check"),
+            ("关闭", "secondaryBtn", dlg.accept),
+        ])
+        dlg.exec()
+        self._refresh_guard_entry()
+
     def _start_foreground_tracker(self):
         """低频记录"非本程序的前台窗口"，供「粘回」还原焦点。
 

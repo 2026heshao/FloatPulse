@@ -20,6 +20,11 @@
  10. 图片捕获（Y2）：剪贴板里是图片（截图/复制图片）且不含文本时，
      落盘为临时文件后交给 TempAssetManager 存入素材池，
      再删除中转文件；单张上限 IMAGE_MAX_BYTES，按内容哈希去重
+ 11. 凭证哨兵（clipboard-guard）：文本落盘前过一层凭证检测
+     （secret_guard，纯正则 + 香农熵），命中即按配置处置——
+     保守默认「遮蔽落盘」（先存占位，绝不静默丢弃），并记入待办队列
+     供 UI 回溯改判。默认**关闭**（clipboard_guard_enabled=False），
+     与既有行为逐项等价。这是**并列的一层**，不替换 _is_filtered_app。
 
 不实现的功能：
   - 不把图片存成碎片（图片统一进素材池，与拖拽到悬浮球的行为一致）
@@ -41,6 +46,7 @@ from PyQt6.QtWidgets import QApplication
 from src.fragment_manager import (
     FragmentManager,
 )
+from src import secret_guard
 from src.logger import get_logger
 
 # 剪贴板图片 MIME → 落盘扩展名（md.hasImage() 为假时的兜底路径）
@@ -127,6 +133,9 @@ class ClipboardMonitor(QObject):
     path_detected = pyqtSignal(str)
     fragments_trimmed = pyqtSignal(int)
     image_captured = pyqtSignal(int)
+    # 凭证哨兵：一次命中已按当前处置落盘后发射，参数为命中记录 dict。
+    # UI（碎片面板）监听本信号 → 把记录挂进「待办队列」，给用户回溯改判。
+    secret_guarded = pyqtSignal(dict)
 
     # 短时间内去重窗口（毫秒），同一内容在此间隔内不重复捕获
     DEDUP_INTERVAL_MS = 800
@@ -137,6 +146,17 @@ class ClipboardMonitor(QObject):
     # 图片最小边长：某些程序会把 1×1 位图放进剪贴板（如取色器），
     # 收集下来只会变成垃圾素材，直接放行
     IMAGE_MIN_SIDE = 4
+
+    # 待办队列上限（内存，不落盘）：超过就丢最老的，避免长期运行占内存
+    GUARD_QUEUE_MAX = 200
+
+    # 进程级审核计数器：埋点「凭证进明文池次数」（验收指标，进程内共享）
+    _audit = {"plain": 0, "masked": 0, "denied": 0, "allowed": 0}
+
+    @classmethod
+    def guard_audit(cls):
+        """返回一份审核计数快照（产品指标，供离屏/测试读取）。"""
+        return dict(cls._audit)
 
     def __init__(self, fragment_manager: FragmentManager, config_manager=None,
                  temp_asset_manager=None):
@@ -155,6 +175,12 @@ class ClipboardMonitor(QObject):
         self._last_image_hash = ""
         # 监听是否已启动
         self._started = False
+        # 凭证哨兵：本轮待用户回溯改判的命中队列（内存，不落盘）
+        # 每项 = {"fragment_id", "mode", "rule", "preview", "content"}
+        # content 保留原文，仅在内存里——用户选「仅本次记录原文」才写盘。
+        self._guard_queue = []
+        # 「本次记住」：本进程内记住的处置（不写持久配置）
+        self._guard_session_mode = None
 
     # ---------------- 启停 ----------------
     def start(self):
@@ -272,13 +298,126 @@ class ClipboardMonitor(QObject):
             self._add_text_fragment(text)
 
     def _add_text_fragment(self, content: str):
-        """添加文本碎片"""
+        """添加文本碎片（落盘前先过凭证哨兵）"""
+        # 凭证哨兵（clipboard-guard）：先判后写，绝不把明文凭证放进池子。
+        # 与 _is_filtered_app 并列的一层，不改变既有去重/裁剪逻辑。
+        content, is_guarded, guard_info = self._guard_text(content)
+        if is_guarded and content is None:
+            # 处置 = deny：整条不落盘。仍要通报 UI，用户必须知道「这条
+            # 被拦了、内容是什么」，否则等同于静默删除（功能故障）。
+            self._audit["denied"] += 1
+            self._enqueue_guard(guard_info)
+            return
         try:
             fid = self._fm.add_clipboard_text(content, source="剪贴板")
             self._trim_if_needed()
+            if is_guarded:
+                guard_info["fragment_id"] = fid
+                self._enqueue_guard(guard_info)
             self.fragment_added.emit(fid)
         except Exception as e:        # noqa: BLE001 - 捕获失败不中断监听，但留痕
             get_logger().warning(f"剪贴板文本碎片写入失败: {e}")
+
+    # ---------------- 凭证哨兵（clipboard-guard） ----------------
+    def _guard_config(self):
+        """读取哨兵配置：(enabled, mode)。未注入配置 → (False, default)。"""
+        if self._config is None:
+            return False, secret_guard.DEFAULT_MODE
+        enabled = bool(self._config.get("clipboard_guard_enabled", False))
+        mode = secret_guard.sanitize_mode(
+            self._config.get("clipboard_guard_mode", secret_guard.DEFAULT_MODE))
+        return enabled, mode
+
+    def _guard_text(self, content: str):
+        """对文本做凭证检测并按处置返回。
+
+        :return: ``(落盘文本, 是否命中, 命中记录)``
+                 - 未命中/开关关闭 → ``(原文本, False, None)``
+                 - deny   → ``(None, True, info)``    整条丢弃（不落盘）
+                 - mask   → ``(遮蔽文本, True, info)`` 占位落盘
+                 - allow  → ``(原文本, True, info)``   仅本次记录原文
+        """
+        enabled, mode = self._guard_config()
+        if not enabled:
+            return content, False, None
+        # 「本次记住」优先于持久配置（仅本进程有效，不写盘）
+        if self._guard_session_mode is not None:
+            mode = self._guard_session_mode
+        hits = secret_guard.detect(content)
+        if not hits:
+            return content, False, None
+        info = {
+            "mode": mode,
+            "rule": hits[0]["rule"],
+            "rules": [h["rule"] for h in hits],
+            "count": len(hits),
+            "preview": secret_guard.mask_text(content),
+            "content": content,       # 原文只留内存，供回溯改判
+            "fragment_id": None,
+        }
+        if mode == secret_guard.MODE_DENY:
+            return None, True, info
+        if mode == secret_guard.MODE_ALLOW:
+            self._audit["allowed"] += 1
+            return content, True, info
+        self._audit["masked"] += 1
+        return secret_guard.mask_text(content), True, info
+
+    def _enqueue_guard(self, info):
+        """把一次命中挂进待办队列并发信号，供 UI 回溯改判。"""
+        self._guard_queue.append(info)
+        if len(self._guard_queue) > self.GUARD_QUEUE_MAX:
+            self._guard_queue = self._guard_queue[-self.GUARD_QUEUE_MAX:]
+        try:
+            self.secret_guarded.emit(dict(info))
+        except Exception:             # noqa: BLE001 - 信号消费方异常不影响监听
+            pass
+
+    # ---- 回溯入口（供 UI 调用） ----
+    def guard_pending(self):
+        """返回当前待办命中记录（浅拷贝列表，调用方可安全遍历）。"""
+        return list(self._guard_queue)
+
+    def guard_pending_count(self) -> int:
+        return len(self._guard_queue)
+
+    def resolve_guard(self, index: int, mode: str) -> bool:
+        """用户回溯改判：把队列第 index 条按 mode 重新处置。
+
+        - ``allow``：把该条原文写回碎片池（若当初存的是占位，先改内容）
+        - ``mask`` ：把该条改为遮蔽占位
+        - ``deny`` ：从碎片池删除该条
+        返回是否成功；成功即从队列移除（已处理）。
+        """
+        mode = secret_guard.sanitize_mode(mode)
+        if not (0 <= index < len(self._guard_queue)):
+            return False
+        info = self._guard_queue[index]
+        fid = info.get("fragment_id")
+        try:
+            if mode == secret_guard.MODE_ALLOW:
+                original = info.get("content", "")
+                if fid:
+                    self._fm.update_fragment(fid, original)
+                else:
+                    # 当初被整条丢弃（deny）→ 这次补写回池
+                    fid = self._fm.add_clipboard_text(original, source="剪贴板")
+                    self._trim_if_needed()
+                self._audit["plain"] += 1
+            elif mode == secret_guard.MODE_DENY:
+                if fid:
+                    self._fm.delete_fragment(fid)
+            elif fid:
+                self._fm.update_fragment(fid, secret_guard.MASK_PLACEHOLDER)
+        except Exception as e:        # noqa: BLE001
+            get_logger().warning(f"凭证回溯改判失败: {e}")
+            return False
+        del self._guard_queue[index]
+        return True
+
+    def remember_guard_mode(self, mode: str):
+        """「本次记住」：仅本进程内记住处置，不写持久配置。"""
+        self._guard_session_mode = secret_guard.sanitize_mode(mode)
 
     def _add_path_fragment(self, path: str):
         """添加路径碎片"""

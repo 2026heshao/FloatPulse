@@ -80,6 +80,7 @@ from src.constants import (
 from src.theme import THEME_VALUES
 from src import accent
 from src import wallpaper
+from src import secret_guard
 from src.data_backups import rotate_backup
 from src.json_store import (STORE_VERSIONS, CONFIG_VERSION_KEY,
                             migrate_data)
@@ -163,6 +164,11 @@ DEFAULT_CONFIG = {
     "hide_on_fullscreen":   True,         # 全屏应用前台时自动隐藏悬浮球
     "fragment_preview_visible": True,     # 碎片工作台右侧预览面板是否显示
     "clipboard_capture_images": True,     # 剪贴板图片自动存入临时素材池
+    # 凭证哨兵（clipboard-guard）：文本落盘前过一层正则 + 熵检测，
+    # 命中即按 clipboard_guard_mode 处置。**默认关闭**（与既有行为等价，
+    # 上线后手工打开，出问题一键关回去）。
+    "clipboard_guard_enabled": False,      # 凭证哨兵总开关（默认关）
+    "clipboard_guard_mode":  "mask",       # 命中处置：deny / mask / allow
     "nav_order":            [],           # 左栏功能页显示顺序（空 = 从未自定义，用默认顺序）
     # 左栏当前**已展开**的分组集合（多组可同时展开；空列表 = 全部折叠）
     # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
@@ -250,6 +256,8 @@ _CONFIG_TYPES = {
     "hide_on_fullscreen":   bool,
     "fragment_preview_visible": bool,
     "clipboard_capture_images": bool,
+    "clipboard_guard_enabled": bool,
+    "clipboard_guard_mode": str,
     "nav_order":            list,
     "nav_expanded_groups":  list,
     "ai_backend_mode":      str,
@@ -327,6 +335,8 @@ _CONFIG_VALUE_WHITELISTS = {
     "accent": accent.ACCENT_IDS,
     # 壁纸适配模式：五选一，越界一律回落到 cover
     "wallpaper_mode": wallpaper.MODES,
+    # 凭证哨兵处置：deny/mask/allow 三选一（与 secret_guard.GUARD_MODES 同源）
+    "clipboard_guard_mode": secret_guard.GUARD_MODES,
 }
 
 
