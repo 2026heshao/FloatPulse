@@ -369,9 +369,10 @@ check("C8 范围与来源写进头部",
 from knowledge_ball import FloatingBall          # noqa: E402
 ball = FloatingBall([])
 ball.set_action_registry(registry, ctx)
-# v2026-10-01 分组收纳：插件动作在「🧩 插件功能」子菜单里（一级只剩子菜单项）
+# 2026-10-02 菜单图标化：子菜单标题去 emoji 前缀，且插件动作收进
+# 「插件功能」子菜单（一级只剩子菜单项）
 _plug_menu = next((a.menu() for a in ball._menu.actions()
-                   if a.text() == "🧩 插件功能"), None)
+                   if a.text() == "插件功能"), None)
 texts = [a.text() for a in _plug_menu.actions()] if _plug_menu else []
 print(f"    插件功能子菜单：{texts}", flush=True)
 check("D1 插件动作出现在球右键菜单的插件功能子菜单里",

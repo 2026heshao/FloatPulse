@@ -295,9 +295,11 @@ def section_main_window(app, theme):
     #   是 _toggle_theme()/set_theme() 里"_apply_theme() 之后再 emit"。
     win.theme_changed.emit(theme)
 
-    # 注册一个带 emoji 标题的演示插件页（验证剥离 + 占位图标）
+    # 注册两个演示插件页：demo 不在映射表（验证占位回落），
+    # kb-search 在表（验证 P5 专属图标真的挂上了按钮，2026-10-02）
     from PyQt6.QtWidgets import QWidget
     win.register_plugin_page("plugin:demo", "🤖 演示插件", QWidget())
+    win.register_plugin_page("plugin:kb-search", "🔍 站内搜索", QWidget())
 
     # 四组全展开，所有导航项都可见（默认只展开 workbench）
     win._current_expanded_groups = set(NAV_GROUPS)
@@ -338,6 +340,24 @@ def section_main_window(app, theme):
     check("E3 插件页用通用占位图标 plugin",
           plug_btn is not None
           and plug_btn.property("iconName") == icons.PLUGIN_PAGE_ICON)
+
+    # --- E3b 插件图标映射（P5 批次，2026-10-02）---
+    # 映射表里的插件挂专属图标（图标名来自 icons.PLUGIN_ICONS）；
+    # 未映射的 demo 仍落回占位 —— 两半合起来才是完整口径。
+    mapped_btn = win._nav_btns.get("plugin:kb-search")
+    want = icons.PLUGIN_ICONS.get("kb-search")
+    check(f"E3b 映射表插件挂专属图标（kb-search → {want}）",
+          want is not None
+          and mapped_btn is not None
+          and mapped_btn.property("iconName") == want
+          and icons.has_icon(want)
+          and not mapped_btn.icon().isNull())
+    check("E3b 未映射插件仍落回通用占位（plugin:demo → plugin）",
+          plug_btn is not None
+          and plug_btn.property("iconName") == icons.PLUGIN_PAGE_ICON)
+    check("E3b 全部映射值都是已登记图标",
+          all(icons.has_icon(n) for n in icons.PLUGIN_ICONS.values()),
+          f"表：{icons.PLUGIN_ICONS}")
 
     # --- E4 图标取色 = 主题 token（Off 态）---
     nav_btn = win._nav_btns["fragments"]
