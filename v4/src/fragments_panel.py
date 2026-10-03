@@ -40,6 +40,7 @@ from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import FALLBACK_ACCENT, get_colors
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
+from src import day_recall
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -383,6 +384,233 @@ class _PreviewPane(QWidget):
             self._panel.refresh(preserve_view=True)
 
 
+# ====================================================================
+# 按天回溯视图（day-recall）
+# ====================================================================
+# 回溯条目行的角色：存来源标签 / 时间 / ref_id，供 delegate 与双击跳转用
+DAY_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 10
+DAY_TIME_ROLE = Qt.ItemDataRole.UserRole + 11
+DAY_REF_ROLE = Qt.ItemDataRole.UserRole + 12
+
+
+class _DayRecallView(QWidget):
+    """「按天」视图：选一天 → 时序还原当天碎片 + 任务 + 素材 + 专注。
+
+    设计约束（任务卡护栏）：
+      · 只列表**活跃天**（``day_recall.active_days``），空闲日不占屏；
+      · 直接在四源自身的 ``created_at`` / ``added_time`` 上分组，不建
+        第二份索引文件；
+      · 全部聚合逻辑在纯逻辑模块 ``src.day_recall``，本类只做渲染与
+        事件转发（单测不打 UI 也能覆盖核心规则）；
+      · 「把这一堆存为笔记」复用现有 ``NoteManager.add_note`` 通道。
+    """
+
+    def __init__(self, panel: "FragmentsPanel"):
+        super().__init__()
+        self._panel = panel
+        self._host = panel._host
+        self._groups = []          # 当前 [DayGroup, ...]
+        self._build_ui()
+
+    # ---- UI ----
+    def _build_ui(self):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+
+        # 顶部：日期选择 + 当天摘要 + 存为笔记
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self._day_combo = QComboBox()
+        self._day_combo.setMinimumContentsLength(16)
+        self._day_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._day_combo.currentIndexChanged.connect(self._on_day_changed)
+        bar.addWidget(self._day_combo)
+
+        self._day_summary = QLabel("")
+        self._day_summary.setObjectName("hintLabel")
+        bar.addWidget(self._day_summary)
+        bar.addStretch()
+
+        self._save_note_btn = IconButton("save", text="存为笔记", icon_size=14,
+                                         object_name="secondaryBtn")
+        self._save_note_btn.setToolTip("把当天的全部条目整理成一条笔记")
+        self._save_note_btn.clicked.connect(self._on_save_note)
+        bar.addWidget(self._save_note_btn)
+        v.addLayout(bar)
+
+        # 当天条目列表（按时间正序）
+        self._day_list = QListWidget()
+        tune_list_scrolling(self._day_list)
+        self._day_list.setSelectionMode(
+            QListWidget.SelectionMode.SingleSelection)
+        self._day_list.itemDoubleClicked.connect(self._on_day_item_activated)
+        v.addWidget(self._day_list, 1)
+
+        # 空态引导（覆盖层，跟随列表尺寸）
+        self._day_empty = EmptyState(
+            "calendar", "还没有可回溯的记录",
+            "收集碎片、添加任务、拖入素材或完成一次专注后，\n"
+            "这里会按天把当天发生过什么还原出来")
+        self._day_empty.attach_to(self._day_list)
+
+    # ---- 数据重建 ----
+    def rebuild(self):
+        """从四源现取数据，重建活跃天索引与当天的条目列表。
+
+        每次进入该视图 / 收到 data_changed 时调用；无缓存、无落盘。
+        """
+        fragments = self._fragments()
+        tasks = self._tasks()
+        assets = self._assets()
+        sessions = self._pomodoro_sessions()
+        self._groups = day_recall.build_day_groups(
+            fragments, tasks, assets, sessions)
+
+        prev = self._day_combo.currentData()
+        self._day_combo.blockSignals(True)
+        self._day_combo.clear()
+        for g in self._groups:
+            self._day_combo.addItem(
+                "%s（%d）" % (day_recall.day_label(g.day), len(g.events)),
+                g.day)
+        # 尽量保留原先选中的那一天；那天没了就回落到最新一天
+        if prev is not None:
+            idx = self._day_combo.findData(prev)
+            if idx >= 0:
+                self._day_combo.setCurrentIndex(idx)
+        self._day_combo.blockSignals(False)
+
+        self._refresh_current_day()
+        shown = self._day_combo.count()
+        self._day_empty.setVisible(shown == 0)
+        if shown == 0:
+            self._day_summary.setText("")
+            self._day_list.clear()
+            self._day_empty.setGeometry(self._day_list.rect())
+            self._day_empty.raise_()
+
+    def _assets(self):
+        """取当前素材列表（管理器由宿主晚绑定注入；缺省给空列表）。"""
+        manager = getattr(self._host, "_temp_asset_manager", None)
+        if manager is None:
+            return []
+        try:
+            return manager.get_all_assets()
+        except Exception:
+            return []
+
+    def _fragments(self):
+        """取全部碎片（管理器缺省时给空列表，单测替身不炸）。"""
+        manager = getattr(self._host, "_fragment_manager", None)
+        if manager is None:
+            return []
+        try:
+            return manager.get_all_fragments()
+        except Exception:
+            return []
+
+    def _tasks(self):
+        """取全部任务（管理器缺省时给空列表）。"""
+        manager = getattr(self._host, "_task_manager", None)
+        if manager is None:
+            return []
+        try:
+            return manager.get_all_tasks()
+        except Exception:
+            return []
+
+    def _pomodoro_sessions(self):
+        """取番茄钟专注记录列表（宿主/悬浮球未提供时给空列表）。
+
+        当前版本番茄钟只按任务累计 ``focus_sessions``（不落逐次记录），
+        故此处通常为空 —— 一旦未来悬浮球提供逐次会话列表（带
+        ``created_at``），本方法即自动接上，无需改 UI。
+        """
+        provider = getattr(self._host, "pomodoro_sessions", None)
+        if callable(provider):
+            try:
+                return list(provider())
+            except Exception:
+                return []
+        return []
+
+    # ---- 渲染当天 ----
+    def _current_group(self):
+        day = self._day_combo.currentData()
+        for g in self._groups:
+            if g.day == day:
+                return g
+        return None
+
+    def _refresh_current_day(self):
+        group = self._current_group()
+        self._day_list.clear()
+        if group is None:
+            self._day_summary.setText("")
+            return
+        self._day_summary.setText(group.summary())
+        colors = get_colors(self._host.current_theme)
+        for e in group.events:
+            item = QListWidgetItem(
+                self._day_row_text(e))
+            item.setData(DAY_SOURCE_ROLE, e.source)
+            item.setData(DAY_TIME_ROLE, e.time_text)
+            item.setData(DAY_REF_ROLE, e.ref_id)
+            tip = ["%s · %s" % (e.source_label, e.time_text or "—")]
+            if e.detail:
+                tip.append(e.detail)
+            item.setToolTip("\n".join(tip))
+            item.setForeground(QColor(colors.get("text", "#E4E8EE")))
+            item.setSizeHint(QSize(0, 28))
+            self._day_list.addItem(item)
+
+    @staticmethod
+    def _day_row_text(e) -> str:
+        """条目行文案：``HH:MM  [来源] 主文案（细节）``。"""
+        t = e.time_text or "--:--"
+        suffix = "（%s）" % e.detail if e.detail else ""
+        return "  %s   [%s] %s%s" % (t, e.source_label, e.title, suffix)
+
+    # ---- 交互 ----
+    def _on_day_changed(self, _idx):
+        self._refresh_current_day()
+
+    def _on_day_item_activated(self, item):
+        """双击条目 → 能跳的跳回原记录（碎片/任务），其余给提示。"""
+        source = item.data(DAY_SOURCE_ROLE)
+        ref_id = item.data(DAY_REF_ROLE)
+        if source in (day_recall.SOURCE_FRAGMENT,) and ref_id is not None:
+            self._panel._show_detail(ref_id)
+        elif source in (day_recall.SOURCE_TASK,
+                        day_recall.SOURCE_TASK_DONE) and ref_id is not None:
+            self._host.show_toast("任务已在「日程任务」页，可按标题查找")
+        elif source == day_recall.SOURCE_ASSET:
+            self._host.show_toast("素材在「临时素材」页")
+        elif source == day_recall.SOURCE_POMODORO:
+            self._host.show_toast("专注记录来自番茄钟")
+
+    def _on_save_note(self):
+        """把当天全部条目组装成文本，走现有笔记通道存为一条笔记。"""
+        group = self._current_group()
+        if group is None or len(group) == 0:
+            QMessageBox.information(self, "提示", "当天没有可保存的记录。")
+            return
+        text = day_recall.format_day_text(group)
+        title = "%s 回顾" % group.day
+        note_id = self._host._note_manager.add_note(text, title=title)
+        if note_id:
+            self._host.refresh_page("notes")
+            self._host.data_changed.emit("note")
+            self._host.show_toast("已存为笔记")
+
+    def apply_theme(self):
+        """跟主题刷新条目文字色与空态图标。"""
+        self._refresh_current_day()
+        self._day_empty.apply_theme(getattr(self._host, "current_theme", None))
+
+
 class FragmentsPanel(QWidget):
     """碎片工作台面板"""
 
@@ -453,6 +681,17 @@ class FragmentsPanel(QWidget):
         self._frag_search.textChanged.connect(self._on_search_text_changed)
         toolbar.addWidget(self._frag_search, 1)
 
+        # ---- 视图切换：列表 / 按天（day-recall）----
+        # 默认「列表」= 现有行为，切到「按天」才走新分支（护栏 §1）。
+        # 用 checkable IconButton 承担（panel 禁裸 QPushButton）。
+        # 注：勾选态在 _center_stack 建好之后再设（见下方），否则 toggled
+        # 回调会在 stack 存在前触发。
+        self._day_btn = IconButton("calendar", text="按天", icon_size=14,
+                                   object_name="secondaryBtn", checkable=True)
+        self._day_btn.setToolTip("按天回溯：选一天，看当天碎片 / 任务 / 素材 / 专注")
+        self._day_btn.toggled.connect(self._on_day_view_toggled)
+        toolbar.addWidget(self._day_btn)
+
         preview_visible = bool(self._host._config.get(
             "fragment_preview_visible", True))
         self._preview_btn = SmoothButton("预览")
@@ -516,7 +755,22 @@ class FragmentsPanel(QWidget):
         self._splitter.setStretchFactor(1, 0)
         self._splitter.setSizes([620, 330])
         self._preview.setVisible(preview_visible)
-        v.addWidget(self._splitter, 1)
+
+        # ---- 中部两页：0=列表（现有） / 1=按天回溯（新分支）----
+        # 默认停在列表页；两页各自持有控件，切页不动数据、不重建列表。
+        self._day_view = _DayRecallView(self)
+        self._center_stack = QStackedWidget()
+        self._center_stack.addWidget(self._splitter)
+        self._center_stack.addWidget(self._day_view)
+        self._center_stack.setCurrentIndex(0)
+        v.addWidget(self._center_stack, 1)
+
+        # 恢复「按天」偏好：stack 已就绪后才设勾选态（配置默认 False =
+        # 列表视图，与改动前等价）。设完补建一次当天数据。
+        if bool(self._host._config.get("fragment_day_view", False)):
+            self._day_btn.setChecked(True)
+            self._center_stack.setCurrentIndex(1)
+            self._day_view.rebuild()
 
         # 搜索去抖定时器
         self._search_timer = QTimer(self)
@@ -569,6 +823,22 @@ class FragmentsPanel(QWidget):
         config = self._host._config
         if bool(checked) != config.get("fragment_preview_visible", True):
             config.set("fragment_preview_visible", bool(checked))
+            config.save()
+
+    # ---- 视图切换：列表 / 按天 ----
+    def _on_day_view_toggled(self, checked: bool):
+        """切到「按天」分支：中部换页到回溯视图并即时重建当天数据。
+
+        列表页的控件与滚动位置原样保留（QStackedWidget 只切可见页），
+        切回来不需要重新筛选；只有首次进入 / 数据变更时才重建回溯视图。
+        偏好落盘（fragment_day_view），下次启动沿用。
+        """
+        self._center_stack.setCurrentIndex(1 if checked else 0)
+        if checked:
+            self._day_view.rebuild()
+        config = self._host._config
+        if bool(checked) != config.get("fragment_day_view", False):
+            config.set("fragment_day_view", bool(checked))
             config.save()
 
     # ---- 空态 / 筛选 ----
@@ -640,6 +910,8 @@ class FragmentsPanel(QWidget):
         # 空态图标是自绘位图，同样不在 QSS 管辖内（A3）
         self._empty_state.apply_theme(getattr(self._host, "current_theme",
                                               None))
+        # 按天视图的条目文字色同样烘进 item，换主题须就地重刷
+        self._day_view.apply_theme()
 
     # ---- 刷新入口（供 host.refresh_page 调用） ----
     def refresh(self, preserve_view: bool = True):
@@ -728,6 +1000,9 @@ class FragmentsPanel(QWidget):
         self._update_empty_state(len(fragments),
                                  bool(keyword) or ftype != "all"
                                  or cat != "all")
+        # 正停留在「按天」视图时同步重建（数据变更 → 当天条目跟着变）
+        if self._day_btn.isChecked():
+            self._day_view.rebuild()
         self._host.data_changed.emit("fragment")
 
     # ---- 窗口化渲染：行描述符表 / 行工厂 / 分块建行 ----

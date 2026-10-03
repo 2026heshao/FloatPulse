@@ -1,0 +1,244 @@
+# -*- coding: utf-8 -*-
+"""Offscreen 功能验证：临时素材「会话分组」视图（第 4 卡 shot-burst）。
+
+验证点（全部离屏实跑 + 真像素/数值断言，不是"没报错就算过"）：
+  A. 默认关闭：首屏条目集合 = 全部素材（等价改动前平铺）
+  B. 开启分组：条目集合与平铺**逐项相等**（只重排，不增删）
+  C. 真聚类：5 张同刻连拍 → 1 堆，堆名 "5 张 · HH:MM"
+  D. 阈值可调：改 asset_group_gap_seconds 改变堆数（配置生效，非写死）
+  E. 分组模式真出像素：堆标题栏区域与平铺模式**渲染不同**（切片比对）
+  F. 切回平铺：条目顺序复原
+  G. 不落库：开关分组前后 temp_assets.json 字节不变
+
+运行（offscreen）：
+  python tools/run_gui_check.py tools/verify_asset_grouping.py
+或直接：
+  QT_QPA_PLATFORM=offscreen python tools/verify_asset_grouping.py
+"""
+import hashlib
+import os
+import sys
+import tempfile
+import time
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtGui import QColor, QImage  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+
+from src.assets_panel import AssetsPanel  # noqa: E402
+from src.config import ConfigManager, DEFAULT_CONFIG  # noqa: E402
+from src.temp_asset_manager import TempAssetManager, AssetInfo  # noqa: E402
+
+PASS = 0
+FAIL = 0
+
+
+def ok(msg):
+    global PASS
+    PASS += 1
+    print("[OK] %s" % msg)
+
+
+def bad(msg):
+    global FAIL
+    FAIL += 1
+    print("[FAIL] %s" % msg)
+
+
+def check(cond, msg):
+    ok(msg) if cond else bad(msg)
+
+
+def pump(app, ms=0):
+    end = time.time() + ms / 1000.0
+    while time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def make_image(path, hue=120):
+    img = QImage(200, 140, QImage.Format.Format_RGB32)
+    img.fill(QColor(hue % 256, 200, 90))
+    assert img.save(path)
+    return path
+
+
+def t_str(sec):
+    from datetime import datetime, timedelta
+    base = datetime(2026, 10, 3, 9, 0, 0)
+    return (base + timedelta(seconds=sec)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+class NoopConfig:
+    def __init__(self):
+        self._config = dict(DEFAULT_CONFIG)
+
+    def get(self, key, default=None):
+        return self._config.get(key, default)
+
+    def set(self, key, value):
+        self._config[key] = value
+        return True
+
+    def save(self):
+        return None
+
+
+class Host:
+    def __init__(self, mgr, cfg):
+        self._config = cfg
+        self.current_theme = "light"
+        self._temp_asset_manager = mgr
+        from types import SimpleNamespace
+        self.data_changed = SimpleNamespace(emit=lambda *a: None)
+
+
+def list_ids(panel):
+    return [panel._asset_list.item(i).data(Qt.ItemDataRole.UserRole + 1)
+            for i in range(panel._asset_list.count())]
+
+
+def digest(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def grab_cell(panel, index):
+    """渲染第 index 格为 QImage（真走 delegate.paint，取像素）。"""
+    from PyQt6.QtGui import QPainter
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem
+    d = panel._thumb_delegate
+    model_index = panel._asset_list.model().index(index, 0)
+    img = QImage(d.CELL_W, d.CELL_H, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+    p = QPainter(img)
+    opt = QStyleOptionViewItem()
+    opt.rect = QRect(0, 0, d.CELL_W, d.CELL_H)
+    opt.state = QStyle.StateFlag.State_Enabled
+    opt.font = panel._asset_list.font()
+    d.paint(p, opt, model_index)
+    p.end()
+    return img
+
+
+def main():
+    app = QApplication.instance() or QApplication([])
+    tmp = tempfile.mkdtemp(prefix="fp_verify_group_")
+
+    cfg = ConfigManager(os.path.join(tempfile.mkdtemp(), "config.json"))
+
+    # ---- 构造 5 张同刻素材 + 2 张晚一小时的素材 ----
+    mgr = TempAssetManager(tmp)
+    imgs = [make_image(os.path.join(tmp, "burst%d.png" % i), 40 * i + 10)
+            for i in range(5)]
+    late = [make_image(os.path.join(tmp, "late%d.png" % i), 180 + 10 * i)
+            for i in range(2)]
+    mgr._assets = [
+        AssetInfo(i + 1, "连拍%d.png" % i, imgs[i], True, 10, t_str(i * 15))
+        for i in range(5)
+    ] + [
+        AssetInfo(i + 6, "晚%d.png" % i, late[i], True, 10, t_str(3600 + i))
+        for i in range(2)
+    ]
+    mgr._next_id = 8
+
+    panel = AssetsPanel(Host(mgr, cfg))
+    panel._valid_ids = {a.asset_id for a in mgr._assets}
+    panel.refresh()
+
+    # A. 默认关闭 = 平铺
+    check(not panel._is_grouping(), "A 默认关闭分组视图（等价改动前平铺行为）")
+    flat = list_ids(panel)
+    check(len(flat) == 7, "A 平铺模式铺满 7 条 (实际 %d)" % len(flat))
+    check(panel._thumb_delegate._header_texts == {}, "A 平铺模式无堆标题")
+
+    # G. 不落库：抓 json 摘要
+    json_path = mgr._json_path
+    d0 = digest(json_path) if os.path.exists(json_path) else None
+
+    # B. 开启分组：集合相等
+    panel.set_grouping(True)
+    pump(app, 30)
+    grouped = list_ids(panel)
+    check(sorted(grouped) == sorted(flat), "B 分组后条目集合与平铺逐项相等（不丢图）")
+    check(len(grouped) == 7, "B 分组模式仍 7 条 (实际 %d)" % len(grouped))
+
+    # C. 真聚类：5 同刻 → 1 堆；2 晚一小时 → 1 堆；共 2 堆
+    headers = panel._thumb_delegate._header_texts
+    check(len(headers) == 2, "C 7 张聚成 2 堆 (实际 %d)" % len(headers))
+    labels = list(headers.values())
+    check(any(lab == "5 张 · 09:00" for lab in labels),
+          "C 同刻连拍堆名为 '5 张 · 09:00' (实际 %s)" % labels)
+    # E. 分组模式真出像素：首格（带堆标题）渲染与平铺不同
+    cell_grouped = grab_cell(panel, 0)
+    panel.set_grouping(False)
+    pump(app, 30)
+    cell_flat = grab_cell(panel, 0)
+    check(cell_grouped != cell_flat, "E 分组首格渲染与平铺不同（堆标题真画上去了）")
+    # 进一步：统计堆标题条内的主色像素（左缘 3px 刻度 + 文字）
+    from src.theme import get_colors
+    colors = get_colors("light")
+    from src.glass import _to_color
+    accent = _to_color(colors["primary"])
+    hits = 0
+    for y in range(2, 22):
+        for x in range(6, 20):
+            px = cell_grouped.pixelColor(x, y)
+            if (abs(px.red() - accent.red()) < 60
+                    and abs(px.green() - accent.green()) < 60
+                    and abs(px.blue() - accent.blue()) < 60):
+                hits += 1
+    check(hits > 0, "E 堆标题条内检出主色刻度像素 (%d px)" % hits)
+
+    # 存一张分组态截图供目检
+    shots = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "build", "shots")
+    try:
+        os.makedirs(shots, exist_ok=True)
+        panel.set_grouping(True)
+        pump(app, 30)
+        out = os.path.join(shots, "asset_group_final.png")
+        cell_grouped.save(out)
+        ok("E 分组态单元图已存 %s" % out)
+    except OSError as exc:
+        bad("E 截图落盘失败: %s" % exc)
+
+    # D. 阈值可调（配置生效；用范围内值，≥10）
+    #    5 张连拍间隔 15 秒 + 2 张晚片间隔 1 秒：
+    #      gap=10  → 连拍各自独立(5) + 晚片并 1 堆 = 6 堆
+    #      gap=600 → 连拍并 1 堆 + 晚片并 1 堆 = 2 堆
+    cfg.set("asset_group_gap_seconds", 10)
+    panel.refresh()
+    n_small = len(panel._thumb_delegate._header_texts)
+    cfg.set("asset_group_gap_seconds", 600)
+    panel.refresh()
+    n_big = len(panel._thumb_delegate._header_texts)
+    check(n_small == 6, "D gap=10s → 6 堆（15 秒间隔断开）(实际 %d)" % n_small)
+    check(n_big == 2, "D gap=600s → 2 堆（连拍并拢）(实际 %d)" % n_big)
+    check(n_small != n_big, "D 阈值改动确实改变堆数（配置生效，非写死）")
+    # 越界值被拒（护栏：阈值有范围）
+    check(cfg.set("asset_group_gap_seconds", 5) is False, "D 阈值 <10 被配置拒绝")
+    check(cfg.set("asset_group_gap_seconds", 99999) is False, "D 阈值 >3600 被配置拒绝")
+
+    # F. 切回平铺：顺序复原
+    cfg.set("asset_group_gap_seconds", 120)
+    panel.set_grouping(False)
+    pump(app, 30)
+    back = list_ids(panel)
+    check(back == flat, "F 切回平铺后顺序与初始平铺一致")
+
+    # G. 不落库
+    d1 = digest(json_path) if os.path.exists(json_path) else None
+    check(d0 == d1, "G 全程 temp_assets.json 字节不变（零落库）")
+
+    print("\n==== 结果：%d 通过 / %d 失败 ====" % (PASS, FAIL))
+    sys.stdout.flush()
+    os._exit(0 if FAIL == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -21,7 +21,7 @@ import shutil
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QFileDialog,
-    QStackedWidget, QStyledItemDelegate, QStyle,
+    QStackedWidget, QStyledItemDelegate, QStyle, QToolButton,
 )
 from PyQt6.QtCore import (
     QEasingCurve, QObject, QRunnable, QRectF, QSize, Qt, QThreadPool,
@@ -36,6 +36,8 @@ from src.icon_render import icon as render_icon, paint_icon
 from src.controls import EmptyState, IconButton, PageTitle
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src import motion
+# 会话分组纯逻辑（零 PyQt6）：按 added_time 间隔聚类，渲染时派生、不落库
+from src import asset_group
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）。
 # 值为 icons.py 的 file_* 图标名（01 包图集；两处引用同一批名字，保持一致）。
@@ -120,6 +122,7 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         self._thumbs = thumb_cache   # id -> QPixmap | False | _PENDING
         self._loader = loader        # 未命中回调(面板的异步派发);None=旧同步路径
         self._fade_values = {}       # asset_id -> 0.0~1.0(淡入进度,面板维护)
+        self._header_texts = {}      # asset_id -> 会话堆标题(分组模式;平铺=空)
         config = getattr(host, "_config", None)
         init_w = (int(config.get("asset_thumb_size", self.DEFAULT_THUMB_W))
                   if config is not None else self.DEFAULT_THUMB_W)
@@ -188,6 +191,36 @@ class _AssetThumbDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # ---- 会话堆标题（仅分组模式；平铺模式下 _header_texts 为空 → 整段跳过）----
+        live_rect = rect
+        header_text = self._header_texts.get(asset.asset_id)
+        if header_text:
+            bar_h = 22.0
+            bar = QRectF(rect.left(), rect.top(), rect.width(), bar_h)
+            # 缩进到缩略图左缘，与下方格子对齐（比整格左缘更内敛）
+            bar = bar.adjusted(self.PAD, 0, -self.PAD, 0)
+            accent = _to_color(colors["primary"])
+            tick = QRectF(bar.left(), bar.top() + 5, 3.0, bar_h - 10)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(tick, 1.5, 1.5)
+            f = painter.font()
+            f.setBold(True)
+            painter.setFont(f)
+            painter.setPen(_to_color(colors["text_secondary"]))
+            painter.drawText(
+                QRectF(tick.right() + 8, bar.top(), bar.width() - 14, bar_h),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                header_text)
+            painter.setFont(option.font)
+            # 正文与标题**分享同一个单元高**：标题压在上缘 22px 内，正文
+            # 用 rect.top()+22 为顶继续排（PAD 留白也随之收窄），格高
+            # （CELL_H）保持不变 → 分组开启时每行仍是同一高度，只是信息
+            # 更满。这样不必改 sizeHint（分组/平铺共用一套格尺寸）。
+            live_rect = QRectF(rect.left(), rect.top() + bar_h + 4,
+                               rect.width(), rect.height() - bar_h - 4)
+        rect = live_rect
 
         # ---- 单元背景卡（选中/hover/常态）----
         # ★ 色值一律走 _to_color：这里 4 个令牌是 QSS 的 rgba() 写法，
@@ -340,6 +373,18 @@ class AssetsPanel(QWidget):
         refresh_btn.clicked.connect(self.refresh)
         toolbar.addWidget(refresh_btn)
 
+        # 会话分组：一键在「平铺列表 ↔ 会话堆」之间切换
+        # （默认取配置 asset_group_enabled；默认 False = 等价改动前的平铺）
+        cfg = getattr(self._host, "_config", None)
+        grouped = bool(cfg.get("asset_group_enabled", False)) if cfg else False
+        self._group_btn = IconButton("merge", text="会话分组", icon_size=14,
+                                     object_name="secondaryBtn",
+                                     checkable=True)
+        self._group_btn.setToolTip("按添加时间间隔把连拍截图聚成若干会话堆")
+        self._group_btn.setChecked(grouped)
+        self._group_btn.toggled.connect(self._on_group_toggled)
+        toolbar.addWidget(self._group_btn)
+
         toolbar.addStretch()
 
         clear_btn = IconButton("trash", text="清空全部", icon_size=14,
@@ -364,6 +409,20 @@ class AssetsPanel(QWidget):
         self._asset_list.itemDoubleClicked.connect(self._on_double_click)
         self._thumb_delegate = _AssetThumbDelegate(
             self._host, self._thumb_cache, loader=self._request_thumb)
+        self._group_headers = {}
+        # 会话分组视图模式：QListView.setViewMode 在部分平台/离屏后端会被
+        # 忽略，QToolButton 作为 QListWidget 的 setViewport 子级（顶层同窗）
+        # 才是最可靠的「同列表两种呈现」载体，且分组/平铺共用同一个
+        # QListWidget —— 条目集合天然一致，不需要两套列表同步。
+        self._group_view_btn = QToolButton(self._asset_list.viewport())
+        self._group_view_btn.setAutoRaise(True)
+        self._group_view_btn.setText("分组")
+        self._group_view_btn.setToolTip("切换 会话分组 / 平铺")
+        self._group_view_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._group_view_btn.clicked.connect(
+            lambda: self._group_btn.toggle())
+        self._group_view_btn.setVisible(grouped)
+        self._asset_list.viewport().installEventFilter(self)
         self._asset_list.setItemDelegate(self._thumb_delegate)
         self._sync_scroll_step()
         self._stack.addWidget(self._asset_list)
@@ -506,7 +565,12 @@ class AssetsPanel(QWidget):
 
         self._asset_list.clear()
         self._items_by_id = {}
-        for a in assets:
+        # ---- 序列决定呈现顺序：分组模式=按会话堆铺开；平铺=沿用旧顺序 ----
+        # 两种模式喂给同一个 QListWidget 同一批 asset 对象 → 条目集合天然
+        # 相等（"关闭分组后渲染结果逐项一致"由此成立）。
+        sequence, self._group_headers = self._build_sequence(assets)
+        self._thumb_delegate._header_texts = self._group_headers
+        for a in sequence:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, a)            # Asset 对象（delegate 用）
             item.setData(Qt.ItemDataRole.UserRole + 1, a.asset_id)
@@ -523,6 +587,90 @@ class AssetsPanel(QWidget):
         max_assets = self._temp_asset_manager._max_assets
         self._asset_count_label.setText(f"共 {count} 条 / 上限 {max_assets}")
         self._stack.setCurrentIndex(1 if count == 0 else 0)
+        self._position_group_view_btn()
+
+    # ---- 会话分组视图（渲染时派生，不落库）----
+    def _build_sequence(self, assets):
+        """返回 ``(渲染顺序, {asset_id: 堆标题})``。
+
+        分组关闭 → 原样返回（与改动前逐项一致，堆标题表为空）。
+        分组开启 → 按 ``asset_group.cluster_assets`` 聚类，堆内按时间升序
+        铺开，每堆首张挂标题（默认名 "N 张 · HH:MM"）。
+        """
+        if not self._is_grouping():
+            return list(assets), {}
+        gap = self._group_gap_seconds()
+        groups = asset_group.cluster_assets(assets, gap_seconds=gap)
+        headers = {}
+        sequence = []
+        for i, group in enumerate(groups):
+            for a in group:
+                sequence.append(a)
+            if group:
+                headers[group[0].asset_id] = asset_group.group_label(group, i)
+        return sequence, headers
+
+    def _is_grouping(self) -> bool:
+        btn = getattr(self, "_group_btn", None)
+        return bool(btn.isChecked()) if btn is not None else False
+
+    def _group_gap_seconds(self) -> float:
+        """读分组间隔阈值配置（缺配置/脏值 → 回退纯逻辑模块默认值）。"""
+        cfg = getattr(self._host, "_config", None)
+        if cfg is None:
+            return float(asset_group.DEFAULT_GAP_SECONDS)
+        try:
+            return float(cfg.get("asset_group_gap_seconds",
+                                 asset_group.DEFAULT_GAP_SECONDS))
+        except (TypeError, ValueError):
+            return float(asset_group.DEFAULT_GAP_SECONDS)
+
+    def _on_group_toggled(self, checked):
+        """一键切回平铺 / 切到会话分组：持久化开关 + 重渲染。
+
+        分组是纯渲染派生 —— 落盘的只有这个 bool 开关，temp_assets.json 不动。
+        """
+        cfg = getattr(self._host, "_config", None)
+        if cfg is not None:
+            if cfg.set("asset_group_enabled", bool(checked)):
+                save = getattr(cfg, "save", None)
+                if callable(save):
+                    save()
+        btn = getattr(self, "_group_view_btn", None)
+        if btn is not None:
+            btn.setVisible(bool(checked))
+        self.refresh()
+
+    def set_grouping(self, enabled: bool):
+        """程序化切换分组视图（按钮 setChecked + 强制 refresh）。
+
+        ★ 不依赖 ``toggled`` 信号是否送达（未 show 的按钮在离屏/无事件循环
+        下 setChecked 未必发 toggled）—— 开关状态落在按钮上，refresh() 现读
+        按钮态决定渲染，保证「点了就一定重排」。
+        """
+        changed = (self._group_btn.isChecked() != bool(enabled))
+        if changed:
+            self._group_btn.blockSignals(True)
+            self._group_btn.setChecked(bool(enabled))
+            self._group_btn.blockSignals(False)
+        self._on_group_toggled(bool(enabled))
+
+    def _position_group_view_btn(self):
+        """把「分组」浮钮钉在列表视口右上角（内容/滚动条之外，不遮挡首行）。"""
+        btn = getattr(self, "_group_view_btn", None)
+        if btn is None:
+            return
+        vp = self._asset_list.viewport()
+        btn.adjustSize()
+        btn.move(max(4, vp.width() - btn.width() - 12), 6)
+        btn.raise_()
+
+    def eventFilter(self, obj, event):
+        # 视口尺寸变化时重摆浮钮（resize / 首次布局都会走到这里）
+        if obj is getattr(self._asset_list, "viewport", lambda: None)():
+            if event.type() in (event.Type.Resize, event.Type.Show):
+                self._position_group_view_btn()
+        return super().eventFilter(obj, event)
 
     # ---- 右键菜单 ----
     def _on_context_menu(self, pos):

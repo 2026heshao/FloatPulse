@@ -50,6 +50,11 @@
   - temp_asset_max_days:  临时素材自动清理天数（0 = 不按天数清理）
   - temp_asset_max_file_mb: 单个临时素材体积上限（MB，0 = 不限制）
   - asset_thumb_size:     临时素材缩略图宽度（像素，80-160，决定网格每行个数）
+  - asset_group_enabled:  临时素材「会话分组」视图开关（默认关闭 = 等价当前
+                          平铺行为；开启后按添加时间间隔把连拍截图聚成若干堆，
+                          纯渲染派生，**不落库**，关闭即回退平铺）
+  - asset_group_gap_seconds: 会话分组的间隔阈值（秒，10-3600，默认 120）——
+                          相邻两素材添加时间差**严格小于**它即归入同一堆
   - schema_version:       config.json 结构版本（系统保留键，非用户设置；
                           变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移）
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
@@ -94,6 +99,18 @@ DEFAULT_CONFIG = {
     "temp_asset_max_days":  30,           # 临时素材自动清理天数（0 表示不按天数清理）
     "temp_asset_max_file_mb": 50,         # 单个素材体积上限（MB，0 表示不限制）
     "asset_thumb_size":     128,          # 素材缩略图宽度（像素，80-160，决定每行个数）
+    # ===== 临时素材会话分组（2026-10-03 第 4 卡）=====
+    # 默认 False = 与"改动前的平铺列表"逐项等价（护栏硬约束：
+    # 新开关默认值必须等价现有行为）；开启后纯渲染聚类，temp_assets.json 不动。
+    "asset_group_enabled":  False,
+    # 间隔阈值（秒）：相邻素材添加时间差严格小于它即同堆。
+    # 不写死 60 —— 有人截图快有人慢，UI 可调（默认 120）。
+    "asset_group_gap_seconds": 120,
+    # ===== 碎片工作台「按天回溯」视图（2026-10-03 第 5 卡 day-recall）=====
+    # 默认 False = 碎片面板以现有「列表」视图启动，与改动前逐项等价
+    # （护栏硬约束：新分支默认值必须等价现有行为）；开启后启动即进
+    # 「按天」视图（按活跃天把当天碎片/任务/素材/专注还原）。
+    "fragment_day_view":    False,
     "ball_visible":         True,         # 悬浮球是否显示
     "apps":                 [],           # 软件导航条目列表
     "app_card_size":        96,           # 软件卡片边长（像素）
@@ -179,6 +196,9 @@ _CONFIG_TYPES = {
     "temp_asset_max_days":  int,
     "temp_asset_max_file_mb": int,
     "asset_thumb_size":     int,
+    "asset_group_enabled":  bool,
+    "asset_group_gap_seconds": int,
+    "fragment_day_view":    bool,
     "ball_visible":         bool,
     "apps":                 list,
     "app_card_size":        int,
@@ -255,6 +275,10 @@ _CONFIG_RANGES = {
     "temp_asset_max_file_mb": (0, 2048),
     # 素材缩略图宽度：与设置页步进器范围 80-160（每档 8px）保持一致
     "asset_thumb_size":     (80, 160),
+    # 会话分组间隔阈值（秒）：与设置页步进器范围 10-3600 保持一致；
+    # 下限 10 防"1 秒阈值把一次连拍切成 20 堆"，上限 1 小时防"整天聚成 1 堆"。
+    # bool 不进 RANGES（asset_group_enabled 无数值范围）。
+    "asset_group_gap_seconds": (10, 3600),
     # 软件卡片尺寸：与主窗口设置页步进器范围 60-140（每档 4px）保持一致
     "app_card_size":        (60, 140),
     # 小卡片软件图标边长：范围取自 src.constants（与设置页步进器、
