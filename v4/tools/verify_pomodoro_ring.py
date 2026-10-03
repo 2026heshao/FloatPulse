@@ -56,8 +56,8 @@ def render_surface(surface) -> QImage:
     return img
 
 
-FILL = (61, 158, 156)     # 环填充色（light 主题 primary_deep）
-BADGE = (0xE5, 0x48, 0x4D)
+FILL = (61, 158, 156)     # 环填充色（本文件自注入的 set_ring_colors 值）
+BADGE = (0x0F, 0x6E, 0x56)  # 徽标底色（UI 重构 03：硬编码红 #E5484D → light 主题 primary）
 TOL = 60                  # 颜色匹配容差（黑底/阴影离环色很远）
 
 
