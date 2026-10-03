@@ -50,14 +50,19 @@
   - asset_group_enabled:  临时素材「会话分组」视图开关（默认关闭 = 等价当前
                           平铺行为；开启后按添加时间间隔把连拍截图聚成若干堆，
                           纯渲染派生，**不落库**，关闭即回退平铺）
-  - asset_group_gap_seconds: 会话分组的间隔阈值（秒，10-3600，默认 120）——
+  - asset_group_gap_seconds: 会话分组的间隔阈值（秒，10-3600，默认 900）——
                           相邻两素材添加时间差**严格小于**它即归入同一堆
+                          （2026-10-03 由 120 上调；老配置里恰好等于旧默认
+                          120 的值由 json_store 的 config v1→v2 迁移改写，
+                          用户手动设过的其它值不动）
   - triage_min_days:      碎片规则清仓的天数阈值（1-3650，默认 30）——
                           碎片存放天数 ≥ 该值才可能进「清仓建议」清单
   - triage_max_len:       碎片规则清仓的长度阈值（字符，1-500，默认 40）——
                           内容长度 ≤ 该值才可能进「清仓建议」清单
   - schema_version:       config.json 结构版本（系统保留键，非用户设置；
-                          变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移）
+                          变更时 +1 并在 json_store.MIGRATIONS["config"] 注册
+                          迁移，且必须与 json_store.STORE_VERSIONS["config"]
+                          同步）；当前 v2 = 分组阈值默认 120→900
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
                           下载、失败静默、不上传任何数据」立场见 update_checker）
   - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
@@ -106,8 +111,10 @@ DEFAULT_CONFIG = {
     # 新开关默认值必须等价现有行为）；开启后纯渲染聚类，temp_assets.json 不动。
     "asset_group_enabled":  False,
     # 间隔阈值（秒）：相邻素材添加时间差严格小于它即同堆。
-    # 不写死 60 —— 有人截图快有人慢，UI 可调（默认 120）。
-    "asset_group_gap_seconds": 120,
+    # 不写死 60 —— 有人截图快有人慢，UI 可调。默认 900（2026-10-03 由
+    # 120 上调：120s 会把一次连续排障切成 4 段，真数据 17 张聚出 13 堆、
+    # 11 堆是单张；900s 覆盖真连拍段内最大间隔 814s）。
+    "asset_group_gap_seconds": 900,
     # ===== 碎片工作台「按天回溯」视图（2026-10-03 第 5 卡 day-recall）=====
     # 默认 False = 碎片面板以现有「列表」视图启动，与改动前逐项等价
     # （护栏硬约束：新分支默认值必须等价现有行为）；开启后启动即进
@@ -193,8 +200,12 @@ DEFAULT_CONFIG = {
     "ai_plugins":           [],           # 接入总配置的插件 id 列表（设置页多选）
     # ===== 数据 schema 版本（系统保留键，非用户设置）=====
     # config.json 结构变更时 +1 并在 json_store.MIGRATIONS["config"] 注册迁移；
-    # 存量文件缺失该键视为当前版本（零迁移），由加载路径收敛后随下次保存落盘。
-    "schema_version":       1,
+    # 存量文件缺失该键视为当前版本（零迁移）。
+    # ★ 必须与 STORE_VERSIONS["config"] 同步：本值是「新建 / 未迁移文件」写盘时
+    #   落的版本号，若它落后于 STORE_VERSIONS，文件每次加载都会重跑迁移 ——
+    #   用户把 asset_group_gap_seconds 显式设回 120 后，会被迁移再次改回 900，
+    #   静默覆盖用户意图。由 test_assets_grouping 的 pin 用例钉死两边一致。
+    "schema_version":       2,
 }
 
 # 配置项类型映射（用于校验）
@@ -440,8 +451,8 @@ class ConfigManager:
                 raise ValueError("Invalid config structure: expected dict")
 
             # schema 版本迁移：显式旧版本号 → 逐级跑 json_store.MIGRATIONS
-            # （config 当前为空表，机制预留）；缺失视为当前版本，存量零迁移。
-            # 迁移后版本号收敛到当前值，随下次 save() 落盘。
+            # （config v1→v2 = 会话分组阈值默认 120→900）；缺失视为当前版本，
+            # 存量零迁移。迁移后版本号收敛到当前值，随下次 save() 落盘。
             raw_version = data.get(CONFIG_VERSION_KEY)
             if isinstance(raw_version, int) \
                     and raw_version < STORE_VERSIONS.get("config", 1):

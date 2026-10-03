@@ -48,10 +48,33 @@ def _migrate_fragments_0_to_1(data: dict) -> dict:
     return data
 
 
+# config v1 → v2 的迁移参数：会话分组间隔阈值的旧默认 / 新默认（秒）。
+# ★ 不能 import asset_group 或 config 取值：config 反向依赖本模块，
+#   取值会成环。故此处写常量，并由 tests/test_assets_grouping.py 用
+#   「迁移后取值 == DEFAULT_CONFIG['asset_group_gap_seconds']」把两者钉死，
+#   防止日后改默认却忘改迁移（护栏必须能红灯）。
+_CONFIG_V1_OLD_GAP_SECONDS = 120
+_CONFIG_V1_NEW_GAP_SECONDS = 900
+
+
+def _migrate_config_1_to_2(data: dict) -> dict:
+    """config v1 → v2：会话分组间隔阈值默认值 120 → 900（2026-10-03）。
+
+    ★ 只改写**恰好等于旧默认 120** 的持久值 —— 用户手动设过的其它值
+    （例如 300、1800）是他的显式选择，一律不动。幂等纯函数。
+
+    为什么不留给「新建配置走新默认」自然生效：`ConfigManager.load()` 会
+    把旧文件里的值整体读回内存，老用户永远停在 120，改了默认对他无效。
+    """
+    if data.get("asset_group_gap_seconds") == _CONFIG_V1_OLD_GAP_SECONDS:
+        data["asset_group_gap_seconds"] = _CONFIG_V1_NEW_GAP_SECONDS
+    return data
+
+
 # 各数据 store 的当前 schema 版本（键 = 各文件顶层记录数组键名，config 除外）。
 # 结构变更时把对应项 +1，并在 MIGRATIONS 注册逐级迁移函数。
 STORE_VERSIONS = {
-    "config":    1,     # config.json（schema_version 字段）
+    "config":    2,     # config.json（schema_version 字段；v2 = 分组阈值默认 120→900）
     "fragments": 1,     # fragments.json
     "notes":     1,     # notes.json
     "tasks":     1,     # schedule.json
@@ -63,9 +86,8 @@ STORE_VERSIONS = {
 # 迁移注册表：{store: {from_version: 迁移函数}}。
 # 迁移函数签名 fn(data) -> data，必须是幂等纯函数；某一级未注册 →
 # 版本号照常推进、数据原样跳过（适用于新增字段且读取端已有兜底的场景）。
-# 当前全部 store 为 v1，config 留空表占位，待首次结构变更时填充。
 MIGRATIONS = {
-    "config":    {},
+    "config":    {1: _migrate_config_1_to_2},
     "fragments": {0: _migrate_fragments_0_to_1},
     "notes":     {},
     "tasks":     {},
