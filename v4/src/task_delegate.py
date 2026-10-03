@@ -17,15 +17,18 @@ item 数据约定（由任务页 refresh 时写入）：
   - ``Qt.ItemDataRole.UserRole``      : task_id（header 行不写）
   - ``UserRole + 1``（KIND_ROLE）     : KIND_ROW / KIND_HEADER
   - ``UserRole + 2``（ROLE_TITLE）    : 标题文本
-  - ``UserRole + 3``（ROLE_REL）      : 相对时间文案（可为空串）
-  - ``UserRole + 4``（ROLE_STATE）    : 状态枚举（overdue/today/future/none）
+  - ``UserRole + 3``（ROLE_REL）      : 相对时间文案（可为空串）；
+                                        header 行复用为「计数」（字符串）
+  - ``UserRole + 4``（ROLE_STATE）    : 状态枚举（overdue/today/future/none）；
+                                        header 行复用为「是否逾期组」
+                                        （overdue → 组标题整行 danger 红）
   - ``UserRole + 5``（ROLE_DONE）     : 是否已完成（bool，用于无动画时兜底）
 
 勾选动画四要素（全部按进度 p 绘制）：
   1. 对勾 ``QPainterPath`` 按 p 逐段描绘
-  2. 圆框缩放 1.0 → CHECK_BOUNCE_SCALE → 1.0 的回弹
+  2. 方形圆角框缩放 1.0 → CHECK_BOUNCE_SCALE → 1.0 的回弹
   3. 标题删除线按 p 从左划出
-  4. 整行文字 / 状态色按 p 插值到次级灰（task_done）
+  4. 整行文字 / 状态色按 p 插值到次级灰（text_placeholder）
 
 动画进度以 **task_id 为键** 存于本 delegate（``self._progress``），
 故 refresh() 重建 item 后动画不丢；进度由任务页的面板级
@@ -55,14 +58,17 @@ ROLE_REL = Qt.ItemDataRole.UserRole + 3
 ROLE_STATE = Qt.ItemDataRole.UserRole + 4
 ROLE_DONE = Qt.ItemDataRole.UserRole + 5
 
-# ---- 行/组标题尺寸 ----
-ROW_HEIGHT = 34
+# ---- 行/组标题尺寸（2026-10-02 任务页高仿真稿：行高 32、行距 0 18px、
+#      15px 方形圆角勾选框、整行平面背景无圆角）----
+ROW_HEIGHT = 32
 HEADER_HEIGHT = 26
-CHECK_SIZE = 16            # 勾选框圆直径
-LEFT_MARGIN = 8            # 行左内边距
-RIGHT_MARGIN = 10          # 行右内边距
-CHECK_TEXT_GAP = 10        # 勾选框与标题间距
+CHECK_SIZE = 15            # 勾选框边长（方形圆角，不再是圆形）
+CHECK_RADIUS = 3           # 勾选框圆角（稿：border-radius 3px）
+LEFT_MARGIN = 18           # 行左内边距（稿：padding 0 18px）
+RIGHT_MARGIN = 18          # 行右内边距
+CHECK_TEXT_GAP = 10        # 勾选框与标题间距（稿：gap 10px）
 REL_GAP = 10               # 标题与相对时间最小间距
+CAPTION_DROP = 6           # 组标题整体下沉量（稿：上 10px / 下 4px 的非对称留白）
 
 
 def _to_qcolor(value, fallback: str = "#000000") -> QColor:
@@ -150,7 +156,7 @@ class TaskItemDelegate(QStyledItemDelegate):
         return QSize(max(0, width), height)
 
     def _checkbox_rect(self, rect: QRect) -> QRect:
-        """勾选框命中/绘制矩形（行内左侧圆形）。"""
+        """勾选框命中/绘制矩形（行内左侧方形圆角框）。"""
         left = rect.left() + LEFT_MARGIN
         cy = rect.center().y()
         return QRect(left, cy - CHECK_SIZE // 2, CHECK_SIZE, CHECK_SIZE)
@@ -208,19 +214,44 @@ class TaskItemDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _paint_header(self, painter, option, index):
-        """组标题：小号灰字 + 计数（计数由任务页拼进 DisplayRole）。"""
-        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        """组标题：小号灰字 + 等宽计数（逾期组整行转 danger 红）。
+
+        标签取 DisplayRole，计数取 ROLE_REL（面板写入；旧数据无 ROLE_REL
+        时只画标签）。2026-10-02 高仿真稿：标签与计数之间 8px 间隙，
+        计数用等宽字体；不再共用「标签 · 计数」一个字符串。
+        """
+        label = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        count = str(index.data(ROLE_REL) or "")
+        overdue = index.data(ROLE_STATE) == STATE_OVERDUE
+        label_color = _to_qcolor(
+            self._colors.get("danger" if overdue else "text_placeholder",
+                             "#A32D2D" if overdue else "#6E6D67"))
+        # 稿的 CSS：.n 恒为 --text-3 —— 计数不随逾期组变红
+        count_color = _to_qcolor(self._colors.get("text_placeholder", "#6E6D67"))
+
+        rect = option.rect.adjusted(LEFT_MARGIN, CAPTION_DROP,
+                                    -RIGHT_MARGIN, 0)
         font = QFont(painter.font())
         font.setPixelSize(11)
-        font.setBold(True)
         painter.setFont(font)
-        painter.setPen(_to_qcolor(self._colors.get("text_placeholder", "#AAB4BF")))
-        rect = option.rect.adjusted(LEFT_MARGIN + 2, 0, -RIGHT_MARGIN, 0)
+        painter.setPen(label_color)
         painter.drawText(
             rect,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            str(text),
+            label,
         )
+        if count:
+            mono = QFont("Consolas")
+            mono.setPixelSize(11)
+            label_w = QFontMetrics(font).horizontalAdvance(label)
+            painter.setFont(mono)
+            painter.setPen(count_color)
+            painter.drawText(
+                QRect(rect.left() + label_w + 8, rect.top(),
+                      rect.width() - label_w - 8, rect.height()),
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                count,
+            )
 
     def _resolve_progress(self, task_id, done) -> float:
         """取有效进度：有动画进度用动画值，否则按 done 兜底（1/0）。"""
@@ -230,26 +261,23 @@ class TaskItemDelegate(QStyledItemDelegate):
         return max(0.0, min(1.0, float(p)))
 
     def _row_colors(self, state) -> tuple:
-        """行内两处取色（标题色与状态徽标色**解耦**）。
+        """行内两处取色（标题色与行尾徽标色**解耦**，2026-10-02 高仿真稿）。
 
-        - 标题主色 ``normal_color``：仅逾期保留 ``task_overdue`` 红
-          （真正的紧急信号）；今天 / 未来 / 无日期一律用主题主文字色
-          ``text``——避免多条今日任务把整个列表刷成强调橙、可读性差。
-        - 时间徽标色 ``rel_base``（右侧"今天 / 逾期N天"）：逾期红、
-          今天橙、其余次级灰——状态信息只由徽标表达，不丢失。
+        - 标题恒用主题主文字色 ``text``：状态信息只由行尾徽标表达，
+          逾期标题不再整体标红（稿中逾期行标题是正文字色，红色只在
+          「逾期 N 天」徽标上）。
+        - 行尾徽标：逾期 → ``danger``、今天 → ``warn``、其余 →
+          ``text_placeholder``；已完成行按动画进度插值到完成灰。
         """
         c = self._colors
-        if state == STATE_OVERDUE:
-            normal_color = _to_qcolor(c.get("task_overdue", "#E74C3C"))
-        else:
-            normal_color = _to_qcolor(c.get("text", "#2C3E50"))
+        normal_color = _to_qcolor(c.get("text", "#2C2C2A"))
 
         if state == STATE_OVERDUE:
-            rel_base = _to_qcolor(c.get("task_overdue", "#E74C3C"))
+            rel_base = _to_qcolor(c.get("danger", "#A32D2D"))
         elif state == STATE_TODAY:
-            rel_base = _to_qcolor(c.get("task_today", "#E67E22"))
+            rel_base = _to_qcolor(c.get("warn", "#854F0B"))
         else:
-            rel_base = _to_qcolor(c.get("text_secondary", "#8B96A3"))
+            rel_base = _to_qcolor(c.get("text_placeholder", "#6E6D67"))
         return normal_color, rel_base
 
     def _paint_row(self, painter, option, index):
@@ -262,23 +290,27 @@ class TaskItemDelegate(QStyledItemDelegate):
         p = self._resolve_progress(task_id, done)
 
         c = self._colors
-        done_color = _to_qcolor(c.get("task_done", "#9AA5B1"))
+        done_color = _to_qcolor(c.get("text_placeholder", "#6E6D67"))
         normal_color, rel_base = self._row_colors(state)
 
-        # ---- 行背景：选中 / 悬浮 ----
+        # ---- 行背景：选中 / 悬浮（稿：整行平面色块，方角不缩进）----
         if option.state & QStyle.StateFlag.State_Selected:
-            bg = _to_qcolor(c.get("list_item_selected", "rgba(91,192,190,0.16)"))
+            bg = _to_qcolor(c.get("accent_soft", "#E1F5EE"))
         elif option.state & QStyle.StateFlag.State_MouseOver:
-            bg = _to_qcolor(c.get("list_item_hover", "rgba(91,192,190,0.08)"))
+            bg = _to_qcolor(c.get("surface_2", "#F5F4F0"))
         else:
             bg = None
         if bg is not None:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(bg)
-            painter.drawRoundedRect(
-                QRectF(rect.adjusted(1, 1, -1, -1)), 9.0, 9.0)
+            painter.drawRect(QRectF(rect))
+        if option.state & QStyle.StateFlag.State_Selected:
+            # 选中态再描一圈 1px 主色内框（稿：outline 1px accent, offset -1px）
+            painter.setPen(QPen(_to_qcolor(c.get("primary", "#0F6E56")), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5))
 
-        # ---- 勾选框（圆框 + 回弹 + 对勾）----
+        # ---- 勾选框（方形圆角框 + 回弹 + 对勾）----
         cb_rect = self._checkbox_rect(rect)
         self._paint_checkbox(painter, cb_rect, p)
 
@@ -289,7 +321,9 @@ class TaskItemDelegate(QStyledItemDelegate):
         font = QFont(painter.font())
         font.setPixelSize(13)
         base_fm = QFontMetrics(font)
-        rel_font = QFont(font)
+        # 行尾相对时间用等宽字体（稿：--mono）——数字变化时不抖动，
+        # 且与标题的正文字体拉开层级
+        rel_font = QFont("Consolas")
         rel_font.setPixelSize(11)
         rel_fm = QFontMetrics(rel_font)
 
@@ -329,36 +363,42 @@ class TaskItemDelegate(QStyledItemDelegate):
             )
 
     def _paint_checkbox(self, painter, cb_rect: QRect, p: float):
-        check_color = _to_qcolor(self._colors.get("task_check", "#1F8A4C"))
-        idle_border = _to_qcolor(self._colors.get("text_secondary", "#8B96A3"))
+        """方形圆角勾选框（高仿真稿）：未完成 = line_2 描边空框；
+        完成 = primary 实底 + on_primary 对勾（浅主题白勾 / 深主题墨绿勾，
+        与稿的 #FFFFFF / #04342C 一致）。回弹与对勾逐段描绘动画保留。"""
+        fill_color = _to_qcolor(self._colors.get("primary", "#0F6E56"))
+        idle_border = _to_qcolor(self._colors.get("line_2", "#D3D1C7"))
+        symbol_color = _to_qcolor(self._colors.get("on_primary", "#FFFFFF"))
 
         # 回弹：1.0 → CHECK_BOUNCE_SCALE → 1.0
         scale = 1.0 + (CHECK_BOUNCE_SCALE - 1.0) * math.sin(math.pi * p)
         center = cb_rect.center()
-        r = (cb_rect.width() * scale) / 2.0
-        circle = QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r)
+        side = cb_rect.width() * scale
+        box = QRectF(center.x() - side / 2.0, center.y() - side / 2.0,
+                     side, side)
 
         # 填充随 p 淡入
         if p > 0.001:
-            fill = QColor(check_color)
+            fill = QColor(fill_color)
             fill.setAlphaF(min(1.0, p))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill)
-            painter.drawEllipse(circle)
+            painter.drawRoundedRect(box, CHECK_RADIUS, CHECK_RADIUS)
 
-        # 描边：idle → check 插值
-        pen = QPen(_lerp_color(idle_border, check_color, p), 1.6)
+        # 描边：idle(line_2) → primary 插值
+        pen = QPen(_lerp_color(idle_border, fill_color, p), 1.5)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(circle)
+        painter.drawRoundedRect(box, CHECK_RADIUS, CHECK_RADIUS)
 
         # 对勾按 p 逐段描绘
         if p > 0.01:
-            self._draw_check(painter, circle, p)
+            self._draw_check(painter, box, p, symbol_color)
 
-    def _draw_check(self, painter, circle: QRectF, p: float):
-        """在圆内按进度 p 描绘对勾（两段折线，按总长比例分配）。"""
-        x, y, w, h = circle.x(), circle.y(), circle.width(), circle.height()
+    def _draw_check(self, painter, box: QRectF, p: float,
+                    color: QColor | None = None):
+        """在框内按进度 p 描绘对勾（两段折线，按总长比例分配）。"""
+        x, y, w, h = box.x(), box.y(), box.width(), box.height()
         p0 = QPointF(x + w * 0.26, y + h * 0.52)
         p1 = QPointF(x + w * 0.44, y + h * 0.70)
         p2 = QPointF(x + w * 0.76, y + h * 0.32)
@@ -372,7 +412,8 @@ class TaskItemDelegate(QStyledItemDelegate):
             return
         drawn = p * total
 
-        pen = QPen(QColor(255, 255, 255), max(1.5, w * 0.14))
+        pen = QPen(QColor(color) if color is not None else QColor(255, 255, 255),
+                   max(1.5, w * 0.14))
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)

@@ -149,9 +149,11 @@ def bucket_unfinished(tasks, today: str | None = None):
 
 
 def format_relative_deadline(deadline: str, today: str | None = None) -> str:
-    """UI 相对时间文案：今天 / 明天 / 逾期N天 / M月D日（周X）。
+    """UI 相对时间文案（2026-10-02 任务页高仿真稿口径，数字两侧留空格）。
 
-    无日期或解析失败 → 返回空串（调用方不再拼接）。
+    今天 / 明天 / 逾期 N 天 / 本周内 → 周X / 更远 → M 月 D 日。
+    分状态收敛信息密度：本周内的日期用星期表达最短且无歧义；出了本周
+    星期失去锚点，回落月日。无日期或解析失败 → 返回空串（调用方不再拼接）。
     """
     d = _parse_iso_date(deadline)
     if d is None:
@@ -165,16 +167,19 @@ def format_relative_deadline(deadline: str, today: str | None = None) -> str:
     if delta == 1:
         return "明天"
     if delta < 0:
-        return f"逾期{abs(delta)}天"
-    return f"{d.month}月{d.day}日（周{_WEEKDAY_CN[d.weekday()]}）"
+        return f"逾期 {abs(delta)} 天"
+    if d <= current_week_end(base.isoformat()):
+        return f"周{_WEEKDAY_CN[d.weekday()]}"
+    return f"{d.month} 月 {d.day} 日"
 
 
 def format_completed_date(completed_at: str) -> str:
-    """已完成任务行尾文案：完成日期「M月D日（周X）」。
+    """已完成任务行尾文案：完成日期「M 月 D 日」。
 
-    已完成任务不再按 deadline 显示「逾期N天」等状态文案，只展示完成日期。
-    ``completed_at`` 形如 "YYYY-MM-DD HH:MM"（旧数据可能只有日期或为空）；
-    为空 / 解析失败 → 返回空串（调用方不再拼接）。
+    已完成任务不再按 deadline 显示「逾期N天」等状态文案，只展示完成日期
+    （星期对「哪天做完的」没有行动价值，省掉）。``completed_at`` 形如
+    "YYYY-MM-DD HH:MM"（旧数据可能只有日期或为空）；为空 / 解析失败 →
+    返回空串（调用方不再拼接）。
     """
     text = str(completed_at or "").strip()
     if not text:
@@ -182,7 +187,7 @@ def format_completed_date(completed_at: str) -> str:
     d = _parse_iso_date(text.split()[0])
     if d is None:
         return ""
-    return f"{d.month}月{d.day}日（周{_WEEKDAY_CN[d.weekday()]}）"
+    return f"{d.month} 月 {d.day} 日"
 
 
 def current_week_end(today: str | None = None) -> date:
@@ -197,14 +202,12 @@ def current_week_end(today: str | None = None) -> date:
 
 
 def group_title(group_key: str, today: str | None = None) -> str:
-    """组标题文案（不含计数，计数由 UI 追加）。
+    """组标题文案（不含计数，计数由 UI 以独立字段渲染）。
 
-    - ``GROUP_WEEK`` → 「本周（至 9 月 27 日）」
-    - 其余组直接返回组名
+    2026-10-02 高仿真稿起「本周」不再追加「（至 M 月 D 日）」后缀 ——
+    组标题回到纯组名，计数以等宽字体跟在后面（见 TaskItemDelegate）。
+    ``today`` 参数保留以维持既有调用方签名。
     """
-    if group_key == GROUP_WEEK:
-        end = current_week_end(today)
-        return f"本周（至 {end.month} 月 {end.day} 日）"
     return group_key
 
 

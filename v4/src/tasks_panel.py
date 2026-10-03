@@ -34,13 +34,14 @@ from src.glass_dialog import make_dialog_buttons
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.task_manager import (
     task_state, format_relative_deadline, format_completed_date, group_title,
-    KIND_ROW, KIND_HEADER,
+    KIND_ROW, KIND_HEADER, GROUP_OVERDUE, STATE_OVERDUE, STATE_NONE,
 )
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle, UndoBar
 from src.constants import CHECK_ANIM_MS
+from src.date_picker import DateField
 from src import motion
 from src.theme import get_colors
 
@@ -113,13 +114,16 @@ class TasksPanel(QWidget):
         self._task_title_input.returnPressed.connect(self._on_add)
         input_bar.addWidget(self._task_title_input, 1)
 
-        # B1：截止日期改为日历选择器（非法/留空自动回退今天）
-        self._task_deadline = QDateEdit()
-        self._task_deadline.setCalendarPopup(True)
-        self._task_deadline.setDisplayFormat("yyyy-MM-dd")
-        self._task_deadline.setDate(QDate.currentDate())
+        # B1 → 2026-10-02：截止日期换成**自绘日历弹层**的日期框
+        # （原生 QDateEdit 弹层按 Chromium date picker 外观重做，见
+        # src/date_picker.py）。新增的两条用户可见行为：
+        #   · 页脚「清除」把日期置空 = 该任务落「无日期」分组；
+        #   · 页脚「今天」一键回到今天。
+        # 只读：日期只能从弹层选，原先「手输非法值再回退今天」的兜底路径
+        # 随之消失（DateField 内部就是 QDateEdit，值语义不变）。
+        self._task_deadline = DateField(self._host, parent=self)
         self._task_deadline.setFixedWidth(150)
-        self._task_deadline.setToolTip("点击选择截止日期（默认今天）")
+        self._task_deadline.setToolTip("点击选择截止日期（可点「清除」设为无日期）")
         input_bar.addWidget(self._task_deadline)
 
         # 「添加」是主操作钮；P1 起带自绘 plus 图标（原先弃用 emoji「➕」是
@@ -244,11 +248,18 @@ class TasksPanel(QWidget):
             row = self._rows[self._row_pos]
             self._row_pos += 1
             if row[0] == "header":
-                header_item = QListWidgetItem(
-                    f"{group_title(row[1], today)}  ·  {row[2]}")
-                # 组标题：不可选中（多选/批量不会误伤）
+                group_key, n = row[1], row[2]
+                # 组标题：标签进 DisplayRole；计数与「是否逾期组」走独立
+                # 角色，由 delegate 分字体/分色绘制（2026-10-02 高仿真稿：
+                # 标签 + 等宽计数，逾期组整行 danger 红）。
+                # 组标题本身不可选中（多选/批量不会误伤）
+                header_item = QListWidgetItem(group_title(group_key, today))
                 header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 header_item.setData(KIND_ROLE, KIND_HEADER)
+                header_item.setData(ROLE_REL, str(n))
+                header_item.setData(
+                    ROLE_STATE,
+                    STATE_OVERDUE if group_key == GROUP_OVERDUE else STATE_NONE)
                 self._task_list.addItem(header_item)
             else:
                 _, t, state, rel = row
@@ -291,6 +302,8 @@ class TasksPanel(QWidget):
         """主题切换时更新行配色（由 MainWindow 调用）。"""
         self._delegate.set_colors(get_colors(self._host.current_theme))
         self._task_list.viewport().update()
+        # 日期框的自绘图标 + 日历弹层同样不在 QSS 管辖内，必须手动刷
+        self._task_deadline.apply_theme()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -372,8 +385,8 @@ class TasksPanel(QWidget):
         title = self._task_title_input.text().strip()
         if not title:
             return
-        deadline = self._task_deadline.date().toString("yyyy-MM-dd")
-        self._task_manager.add_task(title, "", deadline)
+        d = self._task_deadline.dateOrNone()
+        self._task_manager.add_task(title, "", d.toString("yyyy-MM-dd") if d else "")
         self._task_title_input.clear()
         self.refresh()
         self._host.data_changed.emit("task")
