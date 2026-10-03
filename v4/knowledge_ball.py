@@ -61,7 +61,7 @@ from PyQt6.QtGui import (
 
 # 引入独立模块
 from src.single_instance import SingleInstance
-from src.card_window import CardWindow
+from src.card_window import CardWindow, card_modes
 from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
 from src.task_manager import (
     TaskManager, task_state, bucket_unfinished,
@@ -79,6 +79,8 @@ from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
     apply_app_font
 from src.controls import ScreenToast
 from src import icon_render
+from src.icons import strip_leading_emoji, has_icon as icon_exists
+from src import task_reminder_popup
 from src.constants import sanitize_filename, DEFAULT_THEME
 from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
@@ -538,6 +540,20 @@ class FloatingBall(QWidget):
     HOVER_CHECK_INTERVAL = 50     # 悬停检测定时器间隔（毫秒）
     HOVER_LEAVE_COUNT = 2         # 连续多少次检测到离开才关闭
 
+    # 右键菜单（2026-10-02 图标化）
+    MENU_ICON_SIZE = 16           # 菜单图标边长（逻辑像素）
+    # 插件动作 id → 语义图标名（宿主内部映射：零插件契约改动，映射表
+    # 留在宿主里）。6 个内置动作全覆盖；没映射到的动作兜底 plugin 通用
+    # 图标 —— 不出现「没图标」的空位，也不给 6 项挂同一个无信息图标。
+    PLUGIN_ACTION_ICONS = {
+        "kb-search.open": "search",
+        "recurring-tasks.manage": "clock",
+        "recurring-tasks.check-now": "refresh",
+        "vault.open": "lock",
+        "vault.quick": "unlock",
+        "weekly-report.draft": "notes",
+    }
+
     # 拖拽/缩放/吸附 参数
     DRAG_THRESHOLD = 6            # 判定拖拽开始的最小位移（曼哈顿距离，像素）
     PRESS_SHRINK = 0.08           # 按下态快速缩小比例
@@ -661,76 +677,138 @@ class FloatingBall(QWidget):
         self._card_window.card_drag_finished.connect(self._on_card_drag_finished)
 
     def _init_context_menu(self):
-        """右键菜单骨架：打开主窗口 | [番茄钟项] | [插件动作] | 追加项 | 退出程序"""
+        """右键菜单骨架：进入段 | 执行段 | 退出段（见 _rebuild_context_menu）"""
         self._menu = QMenu(self)
         self._menu.setStyleSheet(get_menu_qss(self._theme))
-        # 动作注册表与插件上下文（由 main() 注入；未注入时菜单退化为内置两项）
+        # 动作注册表与插件上下文（由 main() 注入；未注入时菜单退化为内置项）
         self._action_registry = None
         self._plugin_ctx = None
-        # 运行时追加项（add_context_action）：text / callback / separator_before / QAction
+        # 运行时追加项（add_context_action）：text / callback / icon / QAction
         self._extra_context_actions = []
         self._rebuild_context_menu()
 
-    def _rebuild_context_menu(self):
-        """按当前注册表重建右键菜单。
+    def _menu_icon(self, name: str) -> QIcon:
+        """按当前主题渲染菜单图标（三态取色，设计稿 2.4 的实测结论）。
 
-        顺序：打开主窗口 → [番茄钟项] → [插件功能子菜单] → 运行时追加项 → 退出程序。
-        「退出程序」固定垫底（2026-09-27 用户要求）；
-        截图钉屏等追加项保持插在退出程序之前。
-        插件动作自 2026-10-01 起收进「🧩 插件功能」子菜单（Win11「新建 >」
-        同款层级，用户拍板）：一级菜单不再随安装插件数量线性变长。
+        常态 $text_secondary / 禁用 $text_placeholder 之外，关键是把
+        **QIcon::Active** 位图设成 $primary：QMenu 绘制高亮项时取的正是
+        Active 位图，悬停时图标与文字同时变色 —— 不需要接任何信号、
+        不需要在 hover 时重设图标（「图标不跟随 hover 变色」的常见坑
+        的正解）。
         """
-        self._menu.clear()
+        colors = get_colors(self._theme)
+        px = self.MENU_ICON_SIZE
+        ic = QIcon()
+        ic.addPixmap(icon_render.icon_pixmap(name, px,
+                                             colors.get("text_secondary")),
+                     QIcon.Mode.Normal)
+        ic.addPixmap(icon_render.icon_pixmap(name, px, colors.get("primary")),
+                     QIcon.Mode.Active)
+        ic.addPixmap(icon_render.icon_pixmap(name, px,
+                                             colors.get("text_placeholder")),
+                     QIcon.Mode.Disabled)
+        return ic
 
-        # 打开主窗口
-        open_main_action = QAction("🖥  打开主窗口", self._menu)
-        open_main_action.triggered.connect(self._open_main_window)
-        self._menu.addAction(open_main_action)
+    def _add_menu_action(self, menu, text, callback, icon_name=None):
+        """建 QAction → 挂自绘图标 → 接回调 → 加入菜单，返回 QAction。
 
-        # 番茄钟菜单项（按状态显隐；功能关闭时整组不出现）
+        图标名同步写进 ``icon_name`` 属性：菜单文案断言只比文本的话，
+        「忘记 setIcon」不会红灯 —— 护栏靠这个属性断言图标真的挂上了
+        （verify_plugin_loader 的菜单签名断言）。
+        """
+        act = QAction(text, menu)
+        if icon_name:
+            act.setIcon(self._menu_icon(icon_name))
+            act.setProperty("icon_name", icon_name)
+        act.triggered.connect(callback)
+        menu.addAction(act)
+        return act
+
+    def _add_card_submenu(self, menu):
+        """「小卡片 ▸」二级菜单：7 个模式直达。
+
+        show_card_mode() 早已作为 open_card_mode 注入给插件（能力不对称：
+        插件能直达「临时笔记」，用户自己却没有入口），这里补上用户侧的
+        指定模式直达。图标复用 card_window.card_modes() 的公开取用口。
+        """
+        modes = card_modes()
+        if not modes:
+            return
+        sub = QMenu("小卡片", menu)
+        sub.setStyleSheet(get_menu_qss(self._theme))
+        for key, title, icon_name in modes:
+            self._add_menu_action(
+                sub, title,
+                lambda _checked=False, k=key: self.show_card_mode(k),
+                icon_name if icon_name else None)
+        # addMenu 生成的「子菜单标题」是独立的 QAction，图标要单独挂
+        self._decorate_submenu_action(menu.addMenu(sub), "ball")
+
+    def _plugin_icon_name(self, action) -> str:
+        """插件动作 → 菜单图标名（映射表命中，未命中兜底 plugin）。"""
+        name = self.PLUGIN_ACTION_ICONS.get(getattr(action, "id", ""))
+        return name if icon_exists(name) else "plugin"
+
+    def _add_plugin_submenu(self, menu, plugin_actions):
+        """「插件功能 ▸」子菜单：语义图标 + 标题剥 emoji 前缀（展示层）。
+
+        标题剥前缀走 icons.strip_leading_emoji（与主窗口导航同源）；
+        manifest 归插件作者维护，id 与能力声明不动。
+        """
+        sub = QMenu("插件功能", menu)
+        sub.setStyleSheet(get_menu_qss(self._theme))
+        for act in plugin_actions:
+            title = strip_leading_emoji(act.title or act.id)
+            self._add_menu_action(
+                sub, title,
+                lambda _checked=False, aid=act.id: self._trigger_action(aid),
+                self._plugin_icon_name(act))
+        self._decorate_submenu_action(menu.addMenu(sub), "plugins")
+
+    def _decorate_submenu_action(self, menu_action, icon_name):
+        """给 addMenu() 生成的子菜单标题 QAction 补图标与 icon_name 属性。"""
+        menu_action.setIcon(self._menu_icon(icon_name))
+        menu_action.setProperty("icon_name", icon_name)
+
+    def _rebuild_context_menu(self):
+        """按当前注册表重建右键菜单（2026-10-02 方案 A：三段结构）。
+
+        进入段：打开主窗口 / 小卡片 ▸ —— 都是「去某个地方」。
+        执行段：[番茄钟项] → [运行时追加项] → [插件功能 ▸] —— 当场做一件事。
+        退出段：退出程序，固定垫底（2026-09-27 用户要求），分隔线隔离。
+
+        分隔线 4 → 2 条，每段至少 2 项（番茄钟关闭时执行段仍有追加项 /
+        插件项兜着，即使全空也只会剩一条线，不会出现相邻双分隔线）。
+        追加项落进执行段末尾，不再像旧版那样各自带前置分隔线。
+        插件动作收进子菜单（2026-10-01 用户拍板，Win11「新建 >」同款）。
+        """
+        menu = self._menu
+        menu.clear()
+
+        # ---- 进入段 ----
+        self._add_menu_action(menu, "打开主窗口", self._open_main_window,
+                              "window")
+        self._add_card_submenu(menu)
+
+        # ---- 执行段 ----
         pom_entries = self._pomodoro_menu_entries()
-        if pom_entries:
-            self._menu.addSeparator()
-            for text, callback in pom_entries:
-                act = QAction(text, self._menu)
-                act.triggered.connect(callback)
-                self._menu.addAction(act)
-
-        # 插件功能子菜单（注册表数据驱动：menu=True 且启用中的动作）。
-        # 子菜单显式套同一份 QSS（与托盘便签子菜单同款做法，确保玻璃观感一致）
         plugin_actions = (self._action_registry.menu_actions()
                           if self._action_registry is not None else [])
-        if plugin_actions:
-            self._menu.addSeparator()
-            plugin_menu = QMenu("🧩 插件功能", self._menu)
-            plugin_menu.setStyleSheet(get_menu_qss(self._theme))
-            for act in plugin_actions:
-                qa = QAction(act.title or act.id, plugin_menu)
-                icon_path = getattr(act, "icon_path", None)
-                if icon_path and os.path.isfile(icon_path):
-                    qa.setIcon(QIcon(icon_path))
-                qa.triggered.connect(
-                    lambda _checked=False, aid=act.id: self._trigger_action(aid))
-                plugin_menu.addAction(qa)
-            self._menu.addMenu(plugin_menu)
-
-        # 运行时追加项（add_context_action，如截图钉屏）
+        if pom_entries or self._extra_context_actions or plugin_actions:
+            menu.addSeparator()
+        for text, callback, icon_name in pom_entries:
+            self._add_menu_action(menu, text, callback, icon_name)
         for entry in self._extra_context_actions:
-            actions = self._menu.actions()
-            if entry["separator_before"] and actions and not actions[-1].isSeparator():
-                self._menu.addSeparator()
-            act = QAction(entry["text"], self._menu)
-            act.triggered.connect(entry["callback"])
-            self._menu.addAction(act)
-            entry["action"] = act
+            entry["action"] = self._add_menu_action(
+                menu, entry["text"], entry["callback"], entry["icon"])
+        if plugin_actions:
+            self._add_plugin_submenu(menu, plugin_actions)
 
-        # 退出程序（固定在最底部）
-        actions = self._menu.actions()
+        # ---- 退出段 ----
+        actions = menu.actions()
         if actions and not actions[-1].isSeparator():
-            self._menu.addSeparator()
-        exit_action = QAction("退出程序", self._menu)
-        exit_action.triggered.connect(self._request_quit)
-        self._menu.addAction(exit_action)
+            menu.addSeparator()
+        self._add_menu_action(menu, "退出程序", self._request_quit, "power")
 
     def _trigger_action(self, action_id):
         """触发插件动作（插件的异常由注册表兜住，不会波及悬浮球）"""
@@ -765,7 +843,8 @@ class FloatingBall(QWidget):
     def show_card_mode(self, mode: str) -> bool:
         """公开入口：弹出小卡片并切到指定模式
 
-        mode：fragment / task / note / nav / asset / app
+        mode：fragment / card / task / note / nav / asset / app
+        （与小卡片 Tab 键一一对应，见 card_window.card_modes()）
         """
         w = self._card_window
         w.switch_mode(mode)
@@ -792,15 +871,21 @@ class FloatingBall(QWidget):
                     f"[主窗口] 打开完成, visible={self._main_window.isVisible()}")
             QTimer.singleShot(300, _alive)
 
-    def add_context_action(self, text, callback, separator_before=True):
-        """运行时向右键菜单追加动作（兼容入口，如：截图钉屏）。
+    def add_context_action(self, text, callback, separator_before=True,
+                           icon=None):
+        """运行时向右键菜单追加动作（如：截图钉屏）。
 
-        callback 无参调用；separator_before 决定是否在动作前加分隔线
-        （若菜单末尾已是分隔线则不重复加）。
-        追加项排在菜单末尾（与历史行为一致），插件动作不受影响。
+        callback 无参调用；icon 是 icons.py 的图标名（非法名在追加时即
+        报错 —— 菜单图标必须显式可断言，不做静默降级）。
+        2026-10-02 起追加项固定落进「执行段」末尾（番茄钟项之后、插件
+        功能子菜单之前），段内不再加前置分隔线 —— ``separator_before``
+        参数仅为兼容保留，不再参与布局。
         """
+        if icon is not None and not icon_exists(icon):
+            raise ValueError(f"未登记的菜单图标名：{icon!r}")
         entry = {"text": text, "callback": callback,
-                 "separator_before": bool(separator_before), "action": None}
+                 "separator_before": bool(separator_before),
+                 "icon": icon, "action": None}
         self._extra_context_actions.append(entry)
         self._rebuild_context_menu()
         return entry["action"]
@@ -925,23 +1010,30 @@ class FloatingBall(QWidget):
         self._pomodoro.bound_title = ""
 
     def _pomodoro_menu_entries(self):
-        """按当前状态产出右键菜单项 [(text, callback), ...]；关闭时返回空。"""
+        """按当前状态产出右键菜单项 [(text, callback, icon_name), ...]；关闭时返回空。
+
+        文案维持「开始专注 / 暂停专注 / 继续专注 / 结束计时」原词 ——
+        verify_pomodoro_ring.py 按子串断言，零改动；emoji 前缀的退役
+        由自绘图标承担（pomodoro / pause / play / stop）。
+        """
         if not getattr(self, "_pomodoro_enabled", False):
             return []
         timer = self._pomodoro
         state = timer.state
         is_break = timer.phase == PHASE_BREAK
         if state == STATE_IDLE:
-            return [("🍅 开始专注", self.start_focus)]
+            return [("开始专注", self.start_focus, "pomodoro")]
         if state == STATE_RUNNING:
             return [
-                ("⏸ 暂停休息" if is_break else "⏸ 暂停专注", self._pomodoro_toggle),
-                ("⏹ 结束计时", self._pomodoro_stop),
+                ("暂停休息" if is_break else "暂停专注",
+                 self._pomodoro_toggle, "pause"),
+                ("结束计时", self._pomodoro_stop, "stop"),
             ]
         # paused
         return [
-            ("▶ 继续休息" if is_break else "▶ 继续专注", self._pomodoro_toggle),
-            ("⏹ 结束计时", self._pomodoro_stop),
+            ("继续休息" if is_break else "继续专注",
+             self._pomodoro_toggle, "play"),
+            ("结束计时", self._pomodoro_stop, "stop"),
         ]
 
     def _format_mmss(self, seconds: int) -> str:
@@ -1034,8 +1126,12 @@ class FloatingBall(QWidget):
         # 番茄钟进度环配色随主题（环在球外圈，颜色取自主题字典）
         if getattr(self, "_pomodoro", None) is not None:
             self._apply_ring_colors()
-        # 右键菜单 QSS
+        # 右键菜单 QSS：一级菜单 + 全部子菜单一起重设。此前只刷
+        # self._menu，子菜单停留在「建菜单那一刻」的主题 —— 先切主题
+        # 再右键就会看到一级白、子菜单黑的撕裂（2026-10-02 缺陷 #2）。
         self._menu.setStyleSheet(get_menu_qss(theme_name))
+        for sub_menu in self._menu.findChildren(QMenu):
+            sub_menu.setStyleSheet(get_menu_qss(theme_name))
         # 小卡片主题
         if hasattr(self, '_card_window'):
             self._card_window.apply_theme(theme_name)
@@ -2616,7 +2712,7 @@ def main():
         sticky_manager=sticky_manager,
     )
 
-    # ---- 任务到期提醒（启动时 + 每日 9:00 托盘气泡）----
+    # ---- 任务到期提醒（启动时 + 每日 9:00 自绘提醒卡片）----
     def _msecs_until_next(hour: int) -> int:
         """距下一个指定整点的毫秒数（用于每日定时）"""
         from datetime import datetime, timedelta
@@ -2627,21 +2723,25 @@ def main():
         return int((target - now).total_seconds() * 1000)
 
     def _check_task_reminders():
-        """扫描未完成任务并托盘气泡提醒（三桶口径）。
+        """扫描未完成任务并弹自绘提醒卡片（三桶口径）。
 
         ★2026-09-30 修：此前只提醒「今日到期 / 已逾期」两项，导致
         **无截止日的未完成任务永远不会被提醒**（用户反馈"未完成任务不提示"，
         实测其 5 条未完成任务 deadline 全为空串 → 命中 STATE_NONE → 静默）。
 
-        三桶（顺序即气泡内展示顺序）：
+        ★2026-10-02 换呈现层：原生托盘气泡（系统 toast，样式不可控）→
+        自绘弹窗 task_reminder_popup（用户点名重设计）；触发时机、
+        task_reminder_enabled 开关与三桶口径全部不变，分桶仍由纯函数
+        bucket_unfinished 固化；球体徽标（refresh_badge）保持「逾期 +
+        今日到期」原口径不变。
+
+        三桶（顺序即弹窗内展示顺序）：
           · 已逾期   —— STATE_OVERDUE
           · 今日到期 —— STATE_TODAY
           · 未安排日期 —— STATE_NONE 且未完成（无日期 / 日期写坏）
 
         任务状态仍统一走 task_state（脏日期解析失败 → 无日期，不标红、
-        不进逾期桶），分桶由纯函数 bucket_unfinished 固化，**不新增也不
-        改写任何状态口径**；球体徽标（refresh_badge）保持「逾期 + 今日
-        到期」原口径不变。
+        不进逾期桶）。
         """
         ball.refresh_badge()   # 顺带刷新球体徽标（跨天后"今日到期"口径会变）
         if not config_manager.get("task_reminder_enabled", True):
@@ -2653,21 +2753,12 @@ def main():
         total = len(overdue) + len(due) + len(undated)
         if not total:
             return
-        lines = []
-        for label, bucket in (("【已逾期】", overdue),
-                              ("【今日到期】", due),
-                              ("【未安排日期】", undated)):
-            if not bucket:
-                continue
-            lines.append(label)
-            lines.extend(f"· {t.title}" for t in bucket[:5])
-            if len(bucket) > 5:
-                lines.append(f"· …另有 {len(bucket) - 5} 项")
-        tray.show_message(
-            f"任务提醒（{total} 项未完成）",
-            "\n".join(lines),
-            QSystemTrayIcon.MessageIcon.Information,
-            6000,
+        task_reminder_popup.show_reminder(
+            overdue=[t.title for t in overdue],
+            due=[t.title for t in due],
+            undated=[t.title for t in undated],
+            theme=resolve_theme_name(
+                config_manager.get("theme", DEFAULT_THEME)),
         )
         get_logger().info(
             f"任务提醒已弹出：逾期 {len(overdue)}，今日到期 {len(due)}，"
@@ -2678,8 +2769,16 @@ def main():
         _check_task_reminders()
         QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)
 
-    # 提醒气泡点击 → 显示主窗口并切到任务页（D1-lite：随托盘拆至
-    # TrayController._on_message_clicked，setup 时已接线）
+    # 提醒卡片「打开任务页」/ 点卡片空白处 → 显示主窗口并切到任务页
+    # （与原托盘气泡 messageClicked 同语义；卡片点击经 open_requested 回连）
+    def _open_task_page_from_reminder():
+        main_window.show()
+        main_window.raise_()
+        main_window.activateWindow()
+        main_window.show_page(1)
+
+    task_reminder_popup.popup_instance().open_requested.connect(
+        _open_task_page_from_reminder)
     QTimer.singleShot(4000, _check_task_reminders)          # 启动 4 秒后首次检查
     QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)  # 之后每天 9:00
 
@@ -2766,8 +2865,9 @@ def main():
     screenshot_hotkey.reapply()
     main_window.screenshot_changed.connect(screenshot_hotkey.reapply)
     main_window.theme_changed.connect(screenshot_pin.apply_theme)
-    # 悬浮球右键菜单入口
-    ball.add_context_action("✂ 截图钉屏", screenshot_pin.start_capture)
+    # 悬浮球右键菜单入口（落进「执行段」，图标同 icons.py 菜单批次）
+    ball.add_context_action("截图钉屏", screenshot_pin.start_capture,
+                            icon="screenshot")
 
     # ---- 番茄钟（球体进度环 + 右键菜单 + 任务绑定，V4）----
     def _on_pomodoro_phase_finished(phase, title):

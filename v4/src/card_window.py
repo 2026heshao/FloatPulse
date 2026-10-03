@@ -55,7 +55,7 @@ from PyQt6.QtCore import QUrl
 from src.glass_dialog import make_dialog_buttons
 from src.task_manager import (
     TaskManager, task_state, format_relative_deadline, format_completed_date,
-    group_title, KIND_ROW, KIND_HEADER,
+    group_title, KIND_ROW, KIND_HEADER, GROUP_OVERDUE, STATE_OVERDUE, STATE_NONE,
 )
 from src.task_delegate import (
     TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
@@ -64,16 +64,20 @@ from src.controls import (
     tune_list_scrolling, SmoothButton, IconButton, IconLabel, UndoBar,
     EmptyState,
 )
+from src.fragment_classifier import CATEGORY_ORDER, CATEGORY_TOKENS
+from src.fragment_edit_dialog import FragmentEditDialog
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
 from src.theme import get_card_window_qss, get_menu_qss, get_colors
 from src.icon_render import icon as render_icon
 from src.assets_panel import EXT_ICON
 from src.glass import NavIndicator, draw_soft_shadow
+from src.date_picker import DateField
 from src.app_paths import get_screen_geometry
 from src.constants import (
     NOTE_AUTOSAVE_INTERVAL_MS, DEFAULT_THEME, CHECK_ANIM_MS,
     MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT, mini_btn_size,
+    DATETIME_TIME_START, DATETIME_TIME_LEN, DATETIME_MIN_LEN,
 )
 from src import motion
 from datetime import date as _date
@@ -104,6 +108,19 @@ _TAB_ICONS = {
     "app": "apps",
 }
 
+
+def card_modes() -> tuple:
+    """小卡片全部模式的公开取用口：``((key, 标题, 图标名), ...)``。
+
+    悬浮球建「小卡片 ▸」子菜单时从这里读，避免穿透 ``_TABS`` /
+    ``_TAB_KEYS`` / ``_TAB_ICONS`` 三个私有模块常量（D3 铁律）；
+    顺序即 Tab 栏顺序。
+    """
+    return tuple(
+        (key, name, _TAB_ICONS.get(key, ""))
+        for key, (_placeholder, name) in zip(_TAB_KEYS, _TABS)
+    )
+
 # 左侧 Tab 栏尺寸（固定宽度，不再展开收起）
 _TAB_BAR_WIDTH = 44         # 固定宽度（UI 重构 03：48→44，省 4px 给内容区）
 _TAB_BTN_SIZE = 40          # 图标按钮尺寸
@@ -127,7 +144,99 @@ def _card_shell_qss(colors: dict) -> str:
         圆角由 glass.py 手绘，QSS 这条其实没生效过）。
       · ``#titleLabel``：页标题统一 15px/500（``$fs_md``）。
       · ``#sectionLabel``：素材空状态标题（EmptyState 用；卡片 QSS 原缺该规则）。
+      · 碎片页壳（UI 重构 06，见下方 ``frag`` 段）：页眉 36 / 行 26 /
+        页脚 34 三段，逐条对齐 ``设计稿/ui-redesign-preview.html`` 的
+        ``.mini-head / .mini-row / .mini-foot``。
     """
+    frag = (
+        # ---- 页眉（.mini-head：36px，底边线，标题 13/500 + 等宽计数）----
+        "QWidget#miniHead {\n"
+        "    background-color: transparent;\n"
+        "    border-bottom: 1px solid %(line)s;\n"
+        "}\n"
+        "QLabel#miniHeadTitle {\n"
+        "    color: %(text)s;\n"
+        "    font-size: %(fs_sm)s;\n"
+        "    font-weight: 500;\n"
+        "}\n"
+        "QLabel#miniHeadCount {\n"
+        "    color: %(text_placeholder)s;\n"
+        "    font-size: %(fs_xs)s;\n"
+        "    font-family: 'Consolas', 'Cascadia Mono', monospace;\n"
+        "}\n"
+        # ---- 行（.mini-row：26px，hover 淡面 / 选中淡绿面 + 左 2px 主色条）----
+        # 常量左边框 2px（常态透明）：选中时不再让文字横向跳动，
+        # 行内左内边距固定 10 → 任何状态内容都从 12px 开始（= 设计稿数值）。
+        "QWidget#fragItemRow {\n"
+        "    background-color: transparent;\n"
+        "    border-left: 2px solid transparent;\n"
+        "}\n"
+        "QWidget#fragItemRow:hover {\n"
+        "    background-color: %(surface_2)s;\n"
+        "}\n"
+        'QWidget#fragItemRow[selected="true"] {\n'
+        "    background-color: %(accent_soft)s;\n"
+        "    border-left: 2px solid %(primary)s;\n"
+        "}\n"
+        # 正文取 $text（覆盖 theme.py 的 text_secondary）—— 设计稿行文本是主文本色，
+        # 弱化交给左端类别圆点与右端时间来做。
+        "QLabel#fragPreview {\n"
+        "    color: %(text)s;\n"
+        "    font-size: %(fs_sm)s;\n"
+        "    padding: 0px;\n"
+        "    background: transparent;\n"
+        "    border: none;\n"
+        "}\n"
+        "QLabel#fragTime {\n"
+        "    color: %(text_placeholder)s;\n"
+        "    font-size: 10px;\n"
+        "    font-family: 'Consolas', 'Cascadia Mono', monospace;\n"
+        "}\n"
+        "QLabel#fragCatDot {\n"
+        "    background-color: %(text_secondary)s;\n"
+        "    border-radius: 2px;\n"
+        "}\n"
+        # ---- 页脚（.mini-foot：34px，顶边线，裸露图标钮）----
+        "QWidget#miniFoot {\n"
+        "    background-color: transparent;\n"
+        "    border-top: 1px solid %(line)s;\n"
+        "}\n"
+        # 行内彩色小胶囊 → 裸露图标钮：常态透明无边框（图标色由 IconButton
+        # 的 QIcon 位图控制），hover 底色过渡走 controls._SMOOTH_OVERLAYS。
+        "QPushButton#fragCopyBtn, QPushButton#fragDelBtn,\n"
+        "QPushButton#fragEditBtn {\n"
+        "    background-color: transparent;\n"
+        "    border: 1px solid transparent;\n"
+        "    border-radius: %(r_ctl)spx;\n"
+        "    padding: 0px;\n"
+        "}\n"
+        "QPushButton#fragEditBtn:focus {\n"
+        "    border: 1px solid %(focus_ring)s;\n"
+        "    outline: none;\n"
+        "}\n"
+        "QLabel#miniFootHint {\n"
+        "    color: %(text_placeholder)s;\n"
+        "    font-size: %(fs_xs)s;\n"
+        "}\n"
+        # ---- 右上角关闭钮（UI 重构 06）：对齐 .mini-head .x 的中性 ✕ ----
+        # 常态透明无边框、圆角 r_chip；图标色由 IconButton 位图控制。
+        # 显示逻辑**不变**（仍只在「小卡片保持显示」模式下出现）——
+        # 用户 2026-10-02 明确要求只改样式。
+        "QPushButton#cardCloseBtn {\n"
+        "    background-color: transparent;\n"
+        "    border: 1px solid transparent;\n"
+        "    border-radius: %(r_chip)spx;\n"
+        "}\n"
+    ) % colors
+
+    # 类别圆点取色：由 CATEGORY_ORDER × CATEGORY_TOKENS 现场生成，不手写 5 条 ——
+    # 类别表加了新类别时这里自动跟上（漏写会静默退化成灰点，正是要避免的）。
+    dots = "".join(
+        'QLabel#fragCatDot[cat="%s"] {\n    background-color: %s;\n}\n'
+        % (cat, colors.get(CATEGORY_TOKENS.get(cat, ""), colors["text_secondary"]))
+        for cat in CATEGORY_ORDER
+    )
+
     return (
         "QWidget#cardContainer {\n"
         "    background-color: %(surface)s;\n"
@@ -143,7 +252,7 @@ def _card_shell_qss(colors: dict) -> str:
         "    font-size: %(fs_sm)s;\n"
         "    font-weight: 600;\n"
         "}\n"
-    ) % colors
+    ) % colors + frag + dots
 
 
 def _domain_of_url(url: str) -> str:
@@ -166,6 +275,49 @@ def _domain_of_url(url: str) -> str:
 
 
 # ====================================================================
+# 碎片页（小卡片页 0）尺寸常量
+# 数值逐条取自 设计稿/ui-redesign-preview.html 的 .mini-* 规则（CSS px）
+# ====================================================================
+FRAG_HEAD_HEIGHT = 36       # .mini-head
+FRAG_FOOT_HEIGHT = 34       # .mini-foot
+FRAG_ROW_HEIGHT = 26        # .mini-row
+FRAG_FOOT_BTN = 26          # .mini-foot .ib
+FRAG_FOOT_ICON = 15         # .mini-foot .ib svg 边长
+FRAG_DOT_SIZE = 5           # .mini-row .dot（类别圆点）
+FRAG_ROW_LIMIT = 20         # 小卡片最多展示条数（沿用重构前口径）
+FRAG_HINT_MS = 1200         # 页脚右端「已复制 / 已删除」回执驻留时长
+FRAG_ROW_INSET_L = 10       # 行左内边距（+ QSS 里常态 2px 透明左边框 = 12）
+FRAG_ROW_INSET_R = 12       # 行右内边距
+FRAG_ROW_GAP = 8            # 行内间距（圆点↔正文↔时间）
+FRAG_SCROLLBAR_RESERVE = 12  # 内容区为纵向滚动条预留（8px 条 + 2px 双向外边距）
+
+
+def _fragment_time_text(created_at: str) -> str:
+    """``created_at`` → 展示用 ``"HH:MM"``（长度不足时退化为原串尾部）。
+
+    与主窗口碎片工作台同口径（``fragments_panel._make_row_item`` 用同一组
+    ``DATETIME_*`` 常量切分），避免两处时间展示格式漂移。
+    """
+    text = created_at if isinstance(created_at, str) else ""
+    if len(text) >= DATETIME_MIN_LEN:
+        return text[DATETIME_TIME_START:DATETIME_TIME_START + DATETIME_TIME_LEN]
+    return text[DATETIME_TIME_START:]
+
+
+class _DialogHost:
+    """给 :class:`FragmentEditDialog` 的最小宿主替身：只暴露 ``current_theme``。
+
+    刻意**不**提供 ``_container`` —— GlassDialog 会优先抓"宿主容器"的
+    stylesheet，而小卡片容器挂的是 card QSS（里面没有 primaryBtn /
+    secondaryBtn 等规则），编辑对话框的按钮会因此失去样式。没有该属性时
+    它会退回 ``get_main_window_qss(theme)``，正是对话框该吃的那一套。
+    """
+
+    def __init__(self, theme: str):
+        self.current_theme = theme
+
+
+# ====================================================================
 # 选中 Tab 指示器（圆角竖条，通过 move 驱动滑动）
 # ====================================================================
 class _TabIndicator(NavIndicator):
@@ -184,6 +336,42 @@ class _TabIndicator(NavIndicator):
     def get_indicator_y(self) -> int:
         """获取当前指示器 Y 位置"""
         return self.y()
+
+
+# ====================================================================
+# 碎片行：类别圆点 + 内容预览 + 时间（UI 重构 06）
+# ====================================================================
+class _FragmentRow(QWidget):
+    """碎片列表行（26px 固定高）。
+
+    ★ 单击判定为什么不在行内做：行的 ``mousePressEvent`` **不能消费事件**
+    —— 事件必须继续冒泡给 CardWindow，卡片才能「按住行拖动」。一旦上层
+    ``CardWindow.mousePressEvent`` accept，隐式鼠标抓取就归了上层，
+    **release 根本不会回到行上**，在行内等 release 会永远等不到。
+
+    所以行只负责 press 时上报自己的 fragment_id（``pressed`` 信号），
+    由 CardWindow 在 ``mouseReleaseEvent`` 里按「这期间卡片有没有被拖动」
+    区分「单击复制」与「拖卡片」，两种手势互不干扰。
+    """
+
+    pressed = pyqtSignal(int)
+
+    def __init__(self, fragment_id: int, parent=None):
+        super().__init__(parent)
+        self.fragment_id = int(fragment_id)
+        self.setObjectName("fragItemRow")
+        self.setFixedHeight(FRAG_ROW_HEIGHT)
+        # QSS 的 background-color / border-left 要生效，自定义 QWidget 必须
+        # 显式打开样式背景 —— 否则 hover 与选中底色根本不会被绘制。
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setProperty("selected", "false")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.pressed.emit(self.fragment_id)
+        # 不 accept：让 press 继续冒泡，卡片的「按住任意处拖动」保持原样
+        super().mousePressEvent(event)
 
 
 # ====================================================================
@@ -431,6 +619,11 @@ class CardWindow(QWidget):
         self._loading_note = False
         self._last_mode = "fragment"
         self._dragging = False
+        # 碎片页：选中行 / 本次按下落在哪一行 / 拖动位移标志（单击复制 vs 拖卡片）
+        self._frag_selected_id = None
+        self._frag_press_id = None
+        self._drag_moved = False
+        self._frag_hint_timer = None
         # 小卡片软件图标边长；None = 尚未从配置读入（mini_icon_size 懒读兜底）
         self._mini_icon_size = None
         self._drag_offset = QPoint()
@@ -568,9 +761,12 @@ class CardWindow(QWidget):
         outer.addWidget(content_area, 1)
 
         # 保持显示模式下的关闭按钮（右上角，默认隐藏）
+        # UI 重构 06：取色对齐 .mini-head .x —— 常态次级灰、hover 转正文色
+        # （原为 danger 底 + 白位图的实心红钮；显示逻辑仍只在常驻模式出现）
         self._close_btn = IconButton("close", size=self.CLOSE_BTN_SIZE,
-                                     icon_size=12, object_name="cardCloseBtn",
-                                     off_color="danger", hover_color="#FFFFFF",
+                                     icon_size=13, object_name="cardCloseBtn",
+                                     off_color="text_placeholder",
+                                     hover_color="text",
                                      tooltip="关闭卡片", parent=self._container)
         self._close_btn.apply_theme(self._theme)
         self._close_btn.clicked.connect(self._on_close_button_clicked)
@@ -589,14 +785,24 @@ class CardWindow(QWidget):
         self._switch_mode("fragment")
 
     # ==================================================================
-    # 碎片页面（小卡片：仅复制 + 删除 + 拖拽复制）
+    # 碎片页面（UI 重构 06：对齐高仿真 .mini 壳 —— 页眉 36 + 列表 + 页脚 34）
     # ==================================================================
     def _build_fragment_page(self):
-        """构建碎片工作台小卡片页面"""
+        """构建碎片工作台小卡片页面。
+
+        重构前：整页只有一列「内容 + 行内复制/删除」，没有页眉（7 个页里
+        唯一没有标题的一页），行内也看不到时间与类别。现按设计稿重排成
+        三段固定壳，行只负责展示、动作统一收到页脚：
+          · 页眉 36px：标题「碎片」+ 本屏条数
+          · 列表     ：26px/行（类别圆点 + 内容 + 时间），单击 = 选中并复制
+          · 页脚 34px：复制 / 删除 / 编辑（作用于选中行）+ 右端操作回执
+        """
         page = QWidget()
         v = QVBoxLayout(page)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+
+        v.addWidget(self._build_fragment_head())
 
         # 滚动区域包裹碎片列表（仅纵向滚动，禁止横向滚动条）
         scroll = QScrollArea()
@@ -606,86 +812,267 @@ class CardWindow(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_widget = QWidget()
         scroll_v = QVBoxLayout(scroll_widget)
-        scroll_v.setContentsMargins(0, 0, 0, 0)
+        scroll_v.setContentsMargins(0, 2, 0, 2)     # .mini-list padding: 2px 0
         scroll_v.setSpacing(0)
 
         self._frag_content_layout = QVBoxLayout()
-        self._frag_content_layout.setSpacing(8)
+        self._frag_content_layout.setSpacing(0)     # 行高 26 自带留白，不再加行距
         scroll_v.addLayout(self._frag_content_layout)
         scroll_v.addStretch()
         scroll.setWidget(scroll_widget)
-        v.addWidget(scroll)
+        v.addWidget(scroll, 1)
+
+        v.addWidget(self._build_fragment_foot())
         return page
 
+    def _build_fragment_head(self) -> QWidget:
+        """页眉（36px，.mini-head）：标题 + 本屏条数。
+
+        条数口径 = 本屏显示条数（与设计稿一致：碎片页显示 7 行就写 7）。
+        """
+        head = QWidget()
+        head.setObjectName("miniHead")
+        head.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        head.setFixedHeight(FRAG_HEAD_HEIGHT)
+        lay = QHBoxLayout(head)
+        lay.setContentsMargins(12, 0, 10, 0)        # .mini-head padding: 0 10 0 12
+        lay.setSpacing(8)
+
+        self._frag_title_label = QLabel("碎片")
+        self._frag_title_label.setObjectName("miniHeadTitle")
+        self._frag_count_label = QLabel("0")
+        self._frag_count_label.setObjectName("miniHeadCount")
+        lay.addWidget(self._frag_title_label)
+        lay.addWidget(self._frag_count_label)
+        lay.addStretch()
+        return head
+
+    def _build_fragment_foot(self) -> QWidget:
+        """页脚（34px，.mini-foot）：三个动作钮 + 右端操作回执。
+
+        设计稿这一格是通用页脚里的「下一张」；碎片页没有翻页语义
+        （2026-10-02 用户拍板不做该按钮），改放一次性回执 ——
+        「单击即复制」必须给出可见反馈，否则用户不知道复制成功没成功。
+        """
+        foot = QWidget()
+        foot.setObjectName("miniFoot")
+        foot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        foot.setFixedHeight(FRAG_FOOT_HEIGHT)
+        lay = QHBoxLayout(foot)
+        lay.setContentsMargins(10, 0, 10, 0)        # .mini-foot padding: 0 10
+        lay.setSpacing(4)
+
+        self._frag_copy_btn = IconButton(
+            "copy", size=FRAG_FOOT_BTN, icon_size=FRAG_FOOT_ICON,
+            object_name="fragCopyBtn", off_color="text_secondary",
+            hover_color="text", tooltip="复制选中碎片")
+        self._frag_copy_btn.clicked.connect(self._copy_selected_fragment)
+
+        self._frag_del_btn = IconButton(
+            "trash", size=FRAG_FOOT_BTN, icon_size=FRAG_FOOT_ICON,
+            object_name="fragDelBtn", off_color="danger", hover_color="danger",
+            danger=True, tooltip="删除选中碎片")
+        self._frag_del_btn.clicked.connect(self._delete_selected_fragment)
+
+        self._frag_edit_btn = IconButton(
+            "edit", size=FRAG_FOOT_BTN, icon_size=FRAG_FOOT_ICON,
+            object_name="fragEditBtn", off_color="text_secondary",
+            hover_color="text", tooltip="编辑选中碎片")
+        self._frag_edit_btn.clicked.connect(self._edit_selected_fragment)
+
+        for btn in (self._frag_copy_btn, self._frag_del_btn, self._frag_edit_btn):
+            lay.addWidget(btn)
+
+        self._frag_hint_label = QLabel("")
+        self._frag_hint_label.setObjectName("miniFootHint")
+        self._frag_hint_label.setVisible(False)
+        lay.addStretch()
+        lay.addWidget(self._frag_hint_label)
+        return foot
+
     def _refresh_fragment_page(self):
-        """刷新碎片列表：每条显示内容预览 + 复制/删除按钮"""
+        """重建碎片列表：页眉条数 + 26px 行 + 页脚可用态。
+
+        行结构 = 类别圆点（5px）+ 内容预览（可省略）+ 时间（HH:MM）；
+        动作按钮自 UI 重构 06 起统一收到页脚，不再逐行挂。
+        """
         # 清除旧内容
         while self._frag_content_layout.count():
             item = self._frag_content_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        if not self._fragment_manager:
-            empty = QLabel("暂无碎片")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._frag_content_layout.addWidget(empty)
-            return
+        fragments = []
+        if self._fragment_manager:
+            fragments = self._fragment_manager.get_all_fragments() or []
 
-        fragments = self._fragment_manager.get_all_fragments()
         if not fragments:
-            empty = QLabel("暂无碎片，复制文本即可收集")
+            empty = QLabel("暂无碎片，复制文本即可收集" if self._fragment_manager
+                           else "暂无碎片")
             empty.setObjectName("hintLabel")
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._frag_content_layout.addWidget(empty)
+            self._frag_count_label.setText("0")
+            self._sync_frag_selection(None)
             return
 
-        # 取最近 20 条显示（小卡片不宜过多）
-        display_frags = fragments[:20]
+        # 取最近 20 条显示（小卡片不宜过多；条数口径与重构前一致）
+        display_frags = fragments[:FRAG_ROW_LIMIT]
+        self._frag_count_label.setText(str(len(display_frags)))
 
-        # 预览文本可用宽度：内容区360 - 按钮(26×2) - 间距(6×2) - 行边距(左4右12) - 滚动条预留12
-        text_width = self.WINDOW_WIDTH - _TAB_BAR_WIDTH - 32 - 26 * 2 - 6 * 2 - 4 - 12 - 12
+        # 预览文本可用宽度 = 卡片宽 − Tab 栏与右分隔线 − 内容区左右边距
+        #   − 行左右内边距 − 行常态 2px 左边框 − 圆点与两处行内间距 − 时间列 − 滚动条预留
+        time_width = QFontMetrics(self._frag_time_font()).horizontalAdvance("00:00")
+        text_width = (self.WINDOW_WIDTH - _TAB_BAR_WIDTH - 1
+                      - self.CONTENT_MARGIN * 2
+                      - FRAG_ROW_INSET_L - FRAG_ROW_INSET_R - 2
+                      - FRAG_DOT_SIZE - FRAG_ROW_GAP * 2
+                      - time_width - FRAG_SCROLLBAR_RESERVE)
+        text_width = max(60, int(text_width))
+
         font = QFont("Microsoft YaHei")
-        font.setPixelSize(14)  # 与 QSS 中 fragPreview 字号一致
+        font.setPixelSize(13)  # 与 QSS 里 fragPreview 字号一致
         fm = QFontMetrics(font)
 
         for frag in display_frags:
-            row = QWidget()
-            row.setObjectName("fragItemRow")
+            row = _FragmentRow(frag.fragment_id)
+            row.pressed.connect(self._on_fragment_row_pressed)
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(4, 2, 12, 2)  # 右侧多留空间，防止删除按钮被卡片边缘遮挡
-            row_layout.setSpacing(6)
+            # 左 10 + 常态 2px 透明左边框 = 12（与设计稿选中态下文字不位移同解）
+            row_layout.setContentsMargins(FRAG_ROW_INSET_L, 0, FRAG_ROW_INSET_R, 0)
+            row_layout.setSpacing(FRAG_ROW_GAP)
+
+            # 类别圆点：颜色由 QSS 的 [cat="..."] 规则解析（换主题自动跟随）
+            dot = QLabel()
+            dot.setObjectName("fragCatDot")
+            dot.setFixedSize(FRAG_DOT_SIZE, FRAG_DOT_SIZE)
+            dot.setProperty("cat", frag.category)
+            row_layout.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
 
             # 内容预览（按可用宽度省略截断，允许显示不完全）
-            preview = fm.elidedText(
-                frag.preview(max_len=120),
-                Qt.TextElideMode.ElideRight, text_width)
-            label = QLabel(preview)
+            label = QLabel(fm.elidedText(frag.preview(max_len=120),
+                                         Qt.TextElideMode.ElideRight, text_width))
             label.setObjectName("fragPreview")
             label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            row_layout.addWidget(label)
+            label.setToolTip(frag.content[:500])
+            row_layout.addWidget(label, 1)
 
-            # 复制按钮（UI 重构 03：40×24 文字钮 → 26px 图标钮；objectName
-            # 保留 fragCopyBtn —— QSS 底色/焦点环与 _SMOOTH_OVERLAYS 过渡
-            # 均按它解析。hover 叠 $primary 实底 → 位图转 $on_primary 保对比）
-            copy_btn = IconButton("copy", size=26, icon_size=14,
-                                  object_name="fragCopyBtn",
-                                  off_color="primary", hover_color="on_primary")
-            copy_btn.setToolTip("复制碎片内容")
-            copy_btn.clicked.connect(lambda checked=False, c=frag.content: self._copy_fragment(c))
-            row_layout.addWidget(copy_btn)
-
-            # 删除按钮（同上；danger=True 配 QSS [danger="true"] 与 danger 过渡，
-            # hover 叠 $danger 实底 → 白位图，沿用原 QSS `color: white` 口径）
-            del_btn = IconButton("trash", size=26, icon_size=14,
-                                 object_name="fragDelBtn",
-                                 off_color="danger", hover_color="white",
-                                 danger=True)
-            del_btn.setToolTip("删除此碎片")
-            del_btn.clicked.connect(lambda checked=False, fid=frag.fragment_id: self._delete_fragment(fid))
-            row_layout.addWidget(del_btn)
+            time_label = QLabel(_fragment_time_text(frag.created_at))
+            time_label.setObjectName("fragTime")
+            row_layout.addWidget(time_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
             self._frag_content_layout.addWidget(row)
+
+        # 重建后把选中态贴回原行（原选中项已被删/被挤出显示范围 → 自动清空）
+        self._sync_frag_selection(self._frag_selected_id)
+
+    @staticmethod
+    def _frag_time_font() -> QFont:
+        """时间列字体（与 QSS 里 fragTime 一致：等宽 10px）"""
+        font = QFont("Consolas")
+        font.setPixelSize(10)
+        return font
+
+    def _frag_rows(self) -> list:
+        """当前列表里的碎片行（按布局顺序；空态时为空）"""
+        rows = []
+        for i in range(self._frag_content_layout.count()):
+            w = self._frag_content_layout.itemAt(i).widget()
+            if isinstance(w, _FragmentRow):
+                rows.append(w)
+        return rows
+
+    def _sync_frag_selection(self, fragment_id):
+        """应用选中态：行底色（QSS ``[selected="true"]``）+ 页脚三钮可用性。
+
+        传入的 id 已不在列表中（被删 / 被挤出显示范围）时自动清空选中 ——
+        否则页脚三个按钮会指向一条看不见的碎片。
+        """
+        alive = False
+        for row in self._frag_rows():
+            hit = fragment_id is not None and row.fragment_id == fragment_id
+            alive = alive or hit
+            if row.property("selected") != ("true" if hit else "false"):
+                row.setProperty("selected", "true" if hit else "false")
+                # 动态属性变了必须手工重抛光，QSS 才会重新匹配这条规则
+                row.style().unpolish(row)
+                row.style().polish(row)
+
+        self._frag_selected_id = fragment_id if alive else None
+        has_sel = self._frag_selected_id is not None
+        for btn in (self._frag_copy_btn, self._frag_del_btn, self._frag_edit_btn):
+            btn.setEnabled(has_sel)
+
+    def _selected_fragment(self):
+        """当前选中的碎片对象（无选中 / 已被删时返回 None）"""
+        if self._fragment_manager is None or self._frag_selected_id is None:
+            return None
+        return self._fragment_manager.get_fragment(self._frag_selected_id)
+
+    def _on_fragment_row_pressed(self, fragment_id: int):
+        """行按下：只记下「这次按下落在哪一行」。
+
+        ★ 刻意不在这里复制 —— 按住行往后拖是在拖卡片，press 会先到，
+        若在 press 里就复制，拖卡片会顺手多复制一条碎片。是否算单击由
+        :meth:`mouseReleaseEvent` 按位移判定。
+        """
+        self._frag_press_id = int(fragment_id)
+
+    def _on_fragment_row_clicked(self, fragment_id: int):
+        """单击碎片行 = 选中该行 + 复制其内容（用户 2026-10-02 追加需求）"""
+        self._sync_frag_selection(fragment_id)
+        frag = self._fragment_manager.get_fragment(fragment_id) if self._fragment_manager else None
+        if frag is None:
+            return
+        self._copy_fragment(frag.content)
+        self._show_frag_hint("已复制")
+
+    def _copy_selected_fragment(self):
+        """页脚「复制」：复制选中行内容"""
+        frag = self._selected_fragment()
+        if frag is None:
+            return
+        self._copy_fragment(frag.content)
+        self._show_frag_hint("已复制")
+
+    def _delete_selected_fragment(self):
+        """页脚「删除」：删除选中行"""
+        frag = self._selected_fragment()
+        if frag is None:
+            return
+        self._delete_fragment(frag.fragment_id)     # 内部刷新列表 + 广播 data_changed
+        self._show_frag_hint("已删除")
+
+    def _edit_selected_fragment(self):
+        """页脚「编辑」：就地编辑选中行内容（保存后刷新列表）"""
+        frag = self._selected_fragment()
+        if frag is None:
+            return
+        fragment_id = frag.fragment_id
+
+        def _save(text: str) -> bool:
+            return bool(self._fragment_manager.update_fragment(fragment_id,
+                                                               content=text))
+
+        dlg = FragmentEditDialog(frag, _save, host=_DialogHost(self._theme),
+                                 parent=self)
+        dlg.exec()
+        self._refresh_fragment_page()
+        self.data_changed.emit("fragment")
+
+    def _show_frag_hint(self, text: str):
+        """页脚右端一次性回执（默认 1.2s 后自动隐藏）"""
+        hint = getattr(self, "_frag_hint_label", None)
+        if hint is None:
+            return
+        hint.setText(text)
+        hint.setVisible(True)
+        if self._frag_hint_timer is None:
+            self._frag_hint_timer = QTimer(self)
+            self._frag_hint_timer.setSingleShot(True)
+            self._frag_hint_timer.timeout.connect(
+                lambda: self._frag_hint_label.setVisible(False))
+        self._frag_hint_timer.start(FRAG_HINT_MS)
 
     def _copy_fragment(self, content: str):
         """复制碎片内容到剪贴板"""
@@ -770,11 +1157,11 @@ class CardWindow(QWidget):
         self._task_title_input.setPlaceholderText("输入任务标题，回车添加...")
         self._task_title_input.returnPressed.connect(self._on_add_task)
 
-        self._task_deadline = QDateEdit()
-        self._task_deadline.setObjectName("taskDate")
-        self._task_deadline.setCalendarPopup(True)
-        self._task_deadline.setDisplayFormat("yyyy-MM-dd")
-        self._task_deadline.setDate(QDate.currentDate())
+        # 2026-10-02：与主窗任务页同一套自绘日历弹层（src/date_picker.py）。
+        # 主题显式传入 —— CardWindow 只有私有 _theme，没有 current_theme 可读；
+        # 且它的 apply_theme 在「主题未变」时提前返回，构造期就必须给对。
+        self._task_deadline = DateField(theme=self._theme, parent=self,
+                                        object_name="taskDate")
         self._task_deadline.setFixedWidth(120)
 
         self._task_add_btn = SmoothButton("添加")
@@ -1285,6 +1672,9 @@ class CardWindow(QWidget):
         # 同步任务行委托配色（自绘，需手动刷新）
         if getattr(self, "_task_delegate", None) is not None:
             self._task_delegate.set_colors(colors)
+        # 日期框的日历图标 + 弹层色板同样是自绘，不在 QSS 管辖内
+        if getattr(self, "_task_deadline", None) is not None:
+            self._task_deadline.apply_theme(theme_name)
 
     def showEvent(self, event):
         """窗口显示后初始化指示器位置，并刷新当前页数据"""
@@ -1332,6 +1722,16 @@ class CardWindow(QWidget):
         供宿主与插件上下文调用——外部不要直接调 _switch_mode（私有成员契约）。
         """
         self._switch_mode(mode)
+
+    @property
+    def current_theme(self) -> str:
+        """当前主题名（宿主契约：子面板 / 对话框一律按属性读，不读 _theme）。
+
+        与 ``MainWindow.current_theme`` 同名同语义 —— 卡片自己的编辑对话框
+        （FragmentEditDialog → GlassDialog）靠它拿到正确主题，不再落回
+        DEFAULT_THEME 导致「浅色卡片弹出深色对话框」。
+        """
+        return self._theme
 
     # ---------------- 公开 API（D3 穿透清零 2026-09-30）----------------
     # 宿主（knowledge_ball）此前直接戳 _last_mode / _switch_mode /
@@ -1436,6 +1836,9 @@ class CardWindow(QWidget):
         self._move_indicator_to(idx)
 
         self._stack.setCurrentIndex(idx)
+        # 碎片页贴边、其余页 16px 内衬（含常驻模式顶部净空）——必须在
+        # _last_mode 更新之后调用
+        self._apply_always_show_margin()
         self._apply_mode_init(mode)
 
     def _apply_mode_init(self, mode: str):
@@ -1552,10 +1955,17 @@ class CardWindow(QWidget):
         self._close_btn.raise_()
 
     def _apply_always_show_margin(self):
-        """常驻模式给内容区顶部留出关闭按钮的净空，避免压住首行内容"""
+        """内容区四周内边距：碎片页贴边 + 常驻模式顶部让开关闭按钮。
+
+        · 碎片页（UI 重构 06）改为 0 边距：页眉与页脚的 1px 边线要**横贯
+          整张卡片**（设计稿 .mini-head / .mini-foot 就是通栏），左右留白
+          由页眉/行/页脚各自的内边距负责；其余 6 页仍是 16px 内衬。
+        · 常驻模式再在顶部追加 CLOSE_BTN_RESERVE 净空，避免浮动关闭按钮
+          压住首行内容（原逻辑不变）。
+        """
         if getattr(self, '_content_layout', None) is None:
             return
-        base = self.CONTENT_MARGIN
+        base = 0 if self._last_mode == "fragment" else self.CONTENT_MARGIN
         top = base + (self.CLOSE_BTN_RESERVE if self.is_always_show() else 0)
         self._content_layout.setContentsMargins(base, top, base, base)
 
@@ -1673,8 +2083,8 @@ class CardWindow(QWidget):
         title = self._task_title_input.text().strip()
         if not title:
             return
-        deadline = self._task_deadline.date().toString("yyyy-MM-dd")
-        self._task_manager.add_task(title, "", deadline)
+        d = self._task_deadline.dateOrNone()
+        self._task_manager.add_task(title, "", d.toString("yyyy-MM-dd") if d else "")
         self._task_title_input.clear()
         self._refresh_task_list()
         self.data_changed.emit("task")
@@ -1689,10 +2099,15 @@ class CardWindow(QWidget):
 
         today = _date.today().isoformat()
         for group_key, tasks in self._task_manager.get_tasks_grouped(today):
-            header_item = QListWidgetItem(
-                f"{group_title(group_key, today)}  ·  {len(tasks)}")
+            # 组标题与主窗口同口径：标签 + 独立计数/逾期组角色
+            # （2026-10-02 高仿真稿，见 TaskItemDelegate._paint_header）
+            header_item = QListWidgetItem(group_title(group_key, today))
             header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
             header_item.setData(KIND_ROLE, KIND_HEADER)
+            header_item.setData(ROLE_REL, str(len(tasks)))
+            header_item.setData(
+                ROLE_STATE,
+                STATE_OVERDUE if group_key == GROUP_OVERDUE else STATE_NONE)
             self._task_list.addItem(header_item)
             for t in tasks:
                 state, _delta = task_state(t.deadline, today)
@@ -1916,6 +2331,11 @@ class CardWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
+            self._drag_moved = False
+            # ★ 这里**不能**清 _frag_press_id：按下若落在碎片行上，行的
+            # mousePressEvent 先执行（发出 pressed 记下行号），事件随后才
+            # 冒泡到这里 —— 在这里清会把刚记下的行号抹掉。清理由
+            # mouseMoveEvent（真拖起来了）与 mouseReleaseEvent 负责。
             self._drag_offset = (event.globalPosition().toPoint()
                                  - self.frameGeometry().topLeft())
             # 通知宿主机（悬浮球）此刻卡片与球的真实相对位置 —— 球侧据此跟随，
@@ -1931,6 +2351,9 @@ class CardWindow(QWidget):
             self.card_drag_finished.emit()
             return
         if self._dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            # 真拖起来了 → 这次手势判定为「拖卡片」，不再可能是单击复制
+            self._drag_moved = True
+            self._frag_press_id = None
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             self.card_moved.emit()
             event.accept()
@@ -1939,6 +2362,10 @@ class CardWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             was_dragging = self._dragging
             self._dragging = False
+            # 单击碎片行 = 按下落在行上 + 松手前卡片没被拖动（见 _FragmentRow）
+            click_id, self._frag_press_id = self._frag_press_id, None
+            if was_dragging and not self._drag_moved and click_id is not None:
+                self._on_fragment_row_clicked(click_id)
             if was_dragging:
                 self.card_drag_finished.emit()
             event.accept()

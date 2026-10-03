@@ -93,16 +93,19 @@ THEMES = {
 
         # ---- 主色（强调色）----
         # UI 重构 01：主色从「薄荷青渐变」改为「墨绿实底」。#0F6E56 对白底
-        # 6.2:1，配白字（on_primary）过 WCAG AA；hover/pressed 沿「同色系
-        # 下沉」（S1），pressed #085041 对白字 7.6:1。只用于主按钮与选中态，
+        # 6.2:1，配白字（on_primary）过 WCAG AA。只用于主按钮与选中态，
         # 不做大面积铺色。
+        # hover/pressed（2026-10-02 悬停配色优化）：实底主色钮的 hover 从
+        # 「同色系压暗」（#0C5A47，大色块发闷）改为「轻提亮」#227A64（白字
+        # 5.2:1）—— 按钮有「浮起」的前置感；pressed 下沉复用旧 hover 值
+        # #0C5A47（白字 8.2:1）。两值只被 SmoothButton overlay 消费。
         # primary_lite/deep 保留旧薄荷值：只剩撤销条按钮（深底亮字）与
         # 启动屏渐变在用，不随新主色走。
         "primary":           "#0F6E56",
         "primary_lite":      "#6FFFE9",
         "primary_deep":      "#3D9E9C",
-        "primary_hover":     "#0C5A47",
-        "primary_pressed":   "#085041",
+        "primary_hover":     "#227A64",
+        "primary_pressed":   "#0C5A47",
         "primary_alpha":     "rgba(15, 110, 86, 0.12)",
         "primary_a08":       "rgba(15, 110, 86, 0.08)",
         "primary_a12":       "rgba(15, 110, 86, 0.12)",
@@ -119,9 +122,10 @@ THEMES = {
         "on_primary":        "#FFFFFF",
         "on_disabled":       "#6B747E",
         # ---- 次按钮（secondaryBtn）文字色 ----
-        # 次按钮 = $surface 实底 + $line_2 描边（不再全员淡青）。文字色与
-        # primary_hover 同值（白底 8.2:1）；focus_ring 与它同值同因，
-        # 独立命名让「次按钮文字」与「焦点环」两个语义不绑死。
+        # 次按钮 = $surface 实底 + $line_2 描边（不再全员淡青）。#0C5A47
+        # 对白底 8.2:1（恰为旧 primary_hover 值，两 token 语义各自独立）；
+        # focus_ring 与它同值同因，独立命名让「次按钮文字」与「焦点环」
+        # 两个语义不绑死。
         "secondary_text":    "#0C5A47",
         # ---- 键盘焦点环（UI 强化方案 A4）----
         # 焦点环是「非文本前景」，须在面板底上达 WCAG 下限 3:1。
@@ -156,6 +160,31 @@ THEMES = {
         "task_check":        "#1F8A4C",                    # 勾选框对勾/填充
         "undo_bg":           "rgba(44, 62, 80, 235)",      # 撤销条底色
         "undo_text":         "#FFFFFF",                    # 撤销条文字
+
+        # ---- 日期选择器弹层（自绘，见 src/date_picker.py）----
+        # 弹层不走 QSS 而是 QPainter 自绘，配色只能从本表取 —— 这几个键
+        # 是「自绘控件的色板」，与 QSS 令牌同受 test_theme_contrast 的
+        # 「浅底不得压白字」通用护栏约束。
+        # ★ cal_accent 是全库**唯一一处非主色的强调色**：用户明确要求照抄
+        #   Chromium 原生 date picker（选中日的蓝块），因此不跟随产品主色
+        #   绿。浅色取 Chromium 的 #1A73E8、深色取其暗色主题的 #8AB4F8；
+        #   除日历弹层外不得扩散使用。
+        # ⚠ cal_muted 对弹层底只有约 2.6:1，**刻意低于正文 4.5:1 的下限**
+        #   —— 跨月补位日是装饰性信息，Chromium 原样也是这个灰度；需要读清
+        #   的文字（星期表头）走 cal_weekday（约 4.6:1）。tests/test_date_picker
+        #   有一条"muted 必须比 text / weekday 更浅"的**意图护栏**，
+        #   别为了凑对比度把它们调成同一个灰。
+        "cal_popup_bg":      "#FFFFFF",
+        "cal_popup_edge":    "#DADCE0",
+        "cal_title":         "#202124",
+        "cal_text":          "#3C4043",
+        "cal_muted":         "#9AA0A6",     # 跨月补位日（刻意压浅，见下方说明）
+        "cal_weekday":       "#70757A",     # 星期表头（一 二 三 …，要看得清）
+        "cal_nav_icon":      "#5F6368",     # 翻月/翻年箭头 + 月标题的 ▼
+        "cal_hover_bg":      "#F1F3F4",
+        "cal_divider":       "#E8EAED",     # 页脚上方的分隔线
+        "cal_accent":        "#1A73E8",
+        "cal_on_accent":     "#FFFFFF",
 
         # ---- 其它 ----
         "shadow":            "rgba(0, 0, 0, 70)",
@@ -216,12 +245,13 @@ THEMES = {
 
         # ---- 主色（强调色）----
         # 深色主色换成中亮度的绿（#5DCAA5 对深底 8:1），压 on_primary
-        # 深墨 6.8:1；hover 跳亮档 / pressed 下沉（S1 深色分支）
+        # 深墨 6.8:1；hover 同走「轻提亮」但幅度收敛（#68CFAC 压深墨
+        # 7.3:1，比旧端点 #6FD6B4 更沉稳），pressed 下沉（深色分支）
         # primary_lite/deep 保留旧值（撤销条按钮 / 启动屏在用）
         "primary":           "#5DCAA5",
         "primary_lite":      "#8BFFF0",
         "primary_deep":      "#4AA8A6",
-        "primary_hover":     "#6FD6B4",
+        "primary_hover":     "#68CFAC",
         "primary_pressed":   "#4BB894",
         "primary_alpha":     "rgba(93, 202, 165, 0.15)",
         "primary_a08":       "rgba(93, 202, 165, 0.08)",
@@ -270,6 +300,20 @@ THEMES = {
         "task_check":        "#2ECC71",                    # 勾选框对勾/填充
         "undo_bg":           "rgba(40, 44, 58, 242)",      # 撤销条底色
         "undo_text":         "#E4E8EE",                    # 撤销条文字
+
+        # ---- 日期选择器弹层（自绘；理由与浅色处注释同源）----
+        # 弹层是独立窗口，底色必须实底 —— 取 surface_3（深色下页面底同值）
+        "cal_popup_bg":      "#2A2E34",
+        "cal_popup_edge":    "#454A52",                    # = line_2
+        "cal_title":         "#E9EAE7",
+        "cal_text":          "#DADCE0",
+        "cal_muted":         "#7A7F85",                    # 跨月补位日
+        "cal_weekday":       "#A8ADA5",                    # 星期表头 = text_secondary
+        "cal_nav_icon":      "#A8ADA5",                    # = text_secondary
+        "cal_hover_bg":      "#3A3F46",
+        "cal_divider":       "#33373D",                    # = line
+        "cal_accent":        "#8AB4F8",
+        "cal_on_accent":     "#202124",
 
         "shadow":            "rgba(0, 0, 0, 120)",
         "side_bar_bg":       "transparent",
@@ -545,6 +589,58 @@ QPushButton#secondaryBtn:checked {
     border: 1px solid $primary;
     color: $secondary_text;
     font-weight: 600;
+}
+
+QPushButton#modeBtn {
+    /* 模式切换小胶囊（设置页 AI 后端模式云端/本地、插件页同款）：
+       ghost 常态 + 选中实底反白 —— 镜像卡片模板同名规则。卡片模板的
+       规则不会级联进主窗，此前主窗 modeBtn 掉进通用 QPushButton 实底：
+       选中态与常态底色无差别、primary 图标画在 primary 底上不可见
+       （2026-10-02 随悬停配色优化一并修复）。背景过渡走 SmoothButton
+       overlay（端点 primary 46% 淡染 / 按下 77%，叠在选中实底上同色
+       no-op）。 */
+    background-color: $primary_a12;
+    color: $primary;
+    border: 1px solid $primary_a30;
+    border-radius: $r_ctl;
+    padding: 5px 14px;
+    font-size: 12px;
+}
+QPushButton#modeBtn:checked {
+    background-color: $primary;
+    color: $on_primary;
+    border: 1px solid $primary;
+}
+
+/* ---- 任务提醒弹窗（src/task_reminder_popup，顶层自绘卡片）---- */
+QFrame#taskReminderCard {
+    /* 中性骨架；触发链路不变（启动 +4s 与每日 9:00 三桶口径），语气色
+       （逾期 danger / 今日 primary / 未安排中性）由 _apply_palette 按主题
+       内联取色。★说明注释只放规则体内：裸放在选择器前会被 QSS 切分器
+       并进选择器（test_task_reminder_popup 的骨架契约因此漏检）。 */
+    background-color: $surface;
+    border: 1px solid $panel_edge;
+    border-radius: $r_panel;
+}
+QLabel#taskRemindHead {
+    color: $text;
+    font-size: 14px;
+    font-weight: 600;
+}
+QLabel#taskRemindTitle {
+    color: $text_secondary;
+    font-size: 13px;
+}
+QLabel#taskRemindCount {
+    color: $text_secondary;
+    font-size: 12px;
+}
+QLabel#taskRemindOverflow {
+    color: $text_placeholder;
+    font-size: 12px;
+}
+QFrame#taskRemindFoot {
+    border-top: 1px solid $hair;
 }
 
 QPushButton#textBtn {
@@ -1035,6 +1131,19 @@ QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
     color: $text_disabled;
 }
 
+/* ---- 截止日期输入框 ----
+   2026-10-02：弹层换成自绘日历（见 src/date_picker.py），此处只补两件事：
+   右侧 30px 内边距给自绘的日历图标钮留位；字号与相邻的标题输入框持平。
+   原生上下微调钮由控件里的 setButtonSymbols(NoButtons) 关掉，不靠 QSS
+   隐藏 —— QSS 的 ::up-button{width:0} 在 Fusion 下仍会留出 2px 毛边。 */
+QDateEdit#taskDate {
+    padding: 5px 30px 5px 10px;
+    font-size: 13px;
+}
+QDateEdit#taskDate:disabled {
+    color: $text_disabled;
+}
+
 QComboBox::drop-down {
     width: 20px;
     border: none;
@@ -1153,8 +1262,9 @@ QPushButton#tableOpenBtn {
     max-width: 70px;
 }
 QPushButton#tableOpenBtn:hover {
-    /* 背景（$primary 实底）过渡走 SmoothButton overlay，文字色保持即时 */
-    color: $on_primary;
+    /* 背景（primary 46% 淡染）过渡走 SmoothButton overlay —— 保持 ghost
+       语系、不再突跳实底；文字保持主色，描边加深一档 */
+    border-color: $primary_border_strong;
 }
 
 /* ---- 网址导航行（拖拽动画列表，替代导航页的 QTableWidget）---- */
@@ -1525,11 +1635,13 @@ QDateEdit#taskDate {
     background-color: $panel_fill;
     border: 1px solid $panel_edge;
     border-radius: $r_ctl;
-    padding: 5px 4px;
+    /* 右侧 30px 留给自绘的日历图标钮；旧 ::drop-down 规则随原生弹层一起
+       退役（原生微调钮/下拉箭头已由 setButtonSymbols + 关闭 calendarPopup
+       彻底关掉，见 src/date_picker.py） */
+    padding: 5px 30px 5px 10px;
     font-size: 12px;
     color: $text;
 }
-QDateEdit#taskDate::drop-down { width: 18px; }
 QPushButton#taskAddBtn {
     background-color: $primary;
     color: $on_primary;
@@ -1756,16 +1868,25 @@ QListWidget#taskList:focus {
 # ====================================================================
 # 右键菜单 QSS（悬浮球用）
 # ====================================================================
+# 2026-10-02 菜单图标化调整（离屏实测，尺寸为 Qt 实际渲染值）：
+#   · 决定「图标列」的是 QMenu::item 的 padding-left，不是 QMenu::icon ——
+#     实测三档 padding-left（22/30/36px）菜单总宽依次 138/146/152px，
+#     线性变化；而 ``QMenu::icon{left:…}`` 那种写法与完全不写逐像素一致，
+#     属无效写法，刻意不加。取 30px = 图标 16 + 间隙 5 + 左内边距 9。
+#   · 项内边距 8→6px（项高 29px）、外框 padding 6→5px、分隔线 margin
+#     4px 8px → 3px 6px：把留白收进内容里，菜单项密度恢复正常。
+#   · 项圆角用 $r_ctl(6) 而非 $r_panel(8)：菜单项是「控件」不是「面板」，
+#     8px 配 29px 行高四角会圆过头。
 _QSS_MENU = Template("""
 QMenu {
     background-color: $menu_bg;
     border: 1px solid $primary_a30;
     border-radius: $r_panel;
-    padding: 6px;
+    padding: 5px;
 }
 QMenu::item {
-    padding: 8px 28px 8px 16px;
-    border-radius: $r_panel;
+    padding: 6px 22px 6px 30px;
+    border-radius: $r_ctl;
     font-size: 13px;
     color: $text;
 }
@@ -1776,7 +1897,7 @@ QMenu::item:selected {
 QMenu::separator {
     height: 1px;
     background: $hair;
-    margin: 4px 8px;
+    margin: 3px 6px;
 }
 """)
 

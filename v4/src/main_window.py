@@ -55,7 +55,7 @@ from src.constants import DEFAULT_THEME
 from src import motion
 from src import controls
 from src import icon_render
-from src.icons import NAV_ICON, PLUGIN_PAGE_ICON, strip_leading_emoji
+from src.icons import NAV_ICON, plugin_page_icon, strip_leading_emoji
 from src.app_version import APP_VERSION
 from src.config import (
     sanitize_nav_order, DEFAULT_NAV_ORDER, LAST_PAGE_INDEX_MAX,
@@ -2510,9 +2510,11 @@ class MainWindow(QWidget):
         """
         # ★ 2026-09-30（UI 强化 A2）：插件 manifest 的标题常自带 emoji 前缀
         #   （"🤖 AI 助手"）。图标改由宿主自绘后，这类前缀不但多余，还会因
-        #   系统 emoji 字体缺失退化成豆腐块 —— 统一在这里剥掉；插件页一律
-        #   用通用占位图标 PLUGIN_PAGE_ICON（插件交不出 QPainterPath，宿主
-        #   也不可能认识任意插件的语义，通用包裹图形是唯一稳妥口径）。
+        #   系统 emoji 字体缺失退化成豆腐块 —— 统一在这里剥掉。
+        # ★ 2026-10-02（P5 插件图标）：出厂五插件改挂专属图标——icons 表
+        #   PLUGIN_ICONS 按插件 id 映射（plugin_page_icon 消费）。宿主仍不
+        #   认识任意插件的语义，映射查不到（第三方插件 / 未收录的 id）一律
+        #   落回通用占位 PLUGIN_PAGE_ICON，兜底口径与占位时代完全一致。
         title = strip_leading_emoji(title)
         old_index = NAV_PAGE_INDEX.get(key)
         # ⚠ 幂等判定必须以「本实例已持有该键的按钮」为准：
@@ -2542,7 +2544,7 @@ class MainWindow(QWidget):
         NAV_PAGE_INDEX[key] = index
         self._stack.addWidget(widget)
         btn = self._make_nav_button(title, index, nav_key=key,   # 参与换位
-                                    icon_name=PLUGIN_PAGE_ICON)
+                                    icon_name=plugin_page_icon(key))
         self._nav_btns[key] = btn
         # 顺序：config 里记过位置（上次会话拖过）→ 沿用；新插件 → 追加
         # 到末位（设置之前）。_apply_nav_order 统一重排并交还布局。
@@ -2999,160 +3001,401 @@ class MainWindow(QWidget):
     # ==================================================================
     @staticmethod
     def _help_html() -> str:
-        """使用说明富文本内容（与各页面功能保持同步更新）"""
+        """使用说明富文本源稿（与各页面功能保持同步更新）。
+
+        2026-10-02 观感升级：项目符号从「<p> 里手写 • + <br> 换行」改为
+        真列表（<ul>/<li>，Qt 原生缩进与圆点），热键写 [[键位]] 标记、
+        渲染时由 _decorate_help_html 转成等宽键帽——源稿保持纯静态，
+        主题色一律运行时注入。
+        2026-10-02 内容补充：新增「截图钉屏 / 插件中心 / 内置插件」三章
+        （此前这三个功能整块没有文档）；悬浮球右键菜单、日程任务
+        「专注此任务」、笔记「钉到桌面」按实际界面补齐。
+        """
         return """
-        <p>FloatPulse 是一款常驻桌面的悬浮球效率工具：所有碎片、任务、笔记、素材都保存在本机，不联网、不登录。以下说明按「快捷键 → 悬浮球 → 小卡片 → 各功能面板 → 托盘与设置」的顺序展开。</p>
+        <p>FloatPulse 是一款常驻桌面的悬浮球效率工具：所有碎片、任务、笔记、素材都保存在本机，不联网、不登录。左栏按「快捷键 → 悬浮球 → 小卡片 → 各功能面板 → 截图钉屏 → 插件 → 托盘与设置」分类，点左侧分类即可跳转，不用再滚长页找内容。</p>
 
         <h3>全局快捷键</h3>
-        <p>• <b>Esc</b>：退出程序（主窗口与小卡片中都生效）<br>
-        • <b>Ctrl+W / Ctrl+H</b>：隐藏主窗口（程序继续在托盘后台运行）<br>
-        • <b>Ctrl+T</b>：切换浅色 / 深色主题<br>
-        • <b>Ctrl+K</b>：站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）<br>
-        • <b>F1</b>：进入使用说明页；再按一次返回进入前的页面<br>
-        • <b>Ctrl+1 ~ Ctrl+8</b>：依次切换到左栏第 1~8 个功能页（含插件中心）<br>
-        • <b>Ctrl+Alt+K</b>：呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭；热键与开关可在设置中修改）</p>
+        <ul>
+        <li><b>[[Esc]]</b>：退出程序（主窗口与小卡片中都生效）</li>
+        <li><b>[[Ctrl+W]] / [[Ctrl+H]]</b>：隐藏主窗口（程序继续在托盘后台运行）</li>
+        <li><b>[[Ctrl+T]]</b>：切换浅色 / 深色主题</li>
+        <li><b>[[Ctrl+K]]</b>：站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）</li>
+        <li><b>[[F1]]</b>：进入使用说明页；再按一次返回进入前的页面</li>
+        <li><b>[[Ctrl+1]] ~ [[Ctrl+8]]</b>：依次切换到左栏第 1~8 个功能页（含插件中心）</li>
+        <li><b>[[Ctrl+Alt+K]]</b>：呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭；热键与开关可在设置中修改）</li>
+        <li><b>[[Ctrl+Alt+S]]</b>：截图钉屏——框选屏幕区域，松开即生成置顶参考浮窗（详见「截图钉屏」分类；热键与开关可在设置中修改）</li>
+        </ul>
 
         <h3>悬浮球</h3>
-        <p>• <b>鼠标悬停</b>：自动弹出小卡片（首次随机抽一张知识卡，之后恢复上次离开时的页签）<br>
-        • <b>左键点击</b>：卡片已弹出 → 切到下一张；未弹出 → 随机抽一张并弹出<br>
-        • <b>滚轮</b>：上一张 / 下一张顺序翻卡，手不用离开球<br>
-        • <b>拖拽</b>：按住左键拖动位置，松手自动吸附到最近的屏幕边缘<br>
-        • <b>空闲自动隐藏</b>：贴边静止若干秒后半隐藏到边缘，鼠标移近自动滑出（秒数见设置）<br>
-        • <b>右键</b>：菜单 → 显示主窗口 / 退出程序<br>
-        • <b>拖文件或图片到球上</b>：自动复制收录到「临时素材」<br>
-        • <b>尺寸与外观</b>：球体即应用图标本体，大小与动画速度都在设置里调节</p>
+        <ul>
+        <li><b>鼠标悬停</b>：自动弹出小卡片（首次随机抽一张知识卡，之后恢复上次离开时的页签）</li>
+        <li><b>左键点击</b>：卡片已弹出 → 切到下一张；未弹出 → 随机抽一张并弹出</li>
+        <li><b>滚轮</b>：上一张 / 下一张顺序翻卡，手不用离开球</li>
+        <li><b>拖拽</b>：按住左键拖动位置，松手自动吸附到最近的屏幕边缘</li>
+        <li><b>空闲自动隐藏</b>：贴边静止若干秒后半隐藏到边缘，鼠标移近自动滑出（秒数见设置）</li>
+        <li><b>拖文件或图片到球上</b>：自动复制收录到「临时素材」</li>
+        <li><b>番茄钟</b>：设置开启后球体外圈显示进度环，右键菜单可开始 / 暂停 / 结束（参数见「设置 → 番茄钟」）</li>
+        <li><b>右键菜单</b>：三段式——打开主窗口 / 小卡片 ▸（7 个模式直达）；番茄钟控制、截图钉屏、插件功能 ▸；退出程序</li>
+        <li><b>尺寸与外观</b>：球体即应用图标本体，大小与动画速度都在设置里调节</li>
+        </ul>
 
         <h3>小卡片</h3>
-        <p>• <b>七个页签</b>（左侧竖排图标）：碎片 / 知识卡片 / 日程任务 / 临时笔记 / 网址导航 / 临时素材 / 软件导航<br>
-        • <b>弹出与收起</b>：悬停球自动弹出；鼠标移出「球 + 卡片」区域后自动收起（勾选设置里的「小卡片保持显示」可常驻）<br>
-        • <b>拖动卡片</b>：在顶部空白条或内容空白处按住左键拖动整张卡片，悬浮球同步跟随、保持相对位置<br>
-        • <b>模式记忆</b>：收起时所处的页签会被记住，下次弹出直接回到该页签<br>
-        • <b>临时笔记</b>：停止输入 800ms 自动保存，关闭也不会丢字<br>
-        • <b>日程任务</b>：可直接勾选完成，右键菜单编辑 / 删除<br>
-        • <b>网址导航 / 软件导航 / 素材</b>：卡片里可直接打开，编辑仍在主窗口<br>
-        • <b>右键卡片空白处</b>：退出程序</p>
+        <ul>
+        <li><b>七个页签</b>（左侧竖排图标）：碎片 / 知识卡片 / 日程任务 / 临时笔记 / 网址导航 / 临时素材 / 软件导航</li>
+        <li><b>弹出与收起</b>：悬停球自动弹出；鼠标移出「球 + 卡片」区域后自动收起（勾选设置里的「小卡片保持显示」可常驻）</li>
+        <li><b>拖动卡片</b>：在顶部空白条或内容空白处按住左键拖动整张卡片，悬浮球同步跟随、保持相对位置</li>
+        <li><b>模式记忆</b>：收起时所处的页签会被记住，下次弹出直接回到该页签</li>
+        <li><b>临时笔记</b>：停止输入 800ms 自动保存，关闭也不会丢字</li>
+        <li><b>日程任务</b>：可直接勾选完成，右键菜单编辑 / 删除</li>
+        <li><b>网址导航 / 软件导航 / 素材</b>：卡片里可直接打开，编辑仍在主窗口</li>
+        <li><b>右键卡片空白处</b>：退出程序</li>
+        </ul>
 
         <h3>碎片工作台</h3>
-        <p>• <b>自动收集</b>：复制文本、复制文件路径时自动入库（被过滤的应用除外）；按 Ctrl+Alt+K 也可手动快速捕捉<br>
-        • <b>类型筛选</b>：全部类型 / 剪贴板文本 / 剪贴板路径 / 文件拾取 / 知识段落<br>
-        • <b>搜索</b>：输入即筛（去抖 250ms），命中的关键词在条目里高亮<br>
-        • <b>预览</b>：选中左侧条目，右侧显示完整内容，可「复制」「编辑」<br>
-        • <b>多选批量</b>：勾选多条后可「合并选中」（可合并成一条并直接存为笔记）、「复制选中」、「删除选中」、「清空全部」<br>
-        • <b>右键单条</b>：查看详情 / 编辑内容 / 复制内容 / 存为笔记 / 加入知识库 / 添加至网址导航 / 删除</p>
+        <ul>
+        <li><b>自动收集</b>：复制文本、复制文件路径时自动入库（被过滤的应用除外）；按 [[Ctrl+Alt+K]] 也可手动快速捕捉</li>
+        <li><b>类型筛选</b>：全部类型 / 剪贴板文本 / 剪贴板路径 / 文件拾取 / 知识段落</li>
+        <li><b>搜索</b>：输入即筛（去抖 250ms），命中的关键词在条目里高亮</li>
+        <li><b>预览</b>：选中左侧条目，右侧显示完整内容，可「复制」「编辑」</li>
+        <li><b>多选批量</b>：勾选多条后可「合并选中」（可合并成一条并直接存为笔记）、「复制选中」、「删除选中」、「清空全部」</li>
+        <li><b>右键单条</b>：查看详情 / 编辑内容 / 复制内容 / 存为笔记 / 加入知识库 / 添加至网址导航 / 删除</li>
+        </ul>
 
         <h3>日程任务</h3>
-        <p>• <b>新增</b>：填写标题 + 选择截止日期 → 点「添加」<br>
-        • <b>分组顺序</b>：逾期 → 今天 → 本周（明天 ~ 本周日）→ 以后 → 无日期 → 已完成<br>
-        • <b>颜色</b>：<b>红色</b>已逾期 &nbsp; <b>橙色</b>今日到期 &nbsp; <b>灰色</b>已完成<br>
-        • <b>行尾文案</b>：未完成显示相对截止（今天 / 明天 / 逾期N天 / M月D日（周X））；<b>已完成只显示完成日期</b>，不再显示逾期<br>
-        • <b>批量操作</b>：「批量完成」「批量删除」「清除已完成」<br>
-        • <b>右键单条</b>：标记完成 / 取消完成 / 编辑 / 删除<br>
-        • <b>到期提醒</b>：程序启动后与每日 9:00 通过托盘气泡提示（可在设置中关闭）</p>
+        <ul>
+        <li><b>新增</b>：填写标题 + 选择截止日期 → 点「添加」</li>
+        <li><b>截止日期</b>：点日期框弹出日历（周一开头，可点月标题右侧的 ▼ 直选月份）；底部「<b>清除</b>」= 设为无日期，「<b>今天</b>」= 一键回到今天</li>
+        <li><b>分组顺序</b>：逾期 → 今天 → 本周（明天 ~ 本周日）→ 以后 → 无日期 → 已完成</li>
+        <li><b>颜色</b>：<b>红色</b>已逾期 &nbsp; <b>橙色</b>今日到期 &nbsp; <b>灰色</b>已完成</li>
+        <li><b>行尾文案</b>：未完成显示相对截止（今天 / 明天 / 逾期N天 / M月D日（周X））；<b>已完成只显示完成日期</b>，不再显示逾期</li>
+        <li><b>批量操作</b>：「批量完成」「批量删除」「清除已完成」</li>
+        <li><b>右键单条</b>：标记完成 / 取消完成 / 编辑 / 删除</li>
+        <li><b>专注此任务</b>：右键任务 → 专注此任务，悬浮球进度环开始绑定式专注（番茄钟）</li>
+        <li><b>到期提醒</b>：程序启动后与每日 9:00 通过托盘气泡提示（可在设置中关闭）</li>
+        </ul>
 
         <h3>笔记管理</h3>
-        <p>• <b>新建 / 删除</b>：「新建笔记」「删除当前」<br>
-        • <b>列表</b>：只显示标题；鼠标悬停可看到 标题 + 修改时间 + 内容预览<br>
-        • <b>改名</b>：双击列表项或按 F2 就地改名；按内容自动生成的标题会随内容更新，手动改过的则不再自动变（右键菜单可切换：「标题跟随内容」/「锁定标题（不随内容更新）」）<br>
-        • <b>自动保存</b>：停止输入 800ms 落盘；退出程序前会强制保存未落盘的改动<br>
-        • <b>状态栏</b>：显示「刚刚 / N 分钟前 / 3 小时前 / 昨天 HH:MM / N 天前」，有未保存改动时前面加「● 未保存」<br>
-        • <b>搜索</b>：匹配标题与内容；若正在编辑的笔记被搜索条件过滤掉，状态栏会明确提示<br>
-        • <b>右键</b>：编辑标题… / 删除此笔记</p>
+        <ul>
+        <li><b>新建 / 删除</b>：「新建笔记」「删除当前」</li>
+        <li><b>列表</b>：只显示标题；鼠标悬停可看到 标题 + 修改时间 + 内容预览</li>
+        <li><b>改名</b>：双击列表项或按 F2 就地改名；按内容自动生成的标题会随内容更新，手动改过的则不再自动变（右键菜单可切换：「标题跟随内容」/「锁定标题（不随内容更新）」）</li>
+        <li><b>自动保存</b>：停止输入 800ms 落盘；退出程序前会强制保存未落盘的改动</li>
+        <li><b>状态栏</b>：显示「刚刚 / N 分钟前 / 3 小时前 / 昨天 HH:MM / N 天前」，有未保存改动时前面加「● 未保存」</li>
+        <li><b>搜索</b>：匹配标题与内容；若正在编辑的笔记被搜索条件过滤掉，状态栏会明确提示</li>
+        <li><b>桌面便签</b>：右键笔记 → 钉到桌面，把当前笔记钉成常驻桌面的便签（同时有数量上限，可从托盘唤回管理）</li>
+        <li><b>右键</b>：编辑标题… / 删除此笔记</li>
+        </ul>
 
         <h3>知识库</h3>
-        <p>• <b>数据来源</b>：程序目录 <b>float_data/</b> 文件夹内的「知识库.docx」，主窗口与卡片共用。文件名固定，<b>源码运行放项目根的 float_data/ 内</b>，<b>打包后放 exe 同目录的 float_data/ 内</b>；改名或移走会导致知识卡片无内容（程序仍可运行）<br>
-        • <b>外部编辑</b>：可直接用 Word/WPS 打开该 docx 修改并保存 → 面板提示「检测到外部修改，建议重新加载」时点「重新加载」即生效，程序启动时也会自动检测。每个非空段落（去空格后 ≥ 4 字）就是一张知识卡片，过短段落自动忽略<br>
-        • <b>重新加载</b>：点「重新加载」重新读取 docx<br>
-        • <b>新增内容</b>：「新增知识」追加到 docx 末尾；「加入碎片池」把选中段落送进碎片工作台<br>
-        • <b>右键段落</b>：编辑 / 删除 / 在此后新增 / 加入碎片池（删除与重新加载有玻璃风格确认框）<br>
-        • <b>搜索</b>：输入去抖 250ms 实时过滤段落，无结果时显示占位提示；双击段落可直接编辑<br>
-        • <b>状态提示</b>：检测到 docx 被外部程序改动时提示「检测到外部修改，建议重新加载」。float_data/docx_meta.json 是程序自动维护的指纹缓存，请勿手工编辑</p>
+        <ul>
+        <li><b>数据来源</b>：程序目录 <b>float_data/</b> 文件夹内的「知识库.docx」，主窗口与卡片共用。文件名固定，<b>源码运行放项目根的 float_data/ 内</b>，<b>打包后放 exe 同目录的 float_data/ 内</b>；改名或移走会导致知识卡片无内容（程序仍可运行）</li>
+        <li><b>外部编辑</b>：可直接用 Word/WPS 打开该 docx 修改并保存 → 面板提示「检测到外部修改，建议重新加载」时点「重新加载」即生效，程序启动时也会自动检测。每个非空段落（去空格后 ≥ 4 字）就是一张知识卡片，过短段落自动忽略</li>
+        <li><b>重新加载</b>：点「重新加载」重新读取 docx</li>
+        <li><b>新增内容</b>：「新增知识」追加到 docx 末尾；「加入碎片池」把选中段落送进碎片工作台</li>
+        <li><b>右键段落</b>：编辑 / 删除 / 在此后新增 / 加入碎片池（删除与重新加载有玻璃风格确认框）</li>
+        <li><b>搜索</b>：输入去抖 250ms 实时过滤段落，无结果时显示占位提示；双击段落可直接编辑</li>
+        <li><b>状态提示</b>：检测到 docx 被外部程序改动时提示「检测到外部修改，建议重新加载」。float_data/docx_meta.json 是程序自动维护的指纹缓存，请勿手工编辑</li>
+        </ul>
 
         <h3>临时素材</h3>
-        <p>• <b>收录方式</b>：拖图片 / 文件到悬浮球；复制图片到剪贴板（Excel、Word 一类图文混排仍按文本收集）<br>
-        • <b>打开</b>：双击用系统默认程序打开；右键 打开 / 另存为 / 删除<br>
-        • <b>批量</b>：「打开素材文件夹」「刷新」「清空全部」<br>
-        • <b>容量</b>：条数上限与保留天数在「设置 → 临时素材上限 / 素材保留天数」调整（0 天表示不按天数清理）</p>
+        <ul>
+        <li><b>收录方式</b>：拖图片 / 文件到悬浮球；复制图片到剪贴板（Excel、Word 一类图文混排仍按文本收集）</li>
+        <li><b>打开</b>：双击用系统默认程序打开；右键 打开 / 另存为 / 删除</li>
+        <li><b>批量</b>：「打开素材文件夹」「刷新」「清空全部」</li>
+        <li><b>容量</b>：条数上限与保留天数在「设置 → 临时素材上限 / 素材保留天数」调整（0 天表示不按天数清理）</li>
+        </ul>
 
         <h3>网址导航</h3>
-        <p>• <b>添加站点</b>：填名称 + URL，地址会自动补全 http:// 或 https://<br>
-        • <b>整理</b>：拖拽行可排序；右键站点：打开 / 编辑 / 删除<br>
-        • <b>一键收集</b>：碎片工作台里 URL 类碎片右键 →「添加至网址导航」<br>
-        • <b>卡片入口</b>：小卡片的「网址导航」页签可直接点开，编辑仍在主窗口</p>
+        <ul>
+        <li><b>添加站点</b>：填名称 + URL，地址会自动补全 http:// 或 https://</li>
+        <li><b>整理</b>：拖拽行可排序；右键站点：打开 / 编辑 / 删除</li>
+        <li><b>一键收集</b>：碎片工作台里 URL 类碎片右键 →「添加至网址导航」</li>
+        <li><b>卡片入口</b>：小卡片的「网址导航」页签可直接点开，编辑仍在主窗口</li>
+        </ul>
 
         <h3>软件导航</h3>
-        <p>• <b>启动</b>：左键点击卡片即用系统默认方式启动对应的 exe（需要管理员权限的程序会提示提权启动）<br>
-        • <b>管理</b>：点「管理软件列表」新增 / 编辑 / 删除条目，可填 名称、exe 路径、图标（.ico / .png）、备注<br>
-        • <b>卡片尺寸</b>：「设置 → 软件卡片尺寸」调节（60 ~ 140px，实时生效）<br>
-        • <b>小卡片</b>：卡片的「软件导航」页签是同一份列表，可直接启动</p>
+        <ul>
+        <li><b>启动</b>：左键点击卡片即用系统默认方式启动对应的 exe（需要管理员权限的程序会提示提权启动）</li>
+        <li><b>管理</b>：点「管理软件列表」新增 / 编辑 / 删除条目，可填 名称、exe 路径、图标（.ico / .png）、备注</li>
+        <li><b>卡片尺寸</b>：「设置 → 软件卡片尺寸」调节（60 ~ 140px，实时生效）</li>
+        <li><b>小卡片</b>：卡片的「软件导航」页签是同一份列表，可直接启动</li>
+        </ul>
+
+        <h3>截图钉屏</h3>
+        <ul>
+        <li><b>呼出</b>：[[Ctrl+Alt+S]]（可在设置 → 全局工具改键 / 关闭），或右键悬浮球 → 截图钉屏</li>
+        <li><b>框选</b>：全屏变暗进入框选，拖选要钉住的范围，松开即钉屏；Esc 或右键取消</li>
+        <li><b>钉图浮窗</b>：置顶参考窗——左键拖动移动位置，右下角抓手等比例改窗框大小，双击关闭</li>
+        <li><b>批注</b>：画笔 / 箭头 / 马赛克，[[Ctrl+Z]] 撤销；复制 / 保存时自动合成批注</li>
+        <li><b>退出</b>：Esc 关闭钉图（已拦截全局 Esc，不会误退整个程序）</li>
+        </ul>
+
+        <h3>插件中心</h3>
+        <ul>
+        <li><b>入口</b>：左栏「插件中心」（[[Ctrl+8]]）</li>
+        <li><b>本地插件</b>：每张卡显示版本 / 描述 / 能力 / 动作热键，可启用 / 停用、卸载；加载失败的卡会单独标出，不影响其它插件</li>
+        <li><b>插件商店</b>：独立窗口列出商店目录里的 .fpplug 可安装包，每个包一个「安装」按钮，已装的标记「已安装」</li>
+        <li><b>手动安装</b>：把 .fpplug 插件包放进安装目录或商店目录，点「重新扫描」即可用</li>
+        <li><b>管理</b>：「打开插件目录」定位插件文件夹；「重新扫描」重新装配全部插件</li>
+        <li><b>总闸</b>：设置 → 悬浮球 →「悬浮球插件总闸」，关闭后插件一律不加载</li>
+        </ul>
+
+        <h3>内置插件</h3>
+        <ul>
+        <li><b>站内搜索</b>（[[Ctrl+Alt+F]]）：知识库 / 笔记 / 碎片 / 任务 / 素材全文检索，自研中文分词 + 倒排索引 + BM25 排序，命中片段带高亮，点结果标题跳转；[[Ctrl+K]] 是同一入口</li>
+        <li><b>周期任务</b>（[[Ctrl+Alt+R]]）：只给规则（每天 / 每周几 / 每月几号 / 每 N 天 / 每 N 周），到点自动生成任务；错过的补一次、同一天不重复生成</li>
+        <li><b>AI 助手</b>（[[Ctrl+Alt+I]]）：本地 / 云端双后端的对话助手，读应用内任务、碎片、笔记做总结、分类与问答；多会话记录重启不丢，可导出 Markdown，支持自定义快捷指令与规则库（后端一次配置、所有 AI 插件共用，见「设置 → AI 配置」）</li>
+        <li><b>密码保险箱</b>（[[Ctrl+Alt+V]]）：只活在本机的密码收纳，自定义字段 + DPAPI 与主密码双因子加密；[[Ctrl+Alt+B]] 快速取用，复制 30 秒后自动清剪贴板，不联网不同步</li>
+        <li><b>文本工坊</b>（[[Ctrl+Alt+T]]）：剪贴板一键 AI 加工——润色成邮件、翻译、总结要点、改写正式、提取待办并转任务；原文自动带入（超长自动截断并提示），结果可存碎片 / 存笔记 / 转任务，自带历史与收藏指令</li>
+        <li><b>日报 / 周报草稿</b>（[[Ctrl+Alt+W]]）：一键汇总这段时间的任务 / 碎片 / 番茄生成 Markdown 草稿，可再交 AI 润色成正式周报（动作型插件，无独立页面，热键或插件中心触发）</li>
+        </ul>
 
         <h3>托盘与后台</h3>
-        <p>• <b>单击托盘图标</b>：显示 / 隐藏主窗口<br>
-        • <b>右键托盘图标</b>：显示 / 隐藏主窗口、显示 / 隐藏悬浮球、退出程序<br>
-        • <b>关闭主窗口</b>：默认最小化到托盘不退出（可在设置中改为直接退出）<br>
-        • <b>单实例运行</b>：重复启动会唤醒已在运行的窗口，不会开出第二个进程</p>
+        <ul>
+        <li><b>单击托盘图标</b>：显示 / 隐藏主窗口</li>
+        <li><b>右键托盘图标</b>：显示 / 隐藏主窗口、显示 / 隐藏悬浮球、退出程序</li>
+        <li><b>关闭主窗口</b>：默认最小化到托盘不退出（可在设置中改为直接退出）</li>
+        <li><b>单实例运行</b>：重复启动会唤醒已在运行的窗口，不会开出第二个进程</li>
+        </ul>
 
         <h3>设置</h3>
-        <p>• <b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——外观 / 悬浮球 / 剪贴板与碎片 / 临时素材 / 全局工具 / 番茄钟 / 启动与系统 / 导出 / AI 配置 / 关于，点分类即切换<br>
-        • <b>外观</b>：浅色 / 深色主题一键切换、动画速度、软件卡片尺寸<br>
-        • <b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸<br>
-        • <b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片<br>
-        • <b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小<br>
-        • <b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）<br>
-        • <b>番茄钟</b>：开关、专注时长（1-120 分钟）、休息时长（1-60 分钟）、自动进入休息；计时由悬浮球外圈进度环呈现，右键球体开始 / 暂停 / 结束<br>
-        • <b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务提醒（汇总逾期 / 今日到期 / 未安排日期的未完成任务）<br>
-        • <b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）<br>
-        • <b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）<br>
-        • <b>关于</b>：版本信息与快捷键速查；点「检查更新」仅在你点击时访问一次 GitHub Releases API（不携带任何本机数据），发现新版只给下载页入口、不自动下载，离线不影响任何功能<br>
-        • <b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」在<b>页底常驻栏</b>（任何分类下都可见），恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</p>
+        <ul>
+        <li><b>分类导航</b>：设置页左侧是分类导航，右侧只显示当前分类、各自独立滚动——外观 / 悬浮球 / 剪贴板与碎片 / 临时素材 / 全局工具 / 番茄钟 / 启动与系统 / 导出 / AI 配置 / 关于，点分类即切换</li>
+        <li><b>外观</b>：浅色 / 深色主题一键切换、动画速度、软件卡片尺寸</li>
+        <li><b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸</li>
+        <li><b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片</li>
+        <li><b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小</li>
+        <li><b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）</li>
+        <li><b>番茄钟</b>：开关、专注时长（1-120 分钟）、休息时长（1-60 分钟）、自动进入休息；计时由悬浮球外圈进度环呈现，右键球体开始 / 暂停 / 结束</li>
+        <li><b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务提醒（汇总逾期 / 今日到期 / 未安排日期的未完成任务）</li>
+        <li><b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）</li>
+        <li><b>AI 配置</b>：云端 / 本地后端<b>一次配置、所有接入的 AI 插件共用</b>——云端填 OpenAI 兼容地址 / Key / 模型；本地选 llama-server.exe 与 .gguf 模型文件、可一键「启动本地服务」（退出程序自动结束）；「保存并测试连接」配置落盘并即时探活；「接入插件」勾选哪些插件，哪些就改用这套后端（改完即生效，未勾选的插件继续用自己的配置）</li>
+        <li><b>关于</b>：版本信息与快捷键速查；点「检查更新」仅在你点击时访问一次 GitHub Releases API（不携带任何本机数据），发现新版只给下载页入口、不自动下载，离线不影响任何功能</li>
+        <li><b>改动即生效</b>：所有设置实时保存，无需手动保存；「↺ 恢复默认设置」在<b>页底常驻栏</b>（任何分类下都可见），恢复全部默认值（软件导航条目、窗口与悬浮球位置会保留）</li>
+        </ul>
 
         <h3>数据与迁移</h3>
-        <p>• 全部数据都在本地：程序目录的 <b>float_data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）<br>
-        • 换电脑时把整个程序文件夹拷走即可，数据跟着走<br>
-        • 程序不联网、不登录、不上传任何内容，断网状态下所有功能照常可用</p>
+        <ul>
+        <li>全部数据都在本地：程序目录的 <b>float_data/</b>（碎片 / 任务 / 笔记 / 素材索引 / 配置 / 日志 / 临时素材 / 知识库.docx）</li>
+        <li>换电脑时把整个程序文件夹拷走即可，数据跟着走</li>
+        <li>程序不联网、不登录、不上传任何内容，断网状态下所有功能照常可用</li>
+        </ul>
         """
 
+    # ------------------------------------------------------------------
+    # 说明页内部分类导航（2026-10-02：长滚动 → 与设置页同款次导航）。
+    # 顺序即左栏展示顺序，(key, 图标名, 名称)；图标全部取 icons.py 既有
+    # 字形（零新增）。章节正文不在此表 —— _help_section_html 从整篇
+    # _help_html() 按 <h3> 切片而来，正文一字不动（内容与界面文案的逐条
+    # 同步见 CHANGELOG 2026-10-02「帮助页正文同步」段，本轮改壳不改稿）。
+    # 「总览」= 第一个 <h3> 之前的导语段，key 直取；其余 16 项的名称必须
+    #   与正文 <h3> 标题逐字一致（test_help_nav 钉两表一致）。
+    # ------------------------------------------------------------------
+    HELP_CATEGORIES = (
+        ("overview", "help", "总览"),
+        ("hotkeys", "command", "全局快捷键"),
+        ("ball", "ball", "悬浮球"),
+        ("card", "window", "小卡片"),
+        ("fragments", "fragments", "碎片工作台"),
+        ("tasks", "tasks", "日程任务"),
+        ("notes", "notes", "笔记管理"),
+        ("knowledge", "knowledge", "知识库"),
+        ("assets", "assets", "临时素材"),
+        ("nav", "nav", "网址导航"),
+        ("apps", "apps", "软件导航"),
+        ("shot", "screenshot", "截图钉屏"),
+        ("pluginhub", "plugins", "插件中心"),
+        ("builtin", "store", "内置插件"),
+        ("tray", "power", "托盘与后台"),
+        ("settings", "settings", "设置"),
+        ("data", "folder", "数据与迁移"),
+    )
+
+    @classmethod
+    def _help_html_sections(cls) -> dict:
+        """把整篇 _help_html() 按 <h3> 切成 {章节标题: 含 h3 的片段}。
+
+        str.find 走查而不用 re.split：正文是手写富文本，只认「<h3>…
+        </h3>」字面对；「有头无尾」的损坏内容并进前一章（运行时容错，
+        结构性错误由 test_help_nav 在 CI 拦住）。
+        """
+        html = cls._help_html()
+        marks = []
+        i = html.find("<h3>")
+        while i >= 0:
+            j = html.find("</h3>", i)
+            if j < 0:
+                break
+            marks.append((i, html[i + 4:j].strip()))
+            i = html.find("<h3>", j)
+        out = {"overview": html[:marks[0][0]].strip() if marks else html.strip()}
+        for idx, (start, title) in enumerate(marks):
+            end = marks[idx + 1][0] if idx + 1 < len(marks) else len(html)
+            out[title] = html[start:end].strip()
+        return out
+
+    @classmethod
+    def _help_section_html(cls, key: str) -> str:
+        """按分类 key 取章节 HTML；总览取导语段，其余按左栏名称对 <h3>。
+
+        查不到返回空串 —— 标题表与正文失同步时页面不崩（空白由
+        test_help_nav 的两表一致断言在 CI 阶段拦住）。
+        """
+        sections = cls._help_html_sections()
+        if key == "overview":
+            return sections.get("overview", "")
+        label = dict((c[0], c[2]) for c in cls.HELP_CATEGORIES).get(key, "")
+        return sections.get(label, "")
+
     def _build_help_page(self):
-        """构建使用说明页面（嵌入 QStackedWidget，与其它页面同层级切换）"""
+        """构建使用说明页面（嵌入 QStackedWidget，与其它页面同层级切换）
+
+        2026-10-02 重构：13 个章节此前挤在一条长滚动里，翻找全靠滚轮；
+        改成与设置页同款「左侧分类导航 + 右侧分类页」，每章独立滚动。
+        切换实现与 SettingsPanel 完全同构（QButtonGroup 互斥 + stack 换页），
+        左栏按钮与分隔线复用 settingsNavBtn / settingsNavDivider 的 QSS 与
+        IconButton 悬停配色钩子 —— 那是「页内次导航」的统一样式收口，两页
+        共用一份视觉语言。正文取色仍由 _apply_help_content_color 在
+        _apply_theme 里统一重放（findChildren(IconButton) 一并刷导航图标）。
+        同日内容扩充至 16 章节（17 个分类含总览），切片原文缓存在
+        _help_raw，[[热键]] 键帽与主题色统一在 _decorate_help_html 注入。
+        """
         page = QWidget()
-        v = QVBoxLayout(page)
-        v.setContentsMargins(8, 0, 8, 0)
-        v.setSpacing(12)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(8, 0, 8, 0)
+        outer.setSpacing(8)
 
-        # 标题（图标 + 文字整体居中：两侧加 stretch，与原来 AlignCenter 等效）
-        title_row = QHBoxLayout()
-        title_row.addStretch()
-        title = PageTitle("help", "FloatPulse 使用说明", self)
-        title_row.addWidget(title)
-        title_row.addStretch()
-        v.addLayout(title_row)
+        # 标题与设置页同款：PageTitle 顶格通栏（原居中排版随长滚动退役）
+        outer.addWidget(PageTitle("help", "FloatPulse 使用说明", self))
+        outer.addSpacing(8)
 
-        # 说明内容（可滚动）
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-            "QLabel { background: transparent; }"
-        )
+        # ---- 中部：左分类导航 + 右章节页，每章独立滚动 ----
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(14)
+        body.addWidget(self._build_help_nav_rail())
+        divider = QFrame()
+        divider.setObjectName("settingsNavDivider")
+        divider.setFixedWidth(1)
+        body.addWidget(divider)
+        self._help_stack = QStackedWidget()
+        body.addWidget(self._help_stack, 1)
+        outer.addLayout(body, 1)
 
-        self._help_content = QLabel()
-        self._help_content.setWordWrap(True)
-        self._help_content.setTextFormat(Qt.TextFormat.RichText)
-        self._help_content.setText(self._help_html())
+        self._help_contents = []
+        self._help_raw = {}   # key → 切片原文；装饰与取色在 _apply_help_content_color 统一做
+        for key, _icon, _label in self.HELP_CATEGORIES:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setStyleSheet(
+                "QScrollArea { background: transparent; border: none; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }"
+                "QLabel { background: transparent; }"
+            )
+            content = QLabel()
+            content.setWordWrap(True)
+            content.setTextFormat(Qt.TextFormat.RichText)
+            self._help_raw[key] = self._help_section_html(key)
+            scroll.setWidget(content)
+            self._help_contents.append(content)
+            self._help_stack.addWidget(scroll)
+
+        # 初始落在第一分类（与设置页同口径：不做跨会话记忆）
+        self.show_help_category(self.HELP_CATEGORIES[0][0])
         self._apply_help_content_color()
-        scroll.setWidget(self._help_content)
-        v.addWidget(scroll, 1)
         return page
 
-    def _apply_help_content_color(self):
-        """使用说明正文颜色跟随主题（切主题时由 _apply_theme 调用）"""
-        if getattr(self, "_help_content", None) is None:
+    def _build_help_nav_rail(self) -> QWidget:
+        """说明页左分类导航：与 SettingsPanel._build_nav_rail 同构。
+
+        objectName 复用 settingsNavBtn —— 「页内次导航」的统一样式钩子
+        （QSS / IconButton 悬停淡染 / 圆角都按这个名字收口），两页共用
+        而不是各抄一份。图标三态取色与设置页逐字相同。
+        """
+        rail = QWidget()
+        rv = QVBoxLayout(rail)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(2)   # 17 个分类比设置页多一半，紧凑行距防小窗高度裁切
+        self._help_btns = {}
+        self._help_index = {}
+        self._help_group = QButtonGroup(self)
+        self._help_group.setExclusive(True)
+        for idx, (key, icon, label) in enumerate(self.HELP_CATEGORIES):
+            btn = IconButton(icon, icon_size=16, text=label,
+                             object_name="settingsNavBtn", checkable=True,
+                             host=self,
+                             off_color="text_secondary", hover_color="text",
+                             on_color="primary")
+            btn.clicked.connect(
+                lambda _checked=False, k=key: self.show_help_category(k))
+            self._help_group.addButton(btn)
+            self._help_btns[key] = btn
+            self._help_index[key] = idx
+            rv.addWidget(btn)
+        rv.addStretch()
+        rail.setFixedWidth(140)
+        return rail
+
+    def show_help_category(self, key: str):
+        """切到指定章节；未知 key 静默忽略（导航点击与外部深链共用入口）"""
+        btn = self._help_btns.get(key)
+        if btn is None:
             return
-        text_color = get_colors(self._theme).get("text", "#2C3E50")
-        self._help_content.setStyleSheet(
-            f"font-size: 13px; line-height: 1.6; color: {text_color}; background: transparent;"
-        )
+        btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
+        self._help_stack.setCurrentIndex(self._help_index[key])
+
+    def _apply_help_content_color(self):
+        """使用说明正文重渲染（切主题时由 _apply_theme 调用）。
+
+        Qt 富文本不吃 QSS，颜色只能行内注入；每次主题变化都用
+        _decorate_help_html 从 _help_raw 的切片原文重新装饰一遍——
+        原文是唯一真相源，避免上次注入的行内样式叠进本次输出。
+        """
+        if not getattr(self, "_help_contents", None):
+            return
+        colors = get_colors(self._theme)
+        text_color = colors.get("text", "#2C2C2A")
+        style = (f"font-size: 13px; line-height: 1.6; "
+                 f"color: {text_color}; background: transparent;")
+        for (key, _icon, _label), content in zip(
+                self.HELP_CATEGORIES, self._help_contents):
+            content.setStyleSheet(style)
+            content.setText(self._decorate_help_html(
+                self._help_raw.get(key, ""), colors))
+
+    @staticmethod
+    def _decorate_help_html(raw: str, colors: dict) -> str:
+        """把说明页切片原文装饰成最终富文本（主题色 + 热键键帽）。
+
+        - [[键位]] → 等宽字体键帽样式（bg_level2 底 + text 字色），
+          未闭合的 [[ 按原文保留（容错，结构性错误由 test_help_nav 拦）；
+        - <h3> 章节标题染主题主色。
+        """
+        bg = colors.get("bg_level2", "#F1EFE8")
+        fg = colors.get("text", "#2C2C2A")
+        primary = colors.get("primary", "#0F6E56")
+        cap = ('<span style="font-family:Consolas,\'Courier New\',monospace; '
+               'background-color:%s; color:%s;">&nbsp;%s&nbsp;</span>')
+        out = []
+        rest = raw
+        while True:
+            head, sep, tail = rest.partition("[[")
+            if not sep:
+                out.append(rest)
+                break
+            key, sep2, rest2 = tail.partition("]]")
+            if not sep2:
+                out.append(head + sep + tail)   # 未闭合按原文保留
+                break
+            out.append(head)
+            out.append(cap % (bg, fg, key.strip()))
+            rest = rest2
+        html = "".join(out)
+        html = (html
+                .replace("<h3>", '<h3><span style="color:%s; font-size:15px;">' % primary)
+                .replace("</h3>", "</span></h3>"))
+        return html
 
     def _toggle_help_page(self):
         """F1 切换：进入使用说明页 / 返回进入前的页面"""
