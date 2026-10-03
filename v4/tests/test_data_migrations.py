@@ -136,19 +136,25 @@ class TestRotateBackup(unittest.TestCase):
 class TestStoreVersions(unittest.TestCase):
     """STORE_VERSIONS / MIGRATIONS 注册表"""
 
-    def test_all_stores_registered_at_v1(self):
-        """7 个数据文件全部登记且当前版本均为 1（本次是机制落地，无内容迁移）"""
+    def test_all_stores_registered_at_current_version(self):
+        """7 个数据文件全部登记；config 已升到 v2（2026-10-03 分组阈值默认
+        120→900），其余 store 仍为 v1。新增迁移时同步改这里，别让它退化成
+        「全都写死 1」的摆设。"""
         self.assertEqual(
             set(STORE_VERSIONS),
             {"config", "fragments", "notes", "tasks",
              "groups", "stickies", "assets"})
+        self.assertEqual(STORE_VERSIONS["config"], 2)
         for store, version in STORE_VERSIONS.items():
+            if store == "config":
+                continue
             self.assertEqual(version, 1, "%s 应为 v1" % store)
 
     def test_migrations_table_covers_all_stores(self):
-        """每个 store 在 MIGRATIONS 都有表（可为空 = 机制预留）"""
+        """每个 store 在 MIGRATIONS 都有表（无内容迁移的 store 允许空表）"""
         self.assertEqual(set(MIGRATIONS), set(STORE_VERSIONS))
-        self.assertEqual(MIGRATIONS["config"], {})
+        self.assertIn(1, MIGRATIONS["config"],
+                      "config v1→v2（分组阈值默认值迁移）应已注册")
         self.assertIn(0, MIGRATIONS["fragments"], "示例迁移应挂在 fragments 0→1")
 
 

@@ -115,6 +115,13 @@ class _AssetThumbDelegate(QStyledItemDelegate):
     DEFAULT_THUMB_W = 128   # 默认缩略图宽（一行 4 个；设置项 asset_thumb_size 可调）
     THUMB_RATIO = 100 / 152  # 高/宽比，沿用原 152x100 的视觉比例
     PAD = 10          # 格内左右留白
+    # 会话堆标题条的**专属**高度（仅分组态占用）。
+    # ★ 别再把它塞进 CELL_H 的既有 64px 里：正文（缩略图 + 名 + 元）在平铺
+    #   态已把 64px 用满，标题条若与正文抢空间，实测「大小 · 时间」那行会
+    #   溢出约 24px 压到下一行上 —— 这正是 2026-10-03 用户截图里"标题条与
+    #   缩略图挤压"的根因。分组态整体垫高，平铺态一字不变。
+    HEADER_H = 24
+    HEADER_BAR_H = 20        # 标题条可视条高（刻度与文字居中于其中）
 
     def __init__(self, host, thumb_cache: dict, loader=None, parent=None):
         super().__init__(parent)
@@ -122,7 +129,9 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         self._thumbs = thumb_cache   # id -> QPixmap | False | _PENDING
         self._loader = loader        # 未命中回调(面板的异步派发);None=旧同步路径
         self._fade_values = {}       # asset_id -> 0.0~1.0(淡入进度,面板维护)
-        self._header_texts = {}      # asset_id -> 会话堆标题(分组模式;平铺=空)
+        self._header_texts = {}      # asset_id -> 会话堆标题(仅 ≥2 张的堆;平铺=空)
+        self._member_ordinals = {}   # asset_id -> "#2" 堆内序号(非堆首;平铺=空)
+        self._group_mode = False     # 分组态才垫高 HEADER_H(见 HEADER_H 注释)
         config = getattr(host, "_config", None)
         init_w = (int(config.get("asset_thumb_size", self.DEFAULT_THUMB_W))
                   if config is not None else self.DEFAULT_THUMB_W)
@@ -135,7 +144,21 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         self.THUMB_H = max(60, round(w * self.THUMB_RATIO))
         self.CELL_W = w + self.PAD * 2
         # 顶 8 + 缩略图 + 名 4+20 + 元 4+16 + 底 12
-        self.CELL_H = self.THUMB_H + 64
+        self.CELL_H = self.THUMB_H + 64 + (self.HEADER_H if self._group_mode else 0)
+
+    def set_group_mode(self, active: bool):
+        """切换「分组态」：整体垫高一条专属标题条高度（重算 CELL_H）。
+
+        ★ 分组/平铺**保持 setUniformItemSizes(True)** —— 变的是"整批统一
+        垫高"，不是"逐格变高"，所以不会出现同排参差行高。分组态下**没有**
+        标题的格子一样垫高，否则同一排里带标题的格子缩略图会低 24px、
+        与邻格错位。
+        """
+        active = bool(active)
+        if active == self._group_mode:
+            return
+        self._group_mode = active
+        self.set_thumb_size(self.THUMB_W)
 
     # ---------------- 颜色 ----------------
     def _colors(self) -> dict:
@@ -192,34 +215,34 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # ---- 会话堆标题（仅分组模式；平铺模式下 _header_texts 为空 → 整段跳过）----
+        # ---- 会话堆标题条（仅分组态；平铺态 _group_mode=False → 整段跳过）----
+        # ★ 分组态下**每一格都垫高 HEADER_H**（含没有标题的单张堆），标题只
+        #   画在首格：这样同排所有格子的 rect.top() 一致，缩略图不会错位。
         live_rect = rect
-        header_text = self._header_texts.get(asset.asset_id)
-        if header_text:
-            bar_h = 22.0
-            bar = QRectF(rect.left(), rect.top(), rect.width(), bar_h)
+        if self._group_mode:
+            bar = QRectF(rect.left(), rect.top(), rect.width(), self.HEADER_H)
             # 缩进到缩略图左缘，与下方格子对齐（比整格左缘更内敛）
             bar = bar.adjusted(self.PAD, 0, -self.PAD, 0)
-            accent = _to_color(colors["primary"])
-            tick = QRectF(bar.left(), bar.top() + 5, 3.0, bar_h - 10)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(accent)
-            painter.drawRoundedRect(tick, 1.5, 1.5)
-            f = painter.font()
-            f.setBold(True)
-            painter.setFont(f)
-            painter.setPen(_to_color(colors["text_secondary"]))
-            painter.drawText(
-                QRectF(tick.right() + 8, bar.top(), bar.width() - 14, bar_h),
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                header_text)
-            painter.setFont(option.font)
-            # 正文与标题**分享同一个单元高**：标题压在上缘 22px 内，正文
-            # 用 rect.top()+22 为顶继续排（PAD 留白也随之收窄），格高
-            # （CELL_H）保持不变 → 分组开启时每行仍是同一高度，只是信息
-            # 更满。这样不必改 sizeHint（分组/平铺共用一套格尺寸）。
-            live_rect = QRectF(rect.left(), rect.top() + bar_h + 4,
-                               rect.width(), rect.height() - bar_h - 4)
+            header_text = self._header_texts.get(asset.asset_id)
+            if header_text:
+                bar_h = float(self.HEADER_BAR_H)
+                top = bar.top() + (self.HEADER_H - bar_h) / 2.0
+                accent = _to_color(colors["primary"])
+                tick = QRectF(bar.left(), top, 3.0, bar_h)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(accent)
+                painter.drawRoundedRect(tick, 1.5, 1.5)
+                f = painter.font()
+                f.setBold(True)
+                painter.setFont(f)
+                painter.setPen(_to_color(colors["text_secondary"]))
+                painter.drawText(
+                    QRectF(tick.right() + 8, top, bar.width() - 14, bar_h),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    header_text)
+                painter.setFont(option.font)
+            live_rect = QRectF(rect.left(), rect.top() + self.HEADER_H,
+                               rect.width(), rect.height() - self.HEADER_H)
         rect = live_rect
 
         # ---- 单元背景卡（选中/hover/常态）----
@@ -288,11 +311,15 @@ class _AssetThumbDelegate(QStyledItemDelegate):
                                     trect.width(), 16),
                              Qt.AlignmentFlag.AlignHCenter, sub)
 
-        # ---- 文件名 ----
+        # ---- 文件名 / 堆内序号 ----
+        # 分组态里同一堆的**非首格**不再重复渲染同一个文件名：连拍截图的
+        # 文件名高度雷同（`剪贴板图片_*.png`），一堆里重复 7 次是纯噪音。
+        # 改显 "#2" "#3" 序号 —— 既去噪，又保留连拍先后顺序这一有用信息。
         painter.setFont(option.font)
         fm = painter.fontMetrics()
         painter.setPen(_to_color(colors["text"]))
-        name = fm.elidedText(asset.original_name,
+        name = fm.elidedText(self._member_ordinals.get(asset.asset_id)
+                             or asset.original_name,
                              Qt.TextElideMode.ElideMiddle,
                              int(rect.width() - self.PAD * 2))
         name_y = trect.bottom() + 6 + fm.ascent()
@@ -410,6 +437,7 @@ class AssetsPanel(QWidget):
         self._thumb_delegate = _AssetThumbDelegate(
             self._host, self._thumb_cache, loader=self._request_thumb)
         self._group_headers = {}
+        self._group_ordinals = {}
         # 会话分组视图模式：QListView.setViewMode 在部分平台/离屏后端会被
         # 忽略，QToolButton 作为 QListWidget 的 setViewport 子级（顶层同窗）
         # 才是最可靠的「同列表两种呈现」载体，且分组/平铺共用同一个
@@ -568,8 +596,14 @@ class AssetsPanel(QWidget):
         # ---- 序列决定呈现顺序：分组模式=按会话堆铺开；平铺=沿用旧顺序 ----
         # 两种模式喂给同一个 QListWidget 同一批 asset 对象 → 条目集合天然
         # 相等（"关闭分组后渲染结果逐项一致"由此成立）。
-        sequence, self._group_headers = self._build_sequence(assets)
+        sequence, self._group_headers, self._group_ordinals = \
+            self._build_sequence(assets)
+        # 分组态先把单元垫高（改 CELL_H）再灌条目 —— addItem 时 sizeHint 已定型，
+        # 避免"先按旧高排、再重排"的闪烁；滚动步长随新 CELL_H 一起校准。
+        self._thumb_delegate.set_group_mode(self._is_grouping())
         self._thumb_delegate._header_texts = self._group_headers
+        self._thumb_delegate._member_ordinals = self._group_ordinals
+        self._sync_scroll_step()
         for a in sequence:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, a)            # Asset 对象（delegate 用）
@@ -591,24 +625,30 @@ class AssetsPanel(QWidget):
 
     # ---- 会话分组视图（渲染时派生，不落库）----
     def _build_sequence(self, assets):
-        """返回 ``(渲染顺序, {asset_id: 堆标题})``。
+        """返回 ``(渲染顺序, {asset_id: 堆标题}, {asset_id: 堆内序号})``。
 
-        分组关闭 → 原样返回（与改动前逐项一致，堆标题表为空）。
+        分组关闭 → 原样返回（与改动前逐项一致，两张表都为空）。
         分组开启 → 按 ``asset_group.cluster_assets`` 聚类，堆内按时间升序
-        铺开，每堆首张挂标题（默认名 "N 张 · HH:MM"）。
+        铺开，**只有 ≥2 张的堆才挂标题**：单张素材本来就不是一次"会话"，
+        给它画标题条纯属噪音 —— 真实数据 18 张里 11 张是单张，这正是
+        2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"的来源。
+        非堆首格挂 ``"#2"``/``"#3"`` 序号，避免堆内重复渲染雷同文件名。
         """
         if not self._is_grouping():
-            return list(assets), {}
+            return list(assets), {}, {}
         gap = self._group_gap_seconds()
         groups = asset_group.cluster_assets(assets, gap_seconds=gap)
         headers = {}
+        ordinals = {}
         sequence = []
         for i, group in enumerate(groups):
-            for a in group:
+            for j, a in enumerate(group):
                 sequence.append(a)
-            if group:
+                if j:
+                    ordinals[a.asset_id] = "#%d" % (j + 1)
+            if len(group) >= 2:
                 headers[group[0].asset_id] = asset_group.group_label(group, i)
-        return sequence, headers
+        return sequence, headers, ordinals
 
     def _is_grouping(self) -> bool:
         btn = getattr(self, "_group_btn", None)

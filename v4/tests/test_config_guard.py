@@ -93,18 +93,21 @@ class TestConfigCorruptGuard(unittest.TestCase):
         self.assertFalse(os.path.exists(self.path + ".corrupt.bak"))
 
     def test_schema_version_default_and_persisted(self):
-        """schema_version 默认 1，且随 save() 落盘"""
-        self.assertEqual(DEFAULT_CONFIG.get("schema_version"), 1)
+        """schema_version 默认 = 当前 store 版本，且随 save() 落盘"""
+        from src.json_store import STORE_VERSIONS
+        self.assertEqual(DEFAULT_CONFIG.get("schema_version"),
+                         STORE_VERSIONS["config"])
         cm = ConfigManager(self.path)
         cm.set("theme", "light")
         cm.save()
         with open(self.path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        self.assertEqual(data.get("schema_version"), 1)
+        self.assertEqual(data.get("schema_version"), STORE_VERSIONS["config"])
         self.assertEqual(data.get("theme"), "light")
 
     def test_legacy_file_without_schema_version_still_loads(self):
         """存量 config.json（无 schema_version 键）零迁移、用户值保留"""
+        from src.json_store import STORE_VERSIONS
         legacy = {k: v for k, v in DEFAULT_CONFIG.items()
                   if k != "schema_version"}
         legacy["theme"] = "light"
@@ -112,7 +115,8 @@ class TestConfigCorruptGuard(unittest.TestCase):
         cm = ConfigManager(self.path)
         self.assertIsNone(cm.load_reset_reason)
         self.assertEqual(cm.get("theme"), "light")
-        self.assertEqual(cm.get("schema_version"), 1)  # 内存收敛到当前版本
+        # 内存收敛到当前版本
+        self.assertEqual(cm.get("schema_version"), STORE_VERSIONS["config"])
 
 
 class TestConfigSaveRotate(unittest.TestCase):
