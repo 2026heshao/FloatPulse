@@ -125,9 +125,9 @@ write_plugin("02-rival", manifest("02-rival", [
     {"id": "rival.pick", "title": "抢键插件", "hotkey": " ctrl + ALT + c ", "menu": True}]),
     plugin_code("02-rival", "rival.pick", "抢键插件"))
 
-# 抢核心热键（快速捕捉）
+# 抢核心热键（截图钉屏）
 write_plugin("03-thief", manifest("03-thief", [
-    {"id": "thief.pick", "title": "抢核心热键", "hotkey": "Ctrl+Alt+K", "menu": True}]),
+    {"id": "thief.pick", "title": "抢核心热键", "hotkey": "Ctrl+Alt+S", "menu": True}]),
     plugin_code("03-thief", "thief.pick", "抢核心热键"))
 
 # 依赖不合规
@@ -153,7 +153,7 @@ with zipfile.ZipFile(os.path.join(plugins_dir, "06-zipped.fpplug"), "w") as zf:
 # A/B/C/D/F：注册表与加载器
 # ====================================================================
 registry = ActionRegistry(logger=logger,
-                          reserved_hotkeys=("Ctrl+Alt+K", "Ctrl+Alt+S"))
+                          reserved_hotkeys=("Ctrl+Alt+S",))
 ctx = PluginContext(logger=logger, config={"theme": "dark"},
                     show_toast=lambda t, ms=2800: None,
                     open_main_window=lambda: None,

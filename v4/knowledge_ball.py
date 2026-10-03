@@ -10,7 +10,7 @@
   2. 鼠标悬停悬浮球 → 自动弹出卡片；鼠标离开球+卡片区域 → 自动关闭
   3. 拖拽悬浮球时不显示卡片
   4. 卡片弹窗支持「知识卡片 / 日程任务 / 临时笔记」三模式切换
-  5. 右键悬浮球 / 右键卡片 → 退出程序；Esc 只关闭当前表面（卡片/快捕条/
+  5. 右键悬浮球 / 右键卡片 → 退出程序；Esc 只关闭当前表面（卡片/
      截图框选/钉图/便签），不退出程序（1.3）
   6. 悬浮球靠近桌面上/下/左/右任一边缘 → 自动吸边隐藏一半；鼠标移近滑出
   7. 单实例限制，防止重复启动
@@ -238,7 +238,7 @@ class _BallSurface(QWidget):
             self.update()
 
     def pulse(self):
-        """光晕脉冲一次：成功反馈（拖入文件 / 剪贴板捕获 / 快速捕捉）"""
+        """光晕脉冲一次：成功反馈（拖入文件 / 剪贴板捕获）"""
         if self._dragging or self._glow > 0.5:
             return
         seq = QSequentialAnimationGroup(self)
@@ -2367,7 +2367,7 @@ class FloatingBall(QWidget):
             self._surface.set_badge(count)
 
     def pulse(self):
-        """成功反馈（A4）：球体光晕脉冲一次（拖入文件 / 剪贴板捕获 / 快速捕捉）"""
+        """成功反馈（A4）：球体光晕脉冲一次（拖入文件 / 剪贴板捕获）"""
         if self.isVisible() and self._surface is not None:
             self._surface.pulse()
 
@@ -2689,11 +2689,10 @@ def main():
     _shutdown_state = {"done": False}
 
     def _shutdown_resources():
-        """幂等收尾：三个热键管理器注销 + AI_SERVER.stop + 剪贴板监听停止"""
+        """幂等收尾：热键管理器注销 + AI_SERVER.stop + 剪贴板监听停止"""
         _shutdown_once(_shutdown_state, [
             # global_hotkey.py：程序退出前务必 unregister_all()，否则
             # 组合键残留占用到进程结束
-            ("快捕条热键注销", lambda: hotkey_mgr.unregister_all()),
             ("截图热键注销", lambda: shot_hotkey_mgr.unregister_all()),
             ("插件热键注销", lambda: plugin_hotkey_mgr.unregister_all()),
             # AI 本地服务（llama-server）：退出时主动停止，不再只靠 JobObject 兜底
@@ -2723,7 +2722,7 @@ def main():
 
     # 注（1.3）：不再注册「全局 Esc → 退出程序」快捷键——此前任何窗口按
     # Esc 都会杀掉整个进程，与桌面软件惯例相反。Esc 语义逐表面收口：
-    # 卡片 / 快捕条 / 截图框选 / 钉图 / 便签各自关闭或取消，主窗口 Esc 无动作。
+    # 卡片 / 截图框选 / 钉图 / 便签各自关闭或取消，主窗口 Esc 无动作。
 
     # ---- 托盘右键菜单（F1；D1-lite：构建在 src/tray.py）----
     # 显示/隐藏主窗口、显示/隐藏悬浮球、📌 便签子菜单、退出程序。
@@ -2856,33 +2855,13 @@ def main():
 
     QTimer.singleShot(15000, _silent_update_check)
 
-    # ---- 全局快速捕捉条（热键呼出 → 一句话进碎片池）----
+    # ---- 全局热键基础设施（下方截图钉屏 / 插件热键各自建管理器）----
     _mark("注册热键")
     from src.global_hotkey import GlobalHotkeyManager
     from src.hotkey_binding import ConfigHotkeyBinding, reapply_hotkey_bindings
-    from src.quick_capture import QuickCaptureWindow
-
-    hotkey_mgr = GlobalHotkeyManager()
-    app.eventDispatcher().installNativeEventFilter(hotkey_mgr)
-
-    quick_capture = QuickCaptureWindow(fragment_manager, theme=_resolved_theme, config_manager=config_manager)
-
-    # D4 样板收敛：配置驱动的单键绑定（注销 → hide 钩子 → 开关判定 → 注册）
-    quick_capture_hotkey = ConfigHotkeyBinding(
-        hotkey_mgr, config_manager,
-        enabled_key="quick_capture_enabled", hotkey_key="quick_capture_hotkey",
-        default_hotkey="Ctrl+Alt+K", callback=quick_capture.toggle,
-        fail_log="全局热键注册失败（可能被占用）：{hotkey}",
-        pre_hooks=(quick_capture.hide,))
-
-    main_window.quick_capture_changed.connect(quick_capture_hotkey.reapply)
-    main_window.theme_changed.connect(quick_capture.apply_theme)
-    # 快速捕捉提交成功 → 球体脉冲反馈（A4）
-    quick_capture.capture_submitted.connect(lambda _text: ball.pulse())
-    quick_capture_hotkey.reapply()
 
     # ---- 截图钉屏（Ctrl+Alt+S → 框选 → 置顶参考浮窗，V4）----
-    # 用独立 GlobalHotkeyManager：快捕条重注册会 unregister_all()，
+    # 用独立 GlobalHotkeyManager：插件热键重注册会 unregister_all()，
     # 共用实例会把截图热键一起踢掉
     from src.screenshot_pin import ScreenshotPinController
 
@@ -2937,7 +2916,6 @@ def main():
     plugin_registry = ActionRegistry(
         logger=get_logger(),
         reserved_hotkeys=(
-            config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K"),
             config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
         ),
     )
@@ -3324,8 +3302,8 @@ def main():
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
-    # 独立 GlobalHotkeyManager：快捕条重注册会 unregister_all()，
-    # 共用实例会把插件热键一起踢掉
+    # 独立 GlobalHotkeyManager：插件热键重注册会 unregister_all()，
+    # 共用实例会把截图热键一起踢掉
     plugin_hotkey_mgr = GlobalHotkeyManager()
     app.eventDispatcher().installNativeEventFilter(plugin_hotkey_mgr)
     ball.set_action_registry(plugin_registry, plugin_ctx)
@@ -3339,7 +3317,6 @@ def main():
         这里只负责按注册表筛出绑定表（冲突让位 / 停用跳过）。
         """
         core_norm = {
-            str(config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K")).strip().lower().replace(" ", ""),
             str(config_manager.get("screenshot_hotkey", "Ctrl+Alt+S")).strip().lower().replace(" ", ""),
         }
         bindings = []
@@ -3444,13 +3421,11 @@ def main():
     def _refresh_core_hotkey_reservation():
         """核心热键变更 → 刷新保留集并重绑插件热键（插件始终让位）"""
         plugin_registry.reserve_hotkeys((
-            config_manager.get("quick_capture_hotkey", "Ctrl+Alt+K"),
             config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
         ))
         _apply_plugin_hotkeys()
 
     main_window.plugins_changed.connect(_apply_plugins)
-    main_window.quick_capture_changed.connect(_refresh_core_hotkey_reservation)
     main_window.screenshot_changed.connect(_refresh_core_hotkey_reservation)
     _apply_plugins()
 
@@ -3482,7 +3457,7 @@ def main():
     # 3c. 系统深浅色变化 → 「跟随系统」模式整链路换肤（3.1）
     # 只复用既有换主题路径：主窗口 _apply_theme 重取配色（get_colors 内部
     # 经 resolve_theme_name 现读系统 scheme），theme_changed 再把具体主题
-    # 名广播给球 / 卡片 / 便签 / 快捕条 / 截图钉屏；显式 light/dark 模式忽略。
+    # 名广播给球 / 卡片 / 便签 / 截图钉屏；显式 light/dark 模式忽略。
     def _on_system_scheme_changed(_scheme):
         if config_manager.get("theme", DEFAULT_THEME) != "follow":
             return

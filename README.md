@@ -28,7 +28,7 @@
 | 能力           | FloatPulse              | FocusCapture | Floatyball | Flow Launcher  | Snipaste |
 | ------------ | ----------------------- | ------------ | ---------- | -------------- | -------- |
 | 悬浮球常驻入口      | ✅                       | ✅            | ✅          | ❌              | ❌        |
-| 随手记录碎片       | ✅ 剪贴板自动收（为主）+ 快捕条 + 拖拽  | ✅ 剪贴板        | ⚠️ 拖放      | ❌              | ❌        |
+| 随手记录碎片       | ✅ 剪贴板自动收（为主）+ 拖拽        | ✅ 剪贴板        | ⚠️ 拖放      | ❌              | ❌        |
 | 碎片分类管理       | ✅ 来源 + 内容语义双轴           | ❌ 仅时间流       | ❌          | ❌              | ❌        |
 | 碎片转笔记 / 入知识库 | ✅ 一键存为笔记、加入知识库          | ❌            | ❌          | ❌              | ❌        |
 | 碎片转任务        | ❌ 手动无入口（AI 文本工坊可自动提取待办） | ❌            | ❌          | ❌              | ❌        |
@@ -71,7 +71,6 @@
 - 可拖拽、四向吸边隐藏、鼠标移近自动滑出
 - 悬停弹出 440×340 快捷卡片，滚轮翻卡、点击换卡
 - 拖文件到球 → 自动收入碎片池；拖入 `.exe/.lnk` → 生成软件启动器
-- 全局热键快速捕捉条（`Ctrl+Alt+K`）：不打断当前工作随手记
 - **截图钉屏（`Ctrl+Alt+S`）**：框选屏幕任意区域，钉成置顶参考浮窗；滚轮缩放内容（光标锚定）、右下角抓手等比例调整窗框、批注（画笔/箭头/马赛克，Ctrl+Z 撤销）、右键复制/保存
 
 ![悬浮球 + 快捷卡片](assets/images/preview-card-dark.png)
@@ -172,7 +171,6 @@ python knowledge_ball.py
 
 | 热键           | 功能                            |
 | ------------ | ----------------------------- |
-| `Ctrl+Alt+K` | 快速捕捉条（随手记碎片）                  |
 | `Ctrl+Alt+S` | 截图钉屏（框选区域置顶参考，支持批注）           |
 | `Ctrl+K`     | 站内搜索（由 `kb-search` 插件提供，需先安装） |
 | `Esc`        | 关闭卡片 / 取消截图                   |
@@ -279,7 +277,7 @@ Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 **FloatPulse** is a Windows floating-ball utility built with native PyQt6 — a lightweight, Electron-free landing spot for everything you copy, drag or capture, always one hover away.
 
 - **Floating ball**: drag, edge-snap, hover to pop a quick card; drop files to capture; drop `.exe/.lnk` to create launchers
-- **Clipboard capture (the main path)**: text and paths you copy are kept automatically, de-duplicated and timestamped; plus a global hotkey (`Ctrl+Alt+K`) note bar and drag-and-drop pickup
+- **Clipboard capture (the main path)**: text and paths you copy are kept automatically, de-duplicated and timestamped; plus drag-and-drop pickup
 - **Screenshot pin** (`Ctrl+Alt+S`): select any screen region and pin it as an always-on-top reference window
 - **Main window**: ten pages in a four-group collapsible sidebar (multiple groups can stay open), fragments workbench, tasks with deadline grouping, notes, docx-based knowledge base, asset manager, URL & app launcher
 - **Plugins, opt-in**: the app ships **without any plugins** — download the `.fpplug` you want from Release Assets, drop it into `plugin_store\`, and install it from the plugin center (AI assistant, in-app full-text search, recurring tasks, weekly report)

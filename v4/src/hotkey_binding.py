@@ -3,11 +3,11 @@
 ====================================================================
 热键绑定助手 - ConfigHotkeyBinding / reapply_hotkey_bindings
 ====================================================================
-D4 样板收敛（成熟化路线图 4.3，2026-09-30）：快捕条 / 截图钉屏 / 插件热键
-三处各自持有 GlobalHotkeyManager（独立实例是**对的**——避免 unregister_all
-互踢，见 V4架构审查 2026-09-26 附录），但「注销 → 读配置 → 重注册 → 失败
-告警」的样板在 knowledge_ball 里重复了三遍，且随热键数量翻倍。本模块把
-样板收敛为绑定表驱动：
+D4 样板收敛（成熟化路线图 4.3，2026-09-30）：截图钉屏 / 插件热键各自持有
+GlobalHotkeyManager（独立实例是**对的**——避免 unregister_all 互踢，见 V4架构
+审查 2026-09-26 附录），但「注销 → 读配置 → 重注册 → 失败告警」的样板在
+knowledge_ball 里曾重复三遍（含 2026-10-03 已整体删除的快捕条），且随热键数量
+翻倍。本模块把样板收敛为绑定表驱动：
 
   - ConfigHotkeyBinding     : 单个配置驱动热键（开关键 + 热键串键 + 回调），
                               reapply() 与原手写样板逐行等价；
@@ -25,19 +25,19 @@ from src.logger import get_logger
 
 
 class ConfigHotkeyBinding:
-    """配置驱动的单个全局热键（快捕条 / 截图钉屏各一）。
+    """配置驱动的单个全局热键（当前用于截图钉屏）。
 
     参数：
       manager        : GlobalHotkeyManager（独立实例，勿与其他绑定共用）
       config         : ConfigManager（get(key, default) 读开关与热键串）
       enabled_key    : 开关键名（bool，缺省 True）
       hotkey_key     : 热键串键名
-      default_hotkey : 热键串缺省值（如 "Ctrl+Alt+K"）
+      default_hotkey : 热键串缺省值（如 "Ctrl+Alt+S"）
       callback       : 热键触发回调（无参）
       fail_log       : 注册失败告警模板（"{hotkey}" 占位，输出与原实现一致）
       pre_hooks      : unregister_all 之后、开关判定之前依次调用的钩子。
-                       快捕条用 hide()——配置变更时收起输入条，顺序与
-                       原实现一致（先注销、再收起、再判开关）。
+                       例如配置变更时先收起某个表面，顺序与原实现一致
+                       （先注销、再收起、再判开关）。
     """
 
     def __init__(self, manager, config, enabled_key, hotkey_key,

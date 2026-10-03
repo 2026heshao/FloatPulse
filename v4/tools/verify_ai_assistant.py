@@ -171,8 +171,7 @@ pump(200)
 plugins_dir = os.path.join(ROOT, "plugins")
 registry = ActionRegistry(
     logger=_logger,
-    reserved_hotkeys=(config.get("quick_capture_hotkey", "Ctrl+Alt+K"),
-                      config.get("screenshot_hotkey", "Ctrl+Alt+S")))
+    reserved_hotkeys=(config.get("screenshot_hotkey", "Ctrl+Alt+S"),))
 plugin_data = PluginData(providers={
     "tasks": lambda: [t.to_dict() for t in task_mgr.get_all_tasks()],
     "fragments": lambda: [f.to_dict() for f in frag_mgr.get_all_fragments()],

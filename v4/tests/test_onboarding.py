@@ -146,7 +146,8 @@ class TestOnboardingCopy:
     def test_hotkey_rows_match_registered_defaults(self):
         keys = [row[0] for row in onboarding._HOTKEY_ROWS]
         # 与 knowledge_ball 注册、README「默认热键」表同口径
-        assert "Ctrl+Alt+K" in keys
+        # Ctrl+Alt+K（快捕条）已于 2026-10-03 卡 1 删除，不得再出现
+        assert "Ctrl+Alt+K" not in keys
         assert "Ctrl+Alt+S" in keys
         # Ctrl+K 依赖 kb-search 插件，必须带「需安装」标注而非裸承诺
         ctrl_k = next(row for row in onboarding._HOTKEY_ROWS

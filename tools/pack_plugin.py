@@ -128,7 +128,7 @@ def check_plugin(plugin_dir: str) -> tuple:
         if hk and not is_valid_hotkey(hk):
             errors.append(
                 f"actions[{i}] 的热键格式非法：{hk!r}"
-                f"（须形如 Ctrl+Alt+K：至少一个修饰键 + 一个主键）")
+                f"（须形如 Ctrl+Alt+S：至少一个修饰键 + 一个主键）")
 
     # ---- 入口文件必须真的在目录里 ----
     entry = manifest["entry"]

@@ -194,8 +194,7 @@ def _make_ctx(window):
 # ====================================================================
 # A. 真实加载器扫到真插件
 # ====================================================================
-registry = ActionRegistry(logger=_logger, reserved_hotkeys=("Ctrl+Alt+K",
-                                                            "Ctrl+Alt+S"))
+registry = ActionRegistry(logger=_logger, reserved_hotkeys=("Ctrl+Alt+S",))
 ctx = _make_ctx(win)
 loader = PluginLoader(registry, ctx, plugins_dir=plugins_dir)
 loaded = loader.load_all()

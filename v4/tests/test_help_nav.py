@@ -112,7 +112,7 @@ class TestHelpSections:
     def test_section_anchor_copy_stays_in_place(self):
         """每章一枚代表性文案：内容整段搬页时不许串章、不许丢段。"""
         anchors = {
-            "hotkeys": "Ctrl+Alt+K",
+            "hotkeys": "Ctrl+Alt+S",
             "ball": "吸附到最近的屏幕边缘",
             "card": "七个页签",
             "fragments": "合并选中",

@@ -294,7 +294,6 @@ class MainWindow(QWidget):
     ball_size_changed = pyqtSignal(int)          # 悬浮球球体直径变更
     mini_icon_size_changed = pyqtSignal(int)    # 小卡片软件导航页图标边长变更
     hide_on_fullscreen_changed = pyqtSignal(bool)  # 全屏应用自动隐藏开关变更
-    quick_capture_changed = pyqtSignal()         # 快速捕捉设置（开关/热键）变更
     screenshot_changed = pyqtSignal()            # 截图钉屏设置（开关/热键）变更
     plugins_changed = pyqtSignal(bool)           # 悬浮球外置插件总闸变更
     pomodoro_changed = pyqtSignal()              # 番茄钟设置（开关/时长/自动休息）变更
@@ -3069,10 +3068,9 @@ class MainWindow(QWidget):
         <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+K]]</td><td style="padding:4px 0;">站内搜索（知识库 / 笔记 / 碎片 / 任务 / 素材，点结果标题跳转到对应面板）</td></tr>
         <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[F1]]</td><td style="padding:4px 0;">进入使用说明页；再按一次返回进入前的页面</td></tr>
         <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+1]] ~ [[Ctrl+8]]</td><td style="padding:4px 0;">依次切换到左栏第 1~8 个功能页（含插件中心）</td></tr>
-        <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+Alt+K]]</td><td style="padding:4px 0;">呼出「快速捕捉」迷你输入条（回车存入碎片池，Esc 关闭）</td></tr>
         <tr><td width="31%" style="white-space:nowrap; padding:4px 14px 4px 0;">[[Ctrl+Alt+S]]</td><td style="padding:4px 0;">截图钉屏——框选屏幕区域，松开即生成置顶参考浮窗（详见「截图钉屏」分类）</td></tr>
         </table>
-        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　快速捕捉与截图钉屏的热键与开关可在「设置 → 全局工具」修改；其它全局键为固定键位。</td></tr></table>
+        <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　截图钉屏的热键与开关可在「设置 → 全局工具」修改；其它全局键为固定键位。</td></tr></table>
 
         <h3>悬浮球</h3>
         <p style="color:PHCOLOR; font-size:12px;">桌面角落的那颗球：看卡、翻卡、收文件、跑番茄钟，全在球上完成。</p>
@@ -3104,7 +3102,7 @@ class MainWindow(QWidget):
         <h3>碎片工作台</h3>
         <p style="color:PHCOLOR; font-size:12px;">本机的「随手存」池子：复制即入库，需要时搜出来、合起来、存成笔记。</p>
         <ul>
-        <li><b>自动收集</b>：复制文本、复制文件路径时自动入库；按 [[Ctrl+Alt+K]] 也可手动快速捕捉</li>
+        <li><b>自动收集</b>：复制文本、复制文件路径时自动入库</li>
         <li><b>类型筛选</b>：全部类型 / 剪贴板文本 / 剪贴板路径 / 文件拾取 / 知识段落</li>
         <li><b>搜索</b>：输入即筛（去抖 250ms），命中的关键词在条目里高亮</li>
         <li><b>预览</b>：选中左侧条目，右侧显示完整内容，可直接修改（停止输入 800ms 自动保存），也可「复制」</li>
@@ -3243,7 +3241,7 @@ class MainWindow(QWidget):
         <li><b>悬浮球</b>：显示悬浮球、球体大小、自动隐藏（总开关 + 延迟秒数）、全屏应用让位、小卡片保持显示、悬浮球插件总闸</li>
         <li><b>剪贴板与碎片</b>：历史上限、过滤应用（逗号分隔）、自动收集剪贴板图片</li>
         <li><b>临时素材</b>：条数上限、单文件体积上限、保留天数、缩略图大小</li>
-        <li><b>全局工具</b>：全局快速捕捉（开关 + 热键，格式如 Ctrl+Alt+K，被占用时会提示）、截图钉屏（开关 + 热键）</li>
+        <li><b>全局工具</b>：截图钉屏（开关 + 热键）</li>
         <li><b>番茄钟</b>：开关、专注时长（1-120 分钟）、休息时长（1-60 分钟）、自动进入休息；计时由悬浮球外圈进度环呈现，右键球体开始 / 暂停 / 结束</li>
         <li><b>启动与系统</b>：开机自启、启动时恢复上次页面、关闭即收进托盘、任务提醒（汇总逾期 / 今日到期 / 未安排日期的未完成任务）</li>
         <li><b>导出</b>：选定 Obsidian vault 目录后，一键把笔记 / 碎片 / 任务导出为 Markdown（重复导出覆盖同名文件）</li>

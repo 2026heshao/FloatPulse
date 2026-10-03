@@ -591,19 +591,6 @@ class SettingsPanel(QWidget):
         cv = self._new_category_page("tools")
         gv = group(cv, "全局工具")
 
-        self._set_quick_capture = self._toggle("quick_capture_enabled", True)
-        self._set_quick_capture.toggled.connect(self._on_quick_capture_changed)
-        add_row(gv, "全局快速捕捉", "任意界面按热键呼出迷你输入条，回车即存入碎片池",
-                self._set_quick_capture)
-
-        self._set_capture_hotkey = QLineEdit()
-        self._set_capture_hotkey.setText(self._config.get("quick_capture_hotkey", "Ctrl+Alt+K"))
-        self._set_capture_hotkey.setPlaceholderText("如：Ctrl+Alt+K")
-        self._set_capture_hotkey.setMinimumWidth(190)
-        self._set_capture_hotkey.editingFinished.connect(self._on_capture_hotkey_changed)
-        add_row(gv, "快速捕捉热键", "格式 Ctrl+Alt+K，需含修饰键；被占用时会提示",
-                self._set_capture_hotkey)
-
         # 截图钉屏（V4）：开关 + 热键
         self._set_screenshot = self._toggle("screenshot_enabled", True)
         self._set_screenshot.toggled.connect(self._on_screenshot_changed)
@@ -615,7 +602,7 @@ class SettingsPanel(QWidget):
         self._set_screenshot_hotkey.setPlaceholderText("如：Ctrl+Alt+S")
         self._set_screenshot_hotkey.setMinimumWidth(190)
         self._set_screenshot_hotkey.editingFinished.connect(self._on_screenshot_hotkey_changed)
-        add_row(gv, "截图热键", "格式 Ctrl+Alt+S，不能与快速捕捉热键相同",
+        add_row(gv, "截图热键", "格式 Ctrl+Alt+S，需含修饰键；被占用时会提示",
                 self._set_screenshot_hotkey, last=True)
 
         # ================= 6. 番茄钟 =================
@@ -939,7 +926,7 @@ class SettingsPanel(QWidget):
             f"生活悬浮球 v{APP_VERSION} | PyQt6 + python-docx\n"
             "功能：知识卡片 / 日程任务 / 临时笔记 / 碎片合并\n\n"
             "快捷键：Esc 退出 | Ctrl+W/H 隐藏 | Ctrl+T 主题 | Ctrl+K 站内搜索\n"
-            "F1 使用说明 | Ctrl+1~7 切换面板 | Ctrl+Alt+K 快速捕捉\n"
+            "F1 使用说明 | Ctrl+1~7 切换面板\n"
             "Ctrl+Alt+S 截图钉屏 | 右键悬浮球 / 右键卡片也可退出"
         )
         about_text.setObjectName("hintLabel")
@@ -1339,10 +1326,6 @@ class SettingsPanel(QWidget):
         # AI 总配置：恢复默认等批量重置后，把字段 / 模式 / 接入下拉框同步回来
         if hasattr(self, '_ai_url'):
             self._ai_refresh_fields()
-        if hasattr(self, '_set_quick_capture'):
-            self._set_quick_capture.setChecked(self._config.get("quick_capture_enabled", True))
-        if hasattr(self, '_set_capture_hotkey'):
-            self._set_capture_hotkey.setText(self._config.get("quick_capture_hotkey", "Ctrl+Alt+K"))
         if hasattr(self, '_set_screenshot'):
             self._set_screenshot.blockSignals(True)
             self._set_screenshot.setChecked(self._config.get("screenshot_enabled", True))
@@ -1426,7 +1409,7 @@ class SettingsPanel(QWidget):
         主窗口 apply_external_theme 只收 light / dark，follow 在这里
         落配置，再驱动主窗口走既有换主题路径：_apply_theme 重取配色
         （get_colors 内部现读系统 scheme），theme_changed 广播具体主题
-        名给球 / 卡片 / 便签 / 快捕条 / 截图钉屏。
+        名给球 / 卡片 / 便签 / 截图钉屏。
         """
         host = self._host
         self._config.set("theme", "follow")
@@ -1443,7 +1426,7 @@ class SettingsPanel(QWidget):
         与「跟随系统」同一条刷新链：apply_app_font 重设 QApplication
         字号（未显式指定 font-size 的控件自动重排），再走主窗口
         _apply_theme + theme_changed 广播让 QSS 全量重载、球 / 卡片 /
-        便签 / 快捕条 / 截图钉屏同步。ui_scale 只缩放字号不缩放 px 布局，
+        便签 / 截图钉屏同步。ui_scale 只缩放字号不缩放 px 布局，
         刻意的低风险取舍（见 theme.BASE_FONT_PT）。
         """
         scale = self._set_ui_scale.itemData(index)
@@ -1598,36 +1581,6 @@ class SettingsPanel(QWidget):
             self._config.set("task_reminder_enabled", enabled)
             self._config.save()
 
-    def _on_quick_capture_changed(self, checked: bool):
-        """快速捕捉开关：即时持久化并广播（主流程重注册/注销热键）"""
-        enabled = bool(checked)
-        if enabled != self._config.get("quick_capture_enabled", True):
-            self._config.set("quick_capture_enabled", enabled)
-            self._config.save()
-            self._host.quick_capture_changed.emit()
-
-    def _on_capture_hotkey_changed(self):
-        """快速捕捉热键编辑：校验格式与冲突后持久化并广播重注册"""
-        text = self._set_capture_hotkey.text().strip()
-        old = self._config.get("quick_capture_hotkey", "Ctrl+Alt+K")
-        if text == old:
-            return
-        from src.global_hotkey import parse_hotkey
-        if parse_hotkey(text) is None:
-            QMessageBox.warning(self, "热键无效",
-                                f"「{text}」不是有效的热键组合。\n"
-                                "格式如 Ctrl+Alt+K，需含 Ctrl/Alt/Shift/Win 修饰键。")
-            self._set_capture_hotkey.setText(old)
-            return
-        if text == self._config.get("screenshot_hotkey", "Ctrl+Alt+S"):
-            QMessageBox.warning(self, "热键冲突",
-                                f"「{text}」已被截图钉屏占用，请换一个组合。")
-            self._set_capture_hotkey.setText(old)
-            return
-        self._config.set("quick_capture_hotkey", text)
-        self._config.save()
-        self._host.quick_capture_changed.emit()
-
     def _on_screenshot_changed(self, checked: bool):
         """截图钉屏开关：即时持久化并广播（主流程重注册/注销热键）"""
         enabled = bool(checked)
@@ -1655,11 +1608,6 @@ class SettingsPanel(QWidget):
             QMessageBox.warning(self, "热键无效",
                                 f"「{text}」不是有效的热键组合。\n"
                                 "格式如 Ctrl+Alt+S，需含 Ctrl/Alt/Shift/Win 修饰键。")
-            self._set_screenshot_hotkey.setText(old)
-            return
-        if text == self._config.get("quick_capture_hotkey", "Ctrl+Alt+K"):
-            QMessageBox.warning(self, "热键冲突",
-                                f"「{text}」已被快速捕捉占用，请换一个组合。")
             self._set_screenshot_hotkey.setText(old)
             return
         self._config.set("screenshot_hotkey", text)
@@ -2042,8 +1990,7 @@ class SettingsPanel(QWidget):
         apply_op = getattr(self._host, "_apply_window_opacity", None)
         if callable(apply_op):
             apply_op()                            # 窗口透明度回 100% 不透明
-        self._host.quick_capture_changed.emit()  # 热键/开关可能被重置，重注册
-        self._host.screenshot_changed.emit()     # 截图热键/开关同理
+        self._host.screenshot_changed.emit()     # 截图热键/开关可能被重置，重注册
         self._host.plugins_changed.emit(
             self._config.get("plugins_enabled", True))  # 插件总闸同理
         self._host.pomodoro_changed.emit()       # 番茄钟开关/时长同理

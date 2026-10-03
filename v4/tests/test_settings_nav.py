@@ -134,8 +134,7 @@ class TestRowsSurviveSplit:
         "_set_temp_asset_max_count", "_set_temp_asset_max_file",
         "_set_temp_asset_max_days", "_set_asset_thumb",
         # 全局工具
-        "_set_quick_capture", "_set_capture_hotkey", "_set_screenshot",
-        "_set_screenshot_hotkey",
+        "_set_screenshot", "_set_screenshot_hotkey",
         # 番茄钟（2026-10-02 独立分类）
         "_set_pomodoro", "_set_pomodoro_focus",
         "_set_pomodoro_break", "_set_pomodoro_auto",

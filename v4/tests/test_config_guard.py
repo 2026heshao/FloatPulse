@@ -51,8 +51,8 @@ class TestConfigCorruptGuard(unittest.TestCase):
                         "损坏的 config.json 应先备份为 .corrupt.bak")
         self.assertEqual(cm.load_reset_reason, "corrupt")
         # 默认配置可用：热键 / AI key / 主题均回到默认值，不崩溃
-        self.assertEqual(cm.get("quick_capture_hotkey"),
-                         DEFAULT_CONFIG["quick_capture_hotkey"])
+        self.assertEqual(cm.get("screenshot_hotkey"),
+                         DEFAULT_CONFIG["screenshot_hotkey"])
         self.assertEqual(cm.get("ai_cloud_api_key"),
                          DEFAULT_CONFIG["ai_cloud_api_key"])
         self.assertEqual(cm.get("theme"), DEFAULT_CONFIG["theme"])
@@ -75,12 +75,12 @@ class TestConfigCorruptGuard(unittest.TestCase):
         """正常加载：值原样保留、无备份文件、无损坏标记"""
         cfg = dict(DEFAULT_CONFIG)
         cfg["theme"] = "light"
-        cfg["quick_capture_hotkey"] = "Ctrl+Alt+X"
+        cfg["screenshot_hotkey"] = "Ctrl+Alt+X"
         self._write_text(json.dumps(cfg, ensure_ascii=False))
         cm = ConfigManager(self.path)
         self.assertIsNone(cm.load_reset_reason)
         self.assertEqual(cm.get("theme"), "light")
-        self.assertEqual(cm.get("quick_capture_hotkey"), "Ctrl+Alt+X")
+        self.assertEqual(cm.get("screenshot_hotkey"), "Ctrl+Alt+X")
         self.assertFalse(os.path.exists(self.path + ".corrupt.bak"))
 
     def test_per_key_type_error_is_not_corrupt(self):

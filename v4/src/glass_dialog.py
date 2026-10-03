@@ -99,7 +99,7 @@ class GlassDialog(QDialog):
             # 却看到弹窗一直在最上）；② QMessageBox（ApplicationModal）被
             # 置顶弹窗完全盖住——用户看不到「确定」按钮 → 全应用看似锁死。
             # 模态 Dialog 本身足以挡住宿主主窗口，无需置顶。
-            # 悬浮球/卡片/快捕条/钉屏/便签等桌面常驻小部件的置顶是各自
+            # 悬浮球/卡片/钉屏/便签等桌面常驻小部件的置顶是各自
             # 独立声明的，不受此改动影响。
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)

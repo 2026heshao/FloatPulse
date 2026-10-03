@@ -330,7 +330,10 @@ def test_sync_theme_extras_reads_config():
 # 旧薄荷字面量收口护栏（2026-10-03 P2）：除 theme.py 的常量定义行与
 # 仍为活 token 的 primary_lite / primary_deep 行外，源码任何位置不得
 # 再出现旧薄荷三色字面量（大小写不敏感；注释也算——措辞引用常量名）。
-# 反向验证：临时在 quick_capture.py 塞一行 x = "#5BC0BE" 必须变红。
+# 反向验证：临时在 splash.py 塞一行 x = "#5BC0BE" 必须变红。
+# （原说明指向的那个模块已于 2026-10-03 卡 1 整体删除；改指稳定的
+#   splash.py —— 选它是因为 splash 启动即构建、不会像实验性模块那样
+#   被移走。）
 # ====================================================================
 OLD_MINT_HEXES = ("#5bc0be", "#3d9e9c", "#6fffe9")
 SRC_DIR = os.path.join(

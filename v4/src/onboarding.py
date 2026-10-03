@@ -15,8 +15,8 @@
   3. 关闭即落盘：完成 / Esc / 跳过 / 标题栏 × 任何路径关闭后
      first_run_done 置 True，之后不再骚扰（接线见 knowledge_ball.main）
   4. 文案口径对齐 README 与 F1 使用说明：全局热键只写已注册的
-     Ctrl+Alt+K（快捕条）/ Ctrl+Alt+S（截图钉屏）/ Ctrl+K（站内搜索，
-     需装 kb-search 插件）/ Esc（关闭当前表面）
+     Ctrl+Alt+S（截图钉屏）/ Ctrl+K（站内搜索，需装 kb-search 插件）/
+     Esc（关闭当前表面）
 ====================================================================
 """
 
@@ -66,7 +66,6 @@ def mark_show_again(config_manager) -> None:
 # 全局热键速查（① 欢迎页）：只列已注册/README 口径内的热键，
 # Ctrl+K 标注「需安装 kb-search 插件」，不编造未实现的快捷键。
 _HOTKEY_ROWS = (
-    ("Ctrl+Alt+K", "快速捕捉条：任何界面下随手记一条碎片"),
     ("Ctrl+Alt+S", "截图钉屏：框选一块屏幕置顶参考（可批注）"),
     ("Ctrl+K",     "站内搜索：全局搜碎片 / 笔记 / 任务（需安装 kb-search 插件）"),
     ("Esc",        "关闭卡片 / 取消截图（不退出程序）"),

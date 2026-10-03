@@ -29,9 +29,6 @@
   - close_to_tray:        关闭主窗口时最小化到托盘（不退出程序）
   - task_reminder_enabled: 任务提醒开关（启动时 + 每日 9:00 托盘气泡，
     汇总逾期 / 今日到期 / 未安排日期的未完成任务）
-  - quick_capture_enabled: 全局快速捕捉条开关
-  - quick_capture_hotkey:  快速捕捉全局热键（如 "Ctrl+Alt+K"）
-  - quick_capture_pos:     快速捕捉输入条最后拖动位置 [x, y]（None=屏幕居中）
   - screenshot_enabled:   截图钉屏开关（Ctrl+Alt+S 框选 → 置顶参考浮窗）
   - screenshot_hotkey:     截图钉屏全局热键（如 "Ctrl+Alt+S"）
   - pomodoro_enabled:      番茄钟总开关（球体进度环 + 右键菜单控制）
@@ -155,9 +152,6 @@ DEFAULT_CONFIG = {
     "last_update_check":    "",           # 最近一次检查日期 "YYYY-MM-DD"（空=从未检查）
     "latest_known_version": "",           # 最近发现的新版本 tag（如 "v4.8.0"；空=未发现）
     "task_reminder_enabled": True,        # 任务提醒（托盘气泡，三桶汇总）
-    "quick_capture_enabled": True,        # 全局快速捕捉条
-    "quick_capture_hotkey": "Ctrl+Alt+K", # 快速捕捉全局热键
-    "quick_capture_pos":    None,         # 快速捕捉输入条拖动后位置 [x, y]
     "screenshot_enabled":   True,         # 截图钉屏开关（Ctrl+Alt+S）
     "screenshot_hotkey":    "Ctrl+Alt+S", # 截图钉屏全局热键
     "pomodoro_enabled":     True,         # 番茄钟总开关（球体进度环 + 右键菜单）
@@ -248,9 +242,6 @@ _CONFIG_TYPES = {
     "last_update_check":    str,
     "latest_known_version": str,
     "task_reminder_enabled": bool,
-    "quick_capture_enabled": bool,
-    "quick_capture_hotkey": str,
-    "quick_capture_pos":    list,
     "screenshot_enabled":   bool,
     "screenshot_hotkey":    str,
     "pomodoro_enabled":     bool,

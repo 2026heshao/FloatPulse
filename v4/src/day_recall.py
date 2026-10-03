@@ -58,7 +58,7 @@ from datetime import date, datetime
 # ====================================================================
 # 来源常量（DayEvent.source）
 # ====================================================================
-SOURCE_FRAGMENT = "fragment"       # 碎片（收集 / 快速捕捉）
+SOURCE_FRAGMENT = "fragment"       # 碎片（剪贴板 / 拖入）
 SOURCE_TASK = "task"               # 任务创建
 SOURCE_TASK_DONE = "task_done"     # 任务完成
 SOURCE_ASSET = "asset"             # 素材（拖入 / 截屏 / 剪贴板图片）

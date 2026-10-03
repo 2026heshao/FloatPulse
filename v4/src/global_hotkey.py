@@ -9,7 +9,7 @@
 设计要点：
   1. RegisterHotKey(hwnd=None) → WM_HOTKEY 投递到当前线程消息队列，
      由 Qt 主事件循环泵出，QAbstractNativeEventFilter 拦截分发
-  2. 热键字符串格式："Ctrl+Alt+K"、"Alt+Q"、"Ctrl+Shift+F5"，
+  2. 热键字符串格式："Alt+Q"、"Ctrl+Shift+F5"，
      支持 Ctrl/Alt/Shift/Win 修饰键 + 字母/数字/F1~F12
   3. MOD_NOREPEAT：按住不重复触发
   4. 同一热键组合被其他程序占用时注册失败（返回 False，不崩溃）
@@ -55,7 +55,7 @@ def parse_hotkey(text: str):
     """
     解析热键字符串为 (modifiers, virtual_key)。
 
-    - 格式："Ctrl+Alt+K"（不区分大小写，顺序任意，最后一个为按键）
+    - 格式："Alt+Q"（不区分大小写，顺序任意，最后一个为按键）
     - 支持：Ctrl/Control/Alt/Shift/Win/Meta + 字母/数字/F1~F12
     - 解析失败返回 None
     """
@@ -111,7 +111,7 @@ class GlobalHotkeyManager(QAbstractNativeEventFilter):
     用法：
         mgr = GlobalHotkeyManager()
         app.eventDispatcher().installNativeEventFilter(mgr)
-        mgr.register("Ctrl+Alt+K", callback)
+        mgr.register("Alt+Q", callback)
         ... 退出前：
         mgr.unregister_all()
     """

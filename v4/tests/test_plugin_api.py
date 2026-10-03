@@ -8,7 +8,7 @@
   D requires 不在白名单（requests / ssl）→ 拒绝加载 + 日志写明原因
   E 插件 run() 抛异常 → 注册表兜住，返回 False，其他插件不受影响
   F 两个插件声明同一 hotkey → 后者让位 + 日志有记录
-  G 插件抢核心热键（Ctrl+Alt+K / Ctrl+Alt+S）→ 跳过 + 日志有记录
+  G 插件抢核心热键（Ctrl+Alt+S）→ 跳过 + 日志有记录
   H 插件商店：load_all() **不再**自动解压；scan_store() 只读 manifest；
     install_from_store() 显式安装；卸载后商店源包仍在、可再装
   I deactivate/activate → 摘掉/恢复动作，且**不重新导入模块**
@@ -62,7 +62,7 @@ def env(tmp_path):
     logger.addHandler(_Capture(records))
 
     registry = ActionRegistry(
-        logger=logger, reserved_hotkeys=("Ctrl+Alt+K", "Ctrl+Alt+S"))
+        logger=logger, reserved_hotkeys=("Ctrl+Alt+S",))
     ctx = PluginContext(
         logger=logger,
         config={"theme": "dark", "clipboard_max_items": 200},
@@ -416,7 +416,7 @@ def test_action_id_duplicate_rejected(env):
 # ====================================================================
 # G. 核心热键让位
 # ====================================================================
-@pytest.mark.parametrize("core", ["Ctrl+Alt+K", "ctrl + alt + k", "Ctrl+Alt+S"])
+@pytest.mark.parametrize("core", ["Ctrl+Alt+S", "ctrl + alt + s"])
 def test_core_hotkey_yields(env, core):
     write_plugin(env.plugins_dir, "thief",
                  manifest_of("thief", [action_spec("thief.act", hotkey=core)]),
@@ -428,9 +428,9 @@ def test_core_hotkey_yields(env, core):
 
 
 def test_registry_reserved_hotkeys_normalized():
-    reg = ActionRegistry(logger=None, reserved_hotkeys=(" Ctrl+Alt+K ",))
-    assert reg.reserved_hotkeys() == frozenset({"ctrl+alt+k"})
-    assert reg.hotkey_blocked_by_reserved("CTRL+ALT+K") is True
+    reg = ActionRegistry(logger=None, reserved_hotkeys=(" Ctrl+Alt+S ",))
+    assert reg.reserved_hotkeys() == frozenset({"ctrl+alt+s"})
+    assert reg.hotkey_blocked_by_reserved("CTRL+ALT+S") is True
     assert reg.hotkey_blocked_by_reserved("Ctrl+Alt+Z") is False
     assert normalize_hotkey(None) == ""
 
@@ -937,7 +937,7 @@ def test_is_valid_hotkey_accepts(text):
 
 @pytest.mark.parametrize("text", [
     None, 1, "", "K", "Ctrl", "Ctrl+Alt", "Ctrl+K+Alt", "Ctrl+Alt+",
-    "Ctrl+F99", "Ctrl+F0", "Ctrl+Alt+KK",
+    "Ctrl+F99", "Ctrl+F0", "Ctrl+Alt+SS",
 ])
 def test_is_valid_hotkey_rejects(text):
     assert is_valid_hotkey(text) is False, text

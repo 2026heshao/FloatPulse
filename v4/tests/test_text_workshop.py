@@ -85,8 +85,8 @@ def test_manifest_action_declared_with_hotkey():
     ids = {a.get("id") for a in actions}
     assert f"{plugin_mod.PLUGIN_ID}.open" in ids
     hotkeys = {a.get("hotkey") for a in actions}
-    # 不与核心保留热键冲突（快速捕捉 / 截图钉屏）
-    assert "Ctrl+Alt+K" not in hotkeys and "Ctrl+Alt+S" not in hotkeys
+    # 不与核心保留热键冲突（截图钉屏）
+    assert "Ctrl+Alt+S" not in hotkeys
 
 
 def test_work_actions_keys_unique_and_extract_instruction():

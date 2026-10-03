@@ -174,8 +174,7 @@ def _update_task(task_id, title, note, deadline):
 
 registry = ActionRegistry(
     logger=logger,
-    reserved_hotkeys=(cm.get("quick_capture_hotkey", "Ctrl+Alt+K"),
-                      cm.get("screenshot_hotkey", "Ctrl+Alt+S")))
+    reserved_hotkeys=(cm.get("screenshot_hotkey", "Ctrl+Alt+S"),))
 plugin_data = PluginData(providers={
     "tasks": lambda: [t.to_dict() for t in tasks.get_all_tasks()],
     "fragments": lambda: [f.to_dict() for f in frags.get_all_fragments()],

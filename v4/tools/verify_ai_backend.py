@@ -122,7 +122,7 @@ pump(250)
 plugins_dir = os.path.join(ROOT, "plugins")
 registry = ActionRegistry(
     logger=_logger,
-    reserved_hotkeys=("Ctrl+Alt+K", "Ctrl+Alt+S"))
+    reserved_hotkeys=("Ctrl+Alt+S",))
 
 
 def fake_bridge(url, headers, body, timeout, on_done):

@@ -4,7 +4,7 @@
 钉死的行为：
   A 幂等：连调多次只有第一次实际执行（_safe_quit 与 aboutToQuit 都会
     触发收尾，不能重复注销/重复 stop）
-  B 按真实接线跑一遍：三个热键管理器 unregister_all + AI_SERVER.stop +
+  B 按真实接线跑一遍：两个热键管理器 unregister_all + AI_SERVER.stop +
     剪贴板监听 stop，各组件只被调一次
   C 单步失败（抛异常）只跳过该步，后续步骤照常执行
   D 晚绑定安全：组件尚未创建（NameError，启动早期退出）不算致命
@@ -48,8 +48,10 @@ class _FakeClipboardMonitor:
 
 
 def _build_wiring(calls, state):
-    """复刻 main() 里 _shutdown_resources 的真实接线（步骤与顺序一致）"""
-    hotkey_mgr = _FakeHotkeyMgr(calls, "hotkey")
+    """复刻 main() 里 _shutdown_resources 的真实接线（步骤与顺序一致）。
+
+    2026-10-03 卡 1 删除快捕条后，生产收尾只剩截图 + 插件两个热键管理器。
+    """
     shot_hotkey_mgr = _FakeHotkeyMgr(calls, "shot")
     plugin_hotkey_mgr = _FakeHotkeyMgr(calls, "plugin")
     ai_server = _FakeAiServer(calls)
@@ -57,7 +59,6 @@ def _build_wiring(calls, state):
 
     def _shutdown_resources():
         knowledge_ball._shutdown_once(state, [
-            ("快捕条热键注销", lambda: hotkey_mgr.unregister_all()),
             ("截图热键注销", lambda: shot_hotkey_mgr.unregister_all()),
             ("插件热键注销", lambda: plugin_hotkey_mgr.unregister_all()),
             ("AI 本地服务停止", lambda: ai_server.stop()),
@@ -74,7 +75,7 @@ def test_shutdown_once_idempotent():
     quit_resources = _build_wiring(calls, state)
     assert quit_resources() is None          # 收尾函数无返回值（副作用式）
     assert knowledge_ball._shutdown_once(state, []) is False  # 第二次幂等跳过
-    assert calls == {"hotkey": 1, "shot": 1, "plugin": 1,
+    assert calls == {"shot": 1, "plugin": 1,
                      "ai_stop": 1, "clip_stop": 1}
 
 
@@ -86,7 +87,7 @@ def test_shutdown_once_real_wiring_twice():
     quit_resources()      # 模拟托盘「退出程序」→ _safe_quit 内的收尾
     quit_resources()      # 模拟 aboutToQuit 内的重复收尾
     quit_resources()      # 再来一次也不该有任何副作用
-    assert calls == {"hotkey": 1, "shot": 1, "plugin": 1,
+    assert calls == {"shot": 1, "plugin": 1,
                      "ai_stop": 1, "clip_stop": 1}
 
 

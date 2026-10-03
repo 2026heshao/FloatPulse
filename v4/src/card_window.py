@@ -1714,7 +1714,7 @@ class CardWindow(QWidget):
         if theme_name not in ("light", "dark"):
             return
         # 不做「主题未变提前返回」：强调色变化时主窗 refresh_appearance
-        # 以**原主题名**重广播 theme_changed，主窗/悬浮球/便签/快捕条
+        # 以**原主题名**重广播 theme_changed，主窗/悬浮球/便签
         # 都是收到就无条件重设，卡片若在这里短路就整批停在旧强调色上
         # （卡片 QSS 由 get_card_window_qss 现读 accent 生成，重设即
         # 同步；重复调用只是低频多一次 repolish，无正确性影响）。

@@ -776,7 +776,7 @@ class FragmentsPanel(QWidget):
 
         self._empty_state = EmptyState(
             "fragments", "还没有收集到碎片",
-            "复制任意文本、拖入文件，或按 Ctrl+Alt+K 快速捕捉，\n"
+            "复制任意文本、拖入文件，\n"
             "都会自动收集到这里",
             action_text="清空筛选条件", on_action=self._clear_filters)
         self._empty_state.setVisible(False)
@@ -935,7 +935,7 @@ class FragmentsPanel(QWidget):
         else:
             self._empty_state.set_state(
                 "fragments", "还没有收集到碎片",
-                "复制任意文本、拖入文件，或按 Ctrl+Alt+K 快速捕捉，\n"
+                "复制任意文本、拖入文件，\n"
                 "都会自动收集到这里", show_action=False)
         # 与列表严格同尺寸（隐藏期间布局不会调整它的几何）
         self._empty_state.setGeometry(self._frag_list.geometry())

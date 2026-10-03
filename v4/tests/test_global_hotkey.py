@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(not _IS_WINDOWS, reason="仅 Windows")
 
 def test_parse_hotkey_basic():
     assert parse_hotkey("Ctrl+Alt+S") == (0x2 | 0x1, ord("S"))
-    assert parse_hotkey("Ctrl+Alt+K") == (0x2 | 0x1, ord("K"))
+    assert parse_hotkey("Alt+Q") == (0x1, ord("Q"))
     assert parse_hotkey("") is None
     assert parse_hotkey("Ctrl") is None          # 无最终按键
     assert parse_hotkey("Ctrl+Alt+Shift+F12")[0] & 0x4
