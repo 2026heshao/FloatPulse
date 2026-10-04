@@ -13,7 +13,9 @@
 这类静默缺陷钉死在提交前。
 
 ★ 本模块不落库：聚类只是**渲染时算出来的**，``temp_assets.json`` 一个字
-都不许改（分组纯派生，关掉开关即回退平铺）。
+都不许改。用户的堆命名 / 移出标注走旁路文件（``asset_groups_store.py``
+管理的 ``asset_groups.json``），经 :func:`apply_group_overrides` 在渲染
+前套到聚类结果上。
 """
 
 from datetime import datetime
@@ -113,18 +115,59 @@ def _within_gap(prev_dt, cur_dt, gap: float) -> bool:
     return (cur_dt - prev_dt).total_seconds() < gap
 
 
-def group_label(group, index: int) -> str:
-    """一堆素材的默认名： ``"3 张 · 09:12"``（张数 · 首张 HH:MM）。
+def group_label(group, index: int, custom_name: str = "") -> str:
+    """一堆素材的显示名：有自定义名用自定义名，否则默认 ``"3 张 · 09:12"``。
 
     首张时间缺失时退化为 ``"3 张"``。``index`` 保留在签名里以便调用方
     需要序号时复用（当前默认名不含序号，避免与时间信息重复啰嗦）。
+    ``custom_name`` 是用户在旁路文件（asset_groups.json）里起的堆名，
+    空串/纯空白视为「未命名」走默认名。
     """
+    if custom_name and custom_name.strip():
+        return custom_name.strip()
     n = len(group)
     head = group[0] if group else None
     dt = parse_added_time(getattr(head, "added_time", "")) if head else None
     if dt is None:
         return "%d 张" % n
     return "%d 张 · %02d:%02d" % (n, dt.hour, dt.minute)
+
+
+def apply_group_overrides(groups, detached=()):
+    """把「移出堆」标注套到时间聚类结果上（纯函数，无副作用）。
+
+    ``groups`` 是 :func:`cluster_assets` 的输出（堆内升序、堆间升序）；
+    ``detached`` 是被用户移出的 asset_id 集合——这些素材**脱离任何堆**，
+    作为独立单元按自己的时间插回渲染序列（单元成员数 <2 不画标题，
+    与「单张堆不画标题」的既有规则自然汇合）。
+
+    返回新的堆列表：堆内成员仍按时间升序；单元（堆 / 独立素材）按
+    锚点时间（堆首 / 自身）升序。detached 里不属于任何输入素材的 id
+    静默忽略（素材可能已删，标注由 asset_groups_store.prune 惰性清理）。
+    """
+    detached_ids = set()
+    for v in (detached or ()):
+        try:
+            detached_ids.add(int(v))
+        except (TypeError, ValueError):
+            continue
+
+    def _aid(a):
+        try:
+            return int(getattr(a, "asset_id", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    units = []
+    for group in groups or []:
+        remain = [a for a in group if _aid(a) not in detached_ids]
+        if remain:
+            units.append(sorted(remain, key=sort_key))
+        for a in group:                     # 被移出的按原位拆成独立单元
+            if _aid(a) in detached_ids:
+                units.append([a])
+    units.sort(key=lambda u: sort_key(u[0]))
+    return units
 
 
 def group_signature(groups):
