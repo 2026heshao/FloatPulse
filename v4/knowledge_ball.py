@@ -76,7 +76,7 @@ from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
 from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
-    apply_app_font
+    apply_app_font, current_ui_scale
 from src.controls import ScreenToast
 from src import icon_render
 from src import motion
@@ -139,6 +139,21 @@ def _check_data_integrity(data_dir: str, logger):
 # 全局异常钩子的唯一实现是 src/logger.py 的 install_excepthook()（在 main() 中安装）。
 # 此处曾有一份重复实现，会被日志系统初始化时的 install_excepthook() 覆盖 ——
 # 已删除，避免后续排查「弹窗行为」时改错文件。
+
+
+def badge_font_px(ui_scale=None) -> int:
+    """悬浮球徽标数字的等宽字号（纯函数，可独立单测）。
+
+    基准 11px（UI 重构 03），按「界面缩放」档位换算、下限 9px——
+    球体是手绘控件，QSS 够不着，P1-3 之前这一处字号独立于缩放档位。
+    """
+    if ui_scale is None:
+        ui_scale = current_ui_scale()
+    try:
+        scale = int(ui_scale)
+    except (TypeError, ValueError):
+        scale = 100
+    return max(9, round(11 * scale / 100))
 
 
 # ====================================================================
@@ -437,9 +452,11 @@ class _BallSurface(QWidget):
         if not text:
             return
         d = max(17.0, vis_r * 0.60)            # 徽标高度
-        # UI 重构 03：徽标数字改等宽 11px（数字位对齐，计数变化时不跳动）
+        # UI 重构 03：徽标数字改等宽 11px（数字位对齐，计数变化时不跳动）。
+        # P1-3（2026-10-04）：11px 是独立硬编码，此前不随「界面缩放」档位
+        # 走——统一按 theme.current_ui_scale() 换算，与全应用字号同一档。
         font = QFont("Consolas")
-        font.setPixelSize(11)
+        font.setPixelSize(badge_font_px())
         font.setWeight(QFont.Weight.Bold)
         text_w = QFontMetrics(font).horizontalAdvance(text)
         w = max(d, text_w + 10.0)              # 数字长时自动变胶囊形

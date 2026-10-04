@@ -24,6 +24,7 @@ v3 视觉规范（UI 重构 00/01，对照 `设计稿/ui-redesign-preview.html`�
 ====================================================================
 """
 
+import re
 from string import Template
 
 from src import accent
@@ -992,6 +993,73 @@ QLabel#pluginDirLabel {
     font-size: $fs_xs;
 }
 
+/* ---- 插件中心：卡片 ⋯ 渐进披露菜单入口（2026-10-04 三件套）----
+   ID / 依赖 / 注册页面这些「需要时一眼能找到，不需要时不出现」的元信息
+   收进菜单（设计稿 plugins-center-redesign）；卡面只留一枚 20px 圆角
+   透明图标钮，hover 才浮出底色。 */
+QPushButton#pluginMoreBtn {
+    background-color: transparent;
+    border: none;
+    border-radius: $r_chip;
+    padding: 0;
+}
+QPushButton#pluginMoreBtn:hover {
+    background-color: $surface_3;
+}
+/* ---- 插件中心：加载失败折叠条（2026-10-04 三件套）----
+   失败是低频状态，不该向每个健康会话征收竖向空间：默认收起成一条
+   提示钮，点击展开失败卡。checked 态用 danger 色系点明「有问题在这」。 */
+QPushButton#pluginErrorToggle {
+    text-align: left;
+    color: $text_secondary;
+    background-color: $surface_2;
+    border: 1px solid $line;
+    border-radius: $r_ctl;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#pluginErrorToggle:hover {
+    color: $danger;
+    border-color: $danger_border;
+}
+QPushButton#pluginErrorToggle:checked {
+    color: $danger;
+    background-color: $danger_alpha;
+    border-color: $danger_border;
+}
+/* ---- 插件中心：搜索 + 状态分段筛选（2026-10-04 三件套）----
+   输入框走通用 QLineEdit 底座；分段钮用 :checked 表达当前段
+   （全部 / 已启用 / 已停用，autoExclusive 互斥）。 */
+QPushButton#pluginSegBtn {
+    background-color: transparent;
+    color: $text_secondary;
+    border: 1px solid transparent;
+    border-radius: $r_chip;
+    padding: 3px 11px;
+    font-size: $fs_xs;
+}
+QPushButton#pluginSegBtn:hover {
+    color: $text;
+    background-color: $surface_2;
+}
+QPushButton#pluginSegBtn:checked {
+    color: $text;
+    background-color: $surface_3;
+    border-color: $line;
+    font-weight: 600;
+}
+/* ---- 插件中心：卡片 ⋯ 菜单的信息行（QWidgetAction 容器内）---- */
+QLabel#pluginMenuInfoTitle {
+    color: $text_placeholder;
+    font-size: 11px;
+}
+QLabel#pluginMenuInfoValue {
+    color: $text;
+    font-size: 12px;
+    font-family: 'Consolas', 'Cascadia Mono', monospace;
+}
+
 /* ---- 插件中心：插件商店（可安装包）---- */
 QFrame#pluginStoreBox {
     background-color: transparent;
@@ -1921,15 +1989,61 @@ QMenu::separator {
 # 界面缩放 / 全局字号（成熟化 3.5：活字缩放）
 # ====================================================================
 # 全局字体的基准 pointSize：实际字号 = round(BASE_FONT_PT * ui_scale / 100)。
-# 刻意的低风险取舍：ui_scale 只缩放全局**字号**，不缩放 QSS 里写死的
-# px 布局（间距/圆角/控件尺寸）——全量 px token 化改动面太大，且字号
-# 缩放已覆盖「字太小看不清」的主要诉求；代价是部分固定像素间距不随
-# 缩放，85–130% 观感最佳（设置页文案同口径）。
+# 刻意的低风险取舍：ui_scale 只缩放**字号**（QApplication 全局字号 + QSS
+# 里全部 font-size，含写死的 px 与 $fs_* 令牌——2026-10-04 P1-3 补齐），
+# 不缩放 QSS 里写死的 px **布局**（间距/圆角/控件尺寸）——全量 px token
+# 化改动面太大；85–150% 全档观感稳定（设置页文案同口径）。
 BASE_FONT_PT = 10
 
 # 界面缩放合法档位（百分比）：config._CONFIG_RANGES 的范围校验之外，
 # 设置页下拉框与 apply_app_font 的调用方都以此为准（收敛取值来源）。
 UI_SCALE_VALUES = (85, 100, 115, 130, 150)
+
+# 当前生效的缩放档位（模块级单点）：apply_app_font 是唯一写入方，QSS
+# 生成端（get_main_window_qss / get_card_window_qss / get_menu_qss）与
+# 自绘字号（knowledge_ball 徽标）读它。缺省 100 = 与未缩放逐字节等价。
+_ACTIVE_UI_SCALE = 100
+
+
+def set_ui_scale(ui_scale: int) -> None:
+    """登记当前缩放档位（apply_app_font 专属写入方；脏值忽略保持原档）。"""
+    global _ACTIVE_UI_SCALE
+    try:
+        _ACTIVE_UI_SCALE = int(ui_scale)
+    except (TypeError, ValueError):
+        pass
+
+
+def current_ui_scale() -> int:
+    """当前生效的缩放档位（QSS 生成端 / 自绘字号统一读这里）。"""
+    return _ACTIVE_UI_SCALE
+
+
+# font-size: Npx 的缩放只认这一种写法；`font:` 简写与 pt 单位全仓未用
+_FONT_SIZE_PX_RE = re.compile(r"(font-size\s*:\s*)(\d+)px")
+
+
+def scale_px_fonts(qss: str, ui_scale: int = None) -> str:
+    """把成品 QSS / 内联样式里**所有** ``font-size: Npx`` 按档位缩放（纯函数）。
+
+    - 100%（含缺省）→ 逐字节原样返回——这是「默认行为零变化」的硬护栏；
+    - 只动 font-size，``padding: 0 13px`` / ``border-radius: 3px`` 等
+      布局 px 一律不碰（活字方案的边界：缩字号不缩布局）；
+    - 写死 px 与 $fs_* 令牌在替换后同形，一次正则全覆盖；
+    - ui_scale 非法（非数值）原样返回，绝不抛异常（QSS 生成是渲染热路径）。
+    """
+    if ui_scale is None:
+        ui_scale = _ACTIVE_UI_SCALE
+    try:
+        scale = int(ui_scale)
+    except (TypeError, ValueError):
+        return qss
+    if scale == 100 or not qss:
+        return qss
+    return _FONT_SIZE_PX_RE.sub(
+        lambda m: "%s%dpx" % (m.group(1),
+                              max(1, round(int(m.group(2)) * scale / 100))),
+        qss)
 
 
 def scaled_font_pt(ui_scale: int) -> int:
@@ -1950,10 +2064,15 @@ def apply_app_font(ui_scale: int) -> int:
     - pointSize 由 scaled_font_pt 计算；Qt 的字体变更会自动重 polish
       所有未显式指定 font-size 的控件，调用方通常还需走一遍主题刷新
       链（main_window._apply_theme / theme_changed 广播）让 QSS 全量重载
+    - **同时登记缩放档位**（set_ui_scale）：之后 get_*_qss 生成 QSS 时
+      把全部 font-size 缩放到同一档——QSS 写死 px 的字号也跟随缩放
+      （P1-3 补齐；登记必须在生成之前，调用方先生成 QSS 再调本函数的
+      旧顺序不会出现，主窗刷新链是 apply_app_font → _apply_theme）
     - 无 QApplication 实例（纯逻辑测试 / 工具脚本）时跳过设置，仅返回
       计算结果——本函数保持「模块级可导入、无 GUI 可调用」
     - 返回实际应用的 pointSize（测试断言用）
     """
+    set_ui_scale(ui_scale)
     pt = scaled_font_pt(ui_scale)
     try:
         from PyQt6.QtGui import QFont
@@ -2027,6 +2146,28 @@ def resolve_theme_name(config_value, style_hints=None) -> str:
     return DEFAULT_THEME
 
 
+def next_theme_on_toggle(config_value, current_theme=None,
+                         style_hints=None) -> tuple:
+    """「切换主题」动作（Ctrl+T / 标题栏主题钮）的下一站。
+
+    返回 ``(是否落盘, 应用主题名)``：
+
+    - config 是显式 ``light`` / ``dark``：翻到相反主题并落盘（既有行为）；
+    - config 是 ``"follow"``：只把**本会话**翻到相反主题、**不落盘** ——
+      「跟随系统」的语义是系统变我变，一次快捷键就把偏好固化成显式主题
+      等于静默取消跟随（成熟化路线图遗留备忘的 bug）。重启后回到跟随。
+
+    翻转基准永远是「现在显示的主题」：``current_theme`` 是显示中的主题
+    （可为 "follow" 原始值，非法 / 缺省时退回从 ``config_value`` 解析）。
+    ★ 判定必须读 config 而不是显示值——follow 会话内翻转后显示值已是
+    显式名，若按它落盘，第二按就会把跟随偏好固化掉。
+    """
+    base = current_theme if current_theme in ("light", "dark") else config_value
+    resolved = resolve_theme_name(base, style_hints)
+    applied = "dark" if resolved == "light" else "light"
+    return config_value != "follow", applied
+
+
 # ====================================================================
 # 公开接口
 # ====================================================================
@@ -2075,15 +2216,15 @@ def get_colors(theme_name: str = DEFAULT_THEME) -> dict:
 
 
 def get_main_window_qss(theme_name: str = DEFAULT_THEME) -> str:
-    """获取大窗口主UI的QSS"""
-    return _QSS_MAIN_WINDOW.substitute(get_colors(theme_name))
+    """获取大窗口主UI的QSS（font-size 已按当前 ui_scale 档位缩放）"""
+    return scale_px_fonts(_QSS_MAIN_WINDOW.substitute(get_colors(theme_name)))
 
 
 def get_card_window_qss(theme_name: str = DEFAULT_THEME) -> str:
-    """获取小卡片弹窗的QSS"""
-    return _QSS_CARD_WINDOW.substitute(get_colors(theme_name))
+    """获取小卡片弹窗的QSS（font-size 已按当前 ui_scale 档位缩放）"""
+    return scale_px_fonts(_QSS_CARD_WINDOW.substitute(get_colors(theme_name)))
 
 
 def get_menu_qss(theme_name: str = DEFAULT_THEME) -> str:
-    """获取右键菜单的QSS"""
-    return _QSS_MENU.substitute(get_colors(theme_name))
+    """获取右键菜单的QSS（font-size 已按当前 ui_scale 档位缩放）"""
+    return scale_px_fonts(_QSS_MENU.substitute(get_colors(theme_name)))

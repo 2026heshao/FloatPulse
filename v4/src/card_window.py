@@ -68,7 +68,8 @@ from src.fragment_classifier import CATEGORY_ORDER, CATEGORY_TOKENS
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.note_manager import NoteManager
 from src.nav_manager import NavManager
-from src.theme import get_card_window_qss, get_menu_qss, get_colors
+from src.theme import (get_card_window_qss, get_menu_qss, get_colors,
+                       scale_px_fonts)
 from src.icon_render import icon as render_icon
 from src.assets_panel import EXT_ICON
 from src.glass import NavIndicator, SurfaceBackground, draw_soft_shadow
@@ -1684,7 +1685,10 @@ class CardWindow(QWidget):
         # 基础卡片 QSS + 本包自持覆盖（实底壳 $surface/$line_2、页标题
         # 15px/500、空态标题 sectionLabel）—— 覆盖层不写进 theme.py，
         # 避免与 01/02/04/05 并行会话抢文件（全局指挥裁决）。
-        shell = get_card_window_qss(self._theme) + _card_shell_qss(colors)
+        # 合并后统一做 font-size 缩放（P1-3）：覆盖层里写死的 px 字号
+        # 与 theme 模板的 $fs_* 令牌走同一档（100% 时逐字节不变）。
+        shell = scale_px_fonts(
+            get_card_window_qss(self._theme) + _card_shell_qss(colors))
         # 挂了背景图时，实底壳要让位 —— 但只让到「遮罩 + 部分实底」的程度：
         # 卡片比主窗小得多，文字密度更高，这里最低保留 55% 的底色，避免
         # 用户把遮罩拉到 0 时条目文字直接压在照片上。

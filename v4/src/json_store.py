@@ -81,6 +81,7 @@ STORE_VERSIONS = {
     "groups":    1,     # nav.json
     "stickies":  1,     # stickies.json
     "assets":    1,     # temp_assets.json
+    "asset_groups": 1,  # asset_groups.json（素材会话堆旁路标注：命名/移出，2026-10-04）
 }
 
 # 迁移注册表：{store: {from_version: 迁移函数}}。
@@ -94,6 +95,7 @@ MIGRATIONS = {
     "groups":    {},
     "stickies":  {},
     "assets":    {},
+    "asset_groups": {},
 }
 
 

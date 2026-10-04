@@ -51,7 +51,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (QColor, QFont, QPainter, QAction, QIcon, QShortcut,
                          QKeySequence)
 
-from src.theme import get_main_window_qss, get_colors
+from src.theme import get_main_window_qss, get_colors, next_theme_on_toggle
 from src.constants import DEFAULT_THEME
 from src import motion
 from src import controls
@@ -2716,8 +2716,16 @@ class MainWindow(QWidget):
                 self._page_app_launcher.load_apps_from_config()
                 self._page_app_launcher.reload_settings()
         elif index == 9:
-            # 插件中心：注入 loader 后首次切到此页时重建插件卡片
-            self.refresh_page("plugins")
+            # 插件中心：切页走指纹守卫刷新——数据没变就零重建。
+            # 此前每次切页都整页重建卡片（全窗最大面积重绘），在
+            # WA_TranslucentBackground 半透明壳下是 DWM 黑帧闪现的
+            # 触发面（用户报障：点插件中心导航键闪黑窗）。
+            # 数据变化（启停/安装/卸载/重扫）由面板内部调用全量 refresh()。
+            panel = self._page_plugins
+            if panel is not None and hasattr(panel, "refresh_if_stale"):
+                panel.refresh_if_stale()
+            elif panel is not None and hasattr(panel, "refresh"):
+                panel.refresh()
 
     # ==================================================================
     # 公开接口：供外部调用刷新指定面板
@@ -2980,13 +2988,30 @@ class MainWindow(QWidget):
                                QColor(colors["text_secondary"]))
 
     def _toggle_theme(self):
-        """切换浅色/深色主题"""
-        self._theme = "dark" if self._theme == "light" else "light"
-        self._config.set("theme", self._theme)
-        self._config.save()
+        """切换浅色/深色主题。
+
+        「跟随系统」下**不落盘**（成熟化路线图遗留备忘的修复）：Ctrl+T
+        只把本会话翻到相反主题，config 仍是 "follow"，重启后回到跟随——
+        否则一按快捷键就把跟随偏好静默固化成显式主题，与功能语义相悖。
+        落盘与否 + 下一站是哪个主题，判定收敛在
+        :func:`theme.next_theme_on_toggle`（纯逻辑，可脱离 GUI 单测）。
+        """
+        try:
+            config_value = self._config.get("theme", DEFAULT_THEME)
+        except Exception:                         # noqa: BLE001 - 展示层兜底
+            config_value = DEFAULT_THEME
+        persist, applied = next_theme_on_toggle(config_value, self._theme)
+        self._theme = applied
+        if persist:
+            self._config.set("theme", applied)
+            self._config.save()
         self._apply_theme()
         # 通知外部（悬浮球、小卡片）刷新主题
-        self.theme_changed.emit(self._theme)
+        self.theme_changed.emit(applied)
+        if not persist:
+            # 不落盘的会话翻转必须说破，否则用户以为已永久切换
+            self.show_toast("已临时切换为%s主题（仍跟随系统，重启后恢复）"
+                            % ("深色" if applied == "dark" else "浅色"))
 
     def apply_external_theme(self, theme_name: str):
         """外部（如设置面板）切换主题时调用"""
@@ -3206,7 +3231,7 @@ class MainWindow(QWidget):
         <p style="color:PHCOLOR; font-size:12px;">装插件、管插件的地方；商店与本地 .fpplug 都从这进。</p>
         <ul>
         <li><b>入口</b>：左栏「插件中心」（[[Ctrl+8]]）</li>
-        <li><b>本地插件</b>：每张卡显示版本 / 描述 / 能力 / 动作热键，可启用 / 停用、卸载；加载失败的卡会单独标出，不影响其它插件</li>
+        <li><b>本地插件</b>：每张卡显示版本 / 描述 / 能力 / 动作热键，可启用 / 停用、卸载；插件多时可用顶部搜索框（按插件名 / 动作名）与「全部 / 已启用 / 已停用」分段筛选；卡片的 ⋯ 菜单里有插件 ID、依赖、注册页面与「复制插件 ID」；加载失败的插件收在一条可点击展开的提示条里，不影响其它插件</li>
         <li><b>插件商店</b>：独立窗口列出商店目录里的 .fpplug 可安装包，每个包一个「安装」按钮，已装的标记「已安装」</li>
         <li><b>手动安装</b>：把 .fpplug 插件包放进安装目录或商店目录，点「重新扫描」即可用</li>
         <li><b>管理</b>：「打开插件目录」定位插件文件夹；「重新扫描」重新装配全部插件</li>

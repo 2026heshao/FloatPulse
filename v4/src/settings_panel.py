@@ -286,9 +286,10 @@ class SettingsPanel(QWidget):
         add_row(gv, "主题外观", "浅色 / 深色 / 跟随系统（系统深浅色变化时自动换），切换即时生效",
                 theme_ctl)
 
-        # 界面缩放（3.5 活字缩放）：固定档位下拉——只缩放全局字号不缩放
-        # px 布局（低风险取舍见 theme.BASE_FONT_PT 注释），改动即时生效
-        # （重设 QApplication 字号并走主题刷新链全量重绘，无需重启）。
+        # 界面缩放（3.5 活字缩放）：固定档位下拉——只缩放**字号**（QSS
+        # 全部 font-size 随档位换算，P1-3 补齐）不缩放 px 布局（低风险
+        # 取舍见 theme.BASE_FONT_PT 注释），改动即时生效（重设 QApplication
+        # 字号并走主题刷新链全量重绘，无需重启）。
         self._set_ui_scale = QComboBox()
         for pct in UI_SCALE_VALUES:
             self._set_ui_scale.addItem(f"{pct}%", int(pct))
@@ -297,8 +298,8 @@ class SettingsPanel(QWidget):
                 int(self._config.get("ui_scale", 100)))))
         self._set_ui_scale.currentIndexChanged.connect(self._on_ui_scale_changed)
         add_row(gv, "界面缩放",
-                "整体字号缩放，改动即时生效；部分固定像素间距不随缩放，"
-                "85–130% 观感最佳",
+                "整体字号缩放（含各页面文字），改动即时生效；固定像素间距"
+                "不随缩放，85–150% 观感稳定",
                 self._set_ui_scale)
 
         # 窗口透明度：步进器只存 50-100 的整数百分比（存 0 会让窗口整窗
@@ -526,7 +527,20 @@ class SettingsPanel(QWidget):
         self._set_plugins.toggled.connect(self._on_plugins_changed)
         add_row(gv, "悬浮球插件", "启用 plugins/ 目录里的外置插件包；"
                                   "新放入的插件包需重启程序",
-                self._set_plugins, last=True)
+                self._set_plugins)
+
+        # 插件「允许访问内网」高级开关（成熟化 1.5 原设计，2026-10-04 补齐）：
+        # SSRF 闸默认拒绝本地/内网（安全默认），这里给确有需要的用户一个
+        # 合法出口（本地 API / LAN 服务），不必改源码。放行是**用户显式
+        # 授权**，默认关 = 与既有行为逐项等价。
+        self._set_plugin_net_private = self._toggle(
+            "plugin_net_allow_private", False)
+        self._set_plugin_net_private.toggled.connect(
+            self._on_plugin_net_private_changed)
+        add_row(gv, "插件允许访问内网",
+                "放行插件访问本地 / 局域网地址（默认拒绝，防插件被诱导"
+                "探测内网）；确需访问本地服务的用户再打开",
+                self._set_plugin_net_private, last=True)
 
         # ================= 3. 剪贴板与碎片 =================
         cv = self._new_category_page("clipboard")
@@ -1424,10 +1438,11 @@ class SettingsPanel(QWidget):
         """「界面缩放」档位变更（3.5 活字缩放）：落盘 + 立即重设全局字号。
 
         与「跟随系统」同一条刷新链：apply_app_font 重设 QApplication
-        字号（未显式指定 font-size 的控件自动重排），再走主窗口
-        _apply_theme + theme_changed 广播让 QSS 全量重载、球 / 卡片 /
-        便签 / 截图钉屏同步。ui_scale 只缩放字号不缩放 px 布局，
-        刻意的低风险取舍（见 theme.BASE_FONT_PT）。
+        字号（未显式指定 font-size 的控件自动重排）**并登记缩放档位**，
+        再走主窗口 _apply_theme + theme_changed 广播让 QSS 全量重载
+        （生成时全部 font-size 按档位换算，P1-3）、球 / 卡片 / 便签 /
+        截图钉屏同步。ui_scale 只缩放字号不缩放 px 布局，刻意的低风险
+        取舍（见 theme.BASE_FONT_PT）。
         """
         scale = self._set_ui_scale.itemData(index)
         if scale is None or int(scale) == self._config.get("ui_scale", 100):
@@ -1596,6 +1611,22 @@ class SettingsPanel(QWidget):
             self._config.set("plugins_enabled", enabled)
             self._config.save()
             self._host.plugins_changed.emit(enabled)
+
+    def _on_plugin_net_private_changed(self, checked: bool):
+        """插件「允许访问内网」：持久化 + 即时切换 net_guard 模块级闸门。
+
+        net_guard 是进程级单点开关，设置页是它唯一的 UI 出口（路线图
+        1.5 原设计；此前插件要访问内网只能改源码）。落盘后重启同样
+        生效——启动链路（knowledge_ball.main）按 config 复位闸门。
+        """
+        allowed = bool(checked)
+        if allowed != self._config.get("plugin_net_allow_private", False):
+            self._config.set("plugin_net_allow_private", allowed)
+            save = getattr(self._config, "save", None)
+            if callable(save):
+                save()
+        from src.net_guard import set_allow_private_network
+        set_allow_private_network(allowed)
 
     def _on_screenshot_hotkey_changed(self):
         """截图热键编辑：校验格式与冲突后持久化并广播重注册"""
