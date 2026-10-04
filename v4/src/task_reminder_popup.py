@@ -45,7 +45,7 @@ from src.controls import IconButton, SmoothButton
 from src.glass import draw_soft_shadow
 from src.icon_render import icon as render_icon
 from src import motion
-from src.theme import get_colors, get_main_window_qss
+from src.theme import (get_colors, get_main_window_qss, scale_px_fonts)
 
 # ---- 视觉尺寸（逻辑像素）----
 CARD_W = 360                 # 卡片宽（不含阴影透明边距）
@@ -239,9 +239,9 @@ class TaskReminderPopup(QWidget):
         self._bell_ring.setPixmap(render_icon("bell", 16, tone_color).pixmap(16, 16))
         self._chip.setText("%d 项未完成" % self._total if self._total
                            else "暂无未完成")
-        self._chip.setStyleSheet(
+        self._chip.setStyleSheet(scale_px_fonts(
             "color:%s;background-color:%s;border-radius:9px;"
-            "padding:2px 8px;font-size:11px;" % (tone_color, ring_bg))
+            "padding:2px 8px;font-size:11px;" % (tone_color, ring_bg)))
         self._sep.setStyleSheet(
             "background-color:%s;border:none;" % colors["hair"])
 
@@ -267,8 +267,8 @@ class TaskReminderPopup(QWidget):
             dot.setStyleSheet(
                 "background-color:%s;border-radius:3px;" % color)
             label = QLabel(row["label"])
-            label.setStyleSheet(
-                "color:%s;font-size:12px;font-weight:600;" % color)
+            label.setStyleSheet(scale_px_fonts(
+                "color:%s;font-size:12px;font-weight:600;" % color))
             count = QLabel(str(row["count"]))
             count.setObjectName("taskRemindCount")
             head_row.addWidget(dot)
