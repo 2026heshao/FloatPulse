@@ -1,11 +1,9 @@
-# GUI 夜检（离屏端到端验证）——成熟化 4.2 前置
+# GUI 夜检（离屏端到端验证）——成熟化 4.2
 # --------------------------------------------------------------------
-# ★ 当前仅 workflow_dispatch 手动触发：先在 Actions 页手动跑绿几次，
-#   把偶发不稳定的脚本剔出下方 --only 名单后，再放开定时档——把 on: 换成
-#       on:
-#         schedule:
-#           - cron: "0 19 * * *"   # 每天北京时间凌晨 3 点
-#         workflow_dispatch:       # 保留手动档，补跑/排查用
+# ★ 2026-10-04 起定时档已放开（成熟化路线图遗留备忘「首跑绿后可加 cron」）：
+#   每天北京时间凌晨 3 点（UTC 19:00）跑一轮下方精选子集。若后续出现
+#   偶发不稳定，先把对应脚本剔出 --only 名单；要整体退回手动档，把
+#   schedule 段删掉、只留 workflow_dispatch 即可。
 #
 # 名单口径（≤8 个精选子集，覆盖主链路，不贪多）：
 #   首启        verify_splash            启动闪屏可见/动画/阶段文案
@@ -19,7 +17,9 @@
 name: GUI Check
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: "0 19 * * *"   # 每天北京时间凌晨 3 点（UTC 19:00）
+  workflow_dispatch:       # 保留手动档，补跑/排查用
 
 # ★ 中文输出必须显式 UTF-8（2026-10-02）：Windows runner 默认 stdout 是
 # cp1252，而全部 verify_*.py 都打印中文判据，不改会成片 UnicodeEncodeError。

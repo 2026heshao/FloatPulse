@@ -21,7 +21,7 @@ import shutil
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QMenu, QMessageBox, QFileDialog,
-    QStackedWidget, QStyledItemDelegate, QStyle, QToolButton,
+    QStackedWidget, QStyledItemDelegate, QStyle, QToolButton, QLineEdit,
 )
 from PyQt6.QtCore import (
     QEasingCurve, QObject, QRunnable, QRectF, QSize, Qt, QThreadPool,
@@ -38,6 +38,8 @@ from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ Q
 from src import motion
 # 会话分组纯逻辑（零 PyQt6）：按 added_time 间隔聚类，渲染时派生、不落库
 from src import asset_group
+# 会话堆旁路标注（命名 / 移出）：float_data/asset_groups.json，零 PyQt6
+from src import asset_groups_store
 
 # 非图片文件的类型图标（与 card_window._AssetItemWidget 同一套语义）。
 # 值为 icons.py 的 file_* 图标名（01 包图集；两处引用同一批名字，保持一致）。
@@ -352,6 +354,25 @@ class AssetsPanel(QWidget):
         super().__init__()
         self._host = host
         self._temp_asset_manager = host._temp_asset_manager
+        # ---- 会话堆旁路标注（命名 / 移出）----
+        # 文件与 temp_assets.json 同目录（float_data/）；加载失败/缺失
+        # 一律空结构，绝不影响素材列表本身。
+        self._groups_path = ""
+        self._group_store = asset_groups_store.empty_store()
+        try:
+            self._groups_path = os.path.join(
+                os.path.dirname(self._temp_asset_manager._json_path),
+                asset_groups_store.FILE_NAME)
+            self._group_store = asset_groups_store.load(self._groups_path)
+        except (AttributeError, TypeError, OSError):
+            self._groups_path = ""
+        # 堆归属速查（_build_sequence 在 refresh 时维护）：
+        #   _pile_of      asset_id -> 所在堆的堆首 asset_id（单张/独立不在表内）
+        #   _pile_heads   [堆首 asset_id]（≥2 张的堆，按时间序）
+        #   _detached_ids 被用户移出时间聚类的 asset_id 集合
+        self._pile_of = {}
+        self._pile_heads = []
+        self._detached_ids = set()
         self._thumb_cache = {}
         # ---- 异步缩略图管线(丝滑化):paint 永不解码 ----
         self._pending = set()        # 在途 asset_id(防重复派发)
@@ -590,6 +611,11 @@ class AssetsPanel(QWidget):
         for key in list(self._thumb_delegate._fade_values):
             if key not in valid_ids:
                 del self._thumb_delegate._fade_values[key]
+        # 堆标注（命名/移出）惰性清理：素材删了，指向它的标注成孤儿
+        pruned = asset_groups_store.prune(self._group_store, valid_ids)
+        if pruned != self._group_store:
+            self._group_store = pruned
+            self._save_group_store()
 
         self._asset_list.clear()
         self._items_by_id = {}
@@ -628,26 +654,43 @@ class AssetsPanel(QWidget):
         """返回 ``(渲染顺序, {asset_id: 堆标题}, {asset_id: 堆内序号})``。
 
         分组关闭 → 原样返回（与改动前逐项一致，两张表都为空）。
-        分组开启 → 按 ``asset_group.cluster_assets`` 聚类，堆内按时间升序
-        铺开，**只有 ≥2 张的堆才挂标题**：单张素材本来就不是一次"会话"，
-        给它画标题条纯属噪音 —— 真实数据 18 张里 11 张是单张，这正是
-        2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"的来源。
-        非堆首格挂 ``"#2"``/``"#3"`` 序号，避免堆内重复渲染雷同文件名。
+        分组开启 → 按 ``asset_group.cluster_assets`` 时间聚类，再套旁路
+        标注（``asset_groups_store``：移出的素材拆成独立单元），堆内按
+        时间升序铺开，**只有 ≥2 张的堆才挂标题**：单张素材本来就不是
+        一次"会话"，给它画标题条纯属噪音 —— 真实数据 18 张里 11 张是
+        单张，这正是 2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"
+        的来源。堆名优先取用户自定义（asset_groups.json），无则默认
+        ``N 张 · HH:MM``。非堆首格挂 ``"#2"``/``"#3"`` 序号，避免堆内
+        重复渲染雷同文件名。
         """
+        # 先清堆归属速查（平铺态也必须清干净，不能残留分组态的表）
+        self._pile_of = {}
+        self._pile_heads = []
+        self._detached_ids = set(
+            self._group_store.get(asset_groups_store.DETACHED_KEY, []))
         if not self._is_grouping():
             return list(assets), {}, {}
         gap = self._group_gap_seconds()
         groups = asset_group.cluster_assets(assets, gap_seconds=gap)
+        groups = asset_group.apply_group_overrides(
+            groups, detached=self._detached_ids)
+        names = self._group_store.get(asset_groups_store.NAMES_KEY, {})
         headers = {}
         ordinals = {}
         sequence = []
         for i, group in enumerate(groups):
+            sequence.extend(group)
+            head_id = group[0].asset_id if group else None
+            if len(group) >= 2 and head_id is not None:
+                self._pile_heads.append(head_id)
+                custom = names.get(str(head_id), "")
+                headers[head_id] = asset_group.group_label(
+                    group, i, custom_name=custom)
+                for a in group:
+                    self._pile_of[a.asset_id] = head_id
             for j, a in enumerate(group):
-                sequence.append(a)
                 if j:
                     ordinals[a.asset_id] = "#%d" % (j + 1)
-            if len(group) >= 2:
-                headers[group[0].asset_id] = asset_group.group_label(group, i)
         return sequence, headers, ordinals
 
     def _is_grouping(self) -> bool:
@@ -695,6 +738,103 @@ class AssetsPanel(QWidget):
             self._group_btn.blockSignals(False)
         self._on_group_toggled(bool(enabled))
 
+    # ---- 会话堆旁路标注（命名 / 移出；2026-10-04 P0-2）----
+    # 标注落在 asset_groups.json（旁路文件，见 asset_groups_store）：
+    # temp_assets.json 依旧一个字节不动；删掉标注文件即回到纯时间聚类。
+    def _save_group_store(self):
+        """把当前标注落盘；失败只记一行（标注丢失可接受，不阻断界面）"""
+        if not self._groups_path:
+            return
+        if not asset_groups_store.save(self._groups_path, self._group_store):
+            print("[素材面板] 堆标注写入失败（不影响本次操作）：",
+                  self._groups_path)
+
+    def _pile_display_name(self, head_id) -> str:
+        """堆首 id → 用户自定义堆名（没有自定义返回空串）"""
+        names = self._group_store.get(asset_groups_store.NAMES_KEY, {})
+        return names.get(str(head_id), "")
+
+    def _apply_pile_rename(self, head_id: int, name: str):
+        """写入 / 清除堆名并落盘 + 重渲染（弹窗之外的纯逻辑，测试直达）。
+
+        清空输入 = 恢复默认名（删键，不留空串脏数据）。堆身份 = 堆首
+        asset_id：新增素材只会并入堆尾或新开一堆，堆首不变，标注稳定。
+        """
+        names = self._group_store.setdefault(asset_groups_store.NAMES_KEY, {})
+        key = str(int(head_id))
+        name = (name or "").strip()
+        if name:
+            names[key] = name[:asset_groups_store.NAME_MAX]
+        else:
+            names.pop(key, None)
+        self._save_group_store()
+        self.refresh()
+
+    def _detach_asset(self, asset_id: int, detach: bool = True):
+        """移出 / 取消移出：改 detached 标注 → 落盘 → 重渲染。
+
+        移出后该素材脱离时间聚类、单独渲染（单张不画标题）；取消移出
+        即回到纯时间聚类的天然归属。平铺视图不受任何影响（两条标注
+        只在分组渲染路径被消费）。
+        """
+        aid = int(asset_id)
+        lst = self._group_store.setdefault(asset_groups_store.DETACHED_KEY, [])
+        if detach and aid not in lst:
+            lst.append(aid)
+        elif not detach:
+            self._group_store[asset_groups_store.DETACHED_KEY] = [
+                i for i in lst if i != aid]
+        self._save_group_store()
+        self.refresh()
+
+    def _open_rename_dialog(self, head_id):
+        """重命名会话堆弹窗：单行输入 + 保存/取消（Esc=取消）。
+
+        弹窗是薄壳：存取逻辑在 :meth:`_apply_pile_rename`（可脱离 GUI
+        单测）。留空保存 = 恢复默认名。
+        """
+        from src.glass_dialog import GlassDialog
+        if head_id is None:
+            return
+        current = self._pile_display_name(head_id)
+        head = self._temp_asset_manager.get_asset(head_id)
+        subtitle = "堆名只在「会话分组」视图显示；留空保存 = 恢复默认名"
+        if head is not None:
+            subtitle = f"{len(self._pile_members(head_id))} 张 · " \
+                       f"{head.added_time[11:16] if len(head.added_time) >= 16 else ''}｜" + subtitle
+        dlg = GlassDialog(self._host, title="重命名会话堆",
+                          subtitle=subtitle, size=(460, 200))
+        edit = QLineEdit(current)
+        edit.setPlaceholderText("例如：登录页排障现场")
+        edit.selectAll()
+        dlg.body_layout.addWidget(edit, 0, Qt.AlignmentFlag.AlignTop)
+
+        def _save():
+            self._apply_pile_rename(head_id, edit.text())
+            dlg.accept()
+
+        edit.returnPressed.connect(_save)
+        dlg.add_footer([
+            ("保存", "primaryBtn", _save),
+            ("取消", "secondaryBtn", dlg.reject),
+        ])
+        dlg.exec()
+
+    def _pile_members(self, head_id):
+        """堆首 id → 该堆当前成员列表（Asset 对象；找不到返回空表）"""
+        if not self._is_grouping():
+            return []
+        assets = self._temp_asset_manager.get_all_assets()
+        gap = self._group_gap_seconds()
+        groups = asset_group.apply_group_overrides(
+            asset_group.cluster_assets(assets, gap_seconds=gap),
+            detached=self._group_store.get(
+                asset_groups_store.DETACHED_KEY, []))
+        for group in groups:
+            if group and group[0].asset_id == head_id:
+                return group
+        return []
+
     def _position_group_view_btn(self):
         """把「分组」浮钮钉在列表视口右上角（内容/滚动条之外，不遮挡首行）。"""
         btn = getattr(self, "_group_view_btn", None)
@@ -732,11 +872,36 @@ class AssetsPanel(QWidget):
         # 用 danger 色的自绘 trash 图标承载（UI 重构 05）
         act_delete.setIcon(
             render_icon("trash", 14, self._colors()["danger"]))
+
+        # ---- 会话堆操作（仅分组视图；2026-10-04 P0-2）----
+        # 堆名/移出是「会话分组」视图的专属语义：平铺态没有堆，菜单里
+        # 就不该出现这些项（也避免误触写了标注却看不到效果）。
+        act_rename = act_detach = act_restore = None
+        if self._is_grouping():
+            pile_head = self._pile_of.get(aid)
+            if pile_head is not None:
+                menu.addSeparator()
+                pile_name = self._pile_display_name(pile_head)
+                act_rename = menu.addAction(
+                    "重命名会话堆…" if not pile_name
+                    else f"重命名会话堆（{pile_name}）…")
+                act_detach = menu.addAction("从会话堆移出")
+                act_detach.setToolTip(
+                    "这张素材不再参与时间聚类，单独渲染；可随时取消移出")
+            elif aid in self._detached_ids:
+                menu.addSeparator()
+                act_restore = menu.addAction("取消移出（回到时间分组）")
         action = menu.exec(self._asset_list.mapToGlobal(pos))
         if action == act_open:
             self._open(aid)
         elif action == act_save_as:
             self._save_as(aid)
+        elif action == act_rename:
+            self._open_rename_dialog(self._pile_of.get(aid))
+        elif action == act_detach:
+            self._detach_asset(aid, detach=True)
+        elif action == act_restore:
+            self._detach_asset(aid, detach=False)
         elif action == act_delete:
             targets = selected_ids if n > 1 else [aid]
             removed = sum(1 for a_id in targets

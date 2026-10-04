@@ -1,7 +1,7 @@
 {
   "id": "weekly-report",
   "name": "日报 / 周报草稿",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "entry": "plugin.py",
   "requires": [
     "PyQt6.QtCore",
@@ -13,6 +13,15 @@
     "ai"
   ],
   "description": "一键汇总这段时间的任务 / 碎片 / 番茄生成 Markdown 周报草稿，可再交 AI 润色成正式周报（接入 AI 总配置时）",
+  "settings": [
+    {
+      "key": "default_range",
+      "label": "打开页面默认统计范围",
+      "type": "enum",
+      "default": "week",
+      "choices": ["today", "week"]
+    }
+  ],
   "actions": [
     {
       "id": "weekly-report.draft",

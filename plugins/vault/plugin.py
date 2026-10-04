@@ -12,7 +12,8 @@
   - manifest ``capabilities: []``：不联网、不读宿主数据、不写宿主数据，
     AI 插件（有 manage/网络能力）永远接触不到条目
   - secret 字段默认掩码显示，点「显示」才显形；搜索**永不**命中 secret 值
-  - 复制密文 30 秒后自动清剪贴板（先比对再清，不误伤用户后来的复制）
+  - 复制密文后倒计时自动清剪贴板（默认 30 秒，可在插件中心设置；
+    先比对再清，不误伤用户后来的复制）
   - 空闲自动锁定（默认 5 分钟，可改 1/15/永不），锁定即丢弃内存明文
   - 主密码不可找回；导出明文 JSON 必须二次确认
 
@@ -66,12 +67,40 @@ core = _load_sibling("vault_core")
 PLUGIN_ID = "vault"
 PAGE_KEY = f"plugin:{PLUGIN_ID}"
 
-CLIPBOARD_CLEAR_SECONDS = 30        # 复制密文后自动清剪贴板的等待
+CLIPBOARD_CLEAR_SECONDS = 30        # 复制密文后自动清剪贴板的等待（默认；
+# v1.1.0 起可在插件中心「设置」调整，本常量作旧宿主兜底）
+CLEAR_SECONDS_CHOICES = ("10", "30", "60")   # 与 manifest.settings.choices 同源
 PAGE_SYNC_MS = 1000                 # 页面可见时轮询锁定态的间隔
 IDLE_TICK_MS = 5000                 # 空闲锁定检查的节拍
 
 # 空闲锁定档位（分钟）——0 = 永不
 IDLE_LABELS = (("永不", 0), ("1 分钟", 1), ("5 分钟", 5), ("15 分钟", 15))
+
+
+def normalize_clear_seconds(raw, fallback=CLIPBOARD_CLEAR_SECONDS):
+    """「复制后清剪贴板等待」生效值归一（纯函数，测试钉行为）。
+
+    manifest 里是 enum（choices 存字符串 "10"/"30"/"60"），手改文件可能
+    出整数——两种都收；不在 choices 里的值一律回落 fallback。等待秒数
+    是安全相关参数：非法值宁可保守走默认，也不放大成任意秒数。
+    """
+    text = str(raw) if raw is not None else ""
+    if text not in CLEAR_SECONDS_CHOICES:
+        return fallback
+    return int(text)
+
+
+def clear_seconds_for(ctx, fallback=CLIPBOARD_CLEAR_SECONDS):
+    """从 ctx 读清剪贴板等待的生效值；旧宿主无 get_setting 契约 /
+    读取异常 → 常量兜底（不抛，复制路径绝不能因设置读取而失败）。"""
+    getter = getattr(ctx, "get_setting", None) if ctx is not None else None
+    if not callable(getter):
+        return fallback
+    try:
+        raw = getter("clipboard_clear_seconds", fallback)
+    except Exception:                             # noqa: BLE001
+        return fallback
+    return normalize_clear_seconds(raw, fallback)
 
 
 def _log(ctx, level: str, msg: str) -> None:
@@ -177,11 +206,13 @@ def _idle_tick() -> None:
 
 
 # ====================================================================
-# 剪贴板生命周期：复制 → 30 秒后若原样仍在则清空
+# 剪贴板生命周期：复制 → 等待若干秒后若原样仍在则清空
 # ====================================================================
-def copy_with_autoclear(text: str, seconds: int = CLIPBOARD_CLEAR_SECONDS) -> bool:
+def copy_with_autoclear(text: str, seconds: int = None) -> bool:
     """写剪贴板；``seconds`` 秒后若剪贴板还是这串内容就清空。
 
+    ``seconds`` 传 None（旧调用方 / 未传）时用默认常量
+    ``CLIPBOARD_CLEAR_SECONDS``；插件页面传设置生效值（v1.1.0）。
     **先比对再清**：用户若在等待期内复制了别的东西，绝不清——那是
     用户的数据。多个等待计时器并存时，旧的发现自己不是当前内容就退场。
     """
@@ -199,7 +230,9 @@ def copy_with_autoclear(text: str, seconds: int = CLIPBOARD_CLEAR_SECONDS) -> bo
         except Exception:                         # noqa: BLE001
             pass
 
-    QTimer.singleShot(max(1, seconds) * 1000, _clear_if_untouched)
+    if seconds is None:
+        seconds = CLIPBOARD_CLEAR_SECONDS
+    QTimer.singleShot(max(1, int(seconds)) * 1000, _clear_if_untouched)
     return True
 
 
@@ -422,7 +455,7 @@ class ChangePasswordDialog(PluginDialog):
 
 
 class QuickCopyDialog(PluginDialog):
-    """快速取用（Ctrl+Alt+B）：搜索 → 选中 → 复制首个机密字段 → 30 秒清剪贴板"""
+    """快速取用（Ctrl+Alt+B）：搜索 → 选中 → 复制首个机密字段 → 倒计时清剪贴板"""
 
     def __init__(self, ctx, vault, parent=None):
         super().__init__(ctx, title="快速取用",
@@ -431,6 +464,8 @@ class QuickCopyDialog(PluginDialog):
         self._vault = vault
         self._entries = []
         self._copied = False
+        # 清剪贴板等待：设置生效值（旧宿主 / 脏值 → 常量兜底）
+        self._clear_seconds = clear_seconds_for(self._plugin_ctx)
 
         self._stack = QStackedWidget(self)
         self.body_layout.addWidget(self._stack, 1)
@@ -537,12 +572,13 @@ class QuickCopyDialog(PluginDialog):
         if not value:
             self._pick_hint.setText("该条目没有机密字段（勾了「机密」的才参与快速取用）")
             return
-        if copy_with_autoclear(value):
+        if copy_with_autoclear(value, seconds=self._clear_seconds):
             self._copied = True
             ctx = self._plugin_ctx
             try:
                 if ctx is not None:
-                    ctx.show_toast("已复制机密字段，30 秒后自动清空剪贴板")
+                    ctx.show_toast(
+                        f"已复制机密字段，{self._clear_seconds} 秒后自动清空剪贴板")
             except Exception:                         # noqa: BLE001
                 pass
             self.accept()
@@ -566,12 +602,34 @@ class VaultPage(QWidget):
         ensure_idle_timer(ctx)
         self._current_id = None
         self._shown_secret = {}                    # entry_id -> set(field 下标显形)
-
+        # 清剪贴板等待：设置生效值（旧宿主 / 脏值 → 常量兜底）。必须先于
+        # _build_ui()，页头提示与复制按钮文案都要用它
+        self._clear_seconds = clear_seconds_for(ctx)
         self._build_ui()
+        self._subscribe_settings()
 
         self._sync_timer = QTimer(self)
         self._sync_timer.setInterval(PAGE_SYNC_MS)
         self._sync_timer.timeout.connect(self._sync_overlay)
+
+    # ---------------- 插件设置（v1.1.0） ----------------
+    def _subscribe_settings(self):
+        """订阅插件中心的保存通知（守卫模式；旧宿主无信号时自然跳过）"""
+        sig = getattr(self._ctx, "settings_changed", None)
+        connect = getattr(sig, "connect", None) if sig is not None else None
+        if callable(connect):
+            try:
+                connect(self._on_settings_changed)
+            except Exception:                     # noqa: BLE001 - 订阅失败只影响实时性
+                pass
+
+    def _on_settings_changed(self, _keys=None):
+        """设置保存后重读生效值：复制等待与页头文案即时跟随，无需重建页面"""
+        self._clear_seconds = clear_seconds_for(self._ctx)
+        # _subscribe_settings 在 _build_ui 之后调用，页头提示此时必已存在
+        self._head_hint.setText(
+            "只存本机：DPAPI + 主密码双因子加密；"
+            f"机密值复制后 {self._clear_seconds} 秒自动清剪贴板")
 
     # ---------------- 界面骨架 ----------------
     def _build_ui(self):
@@ -583,8 +641,10 @@ class VaultPage(QWidget):
         title = QLabel("密码保险箱")
         title.setObjectName("pageTitle")
         head.addWidget(title)
-        head.addWidget(make_hint_label(
-            "只存本机：DPAPI + 主密码双因子加密；机密值复制后 30 秒自动清剪贴板"))
+        self._head_hint = make_hint_label(
+            "只存本机：DPAPI + 主密码双因子加密；"
+            f"机密值复制后 {self._clear_seconds} 秒自动清剪贴板")
+        head.addWidget(self._head_hint)
         head.addStretch(1)
         root.addLayout(head)
 
@@ -990,13 +1050,16 @@ class VaultPage(QWidget):
             row.addWidget(toggle)
         copy_btn = _qbtn("复制", "secondaryBtn",
                          tooltip="复制到剪贴板" +
-                                 ("（30 秒后自动清空）" if is_secret else ""))
+                                 (f"（{self._clear_seconds} 秒后自动清空）"
+                                  if is_secret else ""))
         copy_btn.setFixedWidth(64)
 
         # clicked(bool) 同上：首参必须接住 checked
         def _do_copy(_checked=False, value=value, is_secret=is_secret):
-            if copy_with_autoclear(value):
-                self._toast("已复制" + ("，30 秒后自动清空剪贴板" if is_secret else ""))
+            if copy_with_autoclear(value, seconds=self._clear_seconds):
+                self._toast("已复制" + (
+                    f"，{self._clear_seconds} 秒后自动清空剪贴板"
+                    if is_secret else ""))
 
         copy_btn.clicked.connect(_do_copy)
         row.addWidget(copy_btn)
@@ -1175,7 +1238,7 @@ class OpenVaultAction(BallAction):
 
 
 class QuickCopyAction(BallAction):
-    """快速取用：搜索 → 复制首个机密字段 → 30 秒自动清剪贴板"""
+    """快速取用：搜索 → 复制首个机密字段 → 倒计时自动清剪贴板"""
 
     id = f"{PLUGIN_ID}.quick"
     title = "快速取用"
@@ -1205,7 +1268,7 @@ class QuickCopyAction(BallAction):
 class VaultPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "密码保险箱"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def create_actions(self, ctx):
         return [OpenVaultAction(), QuickCopyAction()]

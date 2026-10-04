@@ -1,7 +1,7 @@
 {
   "id": "ai-assistant",
   "name": "AI 助手",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "entry": "plugin.py",
   "requires": [
     "PyQt6.QtCore",
@@ -17,6 +17,24 @@
   "page": {
     "title": "🤖 AI 助手"
   },
+  "settings": [
+    {
+      "key": "temperature",
+      "label": "回答发散度",
+      "type": "float",
+      "default": 0.4,
+      "min": 0.1,
+      "max": 1.0
+    },
+    {
+      "key": "max_history",
+      "label": "上下文记忆条数",
+      "type": "int",
+      "default": 12,
+      "min": 2,
+      "max": 30
+    }
+  ],
   "description": "本地 / 云端双后端的对话助手：读应用内任务、碎片、笔记做总结、分类与问答，多会话记录重启不丢，可导出 Markdown，支持自定义快捷指令与规则库",
   "actions": [
     {

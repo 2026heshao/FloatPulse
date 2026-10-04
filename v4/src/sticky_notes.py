@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
 from src.json_store import load_records
 from src.constants import safe_int, NOTE_AUTOSAVE_INTERVAL_MS
 from src.controls import SmoothButton, IconButton
-from src.theme import FALLBACK_ACCENT_DEEP, get_colors, get_menu_qss
+from src.theme import (FALLBACK_ACCENT_DEEP, get_colors, get_menu_qss, scale_px_fonts)
 from src.icon_render import icon as render_icon
 from src.app_paths import get_data_dir, get_screen_geometry
 from src.task_manager import task_state, format_relative_deadline
@@ -521,9 +521,9 @@ class StickyNoteWindow(QWidget):
                 color = str(colors.get("primary_deep", FALLBACK_ACCENT_DEEP))
             else:
                 color = str(colors.get("text", "#888888"))
-        self._chip.setStyleSheet(
+        self._chip.setStyleSheet(scale_px_fonts(
             f"color: {color}; font-size: 11px; padding: 1px 8px 0;"
-            f"background: transparent;")
+            f"background: transparent;"))
 
     def title_text(self) -> str:
         return self._anchor_title() or ("便签" if self._kind == "note"
@@ -596,7 +596,7 @@ class StickyNoteWindow(QWidget):
         # （QSS 的 rgba() 串只在此处使用——QSS 解析器认它，QColor 不认，
         #  本体色必须走 _css_color 解析后交给 paintEvent。）
         # 替换早期「teal 实底标题栏 + 直角实底窗」朴素画风（用户可见变更）
-        self.setStyleSheet(f"""
+        self.setStyleSheet(scale_px_fonts(f"""
             QWidget#stickyTitle {{
                 color: {colors.get('text', '#2C3E50')};
                 font-size: 12px;
@@ -611,7 +611,7 @@ class StickyNoteWindow(QWidget):
                 padding: 6px 8px;
                 selection-background-color: {colors.get('primary_a30', '#88CCCB')};
             }}
-        """)
+        """))
         self.update()
         # P1：关闭钮是自绘位图，颜色不在 QSS 管辖内
         for btn in self.findChildren(IconButton):

@@ -45,6 +45,15 @@ v1.3.0 碎片行重构（2026-10-02）：
     收起，与「点标题跳转」走两个互不解析的 scheme，不抢语义
   - 来源只在 ≠ 剪贴板 时显示（97% 的碎片来自剪贴板，恒显示是噪音）
   - 非碎片行（知识库/笔记/任务/素材）head 行与 v1.2 同构
+
+v1.4.0 插件独立设置（2026-10-04）：
+  - manifest.settings 声明三项：max_results（int，默认 60）/
+    search_notes（bool，默认开）/ ranking（enum：bm25 / tfidf，默认 bm25）。
+    宿主插件中心卡片的「设置」按钮弹层编辑，存储落插件私有目录
+    （settings.json），不进宿主主配置；default 即 v1.3 的既有行为
+  - 页面按 ctx.get_setting 读生效值（旧宿主无此契约 → 走常量兜底），
+    并订阅 ctx.settings_changed：插件中心保存后勾选态与检索参数即时刷新，
+    不必重开页面
 ====================================================================
 """
 
@@ -730,6 +739,60 @@ class SearchPage(QWidget):
                 theme_sig.connect(self._on_theme_changed)
             except Exception:                     # noqa: BLE001 - 订阅失败只影响配色
                 pass
+        # 插件独立设置（v1.4.0）：读生效值 + 订阅插件中心的保存通知。
+        # 订阅按宿主铁律走守卫模式——旧宿主没有该信号时自然跳过。
+        self._apply_settings()
+        notes_chk = self._kind_checks.get("note")
+        if notes_chk is not None and notes_chk.isChecked() != self._search_notes:
+            notes_chk.blockSignals(True)
+            notes_chk.setChecked(self._search_notes)
+            notes_chk.blockSignals(False)
+        settings_sig = getattr(ctx, "settings_changed", None)
+        connect = getattr(settings_sig, "connect", None) \
+            if settings_sig is not None else None
+        if callable(connect):
+            try:
+                connect(self._on_settings_changed)
+            except Exception:                     # noqa: BLE001 - 订阅失败只影响实时性
+                pass
+
+    # ---------------- 插件设置（v1.4.0） ----------------
+    def _get_setting(self, key, fallback):
+        """读一个设置项生效值；旧宿主没有 get_setting 契约 → 常量兜底"""
+        getter = getattr(self._ctx, "get_setting", None)
+        if not callable(getter):
+            return fallback
+        try:
+            value = getter(key, fallback)
+        except Exception:                         # noqa: BLE001
+            return fallback
+        return fallback if value is None else value
+
+    def _apply_settings(self):
+        """把三项设置的生效值读进页面状态（构建时 / 收到变更通知时）"""
+        raw_max = self._get_setting("max_results", MAX_RESULTS)
+        try:
+            self._max_results = max(1, int(raw_max))
+        except (TypeError, ValueError):
+            self._max_results = MAX_RESULTS
+        self._search_notes = bool(self._get_setting("search_notes", True))
+        ranking = self._get_setting("ranking", "bm25")
+        self._ranking = ranking if ranking == "tfidf" else "bm25"
+
+    def _on_settings_changed(self, _keys=None):
+        """插件中心保存设置后：刷新状态并应用（笔记勾选态 + 重搜）。
+
+        只接管「笔记」这一路勾选（它是设置项），其余数据源勾选仍是
+        会话级 UI 状态；有查询词时按新参数立即重搜。
+        """
+        self._apply_settings()
+        notes_chk = self._kind_checks.get("note")
+        if notes_chk is not None and notes_chk.isChecked() != self._search_notes:
+            notes_chk.blockSignals(True)
+            notes_chk.setChecked(self._search_notes)
+            notes_chk.blockSignals(False)
+        if self._input.text().strip():
+            self._run_search()
 
     def _on_theme_changed(self, *_args):
         """主题切换 → 换强调色并重渲染（不重建索引，数据没变）"""
@@ -880,8 +943,8 @@ class SearchPage(QWidget):
             return
         kind_arg = kinds if len(kinds) < len(KIND_LABEL) else None
         try:
-            hits = self._index.search(query, top_n=MAX_RESULTS,
-                                      kind=kind_arg)
+            hits = self._index.search(query, top_n=self._max_results,
+                                      kind=kind_arg, ranking=self._ranking)
         except Exception as exc:                  # noqa: BLE001
             self._hits = []
             self._stat.setText(f"检索失败：{exc!r}")
@@ -900,7 +963,8 @@ class SearchPage(QWidget):
             labels = " / ".join(KIND_LABEL[k] for k in kinds)
             scope = f" ｜ 范围：{labels}"
         if hits:
-            self._stat.setText(f"命中 {len(hits)} 条（最多显示 {MAX_RESULTS} 条）"
+            self._stat.setText(f"命中 {len(hits)} 条"
+                               f"（最多显示 {self._max_results} 条）"
                                f" ｜ 索引 {self._docs} 条{scope}")
         else:
             self._stat.setText(f"没有匹配「{query}」的内容 ｜ 索引 {self._docs} 条"
@@ -1098,7 +1162,7 @@ class SearchPage(QWidget):
 class KbSearchPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "站内搜索"
-    version = "1.3.0"
+    version = "1.4.0"
 
     def create_actions(self, ctx):
         return [OpenSearchAction()]

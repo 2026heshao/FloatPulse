@@ -61,9 +61,12 @@ PAGE_KEY = f"plugin:{PLUGIN_ID}"       # 主窗口页面 key（与 loader 约定
 
 # 单次发给模型的原文上限（超长截断并标注）
 MAX_SOURCE_CHARS = 8000
-# 生成参数（工坊动作都是短单轮转换，固定即可；后端参数在设置页）
+# 生成参数默认值（v1.6.0 起可在插件中心「设置」调整，本常量作旧宿主兜底；
+# 工坊动作都是短单轮转换，后端地址等仍在设置页）
 TEMPERATURE = 0.4
 MAX_TOKENS = 2048
+TEMPERATURE_MIN, TEMPERATURE_MAX = 0.1, 1.0
+MAX_TOKENS_MIN, MAX_TOKENS_MAX = 256, 4096
 # 请求超时（秒）
 REQUEST_TIMEOUT_S = 90.0
 
@@ -123,8 +126,35 @@ def normalize_source(text, cap: int = 8000):
     return t
 
 
+def clamp_temperature(raw, fallback=TEMPERATURE):
+    """插件设置 temperature 的生效值钳制（纯函数，测试钉行为）。
+
+    非数字回落 fallback（旧宿主无契约 / 脏值都走这里）；越界钳到
+    [0.1, 1.0]——存储层已按 schema 收窄，这里防的是手改 settings.json。
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return max(TEMPERATURE_MIN, min(TEMPERATURE_MAX, value))
+
+
+def clamp_max_tokens(raw, fallback=MAX_TOKENS):
+    """插件设置 max_tokens 的生效值钳制（纯函数，测试钉行为）。
+
+    非整数回落 fallback；钳到 [256, 4096]——8G 显存本机跑 7B 级模型时
+    输出上限直接影响可用性与速度，不放开无界值。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return max(MAX_TOKENS_MIN, min(MAX_TOKENS_MAX, value))
+
+
 def build_request(params: dict, instruction: str, source: str,
-                  max_source_chars: int = 8000):
+                  max_source_chars: int = 8000,
+                  temperature=None, max_tokens=None):
     """AI 总配置参数 + 指令 + 原文 → (url, headers, body, 错误文案)
 
     成功时错误文案为空串；失败时前三个返回值都是 None。
@@ -132,6 +162,8 @@ def build_request(params: dict, instruction: str, source: str,
     mode / base_url / api_key / model / local_port。
     OpenAI 兼容 /chat/completions，非流式单轮（无对话历史）。
     Content-Type 由宿主网络桥负责，headers 只放鉴权。
+    ``temperature`` / ``max_tokens`` 来自插件设置生效值；None（旧宿主 /
+    未传）走默认常量。
     """
     params = params if isinstance(params, dict) else {}
     mode = str(params.get("mode") or "cloud")
@@ -168,8 +200,8 @@ def build_request(params: dict, instruction: str, source: str,
             {"role": "user",
              "content": f"{instruction}\n\n=== 待处理文本 ===\n{text}"},
         ],
-        "temperature": TEMPERATURE,
-        "max_tokens": MAX_TOKENS,
+        "temperature": clamp_temperature(temperature),
+        "max_tokens": clamp_max_tokens(max_tokens),
         "stream": False,
     }
     return url, headers, body, ""
@@ -366,6 +398,13 @@ class AiWorkshopPage(QWidget):
         # 结果历史 + 指令收藏（W1/W2）：插件私有目录 history.json
         self._store = load_workshop_store(ctx)
         self._pending_meta = None   # 在途请求元信息（成功后落历史）
+
+        # 插件独立设置（v1.6.0）：读生效值 + 订阅插件中心保存通知。
+        # 订阅按宿主铁律走守卫模式——旧宿主没有该信号时自然跳过。
+        self._temperature = TEMPERATURE
+        self._max_tokens = MAX_TOKENS
+        self._apply_settings()
+        self._subscribe_settings()
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -586,6 +625,39 @@ class AiWorkshopPage(QWidget):
             pass
         return None
 
+    # ---------------- 插件设置（v1.6.0） ----------------
+    def _get_setting(self, key, fallback):
+        """读一个设置项生效值；旧宿主没有 get_setting 契约 → 常量兜底"""
+        getter = getattr(self._ctx, "get_setting", None)
+        if not callable(getter):
+            return fallback
+        try:
+            value = getter(key, fallback)
+        except Exception:                         # noqa: BLE001
+            return fallback
+        return fallback if value is None else value
+
+    def _apply_settings(self):
+        """把设置生效值读进页面状态（构建时 / 收到变更通知时）"""
+        self._temperature = clamp_temperature(
+            self._get_setting("temperature", TEMPERATURE))
+        self._max_tokens = clamp_max_tokens(
+            self._get_setting("max_tokens", MAX_TOKENS))
+
+    def _subscribe_settings(self):
+        """订阅插件中心的保存通知（守卫模式；订阅失败只影响实时性）"""
+        sig = getattr(self._ctx, "settings_changed", None)
+        connect = getattr(sig, "connect", None) if sig is not None else None
+        if callable(connect):
+            try:
+                connect(self._on_settings_changed)
+            except Exception:                     # noqa: BLE001
+                pass
+
+    def _on_settings_changed(self, _keys=None):
+        """插件中心保存设置后：重读生效值，下一次动作即用新参数"""
+        self._apply_settings()
+
     # ---------------- 界面小件 ----------------
     def _prefill_clipboard(self) -> bool:
         """原文框带入剪贴板文本；返回是否真的带入了内容"""
@@ -639,7 +711,8 @@ class AiWorkshopPage(QWidget):
             return
         src_text = self._src_edit.toPlainText()
         url, headers, body, err = build_request(
-            params, instruction, src_text, MAX_SOURCE_CHARS)
+            params, instruction, src_text, MAX_SOURCE_CHARS,
+            temperature=self._temperature, max_tokens=self._max_tokens)
         if url is None:
             self._status.setText(err)
             return
@@ -969,7 +1042,7 @@ class WorkshopAction(BallAction):
 class AiTextWorkshopPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 文本工坊"
-    version = "1.5.1"
+    version = "1.6.0"
 
     def create_actions(self, ctx) -> list:
         return [WorkshopAction()]

@@ -466,3 +466,243 @@ def test_view_switch_uses_same_list_widget(env):
     assert panel._thumb_delegate._header_texts          # 分组态有堆标题
     panel.set_grouping(False)
     assert panel._thumb_delegate._header_texts == {}    # 平铺态无堆标题
+
+
+# ====================================================================
+# 6. 会话堆旁路标注（asset_groups.json：命名 / 移出；2026-10-04 P0-2）
+# ====================================================================
+def test_groups_store_module_has_no_pyqt_import():
+    """标注存储必须纯逻辑（禁 PyQt6），与 asset_group 同款约束。"""
+    import ast
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(os.path.dirname(here), "src", "asset_groups_store.py")
+    with open(src, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all("PyQt6" not in a.name for a in node.names), node.names
+        if isinstance(node, ast.ImportFrom):
+            assert "PyQt6" not in (node.module or ""), node.module
+
+
+class TestGroupsStore:
+    def test_missing_file_returns_empty(self, tmp_path):
+        from src import asset_groups_store as gs
+        st = gs.load(str(tmp_path / "nope.json"))
+        assert st == {gs.NAMES_KEY: {}, gs.DETACHED_KEY: []}
+
+    def test_save_roundtrip_and_version_stamp(self, tmp_path):
+        import json
+        from src import asset_groups_store as gs
+        p = str(tmp_path / gs.FILE_NAME)
+        st = {gs.NAMES_KEY: {"3": "排障现场"}, gs.DETACHED_KEY: [7]}
+        assert gs.save(p, st) is True
+        data = json.loads(open(p, encoding="utf-8").read())
+        assert data["data_version"] == 1                 # save_records 补版本
+        assert data[gs.STORE_KEY] == st
+        assert gs.load(p) == st
+
+    def test_load_corrupt_file_backed_up(self, tmp_path):
+        from src import asset_groups_store as gs
+        p = tmp_path / gs.FILE_NAME
+        p.write_text("{ broken", encoding="utf-8")
+        assert gs.load(str(p)) == gs.empty_store()
+        # 损坏文件先备份再清空（与全部数据文件同一纪律）
+        assert (tmp_path / (gs.FILE_NAME + ".corrupt.bak")).exists()
+
+    def test_sanitize_garbage(self):
+        from src import asset_groups_store as gs
+        out = gs.sanitize({
+            gs.NAMES_KEY: {"3": "  名字  ", "x": "非数字键", "4": 123,
+                           "5": "   "},
+            gs.DETACHED_KEY: ["7", 8, -1, 0, "abc", 7, None],
+            "junk": 1,
+        })
+        assert out == {gs.NAMES_KEY: {"3": "名字"},
+                       gs.DETACHED_KEY: [7, 8]}
+        assert gs.sanitize(None) == gs.empty_store()
+        assert gs.sanitize(42) == gs.empty_store()
+
+    def test_sanitize_truncates_long_name(self):
+        from src import asset_groups_store as gs
+        out = gs.sanitize({gs.NAMES_KEY: {"1": "长" * 100}})
+        assert len(out[gs.NAMES_KEY]["1"]) == gs.NAME_MAX
+
+    def test_prune_drops_orphans(self):
+        from src import asset_groups_store as gs
+        st = {gs.NAMES_KEY: {"1": "活着", "9": "已删"},
+              gs.DETACHED_KEY: [1, 9, 10]}
+        out = gs.prune(st, valid_ids=[1, 2])
+        assert out == {gs.NAMES_KEY: {"1": "活着"}, gs.DETACHED_KEY: [1]}
+
+
+class TestApplyOverrides:
+    def _assets(self):
+        return [_Asset(1, _t(0)), _Asset(2, _t(10)),      # 同堆
+                _Asset(3, _t(300)), _Asset(4, _t(310))]   # 同堆
+
+    def test_detach_splits_and_keeps_coverage(self):
+        from src import asset_group as ag
+        groups = ag.cluster_assets(self._assets(), gap_seconds=120)
+        out = ag.apply_group_overrides(groups, detached=[2])
+        assert [a.asset_id for a in ag.flatten_groups(out)] == [1, 2, 3, 4]
+        # 2 被拆出成独立单元：按时间插在 1 与 3 之间
+        assert [[a.asset_id for a in g] for g in out] == [[1], [2], [3, 4]]
+
+    def test_detach_everything_degenerates_to_singletons(self):
+        from src import asset_group as ag
+        groups = ag.cluster_assets(self._assets(), gap_seconds=120)
+        out = ag.apply_group_overrides(groups, detached=[1, 2, 3, 4])
+        assert [len(g) for g in out] == [1, 1, 1, 1]
+
+    def test_unknown_and_dirty_ids_ignored(self):
+        from src import asset_group as ag
+        groups = ag.cluster_assets(self._assets(), gap_seconds=120)
+        out = ag.apply_group_overrides(groups, detached=["99", None, "x"])
+        assert [len(g) for g in out] == [2, 2]
+
+    def test_custom_label_beats_default(self):
+        from src import asset_group as ag
+        g = [_Asset(1, _t(0)), _Asset(2, _t(10))]
+        assert ag.group_label(g, 0, custom_name="排障现场") == "排障现场"
+        assert ag.group_label(g, 0, custom_name="   ") == "2 张 · 09:00"
+        assert ag.group_label(g, 0) == "2 张 · 09:00"      # 缺省参数兼容
+
+
+# ====================================================================
+# 7. 面板集成：命名 / 移出改变分组渲染，temp_assets.json 依旧零接触
+# ====================================================================
+def _burst_env(tmp_path, n=4):
+    """n 张同刻连拍 + 分组开启的现成面板（不走真实落盘时间戳）。
+
+    直铺后立即 _save()：temp_assets.json 落到磁盘，供「零接触」护栏
+    做字节摘要比对。
+    """
+    _app()
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "burst.png"))
+    mgr._assets = [AssetInfo(i + 1, "剪贴板图片_%d.png" % i, img, True, 10,
+                             _t(i)) for i in range(n)]
+    mgr._next_id = n + 1
+    mgr._save()
+    panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
+    return mgr, panel
+
+
+def test_rename_pile_updates_header_and_sidecar_file(tmp_path):
+    """命名 → 堆标题条换自定义名，标注落 asset_groups.json（旁路文件）。"""
+    import json as _json
+    mgr, panel = _burst_env(tmp_path)
+    head_id = panel._pile_heads[0]
+    groups_path = panel._groups_path
+    assert groups_path and groups_path.endswith("asset_groups.json")
+
+    panel._apply_pile_rename(head_id, " 登录页排障现场 ")
+    header = panel._thumb_delegate._header_texts[head_id]
+    assert header == "登录页排障现场", header
+    data = _json.loads(open(groups_path, encoding="utf-8").read())
+    assert data["asset_groups"]["names"] == {str(head_id): "登录页排障现场"}
+
+    # 清空 = 恢复默认名（删键，不留空串）
+    panel._apply_pile_rename(head_id, "")
+    assert panel._thumb_delegate._header_texts[head_id] == \
+        "%d 张 · 09:00" % 4
+    data = _json.loads(open(groups_path, encoding="utf-8").read())
+    assert data["asset_groups"]["names"] == {}
+
+
+def test_rename_and_detach_never_touch_temp_assets_json(tmp_path):
+    """★ 红线：命名 / 移出全程 temp_assets.json 字节不变（标注在旁路文件）。"""
+    import hashlib
+    mgr, panel = _burst_env(tmp_path)
+
+    def _digest():
+        with open(mgr._json_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    before = _digest()
+    panel._apply_pile_rename(panel._pile_heads[0], "现场")
+    panel._detach_asset(mgr._assets[1].asset_id, detach=True)   # 非堆首
+    panel._detach_asset(mgr._assets[1].asset_id, detach=False)
+    panel.set_grouping(False)
+    panel.refresh()
+    assert _digest() == before, "旁路标注动了 temp_assets.json（红线）"
+
+
+def test_detach_member_renders_standalone_and_restores(tmp_path):
+    """移出 → 该素材脱离堆、单独渲染无标题；取消移出 → 回到原堆。"""
+    mgr, panel = _burst_env(tmp_path, n=4)
+    aid = mgr._assets[2].asset_id                    # 堆中第 3 张
+    panel._detach_asset(aid, detach=True)
+    d = panel._thumb_delegate
+    assert aid not in panel._pile_of, "移出后仍算堆成员"
+    assert aid not in d._member_ordinals, "独立素材不挂堆内序号"
+    assert len(d._header_texts) == 1                 # 剩 3 张仍是 1 堆
+    assert d._header_texts[panel._pile_heads[0]] == "3 张 · 09:00"
+    # 渲染条目依旧齐全（只拆堆，不丢图）
+    assert panel._asset_list.count() == 4
+    # 取消移出 → 回到原堆
+    panel._detach_asset(aid, detach=False)
+    assert panel._pile_of.get(aid) == panel._pile_heads[0]
+    assert d._member_ordinals.get(aid) in ("#3", "#4")
+
+
+def test_detached_state_survives_refresh_and_flat_mode(tmp_path):
+    """标注是持久态：refresh 后仍生效；平铺态两张表照旧为空（不受标注影响）。
+
+    另钉住堆身份语义：堆名挂在**堆首**上——移出非首成员，堆名不动。
+    """
+    mgr, panel = _burst_env(tmp_path, n=4)
+    aid = mgr._assets[1].asset_id                    # 非堆首成员
+    panel._apply_pile_rename(panel._pile_heads[0], "现场")
+    panel._detach_asset(aid, detach=True)
+    panel.refresh()
+    assert aid not in panel._pile_of
+    assert panel._thumb_delegate._header_texts[
+        panel._pile_heads[0]] == "现场"              # 堆首未动，堆名保留
+    panel.set_grouping(False)
+    assert panel._thumb_delegate._header_texts == {}
+    assert panel._asset_list.count() == 4
+    panel.set_grouping(True)
+    assert aid not in panel._pile_of                 # 重新进入分组仍生效
+
+
+def test_detaching_the_head_hands_the_name_to_the_new_head(tmp_path):
+    """堆身份 = 堆首：堆首被移出 → 剩余成员在新堆首下聚成堆，旧堆名
+    成为孤儿标注（不应用到新堆，等素材删除时被 prune 清理）。"""
+    mgr, panel = _burst_env(tmp_path, n=4)
+    old_head = panel._pile_heads[0]
+    panel._apply_pile_rename(old_head, "现场")
+    panel._detach_asset(old_head, detach=True)
+    new_head = panel._pile_heads[0]
+    assert new_head != old_head
+    assert old_head not in panel._pile_of
+    assert panel._thumb_delegate._header_texts[new_head] == "3 张 · 09:00"
+
+
+def test_orphan_annotations_pruned_on_refresh(tmp_path):
+    """素材被删 → 指向它的堆名 / 移出标注在下次刷新时被惰性清理。"""
+    import json as _json
+    from src import asset_groups_store
+    mgr, panel = _burst_env(tmp_path, n=4)
+    dead_id = mgr._assets[3].asset_id
+    panel._apply_pile_rename(panel._pile_heads[0], "现场")
+    panel._detach_asset(dead_id, detach=True)
+    assert panel._group_store[asset_groups_store.NAMES_KEY]
+    # 模拟素材被外部删除
+    mgr._assets = [a for a in mgr._assets if a.asset_id != dead_id]
+    panel.refresh()
+    assert dead_id not in panel._group_store[asset_groups_store.DETACHED_KEY]
+    data = _json.loads(open(panel._groups_path, encoding="utf-8").read())
+    assert dead_id not in data["asset_groups"]["detached"]
+
+
+def test_flat_mode_has_no_pile_semantics(tmp_path):
+    """平铺态没有堆语义：归属速查恒空（右键菜单据此不出堆操作项）。"""
+    mgr, panel = _burst_env(tmp_path, n=3)
+    panel._detach_asset(mgr._assets[0].asset_id, detach=True)   # 先在分组态留标注
+    panel.set_grouping(False)
+    assert panel._pile_of == {} and panel._pile_heads == []
+    panel.set_grouping(True)
+    assert panel._pile_of, "重新进入分组后堆归属必须重建（refresh 路径）"

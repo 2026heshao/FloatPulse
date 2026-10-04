@@ -53,7 +53,7 @@ P2（字符图标退役弹药库，UI 重构 01，2026-10-02 批次，42 个）�
 file_ppt / file_zip / file_audio / file_video / file_code / file_web /
 file_generic
 通用动作：copy / link / code / command / folder / folder_open / image /
-download / check / warning / info / eye / merge / filter / calendar /
+download / check / warning / info / eye / merge / more / filter / calendar /
 clock / text / rename / lock / unlock
 领域：ai / pomodoro / export / install / store / cloud / pc / palette /
 ball / clipboard
@@ -604,6 +604,18 @@ ICON_PATHS = {
         + "M17.8,3.8V7.8C17.8,11.0 15.6,12.8 12.4,13.4"
     ),
 
+    # 更多（⋯）—— 三枚实心圆点（渐进披露菜单入口；设计稿
+    # plugins-center-redesign 标注「"更多"不在 icons.py 中，落地时建议
+    # 入 icon_render」的补齐）。
+    # ★ 走 **填充**而非描边：paint_icon 是统一描边管线，而零长度线段
+    #   （dot()）Qt 描边时整个跳过——warning/info 的装饰点其实一直没画出来
+    #   （主体形状撑住了观感）；描边小圆（r≈1.5）则成环孔糊点。本图标
+    #   只有点没有主体，必须实心 —— 在 ICON_FILLED 里声明，渲染层换画刷。
+    "more": (
+        circle(6.4, 12.0, 1.9) + circle(12.0, 12.0, 1.9)
+        + circle(17.6, 12.0, 1.9)
+    ),
+
     # 筛选 —— 漏斗（宽口收敛成窄颈）
     "filter": (
         poly(3.8, 4.4, 20.2, 4.4, 14.2, 12.2, 14.2, 18.8,
@@ -941,6 +953,13 @@ def icon_names() -> tuple:
 def has_icon(name) -> bool:
     """图标名是否存在（非字符串 / 未登记一律 False，不抛异常）。"""
     return isinstance(name, str) and name in ICON_PATHS
+
+
+# 填充型图标集合：这些名字在 icon_render.paint_icon 里**用画刷填充**，
+# 不走统一描边管线。为什么需要：描边管线画不出「实心点」——零长度
+# 线段（dot()）在 Qt 描边时整个跳过、描边小圆成环孔；而 ⋯（更多）这类
+# 全部由点构成的图标只有实心才成立。清单保持最小：新图标能描边就描边。
+ICON_FILLED = frozenset({"more"})
 
 
 # ====================================================================

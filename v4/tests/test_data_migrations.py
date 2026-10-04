@@ -137,13 +137,13 @@ class TestStoreVersions(unittest.TestCase):
     """STORE_VERSIONS / MIGRATIONS 注册表"""
 
     def test_all_stores_registered_at_current_version(self):
-        """7 个数据文件全部登记；config 已升到 v2（2026-10-03 分组阈值默认
+        """8 个数据文件全部登记；config 已升到 v2（2026-10-03 分组阈值默认
         120→900），其余 store 仍为 v1。新增迁移时同步改这里，别让它退化成
-        「全都写死 1」的摆设。"""
+        「全都写死 1」的摆设。（asset_groups = 素材会话堆旁路标注，2026-10-04）"""
         self.assertEqual(
             set(STORE_VERSIONS),
             {"config", "fragments", "notes", "tasks",
-             "groups", "stickies", "assets"})
+             "groups", "stickies", "assets", "asset_groups"})
         self.assertEqual(STORE_VERSIONS["config"], 2)
         for store, version in STORE_VERSIONS.items():
             if store == "config":

@@ -413,13 +413,20 @@ class SearchIndex:
             return 0.0
         return math.log(1.0 + (self._n - df + 0.5) / (df + 0.5))
 
-    def search(self, query, top_n: int = 20, kind=None):
+    def search(self, query, top_n: int = 20, kind=None, ranking: str = "bm25"):
         """返回 ``[Hit, ...]``（按分数降序，分数相同按标题稳定排序）
 
         ``kind`` 给定时只在该数据源内检索（UI 的分类筛选）；也接受
         数据源标识的集合（list/tuple/set/frozenset，v1.1.0 多选范围
         过滤）——分数在**全库**上算好之后才按范围排除，所以多选的排序
         与不过滤时逐条一致。
+
+        ``ranking`` 选打分公式（v1.4.0 插件设置「排序算法」的底层开关）：
+          - ``"bm25"``（缺省）：k1 词频饱和 + 长度归一化，业界默认参数
+          - ``"tfidf"``：经典 TF-IDF（idf × tf）——无饱和、无长度归一化，
+            长文档占便宜，给用户一个可感知差异的对照选项
+        其他取值一律按 bm25（枚举合法性由 manifest 校验层收窄，核心层
+        宽容兜底，宁可退回默认也不抛异常）。
         """
         empty = []
         qterms = self._tk.terms(query)
@@ -441,6 +448,7 @@ class SearchIndex:
             if t not in uniq:
                 uniq.append(t)
 
+        use_tfidf = ranking == "tfidf"
         scores = {}
         for term in uniq:
             bucket = self._postings.get(term)
@@ -450,6 +458,9 @@ class SearchIndex:
             if idf <= 0:
                 continue
             for uid, tf in bucket.items():
+                if use_tfidf:
+                    scores[uid] = scores.get(uid, 0.0) + idf * tf
+                    continue
                 doc_len = self._docs[uid][3]
                 denom = tf + self.k1 * (
                     1.0 - self.b + self.b * (doc_len / self._avgdl

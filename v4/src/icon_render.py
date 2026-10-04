@@ -37,7 +37,7 @@ from PyQt6.QtGui import (
     QColor, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap,
 )
 
-from src.icons import ICON_PATHS, ICON_SIZE, parse_path
+from src.icons import ICON_PATHS, ICON_SIZE, ICON_FILLED, parse_path
 
 
 # 默认笔宽（**目标像素**，不是 24 视框里的值）
@@ -123,6 +123,9 @@ def paint_icon(painter, name: str, rect, color, width: float = DEFAULT_STROKE):
     ``width`` 是**目标像素**下的笔宽 —— 内部按缩放比换算到 24 视框，
     因此同一图标在 16px 与 48px 下的视觉粗细一致（若不换算，48px 下
     描边会细得几乎看不见）。
+
+    填充型图标（``icons.ICON_FILLED``，如 ⋯ 三点）用画刷填充而非描边：
+    零长度/极小路径在描边管线里要么整个跳过要么成环孔，只有实心成立。
     """
     path = icon_path(name)
     r = QRectF(rect)
@@ -135,12 +138,16 @@ def paint_icon(painter, name: str, rect, color, width: float = DEFAULT_STROKE):
     painter.translate(r.x() + (r.width() - side) / 2.0,
                       r.y() + (r.height() - side) / 2.0)
     painter.scale(scale, scale)
-    pen = QPen(QColor(color))
-    pen.setWidthF(max(0.01, float(width)) / scale)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if name in ICON_FILLED:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+    else:
+        pen = QPen(QColor(color))
+        pen.setWidthF(max(0.01, float(width)) / scale)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawPath(path)
     painter.restore()
 

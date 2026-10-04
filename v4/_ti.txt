@@ -1,0 +1,19 @@
+[OK] docx loaded: 344 cards
+[OK] tasks: 5
+[OK] notes: 3
+[OK] fragments: 236
+[OK] temp assets: 22
+[OK] clipboard monitor started
+[OK] main window shown
+[OK] floating ball shown
+[OK] signal-slot bridges connected
+[OK] switch to page 0
+[OK] switch to page 1
+[OK] switch to page 2
+[OK] switch to page 3
+[OK] switch to page 4
+[OK] switch to page 5
+[OK] theme switched to dark
+[OK] theme switched to light
+[OK] init test passed, will quit in 500ms
+[DONE]

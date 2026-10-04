@@ -1043,3 +1043,57 @@ class TestFallbackGuardrails:
         assert reloaded.meta_time_for("2025-01-01 08:00") == "2025-01-01 08:00"
         assert reloaded.meta_time_for("") == "未知时间"
         assert reloaded.meta_time_for("坏格式") == "坏格式"
+
+
+# ====================================================================
+# v1.4.0 插件设置「排序算法」：ranking 参数的核心层分叉行为
+# ====================================================================
+class TestRankingSetting:
+    """bm25（默认）与 tfidf（设置项 enum 第二档）必须给出可感知的差异。
+
+    差异设计：同含查询项 tf=1 的短文档 a 与长文档 b——BM25 做长度
+    归一化 → a 严格高于 b；TF-IDF 无长度归一化 → 两者同分。
+    若 tfidf 分叉丢失（忘了实现 / 被误删），第一组断言直接红灯。
+    """
+
+    def _index(self, kb):
+        idx = kb.SearchIndex()
+        idx.add("a", "苹果 香蕉", kind="note", title="短文")
+        idx.add("b", "苹果 樱桃 梨 葡萄 柿子 西瓜", kind="note", title="长文")
+        return idx
+
+    def test_bm25_prefers_short_doc(self, kb):
+        idx = self._index(kb)
+        hits = idx.search("苹果", ranking="bm25")
+        by_uid = {h.uid: h.score for h in hits}
+        assert by_uid["a"] > by_uid["b"]
+
+    def test_tfidf_scores_length_free(self, kb):
+        idx = self._index(kb)
+        hits = idx.search("苹果", ranking="tfidf")
+        by_uid = {h.uid: h.score for h in hits}
+        assert by_uid["a"] == pytest.approx(by_uid["b"])
+
+    def test_tfidf_differs_from_bm25_scores(self, kb):
+        idx = self._index(kb)
+        bm = {h.uid: h.score for h in idx.search("苹果", ranking="bm25")}
+        tf = {h.uid: h.score for h in idx.search("苹果", ranking="tfidf")}
+        assert tf["b"] != pytest.approx(bm["b"])
+
+    def test_default_and_unknown_fall_back_to_bm25(self, kb):
+        idx = self._index(kb)
+        base = [(h.uid, h.score) for h in idx.search("苹果")]
+        assert base == [(h.uid, h.score)
+                        for h in idx.search("苹果", ranking="bm25")]
+        # 非法取值宽容兜底（枚举合法性由 manifest 校验层收窄）
+        assert base == [(h.uid, h.score)
+                        for h in idx.search("苹果", ranking="nonsense")]
+
+    def test_tfidf_multi_term_accumulates(self, kb):
+        """多词命中：tfidf 与 bm25 一样按词累加（不丢命中项）"""
+        idx = kb.SearchIndex()
+        idx.add("x", "苹果 香蕉 榴莲", kind="note", title="双词")
+        idx.add("y", "苹果 荔枝", kind="note", title="单词")
+        hits = idx.search("苹果 香蕉", ranking="tfidf")
+        assert hits[0].uid == "x"
+        assert {h.uid for h in hits} == {"x", "y"}

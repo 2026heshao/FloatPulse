@@ -174,3 +174,114 @@ class TestSettingsUiScaleRow:
         p, _ = panel
         assert hasattr(p, "_onboard_btn")
         assert "重看引导" in p._onboard_btn.text()
+
+
+# ====================================================================
+# P1-3（2026-10-04）：QSS 写死 px 字号随档位缩放
+# ====================================================================
+from src.theme import (current_ui_scale, get_card_window_qss,   # noqa: E402
+                       get_main_window_qss, get_menu_qss, scale_px_fonts,
+                       set_ui_scale)
+
+
+class TestScalePxFonts:
+    def test_scale_100_is_byte_identical(self):
+        qss = "QLabel { font-size: 13px; padding: 0 11px; }"
+        assert scale_px_fonts(qss, 100) == qss
+        assert scale_px_fonts(qss) == qss            # 缺省 = 当前档位（100）
+
+    def test_all_font_sizes_scale_layout_px_untouched(self):
+        qss = ("QLabel#a { font-size: 13px; }\n"
+               "QLabel#b { font-size: 11px; padding: 0 13px; }\n"
+               "QFrame#c { border: 1px solid x; border-radius: 3px;\n"
+               "           font-size: 15px; margin: 10px 2px; }")
+        out = scale_px_fonts(qss, 85)
+        assert "font-size: 11px" in out              # 13*0.85=11.05→11
+        assert "font-size: 9px" in out               # 11*0.85=9.35→9
+        assert "font-size: 13px" in out              # 15*0.85=12.75→13
+        assert "padding: 0 13px" in out              # 布局 px 不动
+        assert "border-radius: 3px" in out
+        assert "margin: 10px 2px" in out
+
+    def test_scale_150_values(self):
+        """150% 取值钉死（round half-to-even：19.5→20、22.5→22、16.5→16）"""
+        assert scale_px_fonts("font-size: 13px", 150) == "font-size: 20px"
+        assert scale_px_fonts("font-size: 15px", 150) == "font-size: 22px"
+        assert scale_px_fonts("font-size: 11px", 150) == "font-size: 16px"
+
+    def test_floor_at_1px_and_garbage_scale(self):
+        assert "font-size: 1px" in scale_px_fonts("font-size: 1px", 85)
+        assert scale_px_fonts("font-size: 13px", None) == \
+            scale_px_fonts("font-size: 13px")        # None → 当前档位
+        assert scale_px_fonts("font-size: 13px", "大") == "font-size: 13px"
+        assert scale_px_fonts("", 150) == ""
+
+    def test_multi_occurrence_all_replaced(self):
+        qss = "A{font-size:10px}B{font-size:10px}C{font-size: 10px}"
+        out = scale_px_fonts(qss, 130)
+        assert out.count("13px") == 3                # 10*1.3=13
+        assert "10px" not in out
+
+
+class TestQssGettersScale:
+    def test_100_percent_byte_identical_to_substitute(self, qapp):
+        """★ 硬护栏：档位 100 时三个 getter 与裸 substitute 逐字节相等"""
+        for getter, tpl in ((get_main_window_qss, theme_mod._QSS_MAIN_WINDOW),
+                            (get_card_window_qss, theme_mod._QSS_CARD_WINDOW),
+                            (get_menu_qss, theme_mod._QSS_MENU)):
+            try:
+                set_ui_scale(100)
+                assert getter("dark") == tpl.substitute(
+                    theme_mod.get_colors("dark"))
+            finally:
+                set_ui_scale(100)
+
+    def test_scaled_qss_differs_and_restores(self, qapp):
+        try:
+            set_ui_scale(100)
+            baseline = get_main_window_qss("dark")
+            set_ui_scale(150)
+            scaled = get_main_window_qss("dark")
+            assert scaled != baseline
+            assert "font-size: 20px" in scaled       # 13px→20
+            assert "font-size: 10px" not in scaled   # 全部被换算过
+            set_ui_scale(100)
+            assert get_main_window_qss("dark") == baseline
+        finally:
+            set_ui_scale(100)
+
+    def test_apply_app_font_registers_scale(self, qapp):
+        try:
+            apply_app_font(130)
+            assert current_ui_scale() == 130
+            qss = get_main_window_qss("dark")
+            assert "font-size: 17px" in qss          # 13px@130% = 16.9→17
+        finally:
+            apply_app_font(100)
+        assert current_ui_scale() == 100
+
+    def test_menu_and_card_qss_scale_too(self, qapp):
+        """菜单模板只有 13px 一档（85%→11px）；卡片模板 10–17px 全换算"""
+        try:
+            set_ui_scale(85)
+            assert "font-size: 11px" in get_menu_qss("dark")     # 13px→11
+            assert "font-size: 11px" in get_card_window_qss("dark")  # 13→11
+            assert "font-size: 8px" in get_card_window_qss("dark")   # 10→8.5→8
+        finally:
+            set_ui_scale(100)
+
+
+class TestBallBadgeFont:
+    def test_badge_px_follows_scale(self):
+        """球体徽标字号随档位（round half-to-even：16.5→16、14.3→14）"""
+        import knowledge_ball
+        assert knowledge_ball.badge_font_px(100) == 11       # 基准不变
+        assert knowledge_ball.badge_font_px(85) == 9         # 9.35→9
+        assert knowledge_ball.badge_font_px(130) == 14       # 14.3→14
+        assert knowledge_ball.badge_font_px(150) == 16       # 16.5→16
+        assert knowledge_ball.badge_font_px("大") == 11      # 脏值回基准
+        assert knowledge_ball.badge_font_px() == 11          # 缺省读当前档位
+
+    def test_badge_floor(self):
+        import knowledge_ball
+        assert knowledge_ball.badge_font_px(1) == 9          # 下限 9px

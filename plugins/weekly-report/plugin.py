@@ -57,6 +57,26 @@ RANGE_OPTIONS = (
     (RANGE_CUSTOM, "自定义区间"),
 )
 
+# ---------------- 默认统计范围（v1.3.0 插件独立设置） ----------------
+# enum 只开放 today/week 两档：7d/custom 是低频选择，不该由默认值替用户
+# 常驻；RANGE_WEEK 作旧宿主（无 get_setting 契约）与非法值的兜底。
+DEFAULT_RANGE_KEY = "default_range"
+
+
+def resolve_default_range(ctx, fallback=RANGE_WEEK):
+    """读「打开页面默认统计范围」生效值（纯函数，mock ctx 可测）。
+
+    旧宿主无 get_setting 契约 / 读取异常 / 值不在两档内 → 回落 fallback。
+    """
+    getter = getattr(ctx, "get_setting", None) if ctx is not None else None
+    if not callable(getter):
+        return fallback
+    try:
+        raw = getter(DEFAULT_RANGE_KEY, fallback)
+    except Exception:                             # noqa: BLE001
+        return fallback
+    return raw if raw in (RANGE_TODAY, RANGE_WEEK) else fallback
+
 # 碎片内容类别 → 分组标题 + 展示顺序（与 fragment_classifier 的值域对齐）
 CATEGORY_TITLES = (
     ("link", "链接"),
@@ -592,6 +612,10 @@ class ReportDialog(PluginDialog):
                          parent=parent, size=(860, 620))
         # 基类已把 ctx 存进 self._plugin_ctx；这里沿用本插件惯用的 _ctx 名字
         self._ctx = ctx
+        # 插件独立设置（v1.3.0）：默认统计范围按生效值勾选。本对话框是
+        # 短命对象，且打开后的范围选择是用户在界面上的显式决定——不订阅
+        # settings_changed，改默认值只影响下次打开。
+        self._default_range = resolve_default_range(ctx)
         self._today = date.today()
         self._polish_busy = False      # AI 润色在途（防重复点击）
         self._last_generated = ""      # 最近一次按范围生成的原文（覆盖确认用）
@@ -621,7 +645,7 @@ class ReportDialog(PluginDialog):
             self._group.addButton(rb)
             self._radios[key] = rb
             rc.addWidget(rb)
-        self._radios[RANGE_WEEK].setChecked(True)
+        self._radios[self._default_range].setChecked(True)
 
         week_start = self._today - timedelta(days=6)
         self._from = QDateEdit()
@@ -968,7 +992,7 @@ class DraftReportAction(BallAction):
 class WeeklyReportPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "日报 / 周报草稿"
-    version = "1.2.0"
+    version = "1.3.0"
 
     def create_actions(self, ctx):
         return [DraftReportAction()]

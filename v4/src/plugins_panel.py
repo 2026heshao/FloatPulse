@@ -40,11 +40,15 @@
 import os
 import re
 
+from src.plugin_loader import PLUGIN_PACKAGE_EXT
+
 from PyQt6.QtCore import Qt, QPoint, QRect, QSize
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QLabel,
     QPushButton, QScrollArea, QFrame, QTextBrowser, QMessageBox,
-    QSizePolicy,
+    QSizePolicy, QApplication, QLineEdit, QMenu, QWidgetAction,
+    QComboBox,
 )
 
 # 弹窗基类：PluginStoreDialog 在模块加载期就需要它作基类，
@@ -52,8 +56,9 @@ from PyQt6.QtWidgets import (
 from src.glass_dialog import GlassDialog
 
 from src import plugin_market
+from src import plugin_settings
 from src.controls import (SmoothButton, EmptyState, IconButton, PageTitle,
-                          IconLabel)
+                          IconLabel, Stepper, ToggleSwitch)
 from src.theme import DEFAULT_THEME, get_colors
 from src.plugin_net import make_async_getter, make_async_bytes_getter
 from src.update_checker import RELEASES_API_URL, check_headers
@@ -277,7 +282,9 @@ class PluginsPanel(QWidget):
         self._cards_layout = None
         self._error_layout = None
         self._error_box = None
-        self._error_label = None
+        self._error_toggle = None     # 失败折叠条标题钮（checkable，2026-10-04）
+        self._error_body = None       # 失败卡片容器（折叠时整体隐藏）
+        self._error_expanded = False  # 折叠状态（会话级；默认收起）
         self._store_dialog = None     # 插件商店弹窗（懒创建，见 _on_open_store_dialog）
         self._empty_label = None
         self._gate_label = None
@@ -285,6 +292,12 @@ class PluginsPanel(QWidget):
         self._dir_label = None
         self._store_dir_label = None
         self._rescan_btn = None
+        # 搜索 + 状态筛选（2026-10-04 三件套之二）
+        self._search_input = None
+        self._seg_buttons = {}        # "all"/"on"/"off" -> QPushButton
+        self._filter_hint = None
+        self._card_records = []       # [(card, lp)]，过滤判据与卡片一一对应
+        self._visible_cards = []      # 过滤后参与网格摆放的卡片
         self._build_ui()
 
     # ---------------- UI 构建 ----------------
@@ -348,11 +361,41 @@ class PluginsPanel(QWidget):
         self._gate_label.setVisible(False)
         v.addWidget(self._gate_label)
 
-        # ---- 工具栏：只剩两个低频操作（主按钮已在页头）----
+        # ---- 工具栏：搜索 + 状态筛选 + 两个低频操作（主按钮已在页头）----
+        # 搜索/筛选（2026-10-04 三件套之二，设计稿 plugins-center-redesign）：
+        # 6 个插件时可有可无，装到 15+ 才真正省事——按插件名或动作名过滤 +
+        # 全部/已启用/已停用分段，两者叠加生效，只改可见性不重建卡片。
         # 「打开插件目录」「重新扫描」由描边按钮降为文字按钮：一屏只留
         # 一个主按钮，其余按层级递降，不再是一排同权重的按钮汤。
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("pluginSearchInput")
+        self._search_input.setPlaceholderText("搜索插件名 / 动作名…")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setFixedWidth(190)
+        self._search_input.setToolTip("按插件名、插件 id 或动作名过滤下方卡片")
+        self._search_input.textChanged.connect(lambda _t: self._apply_filter())
+        toolbar.addWidget(self._search_input)
+
+        seg_tips = {
+            "all": "显示全部已安装插件",
+            "on": "只看状态为「已启用」的插件",
+            "off": "只看已停用 / 未提供动作 / 未生效的插件",
+        }
+        for key, label in (("all", "全部"), ("on", "已启用"), ("off", "已停用")):
+            btn = QPushButton(label)
+            btn.setObjectName("pluginSegBtn")
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            btn.setChecked(key == "all")
+            btn.setToolTip(seg_tips[key])
+            btn.clicked.connect(lambda _c=False, _k=key: self._apply_filter())
+            self._seg_buttons[key] = btn
+            toolbar.addWidget(btn)
+
+        toolbar.addStretch()
 
         open_dir_btn = IconButton("folder_open", text="打开插件目录",
                                   icon_size=14, object_name="textBtn")
@@ -370,18 +413,30 @@ class PluginsPanel(QWidget):
         v.addLayout(toolbar)
 
         # ---- 加载失败区（默认隐藏；有失败项时显示在卡片列表上方）----
+        # 2026-10-04 折叠条（三件套之三，设计稿 plugins-center-redesign）：
+        # 失败是低频状态，不该向每个健康会话征收竖向空间——默认收起成
+        # 一条可点击的提示钮，点击才展开失败卡；展开状态会话内记住。
         self._error_box = QFrame()
         self._error_box.setObjectName("pluginErrorBox")
         eb = QVBoxLayout(self._error_box)
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(8)
-        self._error_label = QLabel("加载失败的插件")
-        self._error_label.setObjectName("pluginSectionLabel")
-        eb.addWidget(self._error_label)
+        self._error_toggle = QPushButton()
+        self._error_toggle.setObjectName("pluginErrorToggle")
+        self._error_toggle.setCheckable(True)
+        self._error_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._error_toggle.setToolTip("展开 / 收起加载失败的插件详情")
+        self._error_toggle.toggled.connect(self._on_error_toggled)
+        eb.addWidget(self._error_toggle)
+        self._error_body = QWidget()
+        error_body_lay = QVBoxLayout(self._error_body)
+        error_body_lay.setContentsMargins(0, 0, 0, 0)
+        error_body_lay.setSpacing(8)
         self._error_layout = QVBoxLayout()
         self._error_layout.setContentsMargins(0, 0, 0, 0)
         self._error_layout.setSpacing(8)
-        eb.addLayout(self._error_layout)
+        error_body_lay.addLayout(self._error_layout)
+        eb.addWidget(self._error_body)
         self._error_box.setVisible(False)
         v.addWidget(self._error_box)
 
@@ -407,9 +462,19 @@ class PluginsPanel(QWidget):
         self._cards_layout.setColumnStretch(0, 1)
         self._cards_layout.setColumnStretch(1, 1)
         self._cards_outer.addLayout(self._cards_layout)
+        # 搜索/筛选把所有卡都滤掉时的提示（与「还没安装」空态区分：
+        # 这里是「装了但被当前条件滤掉」）
+        self._filter_hint = QLabel(
+            "没有符合当前搜索 / 筛选条件的插件——换个关键词，或切回「全部」")
+        self._filter_hint.setObjectName("hintLabel")
+        self._filter_hint.setWordWrap(True)
+        self._filter_hint.setContentsMargins(2, 12, 2, 2)
+        self._filter_hint.setVisible(False)
+        self._cards_outer.addWidget(self._filter_hint)
         self._cards_outer.addStretch()           # 卡片永远顶对齐
         self._card_widgets = []                  # 插入顺序的卡片（重排依据）
         self._card_cols = 2                      # 当前列数（_reflow_cards 维护）
+        self._last_rebuild_fp = None             # 重建指纹（refresh_if_stale 守卫）
         scroll.setWidget(container)
         v.addWidget(scroll, 1)
 
@@ -470,6 +535,23 @@ class PluginsPanel(QWidget):
         self._store_dir_label.setText("插件商店目录：%s" % store_text)
         self._store_dir_label.setToolTip(store_text)
 
+        # 重建指纹：强刷后同步刷新，供 refresh_if_stale 做切页守卫
+        self._last_rebuild_fp = self._fingerprint(
+            plugins, errors, self._store_stat_fingerprint(loader), gate_on)
+
+        # ★ 先建后拆（黑闪修复 2026-10-04）：全部新卡片先在布局外建好，
+        #   再一次性拆旧挂新。旧顺序「清空 → 逐个建」在半透明玻璃壳
+        #   （WA_TranslucentBackground + GlassPanel 半透明填充）下会产生
+        #   一帧无 widget 覆盖的空网格，DWM 合成表现为黑底闪现——插件
+        #   中心是唯一每次切页都整页重建的页面，故只有它闪。
+        new_card_widgets = []
+        new_card_records = []
+        for lp in plugins:
+            card = self._make_card(lp)
+            new_card_widgets.append(card)
+            new_card_records.append((card, lp))
+        new_error_cards = [self._make_error_card(fe) for fe in errors]
+
         # 清空旧卡片（网格只装卡片本体；尾部 stretch 在外层 vbox，不会被动到）
         while self._cards_layout.count():
             item = self._cards_layout.takeAt(0)
@@ -477,23 +559,30 @@ class PluginsPanel(QWidget):
             if w is not None:
                 w.hide()
                 w.deleteLater()
-        self._card_widgets = []
+        self._card_widgets = new_card_widgets
+        self._card_records = new_card_records
 
-        # 清空旧失败卡片
+        # 清空旧失败卡片并挂上新的
         while self._error_layout.count():
             item = self._error_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        for fe_card in new_error_cards:
+            self._error_layout.addWidget(fe_card)
 
-        # 失败区
+        # 失败区（折叠条：标题常显，卡片按展开态决定可见；卡片本体已在
+        # 上方「先建后拆」阶段挂入 new_error_cards，这里只管折叠条状态）
         has_errors = bool(errors)
         self._error_box.setVisible(has_errors)
         if has_errors:
-            self._error_label.setText(
-                f"加载失败的插件（{len(errors)} 个）——见下方原因与修复建议")
-            for fe in errors:
-                self._error_layout.addWidget(self._make_error_card(fe))
+            self._error_toggle.setText(
+                f"加载失败的插件（{len(errors)} 个）"
+                f"——{'点击收起' if self._error_expanded else '点击展开'}原因与修复建议")
+            self._error_toggle.blockSignals(True)
+            self._error_toggle.setChecked(self._error_expanded)
+            self._error_toggle.blockSignals(False)
+            self._error_body.setVisible(self._error_expanded)
 
         has_plugins = bool(plugins)
         show_empty = (not has_plugins and not has_errors
@@ -529,38 +618,183 @@ class PluginsPanel(QWidget):
             cnt += f"，商店可安装 {n_store} 个"
         self._count_label.setText(cnt)
 
-        # 已安装卡片按行优先进网格（[c0 c1 / c2 c3 ...]，与列表顺序一致）
-        for lp in plugins:
-            self._grid_add_card(self._make_card(lp))
+        # 已安装卡片按行优先进网格（[c0 c1 / c2 c3 ...]，与列表顺序一致）；
+        # 卡片本体已在「先建后拆」阶段构建并赋给 _card_records，
+        # 这里只按搜索/筛选条件决定可见与占位——过滤只改可见性，
+        # 不重建卡片，切回「全部」零开销。
+        self._apply_filter()
 
         # 商店清单本身不在这页渲染（2026-09-28 起在独立弹窗 PluginStoreDialog），
         # 这里只留计数与空态判据：让用户知道「有包可装」，去点工具栏的商店按钮。
 
-    # ---------------- 双列网格 ----------------
-    def _grid_add_card(self, card):
-        """把卡片按行优先顺序放进网格（刷新路径；列数随容器宽度自适应）"""
-        self._card_widgets.append(card)
-        self._place_card(len(self._card_widgets) - 1)
+    # ---------------- 切页守卫（黑闪修复 2026-10-04） ----------------
+    def _store_stat_fingerprint(self, loader):
+        """商店目录的轻量指纹（文件名+大小+mtime），避免每次切页读 zip。
 
-    def _place_card(self, idx: int):
-        row, col = divmod(idx, self._card_cols)
-        self._cards_layout.addWidget(self._card_widgets[idx], row, col)
+        返回 None 表示目录读不了 → 调用方视为「未知」，强制全量刷新
+        （保持旧行为）。目录属性拿不到同样返回 None。
+        """
+        try:
+            d = loader.store_dir
+        except (AttributeError, TypeError):
+            return None
+        if not d:
+            return None
+        try:
+            out = []
+            for name in sorted(os.listdir(d)):
+                if not name.endswith(PLUGIN_PACKAGE_EXT):
+                    continue
+                st = os.stat(os.path.join(d, name))
+                out.append((name, st.st_size, st.st_mtime))
+            return tuple(out)
+        except OSError:
+            return None
+
+    def _fingerprint(self, plugins, errors, store_stats, gate_on):
+        """卡片重建指纹：覆盖 _make_card / 失败卡 / 空态 / 计数的数据面。
+
+        - 每个 LoadedPlugin：身份 + 登记结果 + 动作数 + 状态键（停用态
+          由 _state_key 动态判，启停按钮就地更新后指纹自然失配）；
+        - 每个 FailedPlugin：身份 + 阶段 + 原因；
+        - store 维度用 stat 指纹（新丢包 / 换包即失配）；
+        - 总闸状态直接入指纹。
+        """
+        pl = tuple(
+            (getattr(lp, "plugin_id", ""), getattr(lp, "name", ""),
+             getattr(lp, "version", ""), bool(getattr(lp, "registered", False)),
+             getattr(lp, "actions_ok", 0),
+             len(getattr(lp, "actions_raw", []) or []),
+             len(getattr(lp, "warnings", []) or []),
+             PluginsPanel._state_key(lp))
+            for lp in plugins)
+        er = tuple(
+            (getattr(fe, "plugin_id", "") or getattr(fe, "folder", ""),
+             getattr(fe, "stage", ""), str(getattr(fe, "reason", "")))
+            for fe in errors)
+        return (pl, er, store_stats, bool(gate_on))
+
+    def refresh_if_stale(self):
+        """切页路径专用刷新：数据没变就零重建。
+
+        插件中心此前每次切页都整页重建卡片（全窗最大面积重绘），在
+        WA_TranslucentBackground 半透明壳架构下存在 DWM 合成黑帧的
+        触发面（用户报障：每次点插件中心导航键闪黑窗）。指纹相同
+        （且面板曾渲染过）时直接返回——卡片、失败卡、计数全部不动；
+        数据有任何变化（启停/安装/卸载/重扫/丢包）则走全量 refresh()。
+        """
+        loader = getattr(self._host, "plugin_loader", None)
+        gate_on = True
+        try:
+            gate_on = bool(self._host._config.get("plugins_enabled", True))
+        except (AttributeError, TypeError):
+            pass
+        plugins = []
+        errors = []
+        if loader is not None and gate_on:
+            try:
+                plugins = list(loader.loaded_plugins())
+            except Exception:                     # noqa: BLE001 - 展示层兜底
+                plugins = []
+            try:
+                errors = list(loader.load_errors())
+            except Exception:                     # noqa: BLE001 - 旧 loader 兜底
+                errors = []
+        store_stats = ()
+        if loader is not None and gate_on:
+            store_stats = self._store_stat_fingerprint(loader)
+        fp = self._fingerprint(plugins, errors, store_stats, gate_on)
+        ever_built = bool(self._card_records) or bool(self._card_widgets)
+        if ever_built and fp == self._last_rebuild_fp:
+            return
+        self.refresh()
+
+    # ---------------- 双列网格与搜索/筛选 ----------------
+    def _regrid(self):
+        """把**当前可见**的卡片按行优先摆进网格（过滤 / 重排共用一处）。
+
+        被滤掉的卡片不进网格（隐藏控件留在布局里会留下空洞占位），
+        只作为 self._card_records 的成员保留，切回「全部」时零重建回来。
+        """
+        while self._cards_layout.count():
+            self._cards_layout.takeAt(0)
+        for idx, card in enumerate(self._visible_cards):
+            row, col = divmod(idx, self._card_cols)
+            self._cards_layout.addWidget(card, row, col)
+        self._cards_layout.setColumnStretch(1, 1 if self._card_cols == 2 else 0)
 
     def _reflow_cards(self, width: int):
         """容器宽度变化：两列放不下按钮行时回落单列（反之亦然），重排现有卡片。
 
-        由 _CardsContainer.resizeEvent 驱动；列数没变就不动（resize 高频
+        由 _CardsScroll.resizeEvent 驱动；列数没变就不动（resize 高频
         触发，重排一次要拆装全部条目）。
         """
         want = 2 if width >= GRID_TWO_COL_MIN_WIDTH else 1
         if want == self._card_cols:
             return
         self._card_cols = want
-        while self._cards_layout.count():
-            self._cards_layout.takeAt(0)
-        for idx in range(len(self._card_widgets)):
-            self._place_card(idx)
-        self._cards_layout.setColumnStretch(1, 1 if want == 2 else 0)
+        self._regrid()
+
+    def _current_seg(self) -> str:
+        """当前分段筛选键："all" / "on" / "off"（无勾选时兜底 "all"）"""
+        for key, btn in self._seg_buttons.items():
+            if btn.isChecked():
+                return key
+        return "all"
+
+    def _card_matches_filter(self, lp) -> bool:
+        """单张卡片是否通过当前「分段 + 搜索」条件（两者叠加，AND 语义）。
+
+        分段按 :meth:`_state_key` 同源判定：已启用 = on；已停用段收拢
+        其余全部状态（已停用 / 未提供动作 / 未生效）——三段式 UI 里
+        「非全部启用」是它唯一的反义，tooltip 里已写明口径。
+        搜索词匹配插件名 / 插件 id / 动作名（大小写不敏感的包含匹配）。
+        """
+        seg = self._current_seg()
+        state = self._state_key(lp)
+        if seg == "on" and state != "on":
+            return False
+        if seg == "off" and state == "on":
+            return False
+        query = ""
+        if self._search_input is not None:
+            query = self._search_input.text().strip().lower()
+        if not query:
+            return True
+        actions = list(getattr(lp, "actions_raw", []) or [])
+        haystack = " ".join(
+            [strip_emoji(getattr(lp, "name", "") or ""),
+             getattr(lp, "plugin_id", "") or ""]
+            + [strip_emoji(getattr(a, "title", "") or getattr(a, "id", "") or "")
+               for a in actions]
+        ).lower()
+        return query in haystack
+
+    def _apply_filter(self):
+        """按搜索词 + 分段重摆卡片：只改可见性与网格占位，不重建卡片。"""
+        self._visible_cards = []
+        for card, lp in self._card_records:
+            visible = self._card_matches_filter(lp)
+            card.setVisible(visible)
+            if visible:
+                self._visible_cards.append(card)
+        self._regrid()
+        if self._filter_hint is not None:
+            # 「装了但全被滤掉」才提示；真没装走 EmptyState 空态
+            self._filter_hint.setVisible(
+                bool(self._card_records) and not self._visible_cards)
+
+    def _on_error_toggled(self, checked: bool):
+        """失败折叠条展开 / 收起（标题钮 checked ↔ 卡片容器可见）"""
+        self._error_expanded = bool(checked)
+        if self._error_body is not None:
+            self._error_body.setVisible(self._error_expanded)
+        if self._error_toggle is not None and self._error_box is not None \
+                and self._error_box.isVisibleTo(self):
+            n = self._error_layout.count()
+            self._error_toggle.setText(
+                f"加载失败的插件（{n} 个）"
+                f"——{'点击收起' if checked else '点击展开'}原因与修复建议")
 
     @staticmethod
     def _has_store_pkgs(store) -> bool:
@@ -704,6 +938,17 @@ class PluginsPanel(QWidget):
             tag = QLabel(status[0])
             tag.setObjectName(status[1])
             head.addWidget(tag)
+
+        # ---- ⋯ 渐进披露菜单入口（2026-10-04 三件套之一）----
+        # 插件 ID / 依赖 / 注册页面是「需要时一眼能找到，不需要时不出现」
+        # 的低频元信息（设计稿 plugins-center-redesign），收进菜单而非
+        # 常驻卡面——卡面最贵的右上角留给状态列。
+        more_btn = IconButton("more", size=20, icon_size=14,
+                              object_name="pluginMoreBtn",
+                              tooltip="插件 ID / 依赖 / 注册页面 / 复制 ID")
+        more_btn.clicked.connect(lambda _checked=False, p=lp:
+                                 self._show_card_menu(p))
+        head.addWidget(more_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         body.addLayout(head)
 
         # ---- 描述行：manifest.description > 类 docstring 首行 ----
@@ -806,6 +1051,19 @@ class PluginsPanel(QWidget):
                 lambda _checked=False, p=readme: self._on_open_file(p))
             bottom.addWidget(readme_btn)
 
+        # ---- 设置按钮（2026-10-04 插件独立设置）----
+        # 只有 manifest 声明了非空 settings 的插件才有（与能力三档同款
+        # 声明式模型：不声明就没有入口）。编辑走 GlassDialog 弹层表单，
+        # 存储落插件私有目录（plugin_settings），不进主 config。
+        if manifest.get("settings"):
+            settings_btn = IconButton("settings", text="设置", icon_size=14,
+                                      object_name="textBtn")
+            settings_btn.setToolTip("配置该插件声明的设置项"
+                                    "（保存在插件私有数据目录，不进主配置）")
+            settings_btn.clicked.connect(
+                lambda _checked=False, p=lp: self._on_open_plugin_settings(p))
+            bottom.addWidget(settings_btn)
+
         uninstall_btn = IconButton("trash", text="卸载", icon_size=14,
                                    object_name="dangerBtn",
                                    off_color="danger", hover_color="#FFFFFF")
@@ -867,6 +1125,89 @@ class PluginsPanel(QWidget):
         lab.setToolTip(CAP_TIPS.get(cap, ""))
         row.addWidget(lab)
         return wrap
+
+    # ---------------- 卡片 ⋯ 渐进披露菜单（2026-10-04 三件套之一）----------------
+    def _host_qss(self) -> str:
+        """宿主主窗口当前 QSS（给 ⋯ 菜单与主窗右键菜单同一套视觉）。
+
+        测试替身没有 _container / styleSheet → 返回空串，菜单退回系统
+        默认样式，不崩。
+        """
+        container = getattr(self._host, "_container", None)
+        ss = getattr(container, "styleSheet", None)
+        if callable(ss):
+            try:
+                return ss() or ""
+            except Exception:                     # noqa: BLE001 - 展示层兜底
+                return ""
+        return ""
+
+    def _build_card_menu(self, lp) -> QMenu:
+        """构建单张卡片的 ⋯ 菜单（构建与弹出分离，离屏测试可直达构建）。
+
+        信息行（插件 ID / 依赖 / 注册页面）用 QWidgetAction 承载——它们是
+        「展示」不是「命令」，不该混进可勾选的 QAction 文本流里。依赖在
+        卡面悬停提示里仍保留（降噪批次的既有契约，不动）。
+        """
+        menu = QMenu(self)
+        qss = self._host_qss()
+        if qss:
+            menu.setStyleSheet(qss)
+
+        manifest = getattr(lp, "manifest", {}) or {}
+        requires = [str(r).strip() for r in (manifest.get("requires") or [])
+                    if str(r).strip()]
+        page = manifest.get("page") or {}
+        page_title = ""
+        if isinstance(page, dict):
+            page_title = strip_emoji(str(page.get("title", "") or ""))
+        rows = [
+            ("插件 ID", getattr(lp, "plugin_id", "") or "（未知）"),
+            ("依赖", "、".join(requires) if requires else "（未声明）"),
+            ("注册页面", page_title or "（无插件页）"),
+        ]
+        for title, value in rows:
+            widget = QWidget()
+            lay = QHBoxLayout(widget)
+            lay.setContentsMargins(12, 4, 14, 4)
+            lay.setSpacing(12)
+            t = QLabel(title)
+            t.setObjectName("pluginMenuInfoTitle")
+            v = QLabel(value)
+            v.setObjectName("pluginMenuInfoValue")
+            v.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            lay.addWidget(t, 0, Qt.AlignmentFlag.AlignVCenter)
+            lay.addWidget(v, 1, Qt.AlignmentFlag.AlignVCenter)
+            act = QWidgetAction(menu)
+            act.setDefaultWidget(widget)
+            menu.addAction(act)
+
+        menu.addSeparator()
+        pid = getattr(lp, "plugin_id", "") or ""
+        copy_act = menu.addAction("复制插件 ID")
+        copy_act.setEnabled(bool(pid))
+        copy_act.triggered.connect(lambda _c=False, p=pid:
+                                   self._copy_plugin_id(p))
+        return menu
+
+    def _show_card_menu(self, lp):
+        """在光标处弹出 ⋯ 菜单（构建与弹出分离：离屏测试只调构建）"""
+        menu = self._build_card_menu(lp)
+        menu.exec(QCursor.pos())
+        menu.deleteLater()
+
+    def _copy_plugin_id(self, plugin_id: str):
+        """复制插件 id 到剪贴板（⋯ 菜单唯一命令项），成功给一条轻提示"""
+        if not plugin_id:
+            return
+        QApplication.clipboard().setText(plugin_id)
+        toast = getattr(self._host, "show_toast", None)
+        if callable(toast):
+            try:
+                toast(f"已复制插件 ID：{plugin_id}")
+            except Exception:                     # noqa: BLE001 - 展示层兜底
+                pass
 
     def _make_store_card(self, entry) -> QWidget:
         """商店里一个可安装包的卡片：名称 + 版本 + 状态 + 描述 + 安装按钮。
@@ -1278,6 +1619,19 @@ class PluginsPanel(QWidget):
     def _on_startfile(self, path: str):
         """交给系统默认程序打开（委托模块级 _startfile_warn，避免两份逻辑）"""
         _startfile_warn(self, path)
+
+    # ---------------- 插件设置（2026-10-04） ----------------
+    def _on_open_plugin_settings(self, lp):
+        """打开单个插件的设置弹层（GlassDialog 按 manifest.settings 渲染表单）。
+
+        构建与弹出分离（build_plugin_settings_dialog 是模块级函数），
+        离屏测试可以只构建不弹出。无设置项 / manifest 缺失 → 静默返回：
+        按钮本就不该出现在这类插件上，这里是双保险。
+        """
+        dlg = build_plugin_settings_dialog(self._host, lp)
+        if dlg is None:
+            return
+        dlg.exec()
 
     # ---------------- 安装 / 卸载 ----------------
     def _on_install(self, plugin_id: str, name: str):
@@ -1779,3 +2133,227 @@ class PluginStoreDialog(GlassDialog):
         self._set_online_status(f"{it['name']} 已下载并开始安装…")
         self._panel._on_install(it["id"], it["name"])
         self._set_online_status(f"{it['name']} 已从在线市场安装")
+
+
+class PluginSettingsDialog(GlassDialog):
+    """插件独立设置弹层（2026-10-04）：按 manifest.settings 通用渲染表单。
+
+    声明式契约：宿主不认识任何具体插件的设置语义，只按 schema 渲染——
+      - ``bool``  → ToggleSwitch（与设置页同款开关，主题色自绘）
+      - ``int``   → Stepper（禁 QSlider；min/max 来自 schema）
+      - ``float`` → Stepper（divisor=100 / decimals=2，两位小数档）
+      - ``enum``  → QComboBox（choices 来自 schema）
+    type 只有四种是 manifest 校验期收窄的（validate_manifest），这里
+    不存在第五种分支——多出来的类型根本进不了插件加载。
+
+    主题：GlassDialog 复用主窗口 QSS，light/dark 自动跟随；保存 / 取消
+    走 primaryBtn / secondaryBtn（$on_primary / $secondary_text 由 QSS
+    统一管）。表单构建完成后**再调一次 apply_theme**：基类 __init__ 末尾
+    首次调用时 Stepper 内部的 IconButton 还不存在，需要 findChildren 兜底
+    （dark 主题下否则会拿到 light 配色的 ± 图标）。
+
+    保存语义：逐项 plugin_settings.set_one（类型 / 边界收紧校验、原子
+    落盘、遗留键保留）；**实际有改动**的 key 列表经 ctx.settings_changed
+    发射（无改动不发，插件不必空转重读）；任一项写失败 → 弹窗保持打开
+    让用户改（绝不带病关闭丢输入）。
+    """
+
+    # float 档位：内部整数 = 显示值 × 100（两位小数），与设置页
+    # 「 pomodoro 长度」同款手法；schema 未给 min/max 时存储层按
+    # [0, 100000] 兜底，这里再兜一层防 KeyError（normal 之后必有两键，
+    # 双保险只为测试替手写 schema 的场景）
+    FLOAT_DIVISOR = 100
+
+    def __init__(self, host, lp, data_dir_base=None):
+        self._lp = lp
+        self._plugin_id = getattr(lp, "plugin_id", "") or ""
+        manifest = getattr(lp, "manifest", {}) or {}
+        self._entries = [dict(e) for e in (manifest.get("settings") or [])
+                         if isinstance(e, dict)]
+        self._data_dir_base = data_dir_base
+        self._widgets = {}            # key -> (widget, 取值 getter)
+        theme = getattr(host, "current_theme", None) or DEFAULT_THEME
+        self._theme = theme if theme in ("light", "dark") else DEFAULT_THEME
+        name = strip_emoji(getattr(lp, "name", "") or "") or self._plugin_id
+        super().__init__(host=host, title="插件设置",
+                         subtitle=f"{name} · {self._plugin_id}",
+                         size=(520, 500))
+        self._build_form()
+        self.add_footer([
+            ("取消", "secondaryBtn", self.reject),
+            ("保存", "primaryBtn", self._on_save),
+        ])
+        self.apply_theme()            # 补一轮：Stepper 内部 IconButton 主题色
+
+    # ---------------- 表单 ----------------
+    def _build_form(self):
+        """按 schema 顺序渲染设置行；≤12 项一屏放得下，仍给滚动区兜底"""
+        body = QWidget(self)
+        form = QVBoxLayout(body)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+        if not self._entries:
+            hint = QLabel("该插件没有声明任何设置项", body)
+            hint.setObjectName("hintLabel")
+            form.addWidget(hint)
+        for entry in self._entries:
+            form.addWidget(self._make_row(entry))
+        form.addStretch(1)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        self.body_layout.addWidget(scroll, 1)
+        self._apply_current_values()
+
+    def _make_row(self, entry) -> QWidget:
+        """一行 = 左侧 label + 右侧控件（label 承载插件给的文案）"""
+        row = QWidget(self)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+        label = QLabel(str(entry.get("label") or entry.get("key") or ""), row)
+        label.setObjectName("fieldLabel")
+        label.setToolTip(f"key: {entry.get('key')} · type: {entry.get('type')}")
+        lay.addWidget(label)
+        lay.addStretch(1)
+        widget, getter = self._make_control(entry)
+        lay.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._widgets[entry["key"]] = (widget, getter)
+        return row
+
+    def _make_control(self, entry) -> tuple:
+        """按 type 构造控件，返回 ``(widget, 取值 getter)``。
+
+        getter 返回值必须与 schema 类型对齐：bool→bool、int→int、
+        float→float（内部整数 ÷ 100）、enum→str——set_one 的写入校验
+        以此为准。
+        """
+        stype = entry.get("type")
+        if stype == "bool":
+            switch = ToggleSwitch(checked=bool(entry.get("default", False)),
+                                  theme=self._theme)
+            return switch, switch.isChecked
+        if stype == "enum":
+            combo = QComboBox(self)
+            combo.addItems([str(c) for c in entry.get("choices", [])])
+            combo.setCurrentText(str(entry.get("default") or ""))
+            return combo, combo.currentText
+
+        lo = entry.get("min", 0)
+        hi = entry.get("max", 100000)
+        default = entry.get("default", lo)
+        if stype == "float":
+            step = Stepper(int(round(float(lo) * self.FLOAT_DIVISOR)),
+                           int(round(float(hi) * self.FLOAT_DIVISOR)),
+                           int(round(float(default) * self.FLOAT_DIVISOR)),
+                           divisor=self.FLOAT_DIVISOR, decimals=2)
+            return step, (lambda st=step: st.value() / float(self.FLOAT_DIVISOR))
+        stepper = Stepper(int(lo), int(hi), int(default))
+        return stepper, stepper.value
+
+    def _apply_current_values(self):
+        """按当前生效值批量刷新控件（blockSignals：控件此刻虽无业务订阅，
+        批量刷新前统一静默是本面板的既定纪律——防未来接信号时踩雷）"""
+        values = plugin_settings.get_all(self._plugin_id, self._entries,
+                                         self._data_dir_base)
+        for entry in self._entries:
+            packed = self._widgets.get(entry["key"])
+            if packed is None:
+                continue
+            widget, _getter = packed
+            widget.blockSignals(True)
+            self._set_widget_value(widget, entry, values.get(entry["key"]))
+            widget.blockSignals(False)
+
+    @staticmethod
+    def _set_widget_value(widget, entry, value):
+        """把一个生效值写回控件（value 为 None 时落在 schema default）"""
+        stype = entry.get("type")
+        if value is None:
+            value = entry.get("default")
+        if stype == "bool":
+            widget.setChecked(bool(value))
+        elif stype == "enum":
+            text = str(value if value is not None else entry.get("default"))
+            items = [widget.itemText(i) for i in range(widget.count())]
+            if text in items:
+                widget.setCurrentText(text)
+        elif stype == "float":
+            widget.setValue(int(round(float(value)
+                                      * PluginSettingsDialog.FLOAT_DIVISOR)))
+        else:
+            widget.setValue(int(value))
+
+    # ---------------- 保存 ----------------
+    def _on_save(self):
+        """保存：逐项合并校验落盘；有实际改动的 key 经 settings_changed 发射。
+
+        控件已按 schema 收窄（Stepper 钳边界、开关只有两态、下拉只有
+        choices），set_one 的写入校验正常不会拒——它防的是手改文件之外
+        的编程调用。写失败保持弹窗打开，用户的其余改动不丢。
+        """
+        current = plugin_settings.get_all(self._plugin_id, self._entries,
+                                          self._data_dir_base)
+        changed = []
+        failed = []
+        for entry in self._entries:
+            key = entry["key"]
+            packed = self._widgets.get(key)
+            if packed is None:
+                continue
+            widget, getter = packed
+            try:
+                value = getter()
+            except Exception as exc:      # noqa: BLE001 - 控件读值失败不崩弹窗
+                failed.append(f"{entry.get('label') or key}：读取控件值失败"
+                              f"（{exc}）")
+                continue
+            if key in current and value == current[key]:
+                continue
+            ok, msg = plugin_settings.set_one(
+                self._plugin_id, self._entries, key, value,
+                self._data_dir_base)
+            if ok:
+                changed.append(key)
+            else:
+                failed.append(f"{entry.get('label') or key}：{msg}")
+        if failed:
+            QMessageBox.warning(self, "保存失败",
+                                "以下设置项未能保存：\n· "
+                                + "\n· ".join(failed))
+            return
+        if changed:
+            self._emit_settings_changed(changed)
+        self.accept()
+
+    def _emit_settings_changed(self, keys):
+        """把改动 key 列表广播给插件（守卫模式：ctx/信号缺失不抛异常）"""
+        ctx = getattr(self._lp, "ctx", None)
+        sig = getattr(ctx, "settings_changed", None)
+        emit = getattr(sig, "emit", None) if sig is not None else None
+        if not callable(emit):
+            return
+        try:
+            emit(list(keys))
+        except Exception:                 # noqa: BLE001 - 通知失败不阻断保存
+            pass
+
+
+def build_plugin_settings_dialog(host, lp, data_dir_base=None):
+    """构建插件设置弹层（构建与弹出分离，离屏测试可直达构建）。
+
+    返回 ``None`` 的情形：无 plugin_id / manifest 未声明任何 settings
+    条目——调用方（卡片）本就不该在这类插件上出现设置按钮，这里是
+    双保险。``data_dir_base`` 供测试注入临时插件数据目录；生产调用不传，
+    存储层按运行环境解析 ``<float_data>/plugins``。
+    """
+    plugin_id = getattr(lp, "plugin_id", "") or ""
+    manifest = getattr(lp, "manifest", {}) or {}
+    has_settings = any(isinstance(e, dict)
+                       for e in (manifest.get("settings") or []))
+    if not plugin_id or not has_settings:
+        return None
+    return PluginSettingsDialog(host, lp, data_dir_base=data_dir_base)

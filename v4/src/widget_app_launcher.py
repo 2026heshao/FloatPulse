@@ -61,7 +61,7 @@ from PyQt6.QtCore import Qt, QSize, QFileInfo, pyqtSignal
 from PyQt6.QtGui import (QPixmap, QPainter, QColor, QPen, QPixmapCache,
                          QGuiApplication, QIcon)
 
-from src.theme import FALLBACK_ACCENT, get_main_window_qss, get_colors
+from src.theme import (FALLBACK_ACCENT, get_main_window_qss, get_colors, scale_px_fonts)
 from src.constants import DEFAULT_THEME
 from src import win_icons
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
@@ -715,7 +715,8 @@ class AppLauncherPage(QWidget):
             spacing: 6px;
         }}
         """
-        self.setStyleSheet(qss + card_extra)
+        # 内联块里写死的 px 字号与全局 QSS 走同一缩放档（P1-3；100% 逐字节不变）
+        self.setStyleSheet(scale_px_fonts(qss + card_extra))
 
     # ================================ 数据读写 ================================
     def load_apps_from_config(self):
@@ -1057,7 +1058,7 @@ class AppManageDialog(QDialog):
         QDialog {{ background-color: {bg}; }}
         QListWidget {{ font-size: 13px; }}
         """
-        self.setStyleSheet(qss + extra)
+        self.setStyleSheet(scale_px_fonts(qss + extra))
 
     # ---------------- 数据加载 ----------------
     @staticmethod

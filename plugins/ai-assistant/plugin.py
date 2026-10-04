@@ -122,7 +122,14 @@ def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
             + joined)
 
 # 上下文历史最多保留的条数（role 消息条数，防 token 无限膨胀）
+# v1.15.0 起可在插件中心「设置」调整（max_history），本常量作旧宿主兜底
 MAX_HISTORY = 12
+# 回答发散度默认值（v1.15.0 起可在插件中心「设置」调整 temperature）
+DEFAULT_TEMPERATURE = 0.4
+TEMPERATURE_MIN = 0.1
+TEMPERATURE_MAX = 1.0
+MAX_HISTORY_MIN = 2
+MAX_HISTORY_MAX = 30
 
 # ---------------- 会话持久化（2026-10-01 A1） ----------------
 # 对话成功轮次存进插件私有目录 sessions.json：重启可恢复、支持多会话
@@ -734,7 +741,35 @@ def parse_actions(text: str, snapshot: dict | None = None):
 # ====================================================================
 # OpenAI 兼容协议（/chat/completions，非流式）
 # ====================================================================
-def build_request(params: dict, messages: list, max_tokens=None):
+def clamp_temperature(raw, fallback=DEFAULT_TEMPERATURE):
+    """插件设置 temperature 的生效值钳制（纯函数，测试钉行为）。
+
+    非数字回落 fallback（旧宿主无契约 / 脏值都走这里）；越界钳到
+    [0.1, 1.0]——存储层已按 schema 收窄，这里防的是手改 settings.json。
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return max(TEMPERATURE_MIN, min(TEMPERATURE_MAX, value))
+
+
+def clamp_max_history(raw, fallback=MAX_HISTORY):
+    """插件设置 max_history 的生效值钳制（纯函数，测试钉行为）。
+
+    非整数回落 fallback；钳到 [2, 30]；**奇数降一档**——历史按
+    user/assistant 成对追加，奇数条会把最旧一对拆散（模型看到半句问答）。
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return fallback
+    value = max(MAX_HISTORY_MIN, min(MAX_HISTORY_MAX, value))
+    return value - (value % 2)
+
+
+def build_request(params: dict, messages: list, max_tokens=None,
+                  temperature=None):
     """AI 总配置参数 + 消息 → (url, headers, body)；参数不完整返回 (None, None, 错误)
 
     ``params`` 来自 ``ctx.ai.params()``（设置页「🧠 AI 总配置」实时快照），
@@ -743,6 +778,7 @@ def build_request(params: dict, messages: list, max_tokens=None):
     - local → 宿主本地 llama-server（127.0.0.1:{local_port}/v1，模型名固定
       "local"——llama-server 忽略该字段；就绪与否由 params["local_ready"]
       把关，调用方在发请求前拦截）
+    ``temperature`` 来自插件设置生效值；None（旧宿主 / 未传）走默认常量。
     """
     params = params if isinstance(params, dict) else {}
     if params.get("mode") == "local":
@@ -768,7 +804,7 @@ def build_request(params: dict, messages: list, max_tokens=None):
     if key:
         headers["Authorization"] = f"Bearer {key}"
     body = {"model": model, "messages": messages,
-            "temperature": 0.4, "stream": False}
+            "temperature": clamp_temperature(temperature), "stream": False}
     if max_tokens:
         body["max_tokens"] = int(max_tokens)
     return url, headers, body
@@ -1020,6 +1056,13 @@ class AiChatPage(QWidget):
         self._noted_texts = set()
         # 最近一张待确认卡（改删动作等用户点「执行」；测试与调试用引用）
         self._pending_confirm = None
+
+        # 插件独立设置（v1.15.0）：读生效值 + 订阅插件中心保存通知。
+        # 订阅按宿主铁律走守卫模式——旧宿主没有该信号时自然跳过。
+        self._temperature = DEFAULT_TEMPERATURE
+        self._max_history = MAX_HISTORY
+        self._apply_settings()
+        self._subscribe_settings()
 
         root = QVBoxLayout(self)
         self.setObjectName("pluginPage")   # 吃主窗口 QSS 的实底（theme.py）
@@ -1332,7 +1375,7 @@ class AiChatPage(QWidget):
             else:
                 self.add_bubble("AI", m["content"])
             self._history.append({"role": m["role"], "content": m["content"]})
-        self._history = self._history[-MAX_HISTORY:]
+        self._history = self._history[-self._max_history:]
         if not self._session["messages"]:
             self.add_bubble("AI", WELCOME_TEXT)
         # 重建 = 新开一段视角（切会话 / 新建 / 启动恢复），无条件落到最新
@@ -1966,6 +2009,39 @@ class AiChatPage(QWidget):
             pass
         return None
 
+    # ---------------- 插件设置（v1.15.0） ----------------
+    def _get_setting(self, key, fallback):
+        """读一个设置项生效值；旧宿主没有 get_setting 契约 → 常量兜底"""
+        getter = getattr(self._ctx, "get_setting", None)
+        if not callable(getter):
+            return fallback
+        try:
+            value = getter(key, fallback)
+        except Exception:                         # noqa: BLE001
+            return fallback
+        return fallback if value is None else value
+
+    def _apply_settings(self):
+        """把设置生效值读进页面状态（构建时 / 收到变更通知时）"""
+        self._temperature = clamp_temperature(
+            self._get_setting("temperature", DEFAULT_TEMPERATURE))
+        self._max_history = clamp_max_history(
+            self._get_setting("max_history", MAX_HISTORY))
+
+    def _subscribe_settings(self):
+        """订阅插件中心的保存通知（守卫模式；订阅失败只影响实时性）"""
+        sig = getattr(self._ctx, "settings_changed", None)
+        connect = getattr(sig, "connect", None) if sig is not None else None
+        if callable(connect):
+            try:
+                connect(self._on_settings_changed)
+            except Exception:                     # noqa: BLE001
+                pass
+
+    def _on_settings_changed(self, _keys=None):
+        """插件中心保存设置后：重读生效值，下一发请求即用新参数"""
+        self._apply_settings()
+
     def _dispatch(self, display_text: str, data_block, prompt: str):
         """统一发送入口；data_block 非空 = 快捷指令（附加数据）"""
         # 用户主动发起（手动发送 / 快捷指令）→ 视角无条件回到最新：哪怕此前
@@ -1992,7 +2068,8 @@ class AiChatPage(QWidget):
             self.add_bubble(
                 "提示", "宿主本地服务未就绪：到 设置 → AI 总配置 启动。")
             return
-        url, headers, body = build_request(params, messages)
+        url, headers, body = build_request(
+            params, messages, temperature=self._temperature)
         if url is None:
             self.add_bubble("提示", body)      # body 在此路径是错误文案
             return
@@ -2031,8 +2108,8 @@ class AiChatPage(QWidget):
         self._history.append({"role": "user", "content": self._pending_user})
         self._history.append({"role": "assistant",
                               "content": body or "（已按要求操作应用数据）"})
-        if len(self._history) > MAX_HISTORY:
-            self._history = self._history[-MAX_HISTORY:]
+        if len(self._history) > self._max_history:
+            self._history = self._history[-self._max_history:]
         # 会话存档（A1）：同一内容落盘，供重启恢复 / 多会话切换
         self._persist_turn(self._pending_user, self._pending_display,
                            body or "（已按要求操作应用数据）")
@@ -2212,7 +2289,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.14.0"
+    version = "1.15.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]

@@ -1,7 +1,7 @@
 {
   "id": "kb-search",
   "name": "站内搜索",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "entry": "plugin.py",
   "requires": [
     "PyQt6.QtCore",
@@ -13,6 +13,29 @@
   "page": {
     "title": "🔍 站内搜索"
   },
+  "settings": [
+    {
+      "key": "max_results",
+      "label": "最大返回数",
+      "type": "int",
+      "default": 60,
+      "min": 5,
+      "max": 200
+    },
+    {
+      "key": "search_notes",
+      "label": "默认搜索笔记",
+      "type": "bool",
+      "default": true
+    },
+    {
+      "key": "ranking",
+      "label": "排序算法",
+      "type": "enum",
+      "default": "bm25",
+      "choices": ["bm25", "tfidf"]
+    }
+  ],
   "actions": [
     {
       "id": "kb-search.open",

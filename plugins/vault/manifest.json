@@ -1,7 +1,7 @@
 {
   "id": "vault",
   "name": "密码保险箱",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "plugin.py",
   "requires": [
     "PyQt6.QtCore",
@@ -9,10 +9,19 @@
     "PyQt6.QtWidgets"
   ],
   "capabilities": [],
-  "description": "只活在本机的密码保险箱：自定义字段收纳账号密码与任意机密，DPAPI + 主密码双因子加密，热键快速取用，复制 30 秒后自动清剪贴板。不联网、不同步、不碰宿主数据",
+  "description": "只活在本机的密码保险箱：自定义字段收纳账号密码与任意机密，DPAPI + 主密码双因子加密，热键快速取用，复制后倒计时自动清剪贴板（等待时长可在插件中心设置）。不联网、不同步、不碰宿主数据",
   "page": {
     "title": "🔒 密码保险箱"
   },
+  "settings": [
+    {
+      "key": "clipboard_clear_seconds",
+      "label": "复制后清剪贴板等待",
+      "type": "enum",
+      "default": "30",
+      "choices": ["10", "30", "60"]
+    }
+  ],
   "actions": [
     {
       "id": "vault.open",

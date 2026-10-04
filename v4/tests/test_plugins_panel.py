@@ -106,33 +106,37 @@ def qapp():
 
 
 def _make_loaded_plugin(tmp_path, description="", doc=None,
-                        readme=False, requires=("PyQt6",)):
+                        readme=False, requires=("PyQt6",),
+                        plugin_id="demo", name="演示插件", version="1.2.3"):
     """构造 LoadedPlugin 形状的替身（不 import 真插件模块）"""
     import types as _types
-    # 动作替身（鸭子类型：面板只读 title/hotkey/menu 属性）
+    # 动作替身（鸭子类型：面板只读 title/hotkey/menu 属性 + enabled 开关）
+    _state = {"on": True}
     action = _types.SimpleNamespace(
-        id="demo.act", title="做件事", hotkey="Ctrl+Alt+D", menu=True)
+        id=f"{plugin_id}.act", title="做件事", hotkey="Ctrl+Alt+D", menu=True,
+        enabled=lambda: _state["on"],
+        set_enabled=lambda v: _state.__setitem__("on", bool(v)))
 
     plugin = _types.SimpleNamespace()
     if doc is not None:
         # SimpleNamespace 是 immutable type 不能设 __doc__，用一次性子类
         plugin = type("_FakePlugin", (), {"__doc__": doc})()
 
-    pdir = tmp_path / "demo"
+    pdir = tmp_path / plugin_id
     pdir.mkdir(exist_ok=True)
     if readme:
         (pdir / "README.md").write_text("# demo", encoding="utf-8")
     manifest = {
-        "id": "demo", "name": "演示插件", "version": "1.2.3",
+        "id": plugin_id, "name": name, "version": version,
         "entry": "main.py", "requires": list(requires),
-        "actions": [{"id": "demo.act", "title": "做件事",
+        "actions": [{"id": f"{plugin_id}.act", "title": "做件事",
                      "hotkey": "Ctrl+Alt+D", "menu": True}],
         "description": description,
     }
     return _types.SimpleNamespace(
-        plugin_id="demo", name="演示插件", version="1.2.3",
+        plugin_id=plugin_id, name=name, version=version,
         path=str(pdir), plugin=plugin, manifest=manifest,
-        actions_raw=[action])
+        actions_raw=[action], actions_ok=1)
 
 
 def _plugin_cards(panel):
@@ -710,3 +714,191 @@ class TestTwoColumnGrid:
         for _ in range(5):
             QApplication.processEvents()
         assert panel._card_cols == 1
+
+
+# ====================================================================
+# 插件中心三件套（2026-10-04，设计稿 plugins-center-redesign 收尾）：
+#   ① ⋯ 渐进披露菜单（ID / 依赖 / 注册页面 / 复制 ID）
+#   ② 加载失败折叠条（默认收起，点击展开）
+#   ③ 搜索 + 全部/已启用/已停用分段筛选
+# ====================================================================
+class TestCardMoreMenu:
+    def _panel_with(self, qapp, tmp_path, **kw):
+        from src.plugins_panel import PluginsPanel
+        lp = _make_loaded_plugin(tmp_path, **kw)
+        return PluginsPanel(_FakeHost(loader=_FakeLoader([lp]))), lp
+
+    def test_more_button_on_card(self, qapp, tmp_path):
+        from PyQt6.QtWidgets import QPushButton
+        panel, _ = self._panel_with(qapp, tmp_path)
+        cards = _plugin_cards(panel)
+        btns = [b for b in cards[0].findChildren(QPushButton)
+                if b.objectName() == "pluginMoreBtn"]
+        assert len(btns) == 1
+
+    def test_menu_rows_and_copy_action(self, qapp, tmp_path):
+        from PyQt6.QtWidgets import QLabel
+        panel, lp = self._panel_with(
+            qapp, tmp_path,
+            requires=("PyQt6.QtCore", "PyQt6.QtWidgets"))
+        lp.manifest["page"] = {"title": "🤖 演示页"}
+        menu = panel._build_card_menu(lp)
+        try:
+            # 信息行以 QWidgetAction 内嵌 QLabel 承载（展示不是命令）
+            texts = " ".join(lb.text() for lb in menu.findChildren(QLabel))
+            assert "插件 ID" in texts and "demo" in texts
+            assert "依赖" in texts and "PyQt6.QtCore" in texts
+            assert "注册页面" in texts and "演示页" in texts   # emoji 已剥离
+            assert "🤖" not in texts
+            # 命令项：复制插件 ID
+            copy_acts = [a for a in menu.actions() if a.text() == "复制插件 ID"]
+            assert len(copy_acts) == 1 and copy_acts[0].isEnabled()
+        finally:
+            menu.deleteLater()
+
+    def test_copy_action_writes_clipboard(self, qapp, tmp_path, monkeypatch):
+        from PyQt6.QtWidgets import QApplication
+        panel, lp = self._panel_with(qapp, tmp_path)
+        QApplication.clipboard().setText("")
+        panel._copy_plugin_id(lp.plugin_id)
+        assert QApplication.clipboard().text() == "demo"
+        # 空 id 是 no-op（不崩、不清剪贴板）
+        panel._copy_plugin_id("")
+        assert QApplication.clipboard().text() == "demo"
+
+    def test_menu_without_requires_and_page(self, qapp, tmp_path):
+        from PyQt6.QtWidgets import QLabel
+        panel, lp = self._panel_with(qapp, tmp_path, requires=())
+        menu = panel._build_card_menu(lp)
+        try:
+            texts = " ".join(lb.text() for lb in menu.findChildren(QLabel))
+            assert "（未声明）" in texts and "（无插件页）" in texts
+        finally:
+            menu.deleteLater()
+
+
+class TestErrorCollapse:
+    def _panel_with_errors(self, qapp, tmp_path):
+        """借 _FakeLoader 无 load_errors → 直接构造含失败项的 panel 不便，
+        用「好 loader + 手动注入错误列表」的轻量替身走 refresh 路径"""
+        from src.plugins_panel import PluginsPanel
+
+        class _ErrLoader(_FakeLoader):
+            def __init__(self, plugins, errors):
+                super().__init__(plugins)
+                self._errors = errors
+
+            def load_errors(self):
+                return list(self._errors)
+
+        err = types.SimpleNamespace(
+            folder="bad-one", name="坏插件", stage="import",
+            reason="entry 不存在", hint="检查 manifest.json",
+            path=str(tmp_path / "bad-one"))
+        lp = _make_loaded_plugin(tmp_path)
+        panel = PluginsPanel(_FakeHost(loader=_ErrLoader([lp], [err])))
+        return panel
+
+    def test_collapsed_by_default(self, qapp, tmp_path):
+        panel = self._panel_with_errors(qapp, tmp_path)
+        assert panel._error_box.isHidden() is False      # 提示条在
+        assert panel._error_body.isVisibleTo(panel) is False  # 卡片收起
+        assert "1 个" in panel._error_toggle.text()
+        assert panel._error_toggle.isCheckable()
+
+    def test_toggle_expands_and_collapses(self, qapp, tmp_path):
+        panel = self._panel_with_errors(qapp, tmp_path)
+        panel._error_toggle.setChecked(True)
+        assert panel._error_body.isVisibleTo(panel) is True
+        assert "点击收起" in panel._error_toggle.text()
+        panel._error_toggle.setChecked(False)
+        assert panel._error_body.isVisibleTo(panel) is False
+        assert "点击展开" in panel._error_toggle.text()
+
+    def test_expand_state_survives_refresh(self, qapp, tmp_path):
+        panel = self._panel_with_errors(qapp, tmp_path)
+        panel._error_toggle.setChecked(True)
+        panel.refresh()
+        assert panel._error_expanded is True
+        assert panel._error_body.isVisibleTo(panel) is True
+
+
+class TestSearchAndSegFilter:
+    def _panel(self, qapp, tmp_path, n=3):
+        from src.plugins_panel import PluginsPanel
+        lps = [_make_loaded_plugin(tmp_path, description=f"第{i}个",
+                                   plugin_id=f"p{i}", name=f"插件{i}")
+               for i in range(n)]
+        return PluginsPanel(_FakeHost(loader=_FakeLoader(lps)))
+
+    def test_search_by_name(self, qapp, tmp_path):
+        panel = self._panel(qapp, tmp_path)
+        assert len(panel._visible_cards) == 3
+        panel._search_input.setText("插件1")
+        assert [w for w in panel._visible_cards] != []
+        assert len(panel._visible_cards) == 1
+        panel._search_input.setText("")
+        assert len(panel._visible_cards) == 3
+
+    def test_search_by_action_title(self, qapp, tmp_path):
+        panel = self._panel(qapp, tmp_path, n=1)
+        panel._search_input.setText("做件事")          # 动作 title
+        assert len(panel._visible_cards) == 1
+        panel._search_input.setText("不存在的动作")
+        assert panel._visible_cards == []
+        assert panel._filter_hint.isVisibleTo(panel) is True
+        panel._search_input.setText("")
+        assert panel._filter_hint.isVisibleTo(panel) is False
+
+    def test_search_case_insensitive_and_id(self, qapp, tmp_path):
+        panel = self._panel(qapp, tmp_path, n=2)
+        panel._search_input.setText("P1")              # plugin_id 大写
+        assert len(panel._visible_cards) == 1
+
+    def test_seg_filter_on_off(self, qapp, tmp_path):
+        panel = self._panel(qapp, tmp_path, n=2)
+        # 停用第一张卡对应的插件动作（走 enabled() → _status_of 同源判定）
+        panel._card_records[0][1].actions_raw[0].set_enabled(False)
+        panel.refresh()
+        panel._seg_buttons["on"].setChecked(True)
+        panel._apply_filter()
+        assert len(panel._visible_cards) == 1
+        assert panel._visible_cards[0] is not panel._card_records[0][0]
+        panel._seg_buttons["off"].setChecked(True)
+        panel._apply_filter()
+        assert len(panel._visible_cards) == 1
+        assert panel._visible_cards[0] is panel._card_records[0][0]
+        panel._seg_buttons["all"].setChecked(True)
+        panel._apply_filter()
+        assert len(panel._visible_cards) == 2
+
+    def test_search_and_seg_stack(self, qapp, tmp_path):
+        panel = self._panel(qapp, tmp_path, n=2)
+        panel._card_records[0][1].actions_raw[0].set_enabled(False)
+        panel.refresh()
+        panel._seg_buttons["on"].setChecked(True)
+        panel._search_input.setText("插件1")           # p1 是启用中的那张
+        panel._apply_filter()
+        assert len(panel._visible_cards) == 1
+        panel._search_input.setText("插件0")           # 停用卡被 seg 滤掉
+        panel._apply_filter()
+        assert panel._visible_cards == []
+        assert panel._filter_hint.isVisibleTo(panel) is True
+
+    def test_filter_does_not_rebuild_cards(self, qapp, tmp_path):
+        """过滤只改可见性：切换前后是同一批 QWidget 实例"""
+        panel = self._panel(qapp, tmp_path)
+        ids_before = [id(c) for c, _ in panel._card_records]
+        panel._search_input.setText("插件0")
+        panel._search_input.setText("")
+        assert [id(c) for c, _ in panel._card_records] == ids_before
+
+    def test_grid_positions_compact_after_filter(self, qapp, tmp_path):
+        """滤掉中间一张后，网格占位收紧无空洞（可见卡行优先 0,0 → 0,1）"""
+        panel = self._panel(qapp, tmp_path, n=3)
+        panel._reflow_cards(1024)                      # 双列
+        panel._search_input.setText("插件")            # 全部匹配
+        panel._search_input.setText("插件1")           # 只剩 1 张
+        grid = panel._cards_layout
+        assert [grid.getItemPosition(i)[:2] for i in range(grid.count())] == [
+            (0, 0)]
