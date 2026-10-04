@@ -219,8 +219,15 @@ check("M. 有失败项时空态隐藏（不再显示「还没安装任何插件�
       f"empty_hidden={p4._empty_label.isHidden()}")
 
 # ---------- N. 插件卡含启用/停用开关 ----------
-_toggle = [b for b in p4.findChildren(QPushButton)
-           if "停用" in b.text() or "启用" in b.text()]
+# 2026-10-04 起工具栏新增「全部/已启用/已停用」分段筛选钮（pluginSegBtn），
+# 文案同样含「启用/停用」——开关判定改按 objectName 排除，避免误匹配。
+def _toggle_buttons(panel):
+    return [b for b in panel.findChildren(QPushButton)
+            if b.objectName() != "pluginSegBtn"
+            and ("停用" in b.text() or "启用" in b.text())]
+
+
+_toggle = _toggle_buttons(p4)
 check("N. 插件卡含启用/停用开关",
       len(_toggle) == 1 and "停用" in _toggle[0].text(),
       f"buttons={[b.text() for b in _toggle]}")
@@ -241,10 +248,9 @@ check("P. 再点「启用」后动作恢复",
 
 # ---------- Q. 禁用后卡片状态标签变为「已停用」 ----------
 def _toggle_btns(panel):
-    """取当前面板上的启停按钮文本（按钮自身即权威状态信号）。"""
+    """取当前面板上的启停按钮文本（按钮自身即权威状态信号；排除分段筛选钮）。"""
     app.processEvents()
-    return [b.text() for b in panel.findChildren(QPushButton)
-            if "停用" in b.text() or "启用" in b.text()]
+    return [b.text() for b in _toggle_buttons(panel)]
 
 
 p4._toggle_plugin(list(_loader.loaded_plugins()[0].actions_raw), False)
@@ -314,6 +320,64 @@ try:
 except Exception as exc:                           # noqa: BLE001
     ok_u, err_u = False, f"{type(exc).__name__}: {exc}"
 check("U. 旧版 loader（无 load_errors/rescan）面板不崩", ok_u, err_u)
+
+# ====================================================================
+# 2026-10-04 三件套（设计稿 plugins-center-redesign 收尾）
+# ====================================================================
+
+# ---------- V. 卡片 ⋯ 菜单：信息行 + 复制插件 ID 真写剪贴板 ----------
+_lp0 = _loader.loaded_plugins()[0]
+_menu = p4._build_card_menu(_lp0)
+# ⚠ 面板级 findChildren 会数到 deleteLater 尚未冲刷的上一代卡片，
+# 断言按「当前网格里的每张可见卡恰有一枚 ⋯ 钮」统计。
+_cards_now = [p4._cards_layout.itemAt(i).widget()
+              for i in range(p4._cards_layout.count())
+              if p4._cards_layout.itemAt(i).widget() is not None]
+_more_per_card = [
+    len([b for b in c.findChildren(QPushButton)
+         if b.objectName() == "pluginMoreBtn"]) for c in _cards_now]
+_copy_acts = [a for a in _menu.actions()
+              if a.text() == "复制插件 ID" and a.isEnabled()]
+QApplication.clipboard().setText("")
+if _copy_acts:
+    _copy_acts[0].trigger()
+check("V. 卡片 ⋯ 菜单可构建，复制插件 ID 真写剪贴板",
+      _more_per_card == [1, 1]
+      and _copy_acts
+      and QApplication.clipboard().text() == _lp0.plugin_id,
+      f"每卡⋯钮={_more_per_card} clip={QApplication.clipboard().text()!r}")
+_menu.deleteLater()
+
+# ---------- W. 失败折叠条：默认收起，点击展开 ----------
+_w_default_hidden = p4._error_body.isVisibleTo(p4) is False
+p4._error_toggle.setChecked(True)
+_w_expanded = p4._error_body.isVisibleTo(p4) is True
+p4._error_toggle.setChecked(False)
+check("W. 失败区默认折叠成提示条，点击才展开失败卡",
+      _w_default_hidden and _w_expanded
+      and "加载失败的插件" in p4._error_toggle.text(),
+      f"默认收起={_w_default_hidden} 点开后可见={_w_expanded}")
+
+# ---------- X. 搜索框：按插件名过滤卡片 ----------
+_before_n = len(p4._visible_cards)
+p4._search_input.setText("好插件")
+_after_on = len(p4._visible_cards)
+p4._search_input.setText("")
+_after_off = len(p4._visible_cards)
+check("X. 搜索「好插件」只留匹配卡，清空后全部恢复",
+      _before_n == 2 and _after_on == 1 and _after_off == 2,
+      f"前={_before_n} 搜后={_after_on} 清空后={_after_off}")
+
+# ---------- Y. 分段筛选：已启用 / 已停用 ----------
+p4._seg_buttons["off"].setChecked(True)
+p4._apply_filter()
+_off_cards = len(p4._visible_cards)
+_hint_on = p4._filter_hint.isVisibleTo(p4)
+p4._seg_buttons["all"].setChecked(True)
+p4._apply_filter()
+check("Y. 「已停用」段滤掉全部启用卡并显示提示，切回「全部」恢复",
+      _off_cards == 0 and _hint_on and len(p4._visible_cards) == 2,
+      f"off段={_off_cards} 提示={_hint_on} 全部={len(p4._visible_cards)}")
 
 shutil.rmtree(_root, ignore_errors=True)
 

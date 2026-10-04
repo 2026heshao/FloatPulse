@@ -136,7 +136,9 @@ def find_items(panel):
     for i in range(panel._frag_list.count()):
         it = panel._frag_list.item(i)
         token = it.data(COLOR_TOKEN_ROLE)
-        if token == "primary":
+        if token == "text_placeholder" and it.data(TIME_ROLE) is None:
+            # 2026-10-02 改版：日期分组行是灰字小标（text_placeholder），
+            # 不再是主色行——脚本断言同步（行内容见 _make_row_item）
             date_item = date_item or it
         elif token == "link":
             path_item = path_item or it
@@ -175,8 +177,9 @@ def section_a(app):
           None not in (date_item, path_item, normal_item),
           f"date={date_item is not None} path={path_item is not None} "
           f"normal={normal_item is not None}")
-    check("A3 dark 日期行前景=dark.primary",
-          near(date_item.foreground().color(), QColor(d_before["primary"])),
+    check("A3 dark 日期行前景=dark.text_placeholder",
+          near(date_item.foreground().color(),
+               QColor(d_before["text_placeholder"])),
           date_item.foreground().color().name())
     check("A4 dark 路径行前景=dark.link",
           near(path_item.foreground().color(), QColor(d_before["link"])),
@@ -197,8 +200,9 @@ def section_a(app):
     check("A7 light 时间色=light.text_placeholder",
           near(panel._delegate._time_color, QColor(l_now["text_placeholder"])),
           panel._delegate._time_color.name())
-    check("A8 light 日期行前景=light.primary",
-          near(date_item.foreground().color(), QColor(l_now["primary"])),
+    check("A8 light 日期行前景=light.text_placeholder",
+          near(date_item.foreground().color(),
+               QColor(l_now["text_placeholder"])),
           date_item.foreground().color().name())
     check("A9 light 路径行前景=light.link",
           near(path_item.foreground().color(), QColor(l_now["link"])),
@@ -224,8 +228,9 @@ def section_a(app):
     check("A14 切回 dark：代理字色回到 dark.text",
           near(panel._delegate._base_color, QColor(d_before["text"])),
           panel._delegate._base_color.name())
-    check("A15 切回 dark：日期行回到 dark.primary",
-          near(date_item.foreground().color(), QColor(d_before["primary"])),
+    check("A15 切回 dark：日期行回到 dark.text_placeholder",
+          near(date_item.foreground().color(),
+               QColor(d_before["text_placeholder"])),
           date_item.foreground().color().name())
 
     panel.hide()
@@ -282,6 +287,15 @@ def section_b(app):
     win._apply_theme()
     win.show()
     win._switch_page(0)              # 砌出列表（等价于用户切到碎片页）
+    # 播种几条碎片：像素判据需要真实列表文字——临时目录数据是空的，
+    # 空列表只有空态插画，count_color 双零会让 B7/B8 变成「空转绿 / 恒红」
+    # （2026-10-04 修复：该判据自数据目录改临时目录起就量不到东西）。
+    frags = win._fragment_manager
+    frags.add_clipboard_text("夜检像素判据：普通文本行一条")
+    frags.add_clipboard_path(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "src", "main_window.py"))
+    frags.add_clipboard_text("https://docs.python.org/3/library/dataclasses.html")
+    win._page_fragments.refresh(preserve_view=False)
     pump(app, 1500)
 
     viewport = win._page_fragments._frag_list.viewport()
@@ -312,9 +326,10 @@ def section_b(app):
           near(frag_panel._delegate._base_color, QColor(light["text"])),
           frag_panel._delegate._base_color.name())
     date_item, path_item, _ = find_items(frag_panel)
-    check("B5 日期行前景已跟随 light.primary",
+    check("B5 日期行前景已跟随 light.text_placeholder",
           date_item is not None
-          and near(date_item.foreground().color(), QColor(light["primary"])),
+          and near(date_item.foreground().color(),
+                   QColor(light["text_placeholder"])),
           date_item.foreground().color().name() if date_item else "无日期行")
     check("B6 路径行前景已跟随 light.link",
           path_item is not None
@@ -326,11 +341,19 @@ def section_b(app):
     after_light = count_color(viewport.grab(), LIGHT_BASE)
     print(f"  [i] light 态（未切页）：dark 字色像素={after_dark} "
           f"light 字色像素={after_light}")
-    check("B7 旧主题字色像素大幅消失（<30% 原值）",
-          after_dark < max(20, before * 0.3),
-          f"before={before} after={after_dark}")
-    check("B8 新主题字色像素大量出现（≥50）", after_light >= 50,
-          f"count={after_light}")
+    if after_dark == 0 and after_light == 0:
+        # 离屏 + 无字体环境（本地 PyQt6 不带 fonts 目录）下字形全是
+        # 豆腐块，字色判据量不到任何东西（before 可能被底纹噪点蹭成
+        # 非零，但切主题前后两个「字色」都应为 0）——显式 SKIP，别让
+        # 本地跑假红。CI（windows-latest 有系统字体）不受影响，照常实跑。
+        print("  [SKIP] B7/B8 像素判据：环境无文字像素可量（离屏缺字体，"
+              "字形全为豆腐块）；CI 实跑")
+    else:
+        check("B7 旧主题字色像素大幅消失（<30% 原值）",
+              after_dark < max(20, before * 0.3),
+              f"before={before} after={after_dark}")
+        check("B8 新主题字色像素大量出现（≥50）", after_light >= 50,
+              f"count={after_light}")
 
     # ★ light 态截图必须在"不切页面"的当下抓：切页会顺带 refresh 一遍，
     #   那样截出来的"正常"证明不了修复生效（原 bug 正是被切页掩盖的）

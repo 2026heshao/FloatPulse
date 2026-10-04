@@ -300,6 +300,57 @@ def main():
           and panel._thumb_delegate.CELL_H == flat_h,
           "H4 平铺态单元高回到 %d" % flat_h)
 
+    # ---- I. 会话堆旁路标注（命名 / 移出；2026-10-04 P0-2）----
+    import json as _json
+    d_before_annotation = digest(json_path) if os.path.exists(json_path) else None
+    groups_path = panel._groups_path
+    check(bool(groups_path) and groups_path.endswith("asset_groups.json"),
+          "I0 旁路标注文件与 temp_assets.json 同目录 (%s)" % groups_path)
+
+    # I1. 命名：堆标题换自定义名，标注落 asset_groups.json
+    panel.set_grouping(True)
+    pump(app, 30)
+    head_id = panel._pile_heads[0]
+    panel._apply_pile_rename(head_id, "登录页排障现场")
+    check(panel._thumb_delegate._header_texts.get(head_id) == "登录页排障现场",
+          "I1 堆标题换自定义名 (实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(head_id),))
+    data = _json.loads(open(groups_path, encoding="utf-8").read())
+    check(data["asset_groups"]["names"] == {str(head_id): "登录页排障现场"},
+          "I1 标注已落 asset_groups.json (names=%r)"
+          % (data["asset_groups"]["names"],))
+
+    # I2. 移出：成员拆出独立渲染（条目齐全、无序号），取消移出后回到堆
+    victim = [a.asset_id for a in mgr._assets
+              if panel._pile_of.get(a.asset_id) == head_id][1]  # 非堆首
+    panel._detach_asset(victim, detach=True)
+    check(victim not in panel._pile_of
+          and victim not in panel._thumb_delegate._member_ordinals,
+          "I2 移出后不再算堆成员、不挂序号")
+    check(len(list_ids(panel)) == 7, "I2 移出只拆堆不丢图 (实际 %d)"
+          % len(list_ids(panel)))
+    panel._detach_asset(victim, detach=False)
+    check(panel._pile_of.get(victim) == head_id, "I2 取消移出回到原堆")
+
+    # I3. 标注全程 temp_assets.json 零接触（红线）
+    d_after_annotation = digest(json_path) if os.path.exists(json_path) else None
+    check(d_before_annotation == d_after_annotation,
+          "I3 命名/移出全程 temp_assets.json 字节不变")
+
+    # I4. 堆身份 = 堆首：堆首被移出 → 新堆首接棒，旧堆名不串堆
+    panel._detach_asset(head_id, detach=True)
+    new_head = panel._pile_heads[0]
+    check(new_head != head_id
+          and panel._thumb_delegate._header_texts.get(new_head)
+          not in (None, "登录页排障现场"),
+          "I4 堆首移出后新堆首用默认名（旧堆名不串堆）(实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(new_head),))
+    panel._detach_asset(head_id, detach=False)
+    # 收尾：清掉测试标注，别把「现场」留进后续截图
+    panel._apply_pile_rename(head_id, "")
+    check(panel._thumb_delegate._header_texts.get(head_id) == "5 张 · 09:00",
+          "I5 清空堆名 = 恢复默认名")
+
     print("\n==== 结果：%d 通过 / %d 失败 ====" % (PASS, FAIL))
     sys.stdout.flush()
     os._exit(0 if FAIL == 0 else 1)
