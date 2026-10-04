@@ -56,6 +56,7 @@
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -75,6 +76,20 @@ PLUGIN_PACKAGE_EXT = ".fpplug"
 
 # manifest 必需字段
 REQUIRED_FIELDS = ("id", "name", "version", "entry")
+
+# ---------------- 插件设置 schema（manifest.settings 校验，2026-10-04） ----------------
+# 插件在 manifest 里声明可选 ``settings``（设置项条目列表），宿主插件中心
+# 按 schema 通用渲染表单，存储走插件私有目录（src/plugin_settings.py），
+# **不进主 config**。非法 → 整个 manifest 拒载（与 capabilities「未知能力名
+# 拒载」同一思路：拼写错误静默失效比直接拒载危害大得多）。
+SETTING_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+SETTING_TYPES = ("bool", "int", "float", "enum")   # 纯字符串 key 不开放（防脏数据面）
+MAX_PLUGIN_SETTINGS = 12        # 单插件设置条数上限
+MAX_SETTING_LABEL_CHARS = 30    # 设置项 label 字符数上限
+MAX_ENUM_CHOICES = 10           # enum 选项数上限
+# int / float 未声明 min/max 时的兜底边界（要负数 / 更大范围必须显式声明）
+SETTING_DEFAULT_MIN = 0
+SETTING_DEFAULT_MAX = 100000
 
 # 「版本不匹配」类错误的统一前缀。``validate_manifest`` 返回的 error 若以此开头，
 # ``_load_one`` 就不再归为 STAGE_MANIFEST_INVALID，而是 STAGE_VERSION_MISMATCH ——
@@ -106,7 +121,9 @@ FAIL_HINTS = {
     STAGE_MANIFEST_INVALID:
         "对照 docs/插件开发说明.md 第 3 节检查 manifest.json："
         "id / name / version / entry 四个字段必需，且都必须是字符串；"
-        "capabilities（可选）必须是字符串列表，能力名只能是 network",
+        "capabilities（可选）必须是字符串列表，能力名只能是 network；"
+        "settings（可选）条目必须有 key / label / type / default，"
+        "type 只允许 bool / int / float / enum",
     STAGE_REQUIRES_REJECTED:
         "插件只能依赖 PyQt6 和 Python 标准库。ssl / socket / requests 等"
         "联网库在打包后不可用，必须从 requires 里删掉并改用离线实现",
@@ -154,6 +171,97 @@ def stage_label(stage: str) -> str:
 def is_safe_id(plugin_id) -> bool:
     """插件 id 是否可安全用作目录名（实现已上移到 plugin_api，此处保留兼容名）"""
     return is_safe_plugin_id(plugin_id)
+
+
+def _validate_settings_entry(index, item, seen_keys) -> tuple:
+    """校验一条 manifest.settings 条目，返回 ``(归一化 dict, "")`` 或 ``(None, 错误)``。
+
+    错误信息必须指明**第几条哪个字段**（``settings[2].default …``）——
+    插件作者对着一串 JSON 排查时，笼统的「settings 非法」帮不上忙。
+    归一化只保留该 type 实际使用的字段（bool 不带 min/max、非 enum 不带
+    choices），存储层与设置弹层拿到的就是干净形状。
+    """
+    tag = f"settings[{index}]"
+    if not isinstance(item, dict):
+        return None, f"{tag} 不是 JSON 对象"
+
+    key = item.get("key")
+    if not isinstance(key, str) or not SETTING_KEY_RE.match(key):
+        return None, (f"{tag}.key 非法（须匹配 ^[a-z][a-z0-9_]{{0,63}}$，"
+                      f"小写字母开头，≤64 位）：{key!r}")
+    if key in seen_keys:
+        return None, f"{tag}.key 与其他条目重复：{key!r}"
+    seen_keys.add(key)
+
+    label = item.get("label")
+    if not isinstance(label, str) or not label.strip():
+        return None, f"{tag}.label 必须是非空字符串：{label!r}"
+    label = label.strip()
+    if len(label) > MAX_SETTING_LABEL_CHARS:
+        return None, (f"{tag}.label 超长（最多 {MAX_SETTING_LABEL_CHARS} 字符，"
+                      f"实际 {len(label)}）：{label!r}")
+
+    stype = item.get("type")
+    if stype not in SETTING_TYPES:
+        return None, (f"{tag}.type 非法（只允许 "
+                      f"{'/'.join(SETTING_TYPES)}）：{stype!r}")
+
+    entry = {"key": key, "label": label, "type": stype}
+
+    if stype == "bool":
+        default = item.get("default", False)
+        if not isinstance(default, bool):
+            return None, f"{tag}.default 必须是 bool（type=bool）：{default!r}"
+        entry["default"] = default
+        return entry, ""
+
+    if stype in ("int", "float"):
+        lo = item.get("min", SETTING_DEFAULT_MIN)
+        hi = item.get("max", SETTING_DEFAULT_MAX)
+        for name, bound in (("min", lo), ("max", hi)):
+            if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                return None, f"{tag}.{name} 必须是数字：{bound!r}"
+            if stype == "int" and not isinstance(bound, int):
+                return None, f"{tag}.{name} 必须是整数（type=int）：{bound!r}"
+        if lo > hi:
+            return None, f"{tag}.min 不能大于 max：{lo!r} > {hi!r}"
+        default = item.get("default", lo)
+        if isinstance(default, bool):
+            return None, (f"{tag}.default 不能是 bool（type={stype}，"
+                          f"请写 {int(default)}）：{default!r}")
+        if not isinstance(default, (int, float)):
+            return None, (f"{tag}.default 必须是数字（type={stype}）："
+                          f"{default!r}")
+        if stype == "int" and not isinstance(default, int):
+            return None, f"{tag}.default 必须是整数（type=int）：{default!r}"
+        if default < lo or default > hi:
+            return None, f"{tag}.default {default!r} 越界（须落在 [{lo}, {hi}]）"
+        entry["default"] = default
+        entry["min"] = lo
+        entry["max"] = hi
+        return entry, ""
+
+    # enum：choices 必须是非空字符串列表（去重、≤10 项），default ∈ choices
+    choices = item.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None, f"{tag}.choices 必须是非空字符串列表（type=enum）"
+    if len(choices) > MAX_ENUM_CHOICES:
+        return None, (f"{tag}.choices 超限（最多 {MAX_ENUM_CHOICES} 项，"
+                      f"实际 {len(choices)} 项）")
+    cleaned = []
+    for choice in choices:
+        if not isinstance(choice, str) or not choice.strip():
+            return None, f"{tag}.choices 含非字符串或空白项：{choice!r}"
+        cleaned.append(choice.strip())
+    if len(set(cleaned)) != len(cleaned):
+        return None, f"{tag}.choices 含重复项（去空格后比较）：{choices!r}"
+    default = item.get("default")
+    if not isinstance(default, str) or default.strip() not in cleaned:
+        return None, (f"{tag}.default 必须是 choices 之一（type=enum，"
+                      f"必填）：{default!r}")
+    entry["default"] = default.strip()
+    entry["choices"] = cleaned
+    return entry, ""
 
 
 def validate_manifest(data):
@@ -279,6 +387,29 @@ def validate_manifest(data):
                           f"插件要求 FloatPulse >= {min_app_version}，"
                           f"当前版本 {APP_VERSION}（请升级程序）")
 
+    # 可选 settings：插件独立设置项 schema（2026-10-04 起支持）。
+    # 声明了非空 settings 的插件会在插件中心卡片上出现「设置」按钮，宿主
+    # 按这份 schema 通用渲染表单；存储走插件私有目录，不进主 config。
+    # 不声明 / 声明为 [] / 声明为 None → 都视为无设置项（三种都合法）。
+    raw_settings = data.get("settings", [])
+    if raw_settings is None:
+        raw_settings = []
+    if not isinstance(raw_settings, list):
+        return None, "settings 必须是条目列表"
+    if len(raw_settings) > MAX_PLUGIN_SETTINGS:
+        return None, (f"settings 条数超限（最多 {MAX_PLUGIN_SETTINGS} 条，"
+                      f"实际 {len(raw_settings)} 条）")
+    settings = []
+    seen_setting_keys = set()
+    for i, item in enumerate(raw_settings):
+        # ★ 循环变量不可叫 entry：上面 ``entry`` 是入口模块路径字符串，
+        #   在这里被覆盖的话返回值里 entry 会变成 settings 条目 dict
+        #   （插件加载直接 TypeError——离屏验证抓住过一次）。
+        norm, err = _validate_settings_entry(i, item, seen_setting_keys)
+        if err:
+            return None, err
+        settings.append(norm)
+
     return {
         "id": data["id"],
         "name": data["name"].strip(),
@@ -291,6 +422,7 @@ def validate_manifest(data):
         "page": page,
         "api_version": api_version,
         "min_app_version": min_app_version,
+        "settings": settings,
     }, ""
 
 
@@ -926,8 +1058,10 @@ class PluginLoader:
 
         # 派生绑定本插件身份的上下文：插件由此拿到 plugin_id / data_dir /
         # plugin_dir / parent_window，以及按 manifest 声明授权的能力（桥）
+        # 与设置项 schema（2026-10-04 插件独立设置）
         plugin_ctx = self._ctx_for(plugin_id, dirpath,
-                                   manifest.get("capabilities", ()))
+                                   manifest.get("capabilities", ()),
+                                   manifest.get("settings", ()))
 
         try:
             actions = plugin.create_actions(plugin_ctx)
@@ -1116,14 +1250,23 @@ class PluginLoader:
             return False
 
     # ---------------- 工具 ----------------
-    def _ctx_for(self, plugin_id: str, plugin_dir: str, capabilities=()):
+    def _ctx_for(self, plugin_id: str, plugin_dir: str, capabilities=(),
+                 manifest_settings=()):
         """派生绑定插件身份的上下文；宿主 ctx 不支持派生时退回共享实例"""
         factory = getattr(self._ctx, "for_plugin", None)
         if not callable(factory):
             return self._ctx
         try:
             # capabilities 只影响派生实例的权限判定（network 桥），
-            # 旧版 for_plugin 不收该参数时退回不传（能力自然全无）
+            # 旧版 for_plugin 不收该参数时退回不传（能力自然全无）；
+            # manifest_settings（2026-10-04 插件设置）同理逐级降级——
+            # 旧宿主 ctx 不收第 4 参时退回 3 参，插件侧 get_setting
+            # 拿不到 schema 自然全程走 fallback。
+            try:
+                return factory(plugin_id, plugin_dir, capabilities,
+                               manifest_settings)
+            except TypeError:
+                pass
             try:
                 return factory(plugin_id, plugin_dir, capabilities)
             except TypeError:

@@ -756,6 +756,73 @@ class AiBackendFacade:
             self._logger.warning(f"[插件] {msg}")
 
 
+class PluginSignal:
+    """纯 Python 信号（本模块禁 PyQt6，Qt 的 pyqtSignal 在这里用不了）。
+
+    给「宿主 → 插件」的单向通知用，当前唯一实例是
+    ``PluginContext.settings_changed``（用户在插件中心改完插件设置并
+    保存后发射，携带本次实际落盘的改动 key 列表）。
+
+    语义：
+      - ``connect(fn)`` / ``disconnect(fn)``：**幂等**——重复 connect 同一
+        callable 只记一次（插件页重建时容易重复订阅，去重防槽被调两次）
+      - ``emit(*args)``：逐槽隔离——单个订阅者抛异常只记 warning、跳过
+        该槽继续，绝不把异常抛回发射方（与 ``ActionRegistry.trigger``
+        同一条铁律：插件侧异常不许反噬宿主）
+
+    插件订阅按既有铁律走守卫模式（旧宿主没有该信号时自然降级）::
+
+        sig = getattr(ctx, "settings_changed", None)
+        connect = getattr(sig, "connect", None)
+        if callable(connect):
+            try:
+                connect(self._on_settings_changed)
+            except Exception:
+                pass
+    """
+
+    def __init__(self, logger=None):
+        self._logger = logger if logger is not None else _NULL_LOGGER
+        self._slots = []         # list[callable]，connect 顺序即触发顺序
+
+    def connect(self, fn) -> bool:
+        """订阅；非 callable 拒绝，重复订阅幂等（返回 True 但不重复记）。
+
+        判重用 ``==`` 而不是 ``is``：``obj.method`` 每次取属性都会生成
+        新的绑定方法对象（``is`` 永远 False），而绑定方法按 (self, 函数)
+        相等比较——插件页重建时重复订阅同一实例方法能被真正挡住。
+        """
+        if not callable(fn):
+            self._warn("connect 被拒：订阅者不是 callable")
+            return False
+        if any(fn == slot for slot in self._slots):
+            return True
+        self._slots.append(fn)
+        return True
+
+    def disconnect(self, fn) -> bool:
+        """退订（页面销毁时调用，防死引用累积）；没订过返回 False"""
+        for i, slot in enumerate(self._slots):
+            if fn == slot:
+                del self._slots[i]
+                return True
+        return False
+
+    def emit(self, *args) -> int:
+        """逐槽发射，返回成功执行的槽数；槽异常只记 warning 不外抛"""
+        ok = 0
+        for slot in list(self._slots):
+            try:
+                slot(*args)
+                ok += 1
+            except Exception as exc:      # noqa: BLE001 - 订阅者异常必须隔离
+                self._warn(f"信号订阅者抛异常，已跳过该订阅者：{exc!r}")
+        return ok
+
+    def _warn(self, msg: str):
+        self._logger.warning(f"[插件] {msg}")
+
+
 class PluginContext:
     """插件可见的宿主能力（白名单）。
 
@@ -777,7 +844,7 @@ class PluginContext:
                  plugin_id="", plugin_dir="",
                  capabilities=(), http_post_async=None,
                  write_providers=None, manage_providers=None,
-                 ai_providers=None):
+                 ai_providers=None, manifest_settings=()):
         # logger=None → 退化为 NullHandler 日志器：插件可以无条件调用
         # ctx.logger.info(...)，不必自己判空
         self._logger = logger if logger is not None else _NULL_LOGGER
@@ -807,6 +874,15 @@ class PluginContext:
         # {"is_attached"|"params"|"add_listener"|"remove_listener": callable}。
         # params 每次调用**实时**读宿主配置——设置页改完即生效，插件无需重建。
         self._ai_providers = dict(ai_providers or {})
+        # 本插件 manifest 声明的设置项 schema（2026-10-04 插件独立设置；
+        # validate_manifest 归一化后的条目，loader 经 for_plugin 注入）。
+        # get_setting 的合并语义与插件中心设置弹层都以它为真相源。
+        self._manifest_settings = tuple(
+            dict(s) for s in (manifest_settings or ())
+            if isinstance(s, dict))
+        # 插件设置变更信号：插件中心弹层保存后由宿主发射（改动 key 列表）。
+        # 纯 Python 实现（PluginSignal）——本模块禁 PyQt6，Qt 信号用不了。
+        self._settings_changed = PluginSignal(self._logger)
         # 数据入口门面：每次实例化都重新判权限（capabilities 是逐实例的）。
         # write 与 manage 指向同一对象——门禁在方法级按能力名判定，
         # 插件按语义选名字用（ctx.write.add_note / ctx.manage.delete_task）。
@@ -872,7 +948,7 @@ class PluginContext:
             return None
 
     def for_plugin(self, plugin_id: str, plugin_dir: str = "",
-                   capabilities=()) -> "PluginContext":
+                   capabilities=(), manifest_settings=()) -> "PluginContext":
         """派生一个绑定了插件身份的上下文（共享全部能力，只换身份字段）。
 
         loader 在调用 ``create_actions()`` 前派生，并随动作一起交给注册表；
@@ -880,6 +956,11 @@ class PluginContext:
 
         ``capabilities`` 是**本插件**在 manifest 里声明的能力（宿主级桥
         ``http_post_async`` 共享，权限按派生时的声明逐实例判定）。
+
+        ``manifest_settings`` 是本插件 manifest.settings 归一化后的条目
+        （2026-10-04 插件独立设置）：``get_setting`` 的合并语义、设置弹层
+        的渲染都以它为 schema。旧宿主调用不传该参数 → 空元组，
+        ``get_setting`` 自然全程走 fallback（老插件零影响）。
         """
         return PluginContext(
             logger=self._logger,
@@ -897,6 +978,7 @@ class PluginContext:
             write_providers=dict(self._write_providers),
             manage_providers=dict(self._manage_providers),
             ai_providers=dict(self._ai_providers),
+            manifest_settings=manifest_settings,
         )
 
     # ---------------- 白名单能力 ----------------
@@ -952,6 +1034,55 @@ class PluginContext:
         接入与否由用户在设置页勾选决定，插件每次发请求前应重查。
         """
         return self._ai
+
+    @property
+    def manifest_settings(self) -> tuple:
+        """本插件 manifest.settings 的归一化条目（只读快照）。
+
+        共享宿主 ctx / 旧宿主派生 → 空元组（该插件没有声明设置项，
+        或宿主还不支持插件设置契约）。
+        """
+        return self._manifest_settings
+
+    @property
+    def settings_changed(self) -> "PluginSignal":
+        """插件设置变更信号：用户在插件中心「设置」弹层保存后发射。
+
+        携带一个参数：本次**实际落盘**的改动 key 列表（``list[str]``，
+        无改动的保存不发射）。插件按守卫模式订阅（见 :class:`PluginSignal`
+        文档）；收到后应重读 ``get_setting`` 并应用新值（页面已建的情况下）。
+        """
+        return self._settings_changed
+
+    def get_setting(self, key, fallback=None):
+        """读取一个设置项的**当前生效值**（磁盘值与 schema 合并后的结果）。
+
+        - key 未在 manifest.settings 声明 → 返回 ``fallback``
+        - 磁盘值类型不符 / 越界 → 存储层已静默回落 default（见
+          :mod:`src.plugin_settings` 的合并语义）
+        - 未声明设置项 / plugin_id 为空 / 宿主未注入数据目录 → 返回
+          ``fallback``（降级语义与 ``data_dir`` 返回空串一致）
+
+        每次调用实时读盘（settings.json 只有几十行，成本可忽略）；高频
+        调用方应自行缓存，并在 ``settings_changed`` 到达时刷新。
+        """
+        if not self._manifest_settings or not self._plugin_id:
+            return fallback
+        if not self._data_dir_base:
+            self._warn("get_setting 不可用（宿主未注入插件数据目录）")
+            return fallback
+        # 惰性 import：plugin_settings 反向依赖本模块的 is_safe_plugin_id，
+        # 顶层互引会成环；这里在调用期取（此时两侧模块都已加载完毕）
+        from src.plugin_settings import get_all
+        try:
+            values = get_all(self._plugin_id, self._manifest_settings,
+                             self._data_dir_base)
+        except Exception as exc:          # noqa: BLE001 - 读取失败不反噬插件
+            self._warn(f"get_setting 读取失败：{exc!r}")
+            return fallback
+        if key not in values:
+            return fallback
+        return values[key]
 
     def show_toast(self, text: str, ms: int = 2800) -> bool:
         """弹主窗口轻提示；宿主未提供该能力时返回 False"""
