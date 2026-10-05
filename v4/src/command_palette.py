@@ -151,6 +151,12 @@ def action_commands() -> list:
             target=("action", "toggle_theme"),
             keywords=("zhuti", "theme", "dark", "light", "yuese")),
         CommandEntry(
+            cid="action.new_task", title="新建任务",
+            icon="plus", category=CATEGORY_ACTION,
+            target=("action", "new_task"),
+            keywords=("新任务", "待办", "xinjian", "renwu", "new", "task",
+                      "todo", "daiban", "daibanshi")),
+        CommandEntry(
             cid="help.hotkeys", title="查看全局快捷键说明",
             icon="command", category=CATEGORY_HELP,
             target=("help", "hotkeys"),
@@ -285,8 +291,8 @@ def execute_entry(entry, host) -> bool:
     公开面清单（A1 收口后核实）：
       show_page(idx) / show_settings_page(cat) / show_plugin_page(key)
       / show_help_category(key) / export_to_obsidian() /
-      apply_external_theme(name) / current_theme / HELP_PAGE_INDEX /
-      NAV_PAGE_INDEX。
+      apply_external_theme(name) / focus_new_task() / current_theme /
+      HELP_PAGE_INDEX / NAV_PAGE_INDEX。
     """
     if entry is None or len(entry.target) != 2:
         return False
@@ -322,6 +328,9 @@ def _run_action(name: str, host) -> bool:
     if name == "toggle_theme":
         target = "light" if host.current_theme == "dark" else "dark"
         host.apply_external_theme(target)
+        return True
+    if name == "new_task":
+        host.focus_new_task()
         return True
     return False
 

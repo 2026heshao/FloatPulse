@@ -116,10 +116,11 @@ class TestRegistryCompleteness:
         assert ("plugin", "plugin:demo-x") not in [e.target for e in entries2]
 
     def test_registry_size_sane(self):
-        """量级钉子：8 页 + settings/help + 3 动作 + 10 设置分类 = 23+"""
+        """量级钉子：8 页 + settings/help + 4 动作（export/theme/new_task/
+        help.hotkeys）+ 10 设置分类 = 24+（C2 新增 action.new_task 后 +1）"""
         entries = cp.build_registry(
             NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
-        assert len(entries) >= 23
+        assert len(entries) >= 24
 
 
 # ====================================================================
@@ -248,6 +249,9 @@ class _StubHost:
     def apply_external_theme(self, theme_name):
         self.calls.append(("apply_external_theme", theme_name))
 
+    def focus_new_task(self):
+        self.calls.append(("focus_new_task",))
+
 
 @pytest.fixture()
 def stub_host():
@@ -321,6 +325,45 @@ class TestPaletteBehavior:
         palette._input.setText("导出")
         QTest.keyClick(palette._input, Qt.Key.Key_Return)
         assert ("export_to_obsidian", True) in stub_host.calls
+
+    def test_new_task_entry_registered(self):
+        """C2：action.new_task 已入注册表，target/图标/关键词齐备"""
+        entries = cp.build_registry(
+            NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
+        hits = [e for e in entries if e.cid == "action.new_task"]
+        assert len(hits) == 1
+        e = hits[0]
+        assert e.target == ("action", "new_task")
+        assert e.category == cp.CATEGORY_ACTION
+        assert e.icon == "plus"
+        assert e.title == "新建任务"
+        # 触发词覆盖「待办 / todo / renwu」等同义路径
+        assert "daiban" in e.keywords and "todo" in e.keywords
+
+    def test_new_task_keyword_hits(self):
+        """「待办」「todo」「新任务」（关键词/标题命中）都排到 action.new_task"""
+        entries = cp.build_registry(
+            NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
+        for q in ("待办", "todo", "新任务"):
+            hits = cp.filter_commands(entries, q)
+            assert hits and hits[0].cid == "action.new_task", q
+
+    def test_execute_new_task(self, palette, stub_host):
+        palette.open_at()
+        palette._input.setText("新建任务")
+        QTest.keyClick(palette._input, Qt.Key.Key_Return)
+        assert ("focus_new_task",) in stub_host.calls
+
+    def test_execute_new_task_direct_dispatch(self, stub_host):
+        """execute_entry 分派面（不经 GUI）：未知动作名返回 False 不猜"""
+        entry = next(e for e in cp.action_commands()
+                     if e.cid == "action.new_task")
+        assert cp.execute_entry(entry, stub_host) is True
+        assert ("focus_new_task",) in stub_host.calls
+        fake = cp.CommandEntry(
+            cid="action.nope", title="假动作", icon="command",
+            category=cp.CATEGORY_ACTION, target=("action", "nope"))
+        assert cp.execute_entry(fake, stub_host) is False
 
     def test_execute_help_hotkeys(self, palette, stub_host):
         palette.open_at()

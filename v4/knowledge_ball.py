@@ -64,8 +64,8 @@ from PyQt6.QtGui import (
 # 引入独立模块
 from src.single_instance import SingleInstance
 from src.card_window import CardWindow, card_modes
-from src.app_paths import (find_icon_file, get_base_dir,
-                           get_screen_geometry, check_data_integrity)
+from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
+import startup_checks  # 启动数据完整性入口壳（C1 下沉，弹窗留入口层）
 from src.task_manager import (
     TaskManager, task_state, bucket_unfinished,
     STATE_TODAY, STATE_OVERDUE,
@@ -2223,11 +2223,7 @@ class FloatingBall(QWidget):
 # ====================================================================
 # 程序入口
 # ====================================================================
-# 说明：`_get_base_dir` / `_find_icon_file` 两个薄包装已删除（成熟化 4.3）
-# —— 它们只是 src/app_paths.get_base_dir / find_icon_file 的转发，
-# 现直接使用 app_paths 公开函数；`_shutdown_once`（幂等退出收尾）与
-# `_check_data_integrity`（启动数据检查）已随 T05 裁剪迁至
-# src/app_paths.check_data_integrity（app_paths 本就承载启动期环境探测）。
+# 说明：薄包装与启动数据检查已迁 src/app_paths；启动完整性弹窗壳现居 startup_checks（C1）。
 
 def _shutdown_once(state, steps) -> bool:
     """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
@@ -2360,22 +2356,7 @@ def main():
 
     _mark("检查数据完整性")
 
-    # ---- 启动时数据完整性检查 ----
-    # 启动数据完整性检查（T05：扫描段→app_paths；弹窗留入口层，src 禁原生 QMessageBox）
-    _corrupted = check_data_integrity(data_dir, logger)
-    if _corrupted:
-        # 损坏文件较多时弹窗提示用户
-        if len(_corrupted) >= 2:
-            details = "\n".join(f"  • {f}: {r}" for f, r in _corrupted)
-            QMessageBox.warning(
-                None, "数据完整性检查",
-                f"检测到 {len(_corrupted)} 个数据文件损坏，已自动重置为空数据：\n\n"
-                f"{details}\n\n"
-                f"详情请查看日志：float_data/app.log"
-            )
-        logger.warning(f"启动检查完成：{len(_corrupted)} 个文件损坏已重置")
-    else:
-        logger.info("启动检查完成：所有 JSON 文件完整")
+    startup_checks.run_startup_data_integrity_check(data_dir, logger)
 
     # ---- docx 管理器 ----
     _mark("加载知识库")

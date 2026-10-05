@@ -352,6 +352,15 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         """窗口透明度应用（公开门面，委托既有私有实现；settings_panel 调用）。"""
         self._apply_window_opacity()
 
+    def focus_new_task(self):
+        """「新建任务」公开委托（命令面板 action.new_task 落点，收尾 C2）。
+
+        切到日程任务页并聚焦新建输入框；添加本身仍走面板既有的
+        returnPressed / 「添加」按钮路径，不新造交互模式。
+        """
+        self.show_page(NAV_PAGE_INDEX["tasks"])
+        self._page_tasks.focus_new_task()
+
     # ==================================================================
     # 导出到 Obsidian（唯一实现；设置页按钮与三个面板右键菜单共用）
     # ==================================================================
