@@ -23,7 +23,7 @@ import datetime
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
-    QFrame, QMessageBox, QTextEdit, QSplitter, QStackedWidget,
+    QFrame, QTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication,
     QCheckBox, QRadioButton, QButtonGroup,
 )
@@ -38,6 +38,7 @@ from src.fragment_classifier import (
 from src import secret_guard
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
+from src.glass_message_box import GlassMessageBox
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
 from src.theme import FALLBACK_ACCENT, get_colors
@@ -45,7 +46,6 @@ from src.controls import (tune_list_scrolling, SmoothButton, EmptyState,
                           IconButton, PageTitle, Stepper)
 from src import day_recall
 from src import inbox_triage
-from src import paste_helper as _paste_helper
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -57,11 +57,6 @@ from src.constants import (
 
 # 搜索去抖间隔（毫秒）：避免每敲一个字符就全量过滤 + 重建列表
 SEARCH_DEBOUNCE_MS = 250
-
-# 前台窗口记忆刷新间隔（毫秒）：FloatPulse 不在前台时，低频记录"最近
-# 一个非本程序的前台窗口"，供「粘回」还原焦点。600ms 足够跟上用户切窗，
-# 单次开销仅一次 ctypes 调用（可忽略）。
-FOREIGN_FOREGROUND_POLL_MS = 600
 
 
 # ====================================================================
@@ -605,7 +600,7 @@ class _DayRecallView(QWidget):
         """把当天全部条目组装成文本，走现有笔记通道存为一条笔记。"""
         group = self._current_group()
         if group is None or len(group) == 0:
-            QMessageBox.information(self, "提示", "当天没有可保存的记录。")
+            GlassMessageBox.information(self, "提示", "当天没有可保存的记录。")
             return
         text = day_recall.format_day_text(group)
         title = "%s 回顾" % group.day
@@ -633,11 +628,6 @@ class FragmentsPanel(QWidget):
         self._docx_manager = host._docx_manager
         self._nav_manager = host._nav_manager
         self._clipboard_monitor = host._clipboard_monitor
-        # 一键粘回（reuse 卡）：纯 ctypes 执行器 + 重复复制计数埋点
-        self._paste_helper = _paste_helper.PasteHelper()
-        self._reuse_counter = _paste_helper.default_counter()
-        # 最近一个"非本程序"的前台窗口句柄（粘回时还原焦点目标）
-        self._last_foreign_hwnd = 0
         # 窗口化渲染状态（成熟化 3.6）：行描述符表 + 分块决策状态机
         self._rows = None                  # 行描述符表（refresh 时重建）
         self._row_pos = 0                  # 已建到的描述符下标
@@ -649,7 +639,6 @@ class FragmentsPanel(QWidget):
         # 让「从未被搜索命中」这个清仓条件失效。
         self._last_counted_keyword = ""
         self._build_ui()
-        self._start_foreground_tracker()
         self._connect_secret_guard()
 
     # ---- UI 构建 ----
@@ -829,13 +818,6 @@ class FragmentsPanel(QWidget):
         copy_btn.setObjectName("secondaryBtn")
         copy_btn.clicked.connect(self._on_copy)
         bottom.addWidget(copy_btn)
-
-        # 粘回选中：复制到剪贴板 + 还原焦点 + 发 Ctrl+V（reuse 卡）
-        paste_btn = IconButton("copy", text="粘回选中", icon_size=14,
-                               object_name="secondaryBtn")
-        paste_btn.setToolTip("复制到剪贴板，并自动粘回到你刚才用的窗口")
-        paste_btn.clicked.connect(self._on_paste)
-        bottom.addWidget(paste_btn)
 
         bottom.addStretch()
 
@@ -1216,7 +1198,6 @@ class FragmentsPanel(QWidget):
         act_detail = menu.addAction("查看详情")
         act_edit = menu.addAction("编辑内容")
         act_copy = menu.addAction("复制内容")
-        act_paste = menu.addAction("粘回到刚才的窗口")
         menu.addSeparator()
         act_to_note = menu.addAction("存为笔记")
         act_to_kb = menu.addAction("加入知识库")
@@ -1236,8 +1217,7 @@ class FragmentsPanel(QWidget):
         act_delete = menu.addAction("删除")
         action = menu.exec(self._frag_list.mapToGlobal(pos))
         if action == act_pin:
-            if self._fragment_manager.toggle_pinned(fid):
-                self.refresh(preserve_view=True)
+            self._apply_pin_toggle(fid)
         elif action == act_detail:
             self._show_detail(fid)
         elif action == act_edit:
@@ -1246,8 +1226,6 @@ class FragmentsPanel(QWidget):
             frag = self._fragment_manager.get_fragment(fid)
             if frag:
                 self._copy_content(frag)
-        elif action == act_paste:
-            self._paste_fragment(fid)
         elif action == act_to_note:
             self._to_note(fid)
         elif action == act_to_sticky:
@@ -1260,22 +1238,33 @@ class FragmentsPanel(QWidget):
         elif action == act_to_nav:
             self._to_nav(fid)
         elif action in cat_actions:
-            if self._fragment_manager.set_category(fid, cat_actions[action]):
-                self.refresh(preserve_view=True)
+            self._apply_category(fid, cat_actions[action])
         elif action == act_delete:
             if self._fragment_manager.delete_fragment(fid):
                 self.refresh()
+                self._host.show_toast("已删除碎片")
 
     def _frag_current_category(self, fragment_id) -> str:
         """取碎片当前内容语义类别（右键归类菜单勾选态用）"""
         frag = self._fragment_manager.get_fragment(fragment_id)
         return frag.category if frag is not None else ""
 
+    def _apply_category(self, fid: int, cat: str) -> bool:
+        """右键「归类为」纠正（2026-10-05 抽出：菜单分支与护栏测试共用）。
+
+        归类成功后带轻提示反馈（此前静默）；失败（碎片已不存在）不提示。
+        """
+        if self._fragment_manager.set_category(fid, cat):
+            self.refresh(preserve_view=True)
+            self._host.show_toast(f"已归类为「{CATEGORY_LABELS.get(cat, cat)}」")
+            return True
+        return False
+
     # ---- 复制 / 编辑 ----
     def _copy_content(self, frag):
         """复制单条碎片内容到剪贴板"""
         self._clipboard_monitor.put_text(frag.content)
-        self._reuse_counter.record(frag.content)
+        self._host.show_toast("已复制碎片内容")
 
     def _edit_fragment(self, fragment_id):
         """编辑碎片内容（保存后刷新列表与预览，保留浏览位置）"""
@@ -1309,9 +1298,8 @@ class FragmentsPanel(QWidget):
         if title is None:
             return
         note = self._note_manager.get_note(title)
-        QMessageBox.information(
-            self, "已转存",
-            f"碎片已存为新笔记：\n{note.title if note else ''}")
+        self._host.show_toast(
+            f"已转存为新笔记：{note.title if note else ''}")
 
     def _to_sticky(self, fragment_id: int):
         """碎片 → 直接钉成桌面便签（锚定碎片本身，内容写回碎片）。
@@ -1321,7 +1309,7 @@ class FragmentsPanel(QWidget):
         """
         manager = self._host.sticky_manager
         if manager is None:
-            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            GlassMessageBox.information(self, "提示", "便签功能尚未就绪。")
             return
         ok, reason = manager.open_fragment(fragment_id)
         if ok:
@@ -1332,39 +1320,34 @@ class FragmentsPanel(QWidget):
         elif reason == "missing":
             self._host.show_toast("碎片已不存在")
         else:
-            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            GlassMessageBox.information(self, "提示", "便签功能尚未就绪。")
 
     def _to_knowledge(self, fragment_id: int):
         """将碎片内容追加到知识库 docx 末尾"""
         frag = self._fragment_manager.get_fragment(fragment_id)
         if not frag:
             return
-        ret = QMessageBox.question(
-            self, "确认加入知识库",
-            f"将以下碎片内容追加到知识库末尾？\n\n"
-            f"{frag.content[:80]}{'...' if len(frag.content) > 80 else ''}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not GlassMessageBox.question(
+                self, "确认加入知识库",
+                f"将以下碎片内容追加到知识库末尾？\n\n"
+                f"{frag.content[:80]}{'...' if len(frag.content) > 80 else ''}"):
             return
         new_idx = self._docx_manager.append_paragraph(frag.content)
         if new_idx >= 0:
             if self._docx_manager.save():
                 self._host.refresh_page("knowledge")
                 self._host.data_changed.emit("knowledge")
-                QMessageBox.information(
-                    self, "已加入",
-                    f"碎片已追加为知识库段落（编号 {new_idx+1}）。"
-                )
+                self._host.show_toast(
+                    f"已加入知识库：碎片已追加为新段落（编号 {new_idx+1}）")
             else:
-                QMessageBox.warning(self, "保存失败", "docx 保存失败。")
+                GlassMessageBox.warning(self, "保存失败", "docx 保存失败。")
         else:
-            QMessageBox.warning(self, "失败", "追加段落失败。")
+            GlassMessageBox.warning(self, "失败", "追加段落失败。")
 
     def _to_nav(self, fragment_id: int):
         """将 URL 碎片添加到网址导航"""
         if not self._nav_manager:
-            QMessageBox.warning(self, "提示", "网址导航管理器未初始化")
+            GlassMessageBox.warning(self, "提示", "网址导航管理器未初始化")
             return
         frag = self._fragment_manager.get_fragment(fragment_id)
         if not frag:
@@ -1377,13 +1360,13 @@ class FragmentsPanel(QWidget):
         gid = groups[0].group_id
         _, existing = self._nav_manager.find_site_by_url(url)
         if existing:
-            QMessageBox.information(self, "已存在", f"该 URL 已在网址导航中：\n{existing.title}")
+            GlassMessageBox.information(self, "已存在", f"该 URL 已在网址导航中：\n{existing.title}")
             return
         title = url.split("//")[-1].split("/")[0] if "//" in url else url[:20]
         self._nav_manager.add_site(gid, title, url)
         self._host.refresh_page("nav")
         self._host.data_changed.emit("nav")
-        QMessageBox.information(self, "已添加", f"已将 URL 添加到网址导航：\n{title}")
+        self._host.show_toast(f"已添加到网址导航：{title}")
 
     def _on_double_click(self, item):
         fid = item.data(Qt.ItemDataRole.UserRole)
@@ -1480,7 +1463,7 @@ class FragmentsPanel(QWidget):
         """合并选中的碎片"""
         ids = self._get_selected_ids()
         if len(ids) < 2:
-            QMessageBox.information(self, "提示", "请至少选择 2 条碎片进行合并。")
+            GlassMessageBox.information(self, "提示", "请至少选择 2 条碎片进行合并。")
             return
         fragments = self._fragment_manager.get_fragments_by_ids(ids)
         if not fragments:
@@ -1498,9 +1481,8 @@ class FragmentsPanel(QWidget):
         fragments = self._fragment_manager.get_fragments_by_ids(ids)
         text = "\n\n".join(f.content for f in fragments)
         self._clipboard_monitor.put_text(text)
-        self._reuse_counter.record(text)
+        self._host.show_toast(f"已复制 {len(fragments)} 条碎片")
 
-    # ---- 一键粘回（reuse 卡）----
     # ==================================================================
     # 凭证哨兵回溯（clipboard-guard）
     # ==================================================================
@@ -1627,16 +1609,16 @@ class FragmentsPanel(QWidget):
     # 规则清仓建议（inbox-triage 卡）
     # ==================================================================
     def _open_triage_dialog(self):
-        """打开「清仓建议」对话框：只读候选清单 + 单条二次确认删除。
+        """打开「清仓建议」对话框：候选清单 + 单条/全部删除（均二次确认）。
 
-        红线（用户拍板「审查模式」，一条都不能破）：
-          · 清单**只读展示**，本身**不含任何删除按钮**——删除入口只在每条
-            自己的「删除」按钮上，且每条独立二次确认；
-          · 删除只走 ``delete_fragment()``（单条）。**绝不调
-            delete_fragments()**（批量）与 **rotate_backup()**（快照），
-            不做回收站 / 软删除；
+        红线（2026-10-04 用户拍板修订：在「审查模式」基础上放开一键删除）：
           · 清单**每次实时算**（``inbox_triage.collect_candidates``），
-            不落缓存文件——缓存与真实数据不一致会建议错。
+            不落缓存文件——缓存与真实数据不一致会建议错；
+          · 单条删除：每条自己的「删除」按钮，独立二次确认；
+          · 全部删除：底部「全部删除」按钮，一次确认 + 数量警示后
+            走 ``delete_fragments()`` 批量（一次列表重建 + 一次落盘，
+            与循环单条语义一致、性价比更高）；
+          · **绝不调 rotate_backup()**（快照），不做回收站 / 软删除。
         """
         mgr = self._fragment_manager
         if mgr is None:
@@ -1648,7 +1630,8 @@ class FragmentsPanel(QWidget):
 
         hint = QLabel(
             "以下碎片同时满足三个条件：存放时间久、**从未被搜索命中**、内容较短。"
-            "清单仅供复核，**不会自动删除**；若要清理，请逐条点击该条的「删除」。")
+            "清单仅供复核，**不会自动删除**；可逐条点「删除」，"
+            "或用底部「全部删除」一次性清理（均有二次确认，不可撤销）。")
         hint.setObjectName("hintLabel")
         hint.setWordWrap(True)
         body.addWidget(hint)
@@ -1747,35 +1730,74 @@ class FragmentsPanel(QWidget):
             """单条删除：独立二次确认（话术沿用「此操作不可撤销！」口径）。"""
             frag = mgr.get_fragment(fid)
             if frag is None:
-                _rebuild()
+                _rebuild_refresh()
                 return
-            ret = QMessageBox.question(
-                dlg, "确认删除",
-                "确认删除这条碎片？此操作不可撤销！\n\n%s"
-                % frag.preview(FRAGMENT_PREVIEW_LEN),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if ret != QMessageBox.StandardButton.Yes:
+            if not GlassMessageBox.question(
+                    dlg, "确认删除",
+                    "确认删除这条碎片？此操作不可撤销！\n\n%s"
+                    % frag.preview(FRAGMENT_PREVIEW_LEN),
+                    danger=True):
                 return
-            # ★ 只走单条 delete_fragment；绝不触碰 delete_fragments / rotate_backup
+            # ★ 只走单条 delete_fragment；绝不触碰 rotate_backup
             mgr.delete_fragment(fid)
-            _rebuild()
+            _rebuild_refresh()
             self.refresh(preserve_view=True)
+            self._host.show_toast("已删除 1 条碎片")
+
+        def _on_delete_all():
+            """全部删除：一次确认 + 数量警示 → delete_fragments 批量落盘。
+
+            只删**当前候选集**（state["items"]，随阈值实时变）；非候选
+            碎片一律不碰。候选为空时按钮本就禁用，这里是双保险。
+            """
+            ids = [f.fragment_id for f in state["items"]]
+            if not ids:
+                return
+            if not GlassMessageBox.question(
+                    dlg, "确认全部删除",
+                    "确认删除全部 %d 条建议清理的碎片？此操作不可撤销！\n\n"
+                    "（只删清单内的候选，其他碎片不受影响）" % len(ids),
+                    danger=True):
+                return
+            mgr.delete_fragments(ids)
+            _rebuild_refresh()
+            self.refresh(preserve_view=True)
+            self._host.show_toast(f"已删除 {len(ids)} 条碎片")
+
+        # 「全部删除」按钮在 footer 里创建（见下）；用引用容器让重算逻辑
+        # 在按钮诞生前后都能安全同步其可用态（空清单不可点）
+        _del_all_ref = {"btn": None}
+
+        def _rebuild_refresh():
+            _rebuild()
+            btn = _del_all_ref["btn"]
+            if btn is not None:
+                btn.setEnabled(len(state["items"]) > 0)
 
         # 改阈值 → 实时重算（不缓存）
-        days_stepper.valueChanged.connect(lambda _v: _rebuild())
-        len_stepper.valueChanged.connect(lambda _v: _rebuild())
+        days_stepper.valueChanged.connect(lambda _v: _rebuild_refresh())
+        len_stepper.valueChanged.connect(lambda _v: _rebuild_refresh())
+
+        _rebuild_refresh()
+        footer_btns = dlg.add_footer([
+            ("全部删除", "dangerBtn", _on_delete_all, "trash"),
+            ("关闭", "secondaryBtn", dlg.accept),
+        ])
+        del_all_btn = footer_btns[0]
+        del_all_btn.setToolTip(
+            "删除清单内全部候选碎片（会二次确认并显示数量，不可撤销）")
+        _del_all_ref["btn"] = del_all_btn
+        del_all_btn.setEnabled(len(state["items"]) > 0)
 
         # 挂到对话框上，便于离屏脚本直连而无需真正 exec 模态
-        dlg._triage_rebuild = _rebuild
+        dlg._triage_rebuild = _rebuild_refresh
         dlg._triage_delete_one = _on_delete_one
+        dlg._triage_delete_all = _on_delete_all
+        dlg._triage_delete_all_btn = del_all_btn
         dlg._triage_candidates = lambda: list(state["items"])
         dlg._triage_days_stepper = days_stepper
         dlg._triage_len_stepper = len_stepper
 
-        _rebuild()
-        dlg.add_footer([
-            ("关闭", "secondaryBtn", dlg.accept),
-        ])
         dlg.exec()
 
     def _triage_min_days(self) -> int:
@@ -1790,100 +1812,25 @@ class FragmentsPanel(QWidget):
             self._host._config.get("triage_max_len",
                                    inbox_triage.DEFAULT_MAX_LEN))
 
-    def _start_foreground_tracker(self):
-        """低频记录"非本程序的前台窗口"，供「粘回」还原焦点。
-
-        为什么不等点击时再取前台窗口：点击发生在 FloatPulse 面板内，
-        此时前台窗口就是本程序自己，取到的目标毫无意义。故必须持续跟
-        踪"用户最近一次用的外部窗口"——本程序不在前台时才刷新句柄。
-        """
-        self._fg_timer = QTimer(self)
-        self._fg_timer.setInterval(FOREIGN_FOREGROUND_POLL_MS)
-        self._fg_timer.timeout.connect(self._poll_foreign_foreground)
-        self._fg_timer.start()
-
-    def _self_window(self):
-        """返回本面板所属顶层窗口（无则回退宿主）"""
-        win = self.window()
-        return win if win is not None else self._host
-
-    def _poll_foreign_foreground(self):
-        """本程序不在前台时，把当前前台窗口记为「最近外部窗口」。
-
-        自己在前台（用户正在操作 FloatPulse）时**不覆盖**，否则会把
-        目标刷成本程序自身。
-        """
-        win = self._self_window()
-        try:
-            if win is not None and win.isActiveWindow():
-                return
-        except Exception:
-            pass
-        hwnd = self._paste_helper.capture_foreground()
-        if hwnd:
-            self._last_foreign_hwnd = hwnd
-
-    def _on_paste(self):
-        """粘回选中碎片：复制 → 还原焦点 → Ctrl+V；失败降级为仅复制。"""
-        ids = self._get_selected_ids()
-        if not ids:
-            self._host.show_toast("请先选中一条碎片")
-            return
-        fragments = self._fragment_manager.get_fragments_by_ids(ids)
-        if not fragments:
-            return
-        text = "\n\n".join(f.content for f in fragments)
-        self._paste_text(text)
-
-    def _paste_fragment(self, fragment_id):
-        """右键菜单入口：粘回单条碎片内容"""
-        frag = self._fragment_manager.get_fragment(fragment_id)
-        if frag is None:
-            return
-        self._paste_text(frag.content)
-
-    def _paste_text(self, text: str):
-        """粘回公共路径：复制到剪贴板 + 还原焦点发键，失败降级为仅复制。"""
-        # 埋点：同一内容的重复复制计数（产品指标）
-        self._reuse_counter.record(text)
-        self._clipboard_monitor.put_text(text)
-
-        # 用户关掉了自动粘贴 → 只复制（与旧「复制」等价）
-        if not bool(self._host._config.get("fragment_paste_enabled", True)):
-            self._host.show_toast("已复制到剪贴板")
-            return
-
-        hwnd = self._last_foreign_hwnd
-        ok, reason = self._paste_helper.paste_to(hwnd)
-        if ok:
-            return
-        # 降级：内容已在剪贴板，提示用户手动粘贴（不卡住、不抛异常）
-        if reason == _paste_helper.REASON_NOT_WINDOWS:
-            self._host.show_toast("已复制到剪贴板（当前系统不支持自动粘贴）")
-        else:
-            self._host.show_toast("已复制到剪贴板，请手动 Ctrl+V 粘贴")
-
     def _on_delete(self):
         """删除选中的碎片"""
         ids = self._get_selected_ids()
         if not ids:
             return
-        ret = QMessageBox.question(
-            self, "确认删除",
-            f"确认删除选中的 {len(ids)} 条碎片？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认删除",
+                f"确认删除选中的 {len(ids)} 条碎片？",
+                danger=True):
             self._fragment_manager.delete_fragments(ids)
             self.refresh()
+            self._host.show_toast(f"已删除 {len(ids)} 条碎片")
 
     def _on_clear(self):
         """清空全部碎片"""
-        ret = QMessageBox.question(
-            self, "确认清空",
-            "确认清空全部碎片？此操作不可撤销！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认清空",
+                "确认清空全部碎片？此操作不可撤销！",
+                danger=True):
             self._fragment_manager.clear_all()
             self.refresh()
+            self._host.show_toast("已清空全部碎片")

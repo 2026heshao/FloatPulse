@@ -173,6 +173,12 @@ class LaunchSplash(QWidget):
         """显示并开始动画（base 档淡入；reduce_motion 直接全显）"""
         self.setWindowOpacity(0.0)
         self.show()
+        # ★ 2026-10-05（用户实测：主窗弹出瞬间闪现小黑窗）首帧守卫：
+        #   与主窗入场/球弹出同因 —— 半透明窗首个 UpdateLayeredWindow
+        #   晚于 ShowWindow 时，DWM 以未初始化表面（黑）合成。show 返回
+        #   后窗口已映射可见，此刻（opacity 仍为 0）强制同步 paint+flush
+        #   把玻璃卡片写进分层表面，淡入全程不再有黑帧。
+        self.repaint()
         fin = self._ms("base")
         if fin > 0:
             self._fade_in.setDuration(fin)

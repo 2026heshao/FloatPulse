@@ -28,7 +28,7 @@ if BASE not in sys.path:
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QMessageBox      # noqa: E402
+from PyQt6.QtWidgets import QApplication                    # noqa: E402
 
 from src.clipboard_monitor import ClipboardMonitor        # noqa: E402
 from src.config import ConfigManager, DEFAULT_CONFIG      # noqa: E402
@@ -253,15 +253,11 @@ class TestResetRestoresOpacity:
         import src.settings_panel as sp_mod
 
         class _FakeMsgBox:
-            StandardButton = QMessageBox.StandardButton
+            """恢复默认确认框替身（GlassMessageBox.question 返回 bool）"""
 
             @staticmethod
             def question(*_a, **_k):
-                return _FakeMsgBox.StandardButton.Yes
-
-            @staticmethod
-            def information(*_a, **_k):
-                return _FakeMsgBox.StandardButton.Ok
+                return True
 
         config = ConfigManager(_tmp_path("reset.json"))
         config.set("window_opacity", 70)
@@ -272,7 +268,7 @@ class TestResetRestoresOpacity:
             assert w.windowOpacity() == pytest.approx(0.7, abs=0.01)
 
             sp = w._page_settings
-            monkeypatch.setattr(sp_mod, "QMessageBox", _FakeMsgBox)
+            monkeypatch.setattr(sp_mod, "GlassMessageBox", _FakeMsgBox)
             sp._on_reset_settings()
             _pump(qapp, 100)
 

@@ -164,6 +164,7 @@ THEMES = {
         "warn":              "#854F0B",
         "warn_alpha":        "rgba(133, 79, 11, 0.12)",
         "warn_border":       "rgba(133, 79, 11, 0.30)",
+        "warning":           "#B8770F",                    # 警告图标琥珀（GlassMessageBox warning 语义着色；与 warn 的语义色区分）
         "success":           "#1F8A4C",
         "link":              "#185FA5",                    # 碎片内容类别色条（链接）
 
@@ -303,6 +304,7 @@ THEMES = {
         "warn":              "#EF9F27",
         "warn_alpha":        "rgba(239, 159, 39, 0.14)",
         "warn_border":       "rgba(239, 159, 39, 0.32)",
+        "warning":           "#F0B45E",                    # 警告图标琥珀（GlassMessageBox warning 语义着色；与 warn 的语义色区分）
         "success":           "#2ECC71",
         "link":              "#85B7EB",                    # 碎片内容类别色条（链接）
 
@@ -671,16 +673,19 @@ QPushButton#textBtn:hover {
 }
 
 QPushButton#dangerBtn {
-    /* 危险操作：文字按钮 + 二次确认（调用点负责确认）。不做红胶囊 —— 静止态
-       透明底 + $danger 文字，hover 只由 SmoothButton overlay 叠一层淡红底
-       （a26→a46，与 iconBtn[danger] 同款），文字色保持 $danger 不变 */
+    /* 危险操作：文字按钮 + 二次确认（调用点负责确认）。静止态透明底 +
+       $danger 文字；hover 由 SmoothButton overlay 填 $danger_hover 实底
+       （端点见 controls.py _SMOOTH_OVERLAYS，两边必须同步） */
     background-color: transparent;
     color: $danger;
     border: 1px solid transparent;
 }
 QPushButton#dangerBtn:hover {
-    /* 背景过渡走 SmoothButton overlay（端点 $danger 淡染 a26/a46），
-       文字保持 $danger 即时 —— 本规则刻意不声明底色，避免与 overlay 打架 */
+    /* 背景过渡走 SmoothButton overlay（端点 $danger_hover 实底）。
+       对比度修复（2026-10，GlassMessageBox danger 按钮专项拍板）：实底红上
+       保持 $danger 红字几乎不可读 → hover 文字改白。本规则刻意不声明
+       底色，避免与 overlay 打架；实底端点 overlay 会按 QSS 状态补画 label */
+    color: white;
 }
 
 QPushButton#iconBtn {

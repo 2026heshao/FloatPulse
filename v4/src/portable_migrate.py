@@ -133,7 +133,7 @@ def maybe_prompt_migrate(parent=None, *, install_mode: bool = None,
     接线约定：在 ConfigManager 创建之前调用（本函数不依赖也不触发任何
     数据文件的创建），确保迁移发生在第一条数据落盘之前。
 
-    parent       : QMessageBox 父控件（启动早期通常还没有窗口，传 None）。
+    parent       : 弹窗父控件（启动早期通常还没有窗口，传 None）。
     install_mode : 缺省按运行环境自动判定（frozen 且无 portable.marker）；
                    测试可显式注入 True/False。
     exe_dir / data_root : 注入路径（测试用），语义同 detect_legacy_data。
@@ -151,7 +151,7 @@ def maybe_prompt_migrate(parent=None, *, install_mode: bool = None,
     if summary is None:
         return None
     # PyQt6 惰性导入：检测 / 迁移路径保持无 GUI 依赖，可在任意纯逻辑环境调用
-    from PyQt6.QtWidgets import QMessageBox
+    from src.glass_message_box import GlassMessageBox
     text = (
         "检测到旧版本的数据文件，是否迁移到新的数据目录？\n\n"
         f"旧位置：{summary['src']}\n"
@@ -159,16 +159,11 @@ def maybe_prompt_migrate(parent=None, *, install_mode: bool = None,
         f"共 {summary['files']} 个文件。原数据会保留备份"
         "（迁移后旧目录改名为 float_data.migrated-<时间戳>，不会删除）。"
     )
-    ret = QMessageBox.question(
-        parent, "数据迁移", text,
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        QMessageBox.StandardButton.Yes,
-    )
-    if ret != QMessageBox.StandardButton.Yes:
+    if not GlassMessageBox.question(parent, "数据迁移", text):
         return None
     result = migrate_legacy_data(summary)
     if not result.get("ok"):
-        QMessageBox.warning(
+        GlassMessageBox.warning(
             parent, "数据迁移失败",
             "旧数据保持原样、未做任何改动，程序将继续正常启动：\n\n"
             f"{result.get('error', '')}"

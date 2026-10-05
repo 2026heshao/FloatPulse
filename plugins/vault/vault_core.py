@@ -51,7 +51,12 @@ SALT_BYTES = 16
 ENTROPY_BYTES = 32
 META_FILE = "meta.json"
 VAULT_FILE = "vault.bin"
+SESSION_FILE = "session.bin"     # 「永不锁定」档记住的派生密钥（DPAPI 加密）
 TIME_FMT = "%Y-%m-%d %H:%M"
+
+# 记住解锁凭据的 DPAPI 第二因子（固定常量：凭据文件只在本机本账户可解，
+# 真正的访问控制来自 DPAPI 的用户绑定，不需要在这里引入第二秘密）
+_SESSION_ENTROPY = b"floatpulse-vault-session-v1"
 
 # 掩码固定 8 个点：不随真实长度变化，避免「看掩码猜长度」
 MASK = "••••••••"
@@ -375,6 +380,68 @@ def save_settings(data_dir: str, settings: dict) -> bool:
 
 
 # ====================================================================
+# 记住解锁（「永不锁定」档）：派生密钥经 DPAPI 落盘，重启自动开箱
+# --------------------------------------------------------------------
+# 安全语义：session.bin 由 DPAPI（绑定本机 + 本 Windows 账户）保护，
+# 效果 = 「能登录这个 Windows 账户即可开箱」。主密码本身不落盘；
+# 换机器 / 换账户 / 手动上锁 / 切走「永不」档都会使其失效。
+# ====================================================================
+def load_session(data_dir: str):
+    """读记住的派生密钥（DPAPI 解密）；缺失 / 损坏 / 环境变化 → None"""
+    path = os.path.join(data_dir or "", SESSION_FILE)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError:
+        return None
+    plain = dpapi_unprotect(blob, _SESSION_ENTROPY)
+    if not plain or len(plain) != ENTROPY_BYTES:
+        return None
+    return plain
+
+
+def save_session(data_dir: str, entropy: bytes) -> bool:
+    """记住派生密钥（DPAPI 加密后原子落盘）；失败返回 False（不阻塞解锁）"""
+    entropy = bytes(entropy)
+    if len(entropy) != ENTROPY_BYTES:
+        return False
+    path = os.path.join(data_dir or "", SESSION_FILE)
+    if not path or path == SESSION_FILE:
+        return False
+    try:
+        blob = dpapi_protect(entropy, _SESSION_ENTROPY)
+    except VaultError:
+        return False
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(blob)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def clear_session(data_dir: str) -> bool:
+    """清除记住的解锁凭据（手动上锁 / 切走「永不」档时调用）"""
+    path = os.path.join(data_dir or "", SESSION_FILE)
+    if not os.path.isfile(path):
+        return True
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
+# ====================================================================
 # Vault：状态机（missing → ready → unlocked ⇄ locked）+ 存储
 # ====================================================================
 class Vault:
@@ -474,8 +541,34 @@ class Vault:
                                meta.get("verify_sha256", "")):
             return False                        # 主密码错（统一口径，不细究原因）
         entropy = derive_entropy(password, salt, iterations)
-        with open(self.vault_path, "rb") as f:
-            blob = f.read()
+        return self._open_with(meta, entropy)
+
+    def unlock_entropy(self, entropy: bytes) -> bool:
+        """用派生密钥直接解锁（记住解锁路径：跳过主密码验证与 KDF）。
+
+        仅供「永不锁定」档的自动开箱使用：密钥来自 DPAPI 保护的
+        session.bin，解不开 vault.bin（改密后 / 换环境）一律返回 False。
+        """
+        if self.status() != "ready" or not entropy:
+            return False
+        try:
+            meta = self._load_meta()
+        except VaultError:
+            return False
+        return self._open_with(meta, bytes(entropy))
+
+    @property
+    def session_key(self):
+        """当前派生密钥快照（记住解锁用）；锁定态返回 None"""
+        return bytes(self._entropy) if self._entropy is not None else None
+
+    def _open_with(self, meta: dict, entropy: bytes) -> bool:
+        """用已确定的派生密钥解开 vault.bin（unlock / unlock_entropy 共用）"""
+        try:
+            with open(self.vault_path, "rb") as f:
+                blob = f.read()
+        except OSError:
+            return False
         plain = dpapi_unprotect(blob, entropy)
         if plain is None:
             return False                        # 同上：不区分「密码错」与「换机器」

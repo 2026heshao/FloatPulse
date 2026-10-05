@@ -88,24 +88,32 @@ class SurfaceBackground:
         if not new_color.isValid():
             new_color = QColor("#FAFAF8")
 
-        try:
-            src_pm = QPixmap(path) if (path and spec["name"]) else QPixmap()
-        except Exception:          # 损坏的图片不该拖垮界面
-            src_pm = QPixmap()
-        new_src = path if not src_pm.isNull() else ""
+        # 只在换图时才读盘解码：壁纸动辄数 MB，原实现每次 configure 都
+        # QPixmap(path) 重解码一遍 —— 遮罩/模糊/不透明度的每个 ± 都会
+        # 触发一次 configure，大图下步进器连点整段卡顿（2026-10-05）。
+        # 路径未变时保留已解码位图与缩放缓存；解码失败时 _path 收敛成
+        # ""，与请求路径必然不等，下次调用仍会照常重试。
+        source_changed = False
+        if path != self._path:
+            try:
+                src_pm = QPixmap(path) if (path and spec["name"]) else QPixmap()
+            except Exception:          # 损坏的图片不该拖垮界面
+                src_pm = QPixmap()
+            new_src = path if not src_pm.isNull() else ""
+            if new_src != self._path:
+                source_changed = True
+                self._path = new_src
+                self._source = src_pm
+                self._cache_key = None
+                self._cache_pix = QPixmap()
 
-        changed = (new_src != self._path
+        changed = (source_changed
                    or spec["mode"] != self._mode
                    or spec["opacity"] != self._opacity
                    or spec["blur"] != self._blur
                    or spec["veil"] != self._veil
                    or new_color.rgb() != self._veil_color.rgb())
 
-        if new_src != self._path:
-            self._path = new_src
-            self._source = src_pm
-            self._cache_key = None
-            self._cache_pix = QPixmap()
         self._mode = spec["mode"]
         self._opacity = spec["opacity"]
         self._blur = spec["blur"]

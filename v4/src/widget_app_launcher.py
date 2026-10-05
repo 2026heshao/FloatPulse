@@ -48,7 +48,6 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QFormLayout,
     QFileDialog,
-    QMessageBox,
     QFileIconProvider,
     QScrollArea,
     QGridLayout,
@@ -62,9 +61,13 @@ from PyQt6.QtGui import (QPixmap, QPainter, QColor, QPen, QPixmapCache,
                          QGuiApplication, QIcon)
 
 from src.theme import (FALLBACK_ACCENT, get_main_window_qss, get_colors, scale_px_fonts)
+from src.glass_message_box import GlassMessageBox
 from src.constants import DEFAULT_THEME
 from src import win_icons
-from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
+from src.controls import (
+    tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle,
+    ScreenToast,
+)
 
 
 # ====================================================================
@@ -322,7 +325,7 @@ def launch_app(app: dict, parent=None) -> bool:
 
     # ---- 前置校验：路径为空 ----
     if not exe_path:
-        QMessageBox.warning(
+        GlassMessageBox.warning(
             parent, "启动失败",
             f"「{name}」的可执行文件路径为空，请先编辑该条目。",
         )
@@ -330,7 +333,7 @@ def launch_app(app: dict, parent=None) -> bool:
 
     # ---- 前置校验：文件不存在 ----
     if not os.path.exists(exe_path):
-        QMessageBox.warning(
+        GlassMessageBox.warning(
             parent, "启动失败",
             f"找不到「{name}」的可执行文件：\n{exe_path}\n\n"
             "文件可能已被移动或删除，请编辑该条目修正路径。",
@@ -344,14 +347,14 @@ def launch_app(app: dict, parent=None) -> bool:
             os.startfile(exe_path)
             return True
         except FileNotFoundError:
-            QMessageBox.warning(
+            GlassMessageBox.warning(
                 parent, "启动失败",
                 f"快捷方式「{name}」指向的目标不存在：\n{exe_path}\n\n"
                 "原文件可能已被移动或删除。",
             )
             return False
         except OSError as e:
-            QMessageBox.critical(
+            GlassMessageBox.critical(
                 parent, "启动异常",
                 f"启动「{name}」时发生异常：\n{str(e)}",
             )
@@ -368,7 +371,7 @@ def launch_app(app: dict, parent=None) -> bool:
         subprocess.Popen(args_list, shell=False, close_fds=True)
         return True
     except FileNotFoundError:
-        QMessageBox.warning(
+        GlassMessageBox.warning(
             parent, "启动失败",
             f"找不到「{name}」的可执行文件。\n路径：{exe_path}",
         )
@@ -377,13 +380,13 @@ def launch_app(app: dict, parent=None) -> bool:
         # Windows 错误 740：请求的操作需要提升（exe 要求管理员权限）
         if getattr(e, "winerror", None) == 740:
             return _launch_elevated(exe_path, launch_args, name, parent)
-        QMessageBox.critical(
+        GlassMessageBox.critical(
             parent, "启动异常",
             f"启动「{name}」时发生异常：\n{str(e)}",
         )
         return False
     except Exception as e:
-        QMessageBox.critical(
+        GlassMessageBox.critical(
             parent, "启动异常",
             f"启动「{name}」时发生异常：\n{str(e)}",
         )
@@ -412,13 +415,13 @@ def _launch_elevated(exe_path: str, launch_args: str, name: str, parent=None) ->
         if ret > 32:
             return True  # UAC 确认，提权启动成功
         # 返回值 5 = SE_ERR_ACCESSDENIED：用户在 UAC 弹窗点了"否"
-        QMessageBox.information(
+        GlassMessageBox.information(
             parent, "已取消",
             f"已取消以管理员权限启动「{name}」。",
         )
         return False
     except Exception as e:
-        QMessageBox.critical(
+        GlassMessageBox.critical(
             parent, "启动异常",
             f"以管理员权限启动「{name}」失败：\n{str(e)}",
         )
@@ -917,7 +920,7 @@ class AppLauncherPage(QWidget):
         """在资源管理器中定位软件文件（exe 或 lnk 本身，并选中）。"""
         path = (app.get("exe_path") or "").strip()
         if not path or not os.path.exists(path):
-            QMessageBox.warning(
+            GlassMessageBox.warning(
                 self, "无法定位",
                 f"「{app.get('name', '')}」的文件不存在：\n{path or '（空路径）'}\n\n"
                 "文件可能已被移动或删除，请编辑该条目修正路径。")
@@ -926,26 +929,27 @@ class AppLauncherPage(QWidget):
             # explorer /select,"path"：打开所在文件夹并选中该文件
             subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
         except OSError as e:
-            QMessageBox.warning(self, "无法定位",
-                                f"打开资源管理器失败：\n{e}")
+            GlassMessageBox.warning(self, "无法定位",
+                                    f"打开资源管理器失败：\n{e}")
 
     def _copy_app_path(self, app: dict):
-        """复制可执行文件路径到剪贴板（无声操作，不弹提示）。"""
+        """复制可执行文件路径到剪贴板（ScreenToast 轻提示反馈）。
+
+        2026-10-05 改：此前刻意无声，现与全局复制操作反馈口径统一。
+        """
         path = (app.get("exe_path") or "").strip()
         if path:
             QApplication.clipboard().setText(path)
+            ScreenToast.show_msg("已复制路径", self._theme)
 
     def _remove_app(self, index: int):
         """移除条目（二次确认；只从列表删除，不动电脑上的软件本体）。"""
         name = self.app_list[index].get("name", "")
-        reply = QMessageBox.question(
-            self, "确认移除",
-            f"确定要从软件导航移除「{name}」吗？\n\n"
-            "仅从列表中删除，不会卸载或删除电脑上的软件本体。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认移除",
+                f"确定要从软件导航移除「{name}」吗？\n\n"
+                "仅从列表中删除，不会卸载或删除电脑上的软件本体。",
+                danger=True):
             del self.app_list[index]
             self.save_apps_to_config()
             self._refresh_cards()
@@ -1137,14 +1141,11 @@ class AppManageDialog(QDialog):
         if row < 0 or row >= len(self._apps):
             return
         name = self._apps[row].get("name", "")
-        reply = QMessageBox.question(
-            self,
-            "确认删除",
-            f"确定要删除「{name}」吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self,
+                "确认删除",
+                f"确定要删除「{name}」吗？",
+                danger=True):
             del self._apps[row]
             self._save_and_refresh()
 
@@ -1343,10 +1344,10 @@ class AppEditDialog(QDialog):
 
         # 必填校验：软件名称、exe 路径均不可为空
         if not name:
-            QMessageBox.warning(self, "提示", "软件名称不能为空。")
+            GlassMessageBox.warning(self, "提示", "软件名称不能为空。")
             return
         if not exe_path:
-            QMessageBox.warning(self, "提示", "请选择可执行文件（*.exe）。")
+            GlassMessageBox.warning(self, "提示", "请选择可执行文件（*.exe）。")
             return
 
         # 组装编辑结果：以原始模板为基底，覆盖弹窗暴露的字段，

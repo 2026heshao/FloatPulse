@@ -201,6 +201,16 @@ def install_excepthook():
                 f"完整错误信息已记录到日志：\n{log_path}"
             )
             box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            # 零风险增强（2026-10 玻璃拟态统一专项）：崩溃兜底**刻意保留
+            # 原生 QMessageBox**（异常上下文里 GlassDialog 全链路可能正是
+            # 崩溃源，兜底必须用最笨组件；护栏白名单唯一放行点），只补
+            # 应用图标与中文按钮文案 —— 两项都不触碰任何项目样式链路。
+            from PyQt6.QtGui import QIcon
+            from src.app_paths import find_icon_file
+            _icon_file = find_icon_file()
+            if _icon_file:
+                box.setWindowIcon(QIcon(_icon_file))
+            box.button(QMessageBox.StandardButton.Ok).setText("确定")
             box.exec()
         except Exception:
             pass

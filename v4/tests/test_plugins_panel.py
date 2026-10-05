@@ -498,7 +498,7 @@ class TestUsageViewer:
             def warning(parent, title, text):
                 warned.append((title, text))
 
-        monkeypatch.setattr(pp, "QMessageBox", _FakeMB)
+        monkeypatch.setattr(pp, "GlassMessageBox", _FakeMB)
 
         def _boom(path):
             raise OSError("no association")
@@ -647,10 +647,8 @@ class TestStoreDialog:
         # 真实流程里 _on_open_store_dialog 会登记弹窗引用，这里对齐它
         panel._store_dialog = dlg
         try:
-            # 安装成功路径会弹提示框，替身拦下避免测试阻塞
-            monkeypatch.setattr(
-                "src.plugins_panel.QMessageBox.information",
-                lambda *a, **k: None)
+            # 安装成功路径已降级为 show_toast（宿主无该能力时静默跳过），
+            # 不再弹模态提示框，无需替身（2026-10 统一改造）
             card = _store_cards(dlg)[0]
             btn = [b for b in card.findChildren(QPushButton)
                    if b.text() == "安装"][0]
@@ -902,3 +900,138 @@ class TestSearchAndSegFilter:
         grid = panel._cards_layout
         assert [grid.getItemPosition(i)[:2] for i in range(grid.count())] == [
             (0, 0)]
+
+
+# ====================================================================
+# 重新扫描两步走（2026-10-05 黑闪修复 + 轻提示）—— 回归钉
+# ====================================================================
+class _RescanLoader:
+    """记录 rescan / load_all 调用的 loader 替身（errors 可选）"""
+
+    def __init__(self, plugins=(), errors=()):
+        self._plugins = list(plugins)
+        self._errors = list(errors)
+        self.rescan_calls = 0
+        self.load_all_calls = 0
+
+    def rescan(self):
+        self.rescan_calls += 1
+        return list(self._plugins)
+
+    def load_all(self):
+        self.load_all_calls += 1
+        return list(self._plugins)
+
+    def loaded_plugins(self):
+        return list(self._plugins)
+
+    def load_errors(self):
+        return list(self._errors)
+
+    def scan_store(self):
+        return []
+
+    @property
+    def plugins_dir(self):
+        return os.path.join(os.path.sep, "nonexistent_plugins_dir")
+
+    @property
+    def store_dir(self):
+        return os.path.join(os.path.sep, "nonexistent_store_dir")
+
+
+class _ToastHost:
+    """记录 show_toast 与菜单重建调用的 host 替身"""
+
+    def __init__(self, loader):
+        self._loader = loader
+        self._config = {"plugins_enabled": True}
+        self.toasts = []
+        self.menu_rebuilds = 0
+
+    @property
+    def plugin_loader(self):
+        return self._loader
+
+    def show_toast(self, text, ms=2800):
+        self.toasts.append(text)
+
+    def _rebuild_context_menu(self):
+        self.menu_rebuilds += 1
+
+
+class TestRescanToastAndDefer:
+    def _make_panel(self, host):
+        from src.plugins_panel import PluginsPanel
+        return PluginsPanel(host)
+
+    def test_click_defers_and_disables_button(self, qapp, tmp_path):
+        """点击当下不开扫：按钮禁用 + 开始提示，重活等 deferred 槽"""
+        loader = _RescanLoader([_make_loaded_plugin(tmp_path)])
+        host = _ToastHost(loader)
+        panel = self._make_panel(host)
+        panel._on_rescan()
+        assert not panel._rescan_btn.isEnabled()
+        assert host.toasts == ["正在重新扫描插件…"]
+        assert loader.rescan_calls == 0          # 同步路径必须没有扫
+        assert panel._rescan_pending is True
+
+    def test_deferred_slot_scans_and_toasts_result(self, qapp, tmp_path):
+        lp = _make_loaded_plugin(tmp_path)
+        host = _ToastHost(_RescanLoader([lp]))
+        panel = self._make_panel(host)
+        panel._on_rescan()
+        panel._do_rescan()
+        assert host._loader.rescan_calls == 1
+        assert host.menu_rebuilds == 1
+        assert len(_plugin_cards(panel)) == 1    # 整页已刷新
+        assert host.toasts == ["正在重新扫描插件…",
+                               "重新扫描完成：1 个插件可用"]
+        assert panel._rescan_btn.isEnabled()     # 收尾恢复按钮
+        assert panel._rescan_pending is False
+
+    def test_deferred_toast_counts_errors(self, qapp, tmp_path):
+        lp = _make_loaded_plugin(tmp_path)
+        host = _ToastHost(_RescanLoader([lp], errors=["bad"]))
+        panel = self._make_panel(host)
+        panel._do_rescan()
+        assert host.toasts[-1] == "重新扫描完成：1 个插件可用，1 个加载失败"
+
+    def test_deferred_toast_when_nothing_found(self, qapp):
+        host = _ToastHost(_RescanLoader())
+        panel = self._make_panel(host)
+        panel._do_rescan()
+        assert host.toasts[-1] == "重新扫描完成：未发现插件"
+
+    def test_scan_failure_toasts_error(self, qapp):
+        class _BoomLoader(_RescanLoader):
+            def rescan(self):
+                raise RuntimeError("boom")
+
+        host = _ToastHost(_BoomLoader())
+        panel = self._make_panel(host)
+        panel._do_rescan()
+        assert host.toasts[-1] == "重新扫描失败：boom"
+        assert panel._rescan_btn.isEnabled()     # 失败也要恢复按钮
+
+    def test_old_loader_falls_back_to_load_all(self, qapp):
+        class _OldLoader(_RescanLoader):
+            rescan = None                        # 旧 loader 无 rescan 接口
+
+        loader = _OldLoader()
+        host = _ToastHost(loader)
+        panel = self._make_panel(host)
+        panel._do_rescan()
+        assert loader.load_all_calls == 1
+        assert host.toasts[-1] == "重新扫描完成：未发现插件"
+
+    def test_reentry_guard(self, qapp):
+        """扫描进行中再点无效：不重复弹开始提示、不叠加定时器"""
+        host = _ToastHost(_RescanLoader())
+        panel = self._make_panel(host)
+        panel._on_rescan()
+        panel._on_rescan()
+        assert host.toasts == ["正在重新扫描插件…"]
+        panel._do_rescan()
+        assert host._loader.rescan_calls == 1
+        assert host.toasts[-1] == "重新扫描完成：未发现插件"

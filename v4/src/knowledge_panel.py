@@ -11,12 +11,12 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
-    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer
 
 from src.constants import PARAGRAPH_PREVIEW_LEN
 from src.glass_dialog import GlassDialog
+from src.glass_message_box import GlassMessageBox
 from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
 
 # 搜索去抖毫秒数（与碎片页 SEARCH_DEBOUNCE_MS 同值；两面板各自本地定义，避免跨面板耦合）
@@ -299,9 +299,9 @@ class KnowledgePanel(QWidget):
                     self.refresh()
                     self._host.data_changed.emit("knowledge")
                 else:
-                    QMessageBox.warning(self, "保存失败", "docx 保存失败，请检查文件权限。")
+                    GlassMessageBox.warning(self, "保存失败", "docx 保存失败，请检查文件权限。")
             else:
-                QMessageBox.warning(self, "修改失败", "段落修改失败。")
+                GlassMessageBox.warning(self, "修改失败", "段落修改失败。")
 
         btns[0].clicked.connect(_save)
         dlg.exec()
@@ -331,9 +331,9 @@ class KnowledgePanel(QWidget):
                     self.refresh()
                     self._host.data_changed.emit("knowledge")
                 else:
-                    QMessageBox.warning(self, "保存失败", "docx 保存失败。")
+                    GlassMessageBox.warning(self, "保存失败", "docx 保存失败。")
             else:
-                QMessageBox.warning(self, "新增失败", "段落新增失败。")
+                GlassMessageBox.warning(self, "新增失败", "段落新增失败。")
 
         btns[0].clicked.connect(_save)
         dlg.exec()
@@ -348,33 +348,17 @@ class KnowledgePanel(QWidget):
             if self._docx_manager.save():
                 self.refresh()
                 self._host.data_changed.emit("knowledge")
+                self._host.show_toast(f"已删除段落 {index + 1}")
             else:
-                QMessageBox.warning(self, "保存失败", "docx 保存失败，已尝试回滚备份。")
+                GlassMessageBox.warning(self, "保存失败", "docx 保存失败，已尝试回滚备份。")
                 self._docx_manager.restore_backup()
                 self._docx_manager.reload()
                 self.refresh()
 
-    def _confirm(self, title: str, text: str, confirm_label: str = "确认",
-                 confirm_icon: str = None) -> bool:
-        """玻璃风格确认框（替代原生 QMessageBox.question）"""
-        dlg = GlassDialog(self._host, title=title, size=(440, 220))
-        msg = QLabel(text)
-        msg.setWordWrap(True)
-        dlg.body_layout.addWidget(msg, 1)
-
-        result = {"ok": False}
-        btns = dlg.add_footer([
-            (confirm_label, "dangerBtn", None, confirm_icon),
-            ("取消", "secondaryBtn", dlg.reject),
-        ])
-
-        def _ok():
-            result["ok"] = True
-            dlg.accept()
-
-        btns[0].clicked.connect(_ok)
-        dlg.exec()
-        return result["ok"]
+    def _confirm(self, title: str, text: str, confirm_label: str = "确认") -> bool:
+        """玻璃风格确认框（统一走 GlassMessageBox.question，危险确认口径）"""
+        return GlassMessageBox.question(self._host, title, text,
+                                        ok_text=confirm_label, danger=True)
 
     def _add_to_fragments(self, index: int):
         """加入段落到碎片池"""
@@ -382,7 +366,7 @@ class KnowledgePanel(QWidget):
         if not text:
             return
         fid = self._fragment_manager.add_knowledge_segment(text, source=f"知识库#{index+1}")
-        QMessageBox.information(self, "已加入", f"段落已加入碎片池（id={fid}）。")
+        self._host.show_toast(f"已加入碎片池（id={fid}）")
 
     def _on_add_to_fragments(self):
         """批量加入选中段落到碎片池"""
@@ -390,7 +374,7 @@ class KnowledgePanel(QWidget):
                for item in self._kb_list.selectedItems()]
         ids = [i for i in ids if i is not None]   # 过滤"无匹配段落"占位行
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择要加入的段落。")
+            GlassMessageBox.information(self, "提示", "请先选择要加入的段落。")
             return
         count = 0
         for idx in ids:
@@ -398,7 +382,7 @@ class KnowledgePanel(QWidget):
             if text:
                 self._fragment_manager.add_knowledge_segment(text, source=f"知识库#{idx+1}")
                 count += 1
-        QMessageBox.information(self, "已加入", f"已加入 {count} 段到碎片池。")
+        self._host.show_toast(f"已加入 {count} 段到碎片池")
 
     def _on_append(self):
         """新增知识：弹窗输入内容，追加到 docx 末尾（玻璃风格）"""
@@ -419,7 +403,7 @@ class KnowledgePanel(QWidget):
         def _save():
             new_text = edit.toPlainText().strip()
             if not new_text:
-                QMessageBox.information(self, "提示", "内容为空，未新增。")
+                GlassMessageBox.information(self, "提示", "内容为空，未新增。")
                 return
             new_idx = self._docx_manager.append_paragraph(new_text)
             if new_idx >= 0:
@@ -427,14 +411,12 @@ class KnowledgePanel(QWidget):
                     dlg.accept()
                     self.refresh()
                     self._host.data_changed.emit("knowledge")
-                    QMessageBox.information(
-                        self, "新增成功",
-                        f"已追加为新段落（编号 {new_idx+1}）。"
-                    )
+                    self._host.show_toast(
+                        f"已追加为新段落（编号 {new_idx+1}）")
                 else:
-                    QMessageBox.warning(self, "保存失败", "docx 保存失败，请检查文件权限。")
+                    GlassMessageBox.warning(self, "保存失败", "docx 保存失败，请检查文件权限。")
             else:
-                QMessageBox.warning(self, "新增失败", "段落追加失败。")
+                GlassMessageBox.warning(self, "新增失败", "段落追加失败。")
 
         btns[0].clicked.connect(_save)
         dlg.exec()
@@ -444,11 +426,11 @@ class KnowledgePanel(QWidget):
         if not self._confirm("确认重新加载",
                              "重新加载将丢弃当前未保存的内存修改，"
                              "并重新读取 docx 文件。确认？",
-                             "重新加载", confirm_icon="refresh"):
+                             "重新加载"):
             return
         paragraphs, err = self._docx_manager.reload()
         if err:
-            QMessageBox.warning(self, "加载失败", err)
+            GlassMessageBox.warning(self, "加载失败", err)
         else:
             self.refresh()
             self._host.data_changed.emit("knowledge")

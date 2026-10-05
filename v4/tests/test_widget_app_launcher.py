@@ -140,7 +140,7 @@ class TestCardActionDispatch:
         import src.widget_app_launcher as wal
         page = _make_page(apps=[_make_app(exe="C:/no/such/file.exe")])
         warned = []
-        monkeypatch.setattr(wal.QMessageBox, "warning",
+        monkeypatch.setattr(wal.GlassMessageBox, "warning",
                             lambda *a, **k: warned.append(a))
         page._on_card_action(0, "locate")
         assert len(warned) == 1 and "不存在" in warned[0][2]
@@ -182,23 +182,21 @@ class TestCardActionDispatch:
         assert page.app_list[0]["name"] == "演示软件"
 
     def test_remove_confirmed(self, qapp, monkeypatch):
-        from PyQt6.QtWidgets import QMessageBox
         import src.widget_app_launcher as wal
         page = _make_page(apps=[_make_app("甲"), _make_app("乙")])
         monkeypatch.setattr(
-            wal.QMessageBox, "question",
-            lambda *a, **k: QMessageBox.StandardButton.Yes)
+            wal.GlassMessageBox, "question",
+            staticmethod(lambda *a, **k: True))
         page._on_card_action(0, "remove")
         assert [a["name"] for a in page.app_list] == ["乙"]
         assert page._config_manager.get("apps") == page.app_list
 
     def test_remove_declined_keeps_entry(self, qapp, monkeypatch):
-        from PyQt6.QtWidgets import QMessageBox
         import src.widget_app_launcher as wal
         page = _make_page(apps=[_make_app()])
         monkeypatch.setattr(
-            wal.QMessageBox, "question",
-            lambda *a, **k: QMessageBox.StandardButton.No)
+            wal.GlassMessageBox, "question",
+            staticmethod(lambda *a, **k: False))
         page._on_card_action(0, "remove")
         assert len(page.app_list) == 1
 

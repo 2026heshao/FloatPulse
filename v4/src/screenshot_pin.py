@@ -36,6 +36,7 @@ from PyQt6.QtGui import (
 import math
 
 from src.logger import get_logger
+from src.controls import ScreenToast
 from src.theme import FALLBACK_ACCENT, get_colors, get_menu_qss
 
 # 选区最小边长（逻辑像素），小于该值视为误触
@@ -647,6 +648,8 @@ class PinWindow(QWidget):
     def _copy_to_clipboard(self):
         QGuiApplication.clipboard().setPixmap(self._composited())
         get_logger().info("[截图] 钉图已复制到剪贴板")
+        # 轻提示反馈（2026-10-05）：此前仅写日志，用户无感知
+        ScreenToast.show_msg("钉图已复制", self._theme)
 
     def _save_as_png(self):
         from datetime import datetime

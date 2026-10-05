@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 r"""portable_migrate（安装版旧数据迁移）回归。
 
-覆盖分支（全部注入 tmp 目录，不碰真实仓库数据；弹窗经 QMessageBox mock，
+覆盖分支（全部注入 tmp 目录，不碰真实仓库数据；弹窗经 GlassMessageBox mock，
 offscreen 安全，绝不真弹框）：
 
   A detect_legacy_data：命中 / 便携源码模式不迁移 / 旧目录缺失 /
@@ -17,7 +17,7 @@ import sys
 # 让测试能 import src 下的模块
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from PyQt6.QtWidgets import QMessageBox
+from src import glass_message_box as _gmb
 
 import src.portable_migrate as pm
 
@@ -227,15 +227,18 @@ class TestMaybePrompt:
         def fake_question(*args, **kwargs):
             calls.append(args)
             return answer
-        monkeypatch.setattr(QMessageBox, "question", fake_question)
-        monkeypatch.setattr(QMessageBox, "warning",
-                            lambda *a, **k: QMessageBox.StandardButton.Ok)
+        # 2026-10 统一改造：迁移弹窗已换 GlassMessageBox（模块内惰性导入），
+        # patch 目标随之迁到 src.glass_message_box.GlassMessageBox
+        monkeypatch.setattr(_gmb.GlassMessageBox, "question",
+                            staticmethod(fake_question))
+        monkeypatch.setattr(_gmb.GlassMessageBox, "warning",
+                            staticmethod(lambda *a, **k: None))
 
     def test_yes_executes_migration(self, tmp_path, monkeypatch):
         exe_dir, data_root, src, dst = _make_env(tmp_path)
         _make_legacy_dir(src)
         calls = []
-        self._fake_answer(monkeypatch, QMessageBox.StandardButton.Yes, calls)
+        self._fake_answer(monkeypatch, True, calls)
         r = pm.maybe_prompt_migrate(None, install_mode=True,
                                     exe_dir=exe_dir, data_root=data_root)
         assert r is not None and r["ok"] is True
@@ -251,7 +254,7 @@ class TestMaybePrompt:
         exe_dir, data_root, src, dst = _make_env(tmp_path)
         _make_legacy_dir(src)
         calls = []
-        self._fake_answer(monkeypatch, QMessageBox.StandardButton.No, calls)
+        self._fake_answer(monkeypatch, False, calls)
         r = pm.maybe_prompt_migrate(None, install_mode=True,
                                     exe_dir=exe_dir, data_root=data_root)
         assert r is None
@@ -263,7 +266,7 @@ class TestMaybePrompt:
         """未命中（已迁移 / 非安装版）不弹窗、不执行"""
         exe_dir, data_root, _src, _dst = _make_env(tmp_path)
         calls = []
-        self._fake_answer(monkeypatch, QMessageBox.StandardButton.Yes, calls)
+        self._fake_answer(monkeypatch, True, calls)
         assert pm.maybe_prompt_migrate(None, install_mode=True,
                                        exe_dir=exe_dir,
                                        data_root=data_root) is None

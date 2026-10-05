@@ -128,10 +128,6 @@ DEFAULT_CONFIG = {
     # 是布尔门槛，无数值范围（bool 不进下面 _CONFIG_RANGES）。
     "triage_min_days":      30,           # 天数阈值（1-3650，UI 可调）
     "triage_max_len":       40,           # 长度阈值（字符，1-500，UI 可调）
-    # ===== 碎片「一键粘回」（2026-10-03 第 3 卡 reuse）=====
-    # 默认 True = 选中碎片「粘回」时自动还原焦点并发 Ctrl+V（本次新增能力）；
-    # 关掉则「粘回」退化为仅复制到剪贴板（与原「复制」逐项等价）。
-    "fragment_paste_enabled": True,
     "ball_visible":         True,         # 悬浮球是否显示
     "apps":                 [],           # 软件导航条目列表
     "app_card_size":        96,           # 软件卡片边长（像素）
@@ -229,7 +225,6 @@ _CONFIG_TYPES = {
     "fragment_day_view":    bool,
     "triage_min_days":      int,
     "triage_max_len":       int,
-    "fragment_paste_enabled": bool,
     "ball_visible":         bool,
     "apps":                 list,
     "app_card_size":        int,

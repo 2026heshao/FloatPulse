@@ -8,14 +8,17 @@
   B 真实数据 → 真实索引：把任务/笔记/碎片/知识库/素材五类宿主数据喂进去，
     逐项验证「五类都能搜到」「词典外专有名词能搜到」「全角与英文能搜到」
     「多命中项排更前」「结果条数与 kind 正确」
-  C 页面真身：注册进主窗口导航、show_plugin_page 切过去、去抖定时器生效、
-    结果 HTML 带加粗着色、用户原文里的 < 被转义、空查询/无匹配两种空态、
+  C 页面真身（v1.5.0 卡片列）：注册进主窗口导航、show_plugin_page 切过去、
+    去抖定时器生效、QScrollArea 卡片列首页 20 张、命中处行内高亮、用户
+    原文里的 < 被转义、空查询/无匹配两种空态、「显示更多」只追加不重渲染、
     重建索引按钮走真回调
   D **结果跳转**（并入宿主全库搜索后新增的能力）：点结果标题 → 真跑
     anchorClicked 回调 → 切到对应页；知识库要**定位到那一段**
   E **Ctrl+K 两态**：插件启用 → 切到站内搜索页；插件停用 → 只提示不崩
     （宿主侧不做第二套 UI）
-  F 视觉：页面在 light / dark 各截一张真图，且两图确实不同（主题生效）
+  F 视觉：页面在 light / dark 各截一张真图，且两图确实不同（主题生效）；
+    展开前后 QScrollBar.value 不变（展开只动本卡）；弱查询「6」的标题级
+    强命中进主列表、正文顺带命中折叠进低相关组；超长碎片不给行内展开
 
 跑法：python tools/run_gui_check.py tools/verify_kb_search.py
 产物：build/shots/kb-search-page-{light,dark}.png
@@ -35,8 +38,8 @@ ROOT = os.path.dirname(BASE)                                        # 仓库根
 sys.path.insert(0, BASE)
 
 from PyQt6.QtCore import Qt, QUrl                                   # noqa: E402
-from PyQt6.QtWidgets import QApplication, QTextBrowser                # noqa: E402
-from PyQt6.QtGui import QFontDatabase                                # noqa: E402
+from PyQt6.QtWidgets import QApplication, QScrollArea               # noqa: E402
+from PyQt6.QtGui import QFontDatabase                               # noqa: E402
 
 from src.config import ConfigManager                                 # noqa: E402
 from src.main_window import MainWindow, NAV_PAGE_INDEX               # noqa: E402
@@ -148,6 +151,19 @@ with open(_dummy, "w", encoding="utf-8") as f:
     f.write("dummy")
 ASSET_ID = assets.add_asset(_dummy, "客户报价单.xlsx")
 
+# ---- v1.5.0 分层 / 卡片列验证的定向数据 ----
+# 弱查询「6」：标题强命中 1 条（批次 6），正文顺带命中 1 条（不进主列表）
+notes.add_note("这是批次 6 的专属记录条目", "批次 6 清单")
+frags.add_clipboard_text("普通记录第一行\n在第 6 条附注里出现", "剪贴板")
+# 「月报 归档」大池：25 条笔记把主列表撑过一页（分页）且全部是标题级强命中
+for _i in range(10, 35):
+    notes.add_note(f"月报归档条目：把第 {_i} 份月报归档到位",
+                   "月报 归档工作记录")
+# 行内展开：短碎片（窗口片段截断但 < 800 字，且是强相关使卡在主列表可见）
+frags.add_clipboard_text("甲" * 80 + "月报归档" + "乙" * 80, "剪贴板")
+# 超长碎片（>800 字）：不给行内展开，走「在面板中打开」
+frags.add_clipboard_text("丙" * 900 + "蓝鲸九百字", "剪贴板")
+
 win = MainWindow(tasks, notes, frags, docx, cm, clip,
                  temp_asset_manager=assets, nav_manager=nav)
 win.resize(1280, 740)
@@ -253,8 +269,8 @@ check("B2 切入页面即自动重建索引，状态行给出条数",
       "已索引" in stat and "检索项" in stat, stat)
 
 n_docs = page._docs
-# 3 段知识库 + 1 条任务 + 2 条笔记 + 1 条碎片 + 1 条素材 = 8
-check(f"B3 五类数据都进了索引（{n_docs} 条）", n_docs == 8, f"n={n_docs}")
+# 3 段知识库 + 1 条任务 + (2+1+25)=28 条笔记 + 4 条碎片 + 1 条素材 = 37
+check(f"B3 五类数据都进了索引（{n_docs} 条）", n_docs == 37, f"n={n_docs}")
 
 
 def _run(q):
@@ -312,51 +328,64 @@ check("B11 结果按分数降序、分数为正",
                                             reverse=True))
 
 # ====================================================================
-# C. UI 真身
+# C. UI 真身（v1.5.0 卡片列）
 # ====================================================================
 page._input.setText("月报 归档")
 page._run_search()
 pump(60)
-html_out = page._view.toHtml()
-check("C1 结果是 QTextBrowser（能渲染 HTML 子集）",
-      isinstance(page._view, QTextBrowser))
-# ⚠ 不能断言 class="hit"：QTextBrowser 会把 class 内联成 style
-check("C2 渲染出的命中处带加粗着色（高亮生效）",
-      "font-weight:700" in html_out or "font-weight: 700" in html_out,
-      html_out[:160])
-check("C3 命中的每一条都带数据源标签（标签与实际 kind 对得上）",
-      bool(_run("月报 归档")) and all(
-          plug.KIND_LABEL[h.kind] in html_out for h in _run("月报 归档")),
-      f"{[(h.uid, h.kind) for h in _run('月报 归档')]}")
+check("C1 结果区是 QScrollArea 卡片列，首页 20 张卡（QTextBrowser 退役）",
+      isinstance(page._scroll, QScrollArea) and len(page._cards) == 20,
+      f"cards={len(page._cards)}")
+bodies = [c._body.text() for c in page._cards]
+check("C2 卡片正文命中处带行内高亮（强调色 + 底纹 + 加粗）",
+      bool(bodies) and all("font-weight:600" in b for b in bodies),
+      bodies[0][:160] if bodies else "无卡")
+check("C3 每张卡带数据源徽章（与命中 kind 一致）",
+      all(c._badge.text() == plug.KIND_LABEL[c._hit.kind]
+          for c in page._cards),
+      f"{[(c._badge.text(), c._hit.kind) for c in page._cards[:3]]}")
 check("C4 有结果时隐藏空态提示", page._empty.isVisible() is False)
+check("C4b 每张卡带「在面板中打开」尾链（fp-result 锚点）",
+      all(f"{plug.RESULT_SCHEME}:" in c._foot.text() for c in page._cards))
 
-# 用户原文里的尖括号必须被转义（否则被 QTextBrowser 当标签吃掉）
+check("C1b 分页：强相关超过一页时「显示更多」给出剩余数",
+      page._more_btn.isVisible() and "剩余" in page._more_btn.text(),
+      page._more_btn.text())
+_old_ids = [id(c) for c in page._cards]
+_sb = page._scroll.verticalScrollBar()
+_sb.setValue(50)
+pump(30)
+_scroll_before = _sb.value()
+page._more_btn.click()
+pump(60)
+check("C1c 显示更多只追加（旧卡实例不变、滚动位置不动）",
+      [id(c) for c in page._cards[:len(_old_ids)]] == _old_ids
+      and _sb.value() == _scroll_before and len(page._cards) == 27,
+      f"cards={len(page._cards)} scroll={_sb.value()} vs {_scroll_before}")
+
+# 用户原文里的尖括号必须被转义（否则被 QLabel 当标签吃掉）
 page._input.setText("复现步骤")
 page._run_search()
 pump(60)
-xss_html = page._view.toHtml()
-# ⚠ 片段是从命中点向两侧取窗口，`&lt;script` 不一定完整落在窗口里；
-# 判据改成「有转义产物」+「没有任何未转义的标签开头」
+xss_body = page._cards[0]._body.text() if page._cards else ""
 check("C5 用户原文里的 < 被转义（防被当标签吃掉）",
-      "&lt;" in xss_html and "<script" not in xss_html,
-      xss_html[-260:])
+      bool(page._cards) and "&lt;" in xss_body and "<script" not in xss_body,
+      xss_body[:200])
 
-# 无匹配 → 提示文案 + 空态可见
+# 无匹配 → 提示文案 + 空态可见 + 无卡
 page._input.setText("企鹅南极洲冰川")
 page._run_search()
 pump(60)
-check("C6 无匹配时文案说明「没有匹配」且空态可见",
-      "没有匹配" in page._stat.text() and page._empty.isVisible() is True,
-      page._stat.text())
+check("C6 无匹配时文案说明「没有匹配」且空态可见、无卡",
+      "没有匹配" in page._stat.text() and page._empty.isVisible() is True
+      and not page._cards, page._stat.text())
 
 # 空查询 → 清空结果 + 空态
 page._input.setText("")
 page._run_search()
 pump(60)
-# ⚠ toHtml() 永远返回 HTML 骨架，不能拿它判空；看纯文本
-check("C7 清空输入后结果区清空、空态回来",
-      page._view.toPlainText().strip() == "" and page._empty.isVisible() is True,
-      repr(page._view.toPlainText()[:60]))
+check("C7 清空输入后卡片清空、空态回来",
+      not page._cards and page._empty.isVisible() is True)
 
 # 去抖：textChanged 起定时器，且定时器是单次
 page._input.setText("价")
@@ -379,8 +408,11 @@ check("C9「重建索引」按钮走真回调，索引条数不变（数据没�
 notes.add_note("这是一条用来验证重建的独特词条 蓝鲸七号", "临时新增")
 page._rebuild_btn.click()
 pump(150)
+page._input.setText("蓝鲸七号")
+page._run_search()
+pump(60)
 check("C10 新增数据后重建索引即可搜到（懒建索引有效）",
-      page._docs == before_docs + 1 and bool(_run("蓝鲸七号")),
+      page._docs == before_docs + 1 and bool(page._cards),
       f"docs={page._docs}")
 page._input.setText("")
 
@@ -506,27 +538,24 @@ check("E5 重新启用后插件页回来了",
       f"{type(page).__name__ if page else None}")
 
 # ====================================================================
-# F. 双主题（真截图 + 富文本强调色跟随）
+# F. 双主题（真截图 + 卡片随主题刷新 + 展开局部性 + 弱查询分层）
 # ====================================================================
 win.show_plugin_page(PAGE_KEY)
 pump(400)
 page = win._stack.widget(NAV_PAGE_INDEX[PAGE_KEY])
-page._input.setText("月报 归档")
-page._run_search()
-pump(120)
 sizes = {}
-html_by_theme = {}
+body_by_theme = {}
 for theme in ("light", "dark"):
     cm.set("theme", theme)
     # ⚠ 走 apply_external_theme（设置面板的真实路径）：它会广播
-    # theme_changed，插件页据此换强调色。直接调 _apply_theme() 只换 QSS，
-    # QTextBrowser 里的行内颜色不会变——这正是本条要钉的东西。
+    # theme_changed，插件页据此刷新卡片样式。直接调 _apply_theme() 只换
+    # QSS，卡片 rich text 里的行内颜色不会变——这正是本条要钉的东西。
     win.apply_external_theme(theme)
     pump(300)
     page._input.setText("月报 归档")
     page._run_search()
     pump(120)
-    html_by_theme[theme] = page._view.toHtml()
+    body_by_theme[theme] = page._cards[0]._body.text() if page._cards else ""
     p = os.path.join(OUT_DIR, f"kb-search-page-{theme}.png")
     img = win.grab()
     img.save(p)
@@ -544,20 +573,20 @@ with open(os.path.join(OUT_DIR, "kb-search-page-dark.png"), "rb") as f:
 check("F2 light / dark 两图不同（主题确实生效）",
       light_bytes != dark_bytes)
 
-# 富文本强调色必须跟随主题（QSS 管不到 QTextBrowser 内部的行内样式）。
+# 强调色必须跟随主题（QSS 管不到卡片 rich text 里的行内样式）。
 # 修复前这里写死 #0a7d7b：深色主题下结果标题对比度只有 3.05:1，几乎看不见。
-# ⚠ toHtml() 会把颜色统一成**小写**（#6FFFE9 → #6fffe9），比较前要归一
+# ⚠ 卡片正文里颜色以行内样式出现，比较前统一小写
 def _has_accent(html, accent):
     return accent.lower() in (html or "").lower()
 
 
-check("F3 切到 dark 后插件页强调色换成 dark 主题色",
+check("F3 切到 dark 后插件页强调色换成 dark 主题色（卡片正文行内生效）",
       page._accent == plug.accent_for("dark")
-      and _has_accent(html_by_theme["dark"], plug.accent_for("dark")),
+      and _has_accent(body_by_theme["dark"], plug.accent_for("dark")),
       f"accent={page._accent}")
 check("F4 light / dark 的强调色不相同，且各自用在对应主题的渲染里",
       plug.accent_for("light") != plug.accent_for("dark")
-      and _has_accent(html_by_theme["light"], plug.accent_for("light")),
+      and _has_accent(body_by_theme["light"], plug.accent_for("light")),
       f"light={plug.accent_for('light')} dark={plug.accent_for('dark')}")
 
 
@@ -591,6 +620,65 @@ qss = win._container.styleSheet()
 check("F6 宿主 QSS 覆盖插件页样式钩子",
       "pluginPage" in qss and "pluginEmptyHint" in qss
       and "secondaryBtn" in qss, f"qss_len={len(qss)}")
+
+# ---- v1.5.0 新增：展开局部性 + 弱查询分层 + 超长碎片不给行内展开 ----
+page._input.setText("月报 归档")
+page._run_search()
+pump(80)
+while page._more_btn.isVisible():        # 可展开碎片排在长尾（大池第 27 名），
+    page._more_btn.click()               # 先把分页铺完它才有卡
+    pump(40)
+exp_idx = next((i for i, h in enumerate(page._hits)
+                if h.kind == "fragment" and "乙" * 50 in h.text), None)
+check("F7 可展开短碎片在强相关主列表（tier=strong）",
+      exp_idx is not None and page._hits[exp_idx].tier == "strong",
+      f"exp_idx={exp_idx}")
+if exp_idx is not None:
+    sb = page._scroll.verticalScrollBar()
+    sb.setValue(60)
+    pump(30)
+    before = sb.value()
+    page._on_anchor(QUrl(f"{plug.EXPAND_SCHEME}:{exp_idx}"))
+    pump(80)
+    card = page._card_for_hit(exp_idx)
+    check("F8 展开前后 QScrollBar.value 不变（展开只动本卡）",
+          sb.value() == before and card is not None
+          and "收起" in card._foot.text(),
+          f"scroll={sb.value()} vs {before} foot={card._foot.text()[:40] if card else '无卡'}")
+    check("F9 展开后全文上屏（被窗口截掉的尾部回来了）",
+          card is not None and "乙" * 50 in card._body.text())
+
+# 超长碎片（>800 字）：不给行内展开，守「不做数据沉淀层」红线
+page._input.setText("蓝鲸九百字")
+page._run_search()
+pump(60)
+long_cards = [c for c in page._cards + page._weak_cards
+              if "蓝鲸九百字" in c._hit.text]
+check("F10 超长碎片（>800 字）不给行内展开",
+      bool(long_cards) and all(
+          not c._can_expand() and plug.EXPAND_SCHEME not in c._foot.text()
+          for c in long_cards),
+      f"n={len(long_cards)}")
+
+# 弱查询「6」：标题命中的进主列表，正文顺带命中的折叠进低相关组
+page._input.setText("6")
+page._run_search()
+pump(80)
+check("F11 弱查询「6」强相关唯一且来自标题（批次 6 清单）",
+      len(page._strong_idx) == 1
+      and "批次 6" in page._hits[page._strong_idx[0]].title,
+      f"strong={len(page._strong_idx)} weak={len(page._weak_idx)}")
+check("F12 正文顺带命中折叠进低相关组（默认收起）",
+      bool(page._weak_idx) and page._weak_bar.isVisible()
+      and not page._weak_box.isVisible()
+      and "已折叠" in page._stat.text(),
+      f"weak={len(page._weak_idx)} stat={page._stat.text()}")
+page._weak_bar.click()
+pump(40)
+check("F13 低相关组展开后可见，卡数与弱相关数一致",
+      page._weak_box.isVisible()
+      and len(page._weak_cards) == len(page._weak_idx))
+page._weak_bar.click()
 
 # ====================================================================
 win.close()

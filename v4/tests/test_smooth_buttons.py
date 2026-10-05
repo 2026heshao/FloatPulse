@@ -138,26 +138,33 @@ def test_named_hover_rules_have_no_background_color_left():
 def test_danger_and_close_hover_keep_white_text():
     """收编只动背景，不动文字：danger 系「实底充填」按钮 hover 白字必须仍在。
 
-    ★ UI 重构 01 例外：``#dangerBtn`` 已从红胶囊改成文字按钮（透明底 +
-    $danger 文字，hover 只叠淡红底 a26/a46），文字不再走白 —— 见
-    test_dangerbtn_is_text_button_no_white_hover。cardCloseBtn / fragDelBtn
-    仍是深红实底按钮，白字契约不变。
+    2026-10 对比度修复（GlassMessageBox danger 按钮专项拍板）：``#dangerBtn``
+    hover 端点改回 $danger_hover 实底（红底上 $danger 红字几乎不可读），
+    文字同步改白 —— 与 cardCloseBtn / fragDelBtn 白字契约并轨。
     """
     bodies = _rule_bodies()
-    for sel in ("QPushButton#cardCloseBtn:hover", "QPushButton#fragDelBtn:hover"):
+    for sel in ("QPushButton#cardCloseBtn:hover", "QPushButton#fragDelBtn:hover",
+                "QPushButton#dangerBtn:hover"):
         assert "color: white" in bodies[sel], (
             "%s 丢失了 hover 白字（背景过渡收编时误删了文字契约）" % sel
         )
 
 
 def test_dangerbtn_is_text_button_no_white_hover():
-    """#dangerBtn 是文字按钮（UI 重构 01 三级制）：hover 不得压白字、不得
-    自己写 background-color（背景过渡归 SmoothButton 淡红 overlay）。"""
+    """#dangerBtn 静止态仍是文字按钮（UI 重构 01 三级制）：hover 只许改文字
+    白、不得自己写 background-color（实底过渡归 SmoothButton overlay）。"""
     bodies = _rule_bodies()
     assert "QPushButton#dangerBtn" in bodies
-    assert "color: white" not in bodies["QPushButton#dangerBtn:hover"]
+    # 静止态仍是 $danger 文字 + 透明底（红胶囊不得回归；
+    # _rule_bodies 返回的是 $token 已替换后的 QSS，故取 light 主题色值比对）
+    from src.theme import get_colors as _gc
+    assert ("color: %s" % _gc("light")["danger"]
+            in bodies["QPushButton#dangerBtn"])
+    assert "color: white" in bodies["QPushButton#dangerBtn:hover"]
     assert "background-color" not in bodies["QPushButton#dangerBtn:hover"]
-    assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 26), ("danger", 46))
+    # 2026-10 对比度修复：hover/press 端点 = $danger_hover 实底（白字才成立）
+    assert _SMOOTH_OVERLAYS["dangerBtn"] == (
+        ("danger_hover", 255), ("danger_hover", 255))
 
 
 # ====================================================================
@@ -190,7 +197,9 @@ def test_key_overlay_endpoints_are_pinned():
     """端点值钉死：这些值 = 各按钮的视觉端点契约，
     改任何一个都意味着视觉端点漂移，必须过肉眼校验再改这里。"""
     assert _SMOOTH_OVERLAYS["secondaryBtn"] == (("primary", 18), None)
-    assert _SMOOTH_OVERLAYS["dangerBtn"] == (("danger", 26), ("danger", 46))
+    # 2026-10 对比度修复：dangerBtn hover/press 端点 = $danger_hover 实底
+    assert _SMOOTH_OVERLAYS["dangerBtn"] == (
+        ("danger_hover", 255), ("danger_hover", 255))
     assert _SMOOTH_OVERLAYS["iconBtn"] == (("primary", 31), ("primary", 46))
     # 2026-10-02 悬停配色优化：modeBtn 常态是 ghost（$primary_a12），hover
     # 端点从 primary_hover 实底改淡染（46/77，与 stepBtn 同档）—— ghost→

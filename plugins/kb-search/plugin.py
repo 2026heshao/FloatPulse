@@ -21,9 +21,10 @@ Launcher）：本插件**只索引宿主自己的数据**，不碰文件系统�
   1. **索引是懒建的 + 可手动重建**：数据变了（新记了笔记）需要重建才能
      搜到；搜索页每次切入时**自动重建**（数据量小，几千条毫秒级），
      另给一个「重建索引」按钮兜底。
-  2. **结果用 QTextBrowser 渲染 HTML 而不是 QLabel 拼控件**：宿主 QLabel
-     不渲染 Markdown，高亮只能靠拼多个控件或自绘；QTextBrowser 支持
-     HTML 子集，一个控件就能把「命中处加粗着色」做对，代码量也最小。
+  2. **命中高亮走 rich text 行内样式**：宿主 QLabel 不渲染 Markdown，
+     高亮只能靠拼控件或自绘；v1.3 起用 QTextBrowser 的 HTML 子集，
+     v1.5.0 卡片化后每条结果是独立 ResultCard（QLabel rich text 消费
+     行内样式），命中处 span 着色 + $primary_a12 底纹。
 
 v1.1.0 增强：
   - K1 范围过滤：搜索框下五个数据源勾选（默认全开=与旧版同路径），
@@ -54,6 +55,21 @@ v1.4.0 插件独立设置（2026-10-04）：
   - 页面按 ctx.get_setting 读生效值（旧宿主无此契约 → 走常量兜底），
     并订阅 ctx.settings_changed：插件中心保存后勾选态与检索参数即时刷新，
     不必重开页面
+
+v1.5.0 结果页卡片化重设计（2026-10-05，方案见 docs/站内搜索结果页重设计）：
+  三个实测痛点，三个结构性修法：
+  1. **弱相关大段正文涌入首页**（查 "6" 时 2026 日期顺带命中 97% 碎片）：
+     core 加相关度分层——min_score_rel 相对分数下限 + is_weak_query 弱查询
+     口径（单字/纯数字只把标题/首行/文件名级命中算强相关），weak 命中
+     折叠进「低相关」组，默认收起
+  2. **「展开全文」整页弹跳**：根因是展开=整份结果 setHtml 重渲染（滚动
+     位置丢、其余结果全部重排）。现每条结果一张独立 ResultCard（QWidget），
+     展开状态自持在卡上，切展开只重排本卡内部——其余卡几何纹丝不动；
+     超长碎片（>800 字）不給行内展开，改「在面板中打开」看全文（守住
+     「不做数据沉淀层」红线）
+  3. **结果连成一面墙**：QTextBrowser 单份 HTML → QScrollArea + 卡片列
+     （卡距 8px、kind 徽章、左缘色条、命中行内高亮），来源过滤五勾选行
+     → 单选 chips；「显示更多」按页追加卡片，旧卡不重渲染
 ====================================================================
 """
 
@@ -63,11 +79,11 @@ import json
 import os
 import sys
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QTextBrowser, QToolTip, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from src.controls import IconButton, SmoothButton
@@ -99,13 +115,29 @@ SEARCH_DEBOUNCE_MS = 220            # 输入去抖（与宿主搜索同量级）
 MAX_RESULTS = 60
 PREVIEW_CHARS = 4000                # 单条入库正文上限（防一条长文拖慢索引）
 
-# 数据源标识 → 展示名
+# ---------------- 结果卡片列（v1.5.0） ----------------
+PAGE_SIZE = 20                      # 主列表每页卡片数（「显示更多」步长）
+CARD_SNIPPET_RADIUS = 40            # 卡片正文窗口半径（v1.3 行版是 26）
+INLINE_EXPAND_MAX_CHARS = 800       # 行内「展开」只服务短文；超长走面板跳转
+SEARCH_MIN_SCORE_REL = 0.18         # 相对分数下限：score < top×0.18 进低相关组
+
+# 数据源标识 → 展示名（kind 徽章 / chips / 尾行「在 xx 面板打开」共用）
 KIND_LABEL = {
     "knowledge": "知识库",
     "note": "笔记",
     "fragment": "碎片",
     "task": "任务",
     "asset": "素材",
+}
+
+# 数据源标识 → 主题 token（kind 徽章文字色与非碎片卡的左缘色条共用；
+# 碎片卡的色条仍走内容类别 CATEGORY_TOKENS，不在此表）
+_KIND_TOKEN = {
+    "knowledge": "primary",
+    "note": "link",
+    "fragment": "text_secondary",
+    "task": "warn",
+    "asset": "danger",
 }
 
 # 结果标题行锚点用的 URL scheme。用自定义 scheme 而不是 http/file：
@@ -120,6 +152,13 @@ EXPAND_SCHEME = "fp-expand"
 
 # meta 行不显示的默认来源：97% 的碎片来自剪贴板，恒显示是噪音
 SOURCE_DEFAULT = "剪贴板"
+
+# 空态引导文案（v1.5.0：与卡片列的新交互口径一致）
+EMPTY_HINT = ("输入关键词开始搜索\n\n"
+              "· 支持中文短语与英文单词混合，例如「月报 归档」\n"
+              "· 强相关结果以卡片呈现，正文顺带命中的低相关结果自动折叠\n"
+              "· 点结果标题或「在面板中打开」跳转到对应面板（知识库会定位到那一段）\n"
+              "· 短碎片可「展开」在卡内看全文，超长碎片请进面板查看")
 
 # ---------------- 搜索历史（K3，v1.2.0） ----------------
 # 最近搜索词存插件私有目录（重启不丢）；输入框为空时在下方显示「最近」行。
@@ -159,6 +198,21 @@ _CATEGORY_FALLBACK = {
     "dark":  {"link": "#85B7EB", "primary": "#5DCAA5", "warn": "#EF9F27",
               "danger": "#F09595", "text_secondary": "#A8ADA5",
               "text": "#E9EAE7", "text_placeholder": "#8A8F88"},
+}
+
+# 卡片容器视觉 token 兜底（v1.5.0，与 theme.py 对应 token 字面量逐值一致；
+# AST 护栏见 test_kb_search_cards.TestCardFallbackGuardrails）
+_CARD_FALLBACK = {
+    "light": {"card_bg_solid": "#FFFFFF", "line": "#E4E2DB",
+              "line_2": "#D3D1C7",
+              "list_item_hover": "rgba(15, 110, 86, 0.08)",
+              "primary_a12": "rgba(15, 110, 86, 0.12)",
+              "on_primary": "#FFFFFF"},
+    "dark":  {"card_bg_solid": "#1E2126", "line": "#33373D",
+              "line_2": "#454A52",
+              "list_item_hover": "rgba(93, 202, 165, 0.08)",
+              "primary_a12": "rgba(93, 202, 165, 0.12)",
+              "on_primary": "#04342C"},
 }
 
 # ---------------- 统一时间函数（src/time_format.py）----------------
@@ -207,6 +261,42 @@ def category_color_for(category, theme=DEFAULT_THEME, colors=None) -> str:
     table = _CATEGORY_FALLBACK.get(
         theme if theme in _CATEGORY_FALLBACK else DEFAULT_THEME, {})
     return table.get(token, "")
+
+
+def _with_alpha(hex_color, alpha: float = 0.12) -> str:
+    """纯色 hex → 同色低透明度 rgba（kind 徽章的浅底）。
+
+    只对既有 token 色加透明度，**不引入新色值**（与 theme.py 的 *_alpha
+    token 同思路）；解析不了原样返回，调用端退化为无底色徽章。
+    """
+    h = str(hex_color or "").lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return str(hex_color or "")
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return str(hex_color or "")
+    return f"rgba({r}, {g}, {b}, {int(round(alpha * 255))})"
+
+
+def _card_token(token, colors, theme=DEFAULT_THEME) -> str:
+    """卡片视觉 token → 色值：宿主色表优先，取不到按主题走字面量兜底。
+
+    查找顺序：文字/类别色系在 _CATEGORY_FALLBACK，容器色系（卡底/描边/
+    hover/高亮底纹）在 _CARD_FALLBACK；两处都没有返回 ""（调用端退化）。
+    """
+    if isinstance(colors, dict):
+        value = colors.get(token)
+        if isinstance(value, str) and (value.startswith("#")
+                                       or value.startswith("rgba(")):
+            return value
+    theme = theme if theme in ("light", "dark") else DEFAULT_THEME
+    for table in (_CATEGORY_FALLBACK, _CARD_FALLBACK):
+        if token in table.get(theme, {}):
+            return table[theme][token]
+    return ""
 
 
 def _fmt_time_fallback(ts) -> str:
@@ -457,8 +547,8 @@ def render_results_html(hits, query, accent=None, metas=None, colors=None,
       三者都可省略 —— 省略时碎片行退化为「无色条 / 无 meta 信息段」，
       调用向后兼容
     - 分数不再渲染进 HTML（旧版 .score 的 opacity 在 QTextBrowser 静默
-      失效，分数混进标题）：悬停结果行由 SearchPage._on_link_hovered
-      用 QToolTip 显示
+      失效，分数混进标题）。v1.5.0 起页面走卡片列，本函数退役为兼容层
+      （纯函数测试与旧调用方仍可用），分数改为整卡 setToolTip
     """
     if not hits:
         return ""
@@ -503,20 +593,120 @@ def _token_color(token, colors) -> str:
     return _CATEGORY_FALLBACK.get(DEFAULT_THEME, {}).get(token, "")
 
 
-def _body_html(snippet, spans, full_text=""):
-    """正文 HTML：命中处高亮 + **按需**省略号（两侧独立判断）。
+def _ellipsis_for(snippet, full_text):
+    """按需省略号：只有 snippet 真是 full_text 的中间截断时才加（两侧独立）。
 
     旧版恒加 "…"：82% 的碎片整条放得下也被谎报截断（"…Python…"）。
-    现在只有 snippet 真是 full_text 的中间截断时才在对应侧加省略号。
+    行版 HTML 与卡片 rich text 共用这一份判断，避免两处口径漂移。
     """
+    full = full_text if isinstance(full_text, str) else ""
+    lead = "…" if full and not full.startswith(snippet) else ""
+    tail = "…" if full and not full.endswith(snippet) else ""
+    return lead, tail
+
+
+def _body_html(snippet, spans, full_text=""):
+    """正文 HTML（QTextBrowser 行版，v1.5.0 起退役为兼容层）：
+    命中处高亮 + **按需**省略号（_ellipsis_for）。"""
     pieces = "".join(
         f'<span class="hit">{html.escape(text)}</span>' if is_hit
         else html.escape(text)
         for text, is_hit in core.split_by_spans(snippet, spans))
-    full = full_text if isinstance(full_text, str) else ""
-    lead = "…" if full and not full.startswith(snippet) else ""
-    tail = "…" if full and not full.endswith(snippet) else ""
+    lead, tail = _ellipsis_for(snippet, full_text)
     return f"{lead}{pieces}{tail}"
+
+
+def render_card_body_html(snippet, spans, full_text="", accent=None,
+                          mark_bg=None):
+    """单卡正文 rich text（QLabel 消费，v1.5.0）：命中行内高亮 + 按需省略号。
+
+    - 转义规则与 ``_body_html`` 同源：用户文本一律 html.escape，命中区间
+      由 core.split_by_spans 给出（核心层不知道渲染方式）
+    - 高亮 = 强调色文字 + ``$primary_a12`` 底纹（QLabel 不认 QSS class，
+      行内样式是唯一通道）；``mark_bg`` 缺省用 light 字面量，纯函数调用方
+      （测试）行为稳定
+    - QLabel rich text 不保留换行空白：``\\n`` 转 ``<br>``（多空格缩进会
+      被折叠——卡片列的既定取舍，超长带缩进的正文请进面板看原文）
+    """
+    color = accent or _ACCENT_FALLBACK[DEFAULT_THEME]
+    mark = mark_bg or _CARD_FALLBACK[DEFAULT_THEME]["primary_a12"]
+
+    def _piece(text):
+        return html.escape(text).replace("\n", "<br>")
+
+    pieces = "".join(
+        f'<span style="color:{color};font-weight:600;'
+        f'background-color:{mark}">{_piece(text)}</span>' if is_hit
+        else _piece(text)
+        for text, is_hit in core.split_by_spans(snippet, spans))
+    lead, tail = _ellipsis_for(snippet, full_text)
+    return f"{lead}{pieces}{tail}"
+
+
+def render_card_body(hit, expanded=False, accent=None, mark_bg=None,
+                     radius=CARD_SNIPPET_RADIUS):
+    """一条命中结果的卡片正文 rich text（v1.5.0）。
+
+    - 片段态：用 ``radius``（默认 40，比行版 26 宽）现算窗口片段——
+      search() 时缓存的 hit.snippet 是 26 半径的，卡片列有空间放宽
+    - 展开态：全文 + 按全文坐标系重算的高亮（复用 ``_full_text_with_spans``）
+    - 现算失败（数据被外部改坏）退化为原文前 200 字，不让单卡炸页面
+    """
+    try:
+        if expanded:
+            text, spans = _full_text_with_spans(hit)
+            return render_card_body_html(text, spans, "", accent, mark_bg)
+        snippet, spans, _matched = core.make_snippet(
+            hit.text, hit.matched, radius=radius)
+        return render_card_body_html(snippet, spans, hit.text, accent, mark_bg)
+    except Exception:                         # noqa: BLE001 - 单卡不许炸页面
+        text = hit.text if isinstance(hit.text, str) else str(hit.text or "")
+        return html.escape(text[:200])
+
+
+def _strip_kind_prefix(hit):
+    """剥掉 collect_documents 拼的「kind · 」前缀——徽章已标数据源，
+    标题里再出现一遍是 v1.2 的旧噪音（"[笔记] 笔记 · xxx"）。"""
+    label = KIND_LABEL.get(hit.kind, "")
+    title = str(hit.title or "")
+    prefix = f"{label} · "
+    return title[len(prefix):] if label and title.startswith(prefix) else title
+
+
+def card_title_for(hit, meta=None):
+    """卡片头行标题：给每张卡一个「身份」锚点。
+
+    - 非碎片：hit.title 剥掉 kind 前缀（任务标题 / 知识库段号 / 素材
+      文件名都在其中）
+    - 碎片没有标题：身份 = 类别名 · 来源（≠剪贴板时）· 首行截断 32 字
+      （97% 碎片来自剪贴板，恒显示来源是噪音——沿用 v1.3 口径）
+    """
+    if hit.kind != "fragment":
+        return _strip_kind_prefix(hit) or KIND_LABEL.get(hit.kind, "其它")
+    meta = meta if isinstance(meta, dict) else {}
+    bits = []
+    label = _CAT_LABELS.get(meta.get("category") or "")
+    if label:
+        bits.append(label)
+    source = str(meta.get("source") or "").strip()
+    if source and source != SOURCE_DEFAULT:
+        bits.append(source)
+    head = str(hit.text or "").split("\n", 1)[0].strip()
+    if head:
+        bits.append(head[:32] + ("…" if len(head) > 32 else ""))
+    return " · ".join(bits) if bits else KIND_LABEL.get(hit.kind, "碎片")
+
+
+def card_time_for(hit, meta=None):
+    """卡片头行右侧的相对时间。目前只有碎片带 created_at（元数据旁路）；
+    其余数据源快照里没有可展示的时间字段，返回空串（时间标签整体省略）。"""
+    if hit.kind != "fragment":
+        return ""
+    meta = meta if isinstance(meta, dict) else {}
+    created = str(meta.get("created_at") or "").strip()
+    if not created:
+        return ""
+    return meta_time_for(created)
 
 
 def _render_fragment_row(index, hit, meta, mc, tc, colors, expanded):
@@ -673,6 +863,217 @@ def target_filter_matches(kind, keyword, data):
 
 
 # ====================================================================
+# 结果卡片（v1.5.0）：一条结果一张独立 widget
+# ====================================================================
+class _ElidedTitle(QLabel):
+    """卡头标题：宽度不足时 QFontMetrics 补省略号（QLabel 没有原生 ellipsis）。
+
+    整段包 fp-result 锚点，点击跳转对应面板（与正文/尾行同一分发口）。
+    resizeEvent 里重排——布局给它的宽度变了才需要重新裁字；文本没变时
+    setText 直接返回，不会形成重排死循环。
+    """
+
+    def __init__(self, page, index, text, colors, theme):
+        super().__init__()
+        self._page = page
+        self._index = index
+        self._full = str(text or "")
+        self._colors = colors
+        self._theme = theme
+        self.setWordWrap(False)
+        font = self.font()
+        font.setPixelSize(13)
+        font.setWeight(QFont.Weight.DemiBold)
+        self.setFont(font)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.setOpenExternalLinks(False)
+        self.linkActivated.connect(page._on_card_link)
+        self._reflow()
+
+    def apply_theme(self, colors, theme):
+        self._colors = colors
+        self._theme = theme
+        self._reflow()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow()
+
+    def _reflow(self):
+        text_color = _card_token("text", self._colors, self._theme)
+        width = max(12, self.width() - 2)
+        elided = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideRight, width)
+        rich = (f'<a href="{RESULT_SCHEME}:{self._index}" '
+                f'style="color:{text_color};text-decoration:none">'
+                f'{html.escape(elided)}</a>')
+        if self.text() != rich:
+            self.setText(rich)
+
+
+class ResultCard(QFrame):
+    """一条结果一张卡（v1.5.0）。
+
+    结构（自左向右 / 自上而下）：
+      左缘 3px 色条 —— 碎片 = 内容类别色（CATEGORY_TOKENS 真相源，
+                        category_color_for 单一取色入口）；其他数据源 =
+                        kind 主题 token；未知类别画透明占位槽（对齐不塌）
+      头行          —— kind 徽章（token 色 + 12% 同色浅底）+ 标题（省略号）
+                       + 相对时间（11px placeholder，碎片专属）
+      正文          —— 窗口片段（radius 40），命中处行内高亮，整段包
+                       fp-result 锚点
+      尾行          —— 「展开/收起」（fp-expand，仅短碎片）+「在 xx 面板
+                       打开 →」（fp-result）；相关度分数在整卡 setToolTip
+
+    展开状态**自持**在卡上（旧版全局 _expanded 下标集退役）：toggle 只
+    换本卡正文与尾行文本，QScrollArea 里其余卡的几何纹丝不动、滚动位置
+    不丢——「展开全文整页弹跳」的根因（整份结果 setHtml 重渲染）从结构
+    上消失。超长碎片（>INLINE_EXPAND_MAX_CHARS）不給行内展开，走「在
+    面板中打开」看全文（不做数据沉淀层）。
+    """
+
+    def __init__(self, page, index, hit, meta, colors, theme):
+        super().__init__()
+        self.setObjectName("kbSearchCard")
+        self._page = page
+        self._index = index
+        self._hit = hit
+        self._meta = meta if isinstance(meta, dict) else {}
+        self._colors = colors
+        self._theme = theme
+        self._expanded = False
+        self.setToolTip(f"相关度 {hit.score:.2f}")
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self._bar = QFrame()
+        self._bar.setFixedWidth(3)
+        root.addWidget(self._bar)
+        col = QVBoxLayout()
+        col.setContentsMargins(13, 9, 12, 9)
+        col.setSpacing(4)
+        root.addLayout(col)
+
+        # ---- 头行：徽章 + 标题 + 时间 ----
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self._badge = QLabel(KIND_LABEL.get(hit.kind, hit.kind or "其它"))
+        head.addWidget(self._badge)
+        self._title = _ElidedTitle(
+            page, index, card_title_for(hit, self._meta), colors, theme)
+        head.addWidget(self._title, 1)
+        self._time = QLabel(card_time_for(hit, self._meta))
+        head.addWidget(self._time)
+        head.addStretch(0)                    # 时间贴右（无时间时标题吃满）
+        col.addLayout(head)
+
+        # ---- 正文 / 尾行 ----
+        self._body = QLabel()
+        self._body.setWordWrap(True)
+        self._body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._body.setOpenExternalLinks(False)
+        self._body.linkActivated.connect(page._on_card_link)
+        col.addWidget(self._body)
+        self._foot = QLabel()
+        self._foot.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._foot.setOpenExternalLinks(False)
+        self._foot.linkActivated.connect(page._on_card_link)
+        col.addWidget(self._foot)
+
+        self.apply_theme(colors, theme)
+
+    # ---------------- 主题 ----------------
+    def apply_theme(self, colors, theme):
+        """主题色刷新：容器/色条/徽章/时间/尾行重设样式，正文与标题重渲染
+        （命中高亮与链接色都在 rich text 行内，必须重出文本）。"""
+        self._colors = colors
+        self._theme = theme
+        card = _card_token("card_bg_solid", colors, theme)
+        line = _card_token("line", colors, theme)
+        hover = _card_token("list_item_hover", colors, theme)
+        self.setStyleSheet(
+            f"QFrame#kbSearchCard{{background-color:{card};"
+            f"border:1px solid {line};border-radius:8px;}}"
+            f"QFrame#kbSearchCard:hover{{background-color:{hover};}}")
+        bar = self._bar_color(colors, theme)
+        self._bar.setStyleSheet(
+            f"background-color:{bar or 'transparent'};border:none;"
+            "border-top-left-radius:8px;border-bottom-left-radius:8px;")
+        kind_color = _card_token(
+            _KIND_TOKEN.get(self._hit.kind, "text_secondary"), colors, theme)
+        self._badge.setStyleSheet(
+            f"color:{kind_color};background-color:{_with_alpha(kind_color)};"
+            "border-radius:4px;font-size:10px;font-weight:600;"
+            "padding:1px 8px;")
+        ph = _card_token("text_placeholder", colors, theme)
+        self._time.setStyleSheet(f"color:{ph};font-size:11px;")
+        self._foot.setStyleSheet(f"color:{ph};font-size:12px;")
+        self._title.apply_theme(colors, theme)
+        self._refresh_body()
+        self._refresh_foot()
+
+    def _bar_color(self, colors, theme) -> str:
+        """左缘色条：碎片走内容类别（真相源 CATEGORY_TOKENS），其余走
+        kind token；取不到返回 ""（透明占位槽，卡头仍对齐）。"""
+        if self._hit.kind == "fragment":
+            return category_color_for(
+                self._meta.get("category"), theme=theme, colors=colors)
+        return _card_token(
+            _KIND_TOKEN.get(self._hit.kind, ""), colors, theme)
+
+    # ---------------- 内容 ----------------
+    def _refresh_body(self):
+        body = render_card_body(
+            self._hit, expanded=self._expanded,
+            accent=self._page._accent,
+            mark_bg=_card_token("primary_a12", self._colors, self._theme))
+        text_color = _card_token("text", self._colors, self._theme)
+        self._body.setText(
+            f'<a href="{RESULT_SCHEME}:{self._index}" '
+            f'style="color:{text_color};text-decoration:none">{body}</a>')
+
+    def _refresh_foot(self):
+        i = self._index
+        ph = _card_token("text_placeholder", self._colors, self._theme)
+        parts = []
+        if self._can_expand():
+            lbl = "收起" if self._expanded else "展开"
+            parts.append(f'<a href="{EXPAND_SCHEME}:{i}" '
+                         f'style="color:{ph};text-decoration:none">{lbl}</a>')
+        label = KIND_LABEL.get(self._hit.kind, "对应")
+        parts.append(f'<a href="{RESULT_SCHEME}:{i}" '
+                     f'style="color:{self._page._accent};'
+                     f'text-decoration:none">在{label}面板打开 →</a>')
+        self._foot.setText(" ｜ ".join(parts))
+
+    def _can_expand(self) -> bool:
+        """行内展开只服务**短**碎片：snippet 已是全文（大多数）或正文超长
+        （>800 字，防卡片被撑成新的一面墙）都不给。"""
+        if self._hit.kind != "fragment":
+            return False
+        text = self._hit.text if isinstance(self._hit.text, str) \
+            else str(self._hit.text or "")
+        if not text or len(text) > INLINE_EXPAND_MAX_CHARS:
+            return False
+        snippet = self._hit.snippet if isinstance(self._hit.snippet, str) \
+            else ""
+        return snippet != text
+
+    def toggle_expand(self):
+        """卡内展开/收起：只重排本卡（其余卡几何不动、滚动位置不丢）。"""
+        if not self._can_expand():
+            return False
+        self._expanded = not self._expanded
+        self._refresh_body()
+        self._refresh_foot()
+        return True
+
+
+# ====================================================================
 # 动作
 # ====================================================================
 class OpenSearchAction(BallAction):
@@ -715,13 +1116,19 @@ class SearchPage(QWidget):
         self.setObjectName("pluginPage")
         self._index = core.SearchIndex()
         self._docs = 0
-        # 渲染顺序的命中列表：锚点 href 里存的是它的下标，点击时靠它反查
+        # 检索顺序的命中列表：锚点 href 里存的是它的下标，点击时靠它反查。
+        # 列表只被整体替换、从不重排（分层只贴 tier 标记），下标始终有效
         self._hits = []
+        # 相关度分层（v1.5.0）：存 self._hits 里的下标，与卡片一一对应
+        self._strong_idx = []
+        self._weak_idx = []
+        self._shown = 0                    # 主列表已渲染的强相关卡数
+        # 卡片列（v1.5.0）：主列表与低相关组的 ResultCard 集合
+        self._cards = []
+        self._weak_cards = []
+        self._weak_open = False
         # 碎片元数据旁路（uid → source/category/created_at），重建索引时刷新
         self._frag_meta = {}
-        # 处于「展开全文」态的结果下标。下标是渲染序，hits 一换代意义
-        # 就变，所以 _run_search 每次都要清空
-        self._expanded = set()
         # 搜索历史（K3）：最新在前，存插件私有目录
         self._history = load_history(ctx)
         self._build_ui()
@@ -742,11 +1149,6 @@ class SearchPage(QWidget):
         # 插件独立设置（v1.4.0）：读生效值 + 订阅插件中心的保存通知。
         # 订阅按宿主铁律走守卫模式——旧宿主没有该信号时自然跳过。
         self._apply_settings()
-        notes_chk = self._kind_checks.get("note")
-        if notes_chk is not None and notes_chk.isChecked() != self._search_notes:
-            notes_chk.blockSignals(True)
-            notes_chk.setChecked(self._search_notes)
-            notes_chk.blockSignals(False)
         settings_sig = getattr(ctx, "settings_changed", None)
         connect = getattr(settings_sig, "connect", None) \
             if settings_sig is not None else None
@@ -780,25 +1182,26 @@ class SearchPage(QWidget):
         self._ranking = ranking if ranking == "tfidf" else "bm25"
 
     def _on_settings_changed(self, _keys=None):
-        """插件中心保存设置后：刷新状态并应用（笔记勾选态 + 重搜）。
+        """插件中心保存设置后：刷新状态并应用（检索参数 + 笔记范围）。
 
-        只接管「笔记」这一路勾选（它是设置项），其余数据源勾选仍是
-        会话级 UI 状态；有查询词时按新参数立即重搜。
+        「默认搜索笔记」不再对应勾选框（v1.5.0 chips 单选化）：关掉时在
+        结果层剔除笔记命中，选「笔记」chip 仍可显式只搜笔记。
+        有查询词时按新参数立即重搜。
         """
         self._apply_settings()
-        notes_chk = self._kind_checks.get("note")
-        if notes_chk is not None and notes_chk.isChecked() != self._search_notes:
-            notes_chk.blockSignals(True)
-            notes_chk.setChecked(self._search_notes)
-            notes_chk.blockSignals(False)
         if self._input.text().strip():
             self._run_search()
 
     def _on_theme_changed(self, *_args):
-        """主题切换 → 换强调色并重渲染（不重建索引，数据没变）"""
+        """主题切换 → 换强调色并刷新已有卡片样式（不重建索引、不重搜，
+        数据没变——遍历卡片刷样式比整页 setHtml 便宜得多）"""
         self._accent = accent_for(theme_of(_host_window(self._ctx)))
-        if self._input.text().strip():
-            self._run_search()
+        self._sync_chip_styles()
+        if self._hits:
+            colors = self._theme_colors()
+            theme = theme_of(_host_window(self._ctx))
+            for card in self._cards + self._weak_cards:
+                card.apply_theme(colors, theme)
 
     # ---------------- 界面 ----------------
     def _build_ui(self):
@@ -812,7 +1215,7 @@ class SearchPage(QWidget):
         head.addWidget(title)
         head.addWidget(make_hint_label(
             "搜知识库 / 笔记 / 碎片 / 任务 / 素材；"
-            "点结果标题跳转到对应面板"))
+            "点结果标题或「在面板中打开」跳转到对应面板"))
         head.addStretch(1)
         root.addLayout(head)
 
@@ -839,47 +1242,74 @@ class SearchPage(QWidget):
         root.addWidget(self._recent_row)
         self._rebuild_recent()
 
-        # ---- 范围行（K1）：五个数据源勾选，默认全开 ----
-        # 全开时 search 走「不过滤」原路径（与旧版逐条一致）；在索引层
-        # 之后按范围排除，勾选切换即时生效，无需重建索引。
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(10)
-        filter_row.addWidget(make_hint_label("范围"))
-        self._kind_checks = {}
-        for kind_key, label in KIND_LABEL.items():
-            chk = QCheckBox(label)
-            chk.setChecked(True)
-            chk.setToolTip("只在勾选的数据源里出结果（索引始终覆盖全部）")
-            chk.toggled.connect(self._on_kind_toggled)
-            self._kind_checks[kind_key] = chk
-            filter_row.addWidget(chk)
-        filter_row.addStretch(1)
-        root.addLayout(filter_row)
+        # ---- 范围 chips（K1，v1.5.0 单选化）----
+        # chip 即过滤：默认「全部」（search 走不过滤原路径，与旧版逐条
+        # 一致）；点单个数据源 chip 只看该源，点击即时重搜，无需重建索引。
+        chips_row = QHBoxLayout()
+        chips_row.setSpacing(8)
+        chips_row.addWidget(make_hint_label("范围"))
+        self._kind_chips = {}
+        self._chip_key = "all"
+        for kind_key, label in [("all", "全部")] + list(KIND_LABEL.items()):
+            chip = SmoothButton(label)
+            chip.setObjectName("kbSearchChip")
+            chip.setCheckable(True)
+            chip.setChecked(kind_key == "all")
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setToolTip("混排全部数据源" if kind_key == "all" else
+                            "只看这一类数据源（索引始终覆盖全部）")
+            chip.clicked.connect(
+                lambda _=False, k=kind_key: self._on_chip_clicked(k))
+            self._kind_chips[kind_key] = chip
+            chips_row.addWidget(chip)
+        chips_row.addStretch(1)
+        root.addLayout(chips_row)
+        self._sync_chip_styles()
 
         self._stat = QLabel("正在建立索引…")
         self._stat.setObjectName("hintLabel")
         root.addWidget(self._stat)
 
-        box = QFrame()
-        box.setObjectName("glassCard")
-        box_lay = QVBoxLayout(box)
-        box_lay.setContentsMargins(10, 8, 10, 8)
-        self._view = QTextBrowser()
-        self._view.setObjectName("kbSearchResults")
-        self._view.setOpenExternalLinks(False)   # 自定义 scheme 只发信号
-        self._view.setOpenLinks(False)           # 不让浏览器自己导航
-        self._view.setFrameShape(QFrame.Shape.NoFrame)
-        self._view.anchorClicked.connect(self._on_anchor)
-        # 悬停锚点时 highlighted 发出 href（离开时发空串）→ 显示分数 tooltip
-        self._view.highlighted.connect(self._on_link_hovered)
-        box_lay.addWidget(self._view)
-        root.addWidget(box, 1)
+        # ---- 结果卡片列（v1.5.0）：QScrollArea + 垂直卡片布局 ----
+        # 一条结果一张独立 ResultCard：展开/追加都只动自己的卡，不再有
+        # 整份 setHtml 重渲染导致的滚动位置丢失与整列重排。
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._results_box = QWidget()
+        self._results_lay = QVBoxLayout(self._results_box)
+        self._results_lay.setContentsMargins(0, 0, 0, 0)
+        self._results_lay.setSpacing(8)
+        self._scroll.setWidget(self._results_box)
 
-        self._empty = QLabel("输入关键词开始搜索\n\n"
-                             "· 支持中文短语与英文单词混合，例如「月报 归档」\n"
-                             "· 命中处加粗着色，悬停结果行可查看相关度分数\n"
-                             "· 点结果标题跳转到对应面板（知识库会定位到那一段）\n"
-                             "· 超长碎片点「展开全文」查看全部内容")
+        # 低相关折叠组（默认收起）：弱相关命中收纳于此，不与强相关抢首屏
+        self._weak_bar = SmoothButton("低相关")
+        self._weak_bar.setObjectName("secondaryBtn")
+        self._weak_bar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._weak_bar.setToolTip("这些结果只在正文里顺带命中（如日期里的数字），"
+                                  "与查询关联较弱")
+        self._weak_bar.setVisible(False)
+        self._weak_bar.clicked.connect(lambda _=False: self._toggle_weak())
+        self._results_lay.addWidget(self._weak_bar)
+        self._weak_box = QWidget(self._results_box)
+        self._weak_lay = QVBoxLayout(self._weak_box)
+        self._weak_lay.setContentsMargins(0, 0, 0, 0)
+        self._weak_lay.setSpacing(8)
+        self._weak_box.setVisible(False)
+        self._results_lay.addWidget(self._weak_box)
+
+        # 分页：追加下一页强相关卡片（旧卡不重渲染、几何不动）
+        self._more_btn = SmoothButton("显示更多")
+        self._more_btn.setObjectName("secondaryBtn")
+        self._more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._more_btn.setVisible(False)
+        self._more_btn.clicked.connect(lambda _=False: self._show_more())
+        self._results_lay.addWidget(self._more_btn)
+        self._results_lay.addStretch(1)
+
+        root.addWidget(self._scroll, 1)
+
+        self._empty = QLabel(EMPTY_HINT)
         self._empty.setObjectName("pluginEmptyHint")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
@@ -916,59 +1346,203 @@ class SearchPage(QWidget):
         self._sync_recent_visible()               # 有输入就藏「最近」行
         self._debounce.start()                    # 去抖，避免每敲一个字搜一次
 
-    def _on_kind_toggled(self, _checked=False):
-        """勾选变化 → 立即重搜（结果层过滤，无需重建索引）"""
+    # ---------------- 范围 chips（v1.5.0 单选化） ----------------
+    def _on_chip_clicked(self, key):
+        """点 chip 切换范围：即时重搜（结果层过滤，无需重建索引）。
+
+        单选语义，不允许「全部不选」：重复点当前 chip 恢复选中态
+        （QPushButton checkable 点自己会被 toggle 成未选中）。
+        """
+        if key not in self._kind_chips:
+            return
+        if self._chip_key == key:
+            self._kind_chips[key].setChecked(True)
+            return
+        self._chip_key = key
+        for k, chip in self._kind_chips.items():
+            chip.setChecked(k == key)
         if self._input.text().strip():
             self._run_search()
 
     def _selected_kinds(self):
-        """勾选的数据源列表；全开 = []（search 不过滤，与旧路径一致）"""
-        return [k for k, chk in self._kind_checks.items() if chk.isChecked()]
+        """选中的数据源列表；「全部」= 全部 kind（search 不过滤，与旧路径一致）"""
+        if self._chip_key == "all":
+            return list(KIND_LABEL.keys())
+        return [self._chip_key]
+
+    def _chip_qss(self, colors, theme) -> str:
+        """范围 chip 的整套样式（含 :checked 态）——一套文本按状态切换，
+        主题切换时整体重设即可，无需逐 chip 判断选中态换色。"""
+        card = _card_token("card_bg_solid", colors, theme)
+        line2 = _card_token("line_2", colors, theme)
+        text2 = _card_token("text_secondary", colors, theme)
+        primary = _card_token("primary", colors, theme)
+        on_primary = _card_token("on_primary", colors, theme)
+        return (f"QPushButton#kbSearchChip{{background-color:{card};"
+                f"border:1px solid {line2};border-radius:999px;"
+                f"color:{text2};padding:3px 14px;font-size:12px;}}"
+                f"QPushButton#kbSearchChip:checked{{background-color:{primary};"
+                f"border-color:{primary};color:{on_primary};}}")
+
+    def _sync_chip_styles(self):
+        colors = self._theme_colors()
+        theme = theme_of(_host_window(self._ctx))
+        qss = self._chip_qss(colors, theme)
+        for chip in self._kind_chips.values():
+            chip.setStyleSheet(qss)
+
+    # ---------------- 结果卡片列（v1.5.0） ----------------
+    def _on_card_link(self, href):
+        """卡片里所有链接（标题/正文/尾行/展开）的统一入口：
+        QLabel linkActivated 给的是字符串，转 QUrl 走 _on_anchor 单点分发。"""
+        self._on_anchor(QUrl(href))
+
+    def _append_card(self, hit_index, colors, theme):
+        """按 self._hits 里的下标造一张卡，插到低相关组之前（主列表尾部）。"""
+        card = ResultCard(self, hit_index, self._hits[hit_index],
+                          self._frag_meta.get(self._hits[hit_index].uid),
+                          colors, theme)
+        self._results_lay.insertWidget(
+            self._results_lay.indexOf(self._weak_bar), card)
+        self._cards.append(card)
+        return card
+
+    def _clear_cards(self):
+        """清空全部结果卡（新搜索 / 清空输入时）；常驻的低相关组与分页
+        按钮只隐藏不销毁。"""
+        for card in self._cards + self._weak_cards:
+            self._results_lay.removeWidget(card)
+            card.deleteLater()
+        self._cards = []
+        self._weak_cards = []
+        self._shown = 0
+        self._weak_open = False
+        self._weak_bar.setVisible(False)
+        self._weak_box.setVisible(False)
+        self._more_btn.setVisible(False)
+
+    def _set_weak_bar_text(self):
+        n = len(self._weak_idx)
+        state = "收起" if self._weak_open else "展开"
+        self._weak_bar.setText(
+            f"{state}低相关 {n} 条（正文顺带命中，如日期里的数字）")
+
+    def _toggle_weak(self):
+        self._weak_open = not self._weak_open
+        self._weak_box.setVisible(self._weak_open)
+        self._set_weak_bar_text()
+
+    def _rebuild_weak_section(self, colors, theme):
+        """低相关组重建：有弱相关命中才亮出折叠条；卡是否上屏跟
+        _weak_open 走（默认收起）。"""
+        for card in self._weak_cards:
+            self._results_lay.removeWidget(card)
+            card.deleteLater()
+        self._weak_cards = []
+        if not self._weak_idx:
+            self._weak_bar.setVisible(False)
+            self._weak_box.setVisible(False)
+            self._weak_open = False
+            return
+        self._weak_bar.setVisible(True)
+        self._weak_box.setVisible(self._weak_open)
+        self._set_weak_bar_text()
+        for i in self._weak_idx:
+            card = ResultCard(self, i, self._hits[i],
+                              self._frag_meta.get(self._hits[i].uid),
+                              colors, theme)
+            self._weak_lay.addWidget(card)
+            self._weak_cards.append(card)
+
+    def _update_more_button(self):
+        remaining = len(self._strong_idx) - self._shown
+        self._more_btn.setVisible(remaining > 0)
+        if remaining > 0:
+            self._more_btn.setText(f"显示更多（剩余 {remaining} 条）")
+
+    def _show_more(self):
+        """追加下一页强相关卡：只 insertWidget 新卡，旧卡不重渲染。"""
+        colors = self._theme_colors()
+        theme = theme_of(_host_window(self._ctx))
+        for i in self._strong_idx[self._shown:self._shown + PAGE_SIZE]:
+            self._append_card(i, colors, theme)
+        self._shown = min(self._shown + PAGE_SIZE, len(self._strong_idx))
+        self._update_more_button()
+
+    def _render_cards(self, weak_query=False):
+        """按当前分层结果整列重建（搜索换代时才走；展开/追加走增量路径）"""
+        self._clear_cards()
+        colors = self._theme_colors()
+        theme = theme_of(_host_window(self._ctx))
+        self._empty.setVisible(not self._hits)
+        for i in self._strong_idx[:PAGE_SIZE]:
+            self._append_card(i, colors, theme)
+        self._shown = min(PAGE_SIZE, len(self._strong_idx))
+        self._rebuild_weak_section(colors, theme)
+        self._update_more_button()
 
     def _run_search(self):
         query = self._input.text().strip()
         if not query:
             self._hits = []
-            self._view.setHtml("")
+            self._strong_idx = []
+            self._weak_idx = []
+            self._clear_cards()
             self._empty.setVisible(True)
             self._sync_recent_visible()
             return
         kinds = self._selected_kinds()
         if not kinds:
-            # 一个源都不勾 = 范围为空，直接给空结果（不发检索）
+            # 防御分支（chips 单选语义下到不了）：范围为空直接给空结果
             self._hits = []
+            self._strong_idx = []
+            self._weak_idx = []
+            self._clear_cards()
             self._empty.setVisible(True)
-            self._view.setHtml("")
-            self._stat.setText("没有勾选任何数据源 ｜ 至少勾选一个再搜")
+            self._stat.setText("没有选中任何数据源范围 ｜ 至少选择一个再搜")
             return
         kind_arg = kinds if len(kinds) < len(KIND_LABEL) else None
+        weak_q = core.is_weak_query(query)
         try:
-            hits = self._index.search(query, top_n=self._max_results,
-                                      kind=kind_arg, ranking=self._ranking)
+            hits = self._index.search(
+                query, top_n=self._max_results, kind=kind_arg,
+                ranking=self._ranking, min_score_rel=SEARCH_MIN_SCORE_REL,
+                weak_query=weak_q)
         except Exception as exc:                  # noqa: BLE001
             self._hits = []
+            self._strong_idx = []
+            self._weak_idx = []
+            self._clear_cards()
             self._stat.setText(f"检索失败：{exc!r}")
             return
-        # ⚠ 必须与 render_results_html 用的是**同一个列表**：锚点 href 里存的
-        # 是它在列表里的下标，渲染完再改列表就会点错行
+        if not self._search_notes and self._chip_key != "note":
+            # 「默认搜索笔记」设置（v1.4.0）：chips 化后在结果层剔除，
+            # 显式选「笔记」chip 仍可只搜笔记
+            hits = [h for h in hits if h.kind != "note"]
+        # ⚠ self._hits 与卡片下标绑定：只整体替换、从不重排，锚点反查才稳
         self._hits = hits
-        self._expanded.clear()     # 下标是渲染序，hits 换代必须清展开态
-        self._empty.setVisible(not hits)
-        self._view.setHtml(render_results_html(
-            hits, query, self._accent, self._frag_meta,
-            self._theme_colors(), self._expanded))
+        self._strong_idx = [i for i, h in enumerate(hits)
+                            if h.tier == "strong"]
+        self._weak_idx = [i for i, h in enumerate(hits) if h.tier == "weak"]
+        self._render_cards(weak_q)
         self._remember_history(query)             # K3：有效检索记入历史
         scope = ""
         if kind_arg is not None:
             labels = " / ".join(KIND_LABEL[k] for k in kinds)
             scope = f" ｜ 范围：{labels}"
-        if hits:
-            self._stat.setText(f"命中 {len(hits)} 条"
-                               f"（最多显示 {self._max_results} 条）"
-                               f" ｜ 索引 {self._docs} 条{scope}")
-        else:
+        n_strong, n_weak = len(self._strong_idx), len(self._weak_idx)
+        if not hits:
             self._stat.setText(f"没有匹配「{query}」的内容 ｜ 索引 {self._docs} 条"
                                f"{scope}")
+        elif not n_strong:
+            self._stat.setText(
+                "没有强相关结果——换个更具体的关键词试试"
+                "（单字 / 纯数字只匹配标题与开头）"
+                f" ｜ 索引 {self._docs} 条{scope}")
+        else:
+            folded = f" ｜ 低相关 {n_weak} 条已折叠" if n_weak else ""
+            self._stat.setText(f"强相关 {n_strong} 条{folded}"
+                               f" ｜ 索引 {self._docs} 条{scope}")
 
     # ---------------- 最近搜索（K3） ----------------
     def _remember_history(self, word: str):
@@ -1055,59 +1629,43 @@ class SearchPage(QWidget):
 
     # ---------------- 跳转 ----------------
     def _on_anchor(self, url):
-        """锚点分发：fp-expand → 行内展开/收起；fp-result → 跳转面板。
+        """锚点分发：fp-expand → 卡内展开/收起；fp-result → 跳转面板。
 
         两个 scheme 各有独立解析函数且**互不解析**（见 parse_expand_anchor），
-        所以点「展开全文」绝不会被当成跳转，反之亦然。宿主侧只暴露一个
-        **公开入口** ``show_search_result(kind, keyword, num)``（与
-        ``show_plugin_page`` 同款约定）；宿主没有这个入口时提示一句，
-        不让点击静默失败。
+        所以点「展开」绝不会被当成跳转，反之亦然。fp-expand 的状态自持在
+        ResultCard 上（v1.5.0）：这里只按下标找到卡再 toggle，展开只动那
+        一张卡。宿主侧只暴露一个**公开入口** ``show_search_result(kind,
+        keyword, num)``（与 ``show_plugin_page`` 同款约定）；宿主没有这个
+        入口时提示一句，不让点击静默失败。
         """
         text = url.toString() if hasattr(url, "toString") else str(url)
         idx = parse_expand_anchor(text)
         if idx is not None:
             if 0 <= idx < len(self._hits):
-                if idx in self._expanded:
-                    self._expanded.discard(idx)
-                else:
-                    self._expanded.add(idx)
-                self._rerender_results()
+                card = self._card_for_hit(idx)
+                if card is not None:
+                    card.toggle_expand()
             return
         idx = parse_result_anchor(text)
         if idx is None or idx >= len(self._hits):
             return
         self._jump_to(self._hits[idx])
 
+    def _card_for_hit(self, hit_index):
+        """下标 → 承载它的 ResultCard（主列表 + 低相关组都找）"""
+        for card in self._cards + self._weak_cards:
+            if card._index == hit_index:
+                return card
+        return None
+
     def _theme_colors(self):
-        """宿主主题色 dict（QTextBrowser 内部只认行内样式，颜色必须每次
-        渲染时从主题取）；取不到返回 None，渲染端走字面量兜底"""
+        """宿主主题色 dict（卡片样式颜色每次从主题取）；取不到返回 None，
+        渲染端走字面量兜底"""
         try:
             from src.theme import get_colors
             return get_colors(theme_of(_host_window(self._ctx)))
         except Exception:                     # noqa: BLE001
             return None
-
-    def _rerender_results(self):
-        """展开/收起后的重渲染：不重建索引、不记历史、不动命中列表"""
-        if not self._hits:
-            return
-        self._view.setHtml(render_results_html(
-            self._hits, self._input.text().strip(), self._accent,
-            self._frag_meta, self._theme_colors(), self._expanded))
-
-    def _on_link_hovered(self, href):
-        """悬停结果行 → QToolTip 显示相关度分数。
-
-        v1.3.0 起分数不再占行内位置（旧 .score 的 opacity 在 QTextBrowser
-        静默失效，分数混进标题）。highlighted 在离开锚点时发空串 → 隐藏。
-        """
-        text = href.toString() if hasattr(href, "toString") else str(href or "")
-        idx = parse_result_anchor(text)
-        if idx is None or not (0 <= idx < len(self._hits)):
-            QToolTip.hideText()
-            return
-        QToolTip.showText(QCursor.pos(),
-                          f"相关度 {self._hits[idx].score:.2f}", self._view)
 
     def _jump_to(self, hit):
         """把一条命中转成宿主跳转调用"""
@@ -1162,7 +1720,7 @@ class SearchPage(QWidget):
 class KbSearchPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "站内搜索"
-    version = "1.4.0"
+    version = "1.5.0"
 
     def create_actions(self, ctx):
         return [OpenSearchAction()]

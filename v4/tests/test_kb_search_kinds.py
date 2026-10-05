@@ -127,6 +127,10 @@ class TestTargetFilterMatches:
 
 
 class TestSearchPageUI:
+    """v1.5.0 起范围过滤是单选 chips（旧五勾选行退役）——这里钉的是
+    chips 与旧 K1 语义的等价面：「全部」= 不过滤原路径，点单个数据源
+    chip 即时过滤且排序与全库一致。"""
+
     @pytest.fixture(scope="class")
     def page(self, plug):
         from PyQt6.QtWidgets import QApplication
@@ -145,35 +149,44 @@ class TestSearchPageUI:
         yield w
         w.deleteLater()
 
-    def test_filter_row_default_all_on(self, page, plug):
-        assert len(page._kind_checks) == 5
-        assert all(c.isChecked() for c in page._kind_checks.values())
-        assert page._selected_kinds() == list(plug.KIND_LABEL.keys())  # 全开
+    def test_chip_default_all(self, page, plug):
+        """默认「全部」chip：等价旧版五源全开（_selected_kinds 全量）"""
+        assert set(page._kind_chips) == {"all", *plug.KIND_LABEL}
+        assert page._chip_key == "all"
+        assert page._kind_chips["all"].isChecked()
+        assert page._selected_kinds() == list(plug.KIND_LABEL.keys())
 
-    def test_uncheck_all_blocks_search(self, page):
+    def test_chip_click_filters_results(self, page):
+        """点数据源 chip 只看该源，切回「全部」恢复混排（即时重搜）"""
+        page._ctx = types.SimpleNamespace(
+            plugin_id="kb-search",
+            data=types.SimpleNamespace(
+                tasks=lambda: [], assets=lambda: [], knowledge=lambda: [],
+                fragments=lambda: [{"fragment_id": 1, "content": "月报归档",
+                                    "source": "", "category": "",
+                                    "created_at": ""}],
+                notes=lambda: [{"note_id": 1, "title": "归档清单",
+                                "content": "把月报归档到位"}]),
+            parent_window=lambda: None, show_toast=lambda *a, **k: None,
+            logger=types.SimpleNamespace(
+                warning=lambda *a, **k: None, info=lambda *a, **k: None))
+        page.rebuild_index()
         page._input.setText("归档")
-        for chk in page._kind_checks.values():
-            chk.setChecked(False)
-        page._run_search()
-        assert page._hits == []
-        assert "至少勾选一个" in page._stat.text()
-
-    def test_uncheck_one_filters_results(self, page):
-        page.rebuild_index()                          # 空数据也能重建
-        for chk in page._kind_checks.values():
-            chk.setChecked(True)
-        page._input.setText("归档")
-        page._run_search()
-        base = len(page._hits)
-        page._kind_checks["note"].setChecked(False)
-        page._kind_checks["fragment"].setChecked(False)
-        page._kind_checks["task"].setChecked(False)
-        page._kind_checks["asset"].setChecked(False)
-        page._run_search()
-        # 只剩知识库范围：索引本页无知识库数据 → 空结果 + 范围提示
-        assert page._hits == []
+        page._on_chip_clicked("note")
+        assert page._hits and all(h.kind == "note" for h in page._hits)
         assert "范围" in page._stat.text()
-        assert base == 0                              # 空数据基准
+        page._on_chip_clicked("all")
+        assert {h.kind for h in page._hits} == {"note", "fragment"}
+
+    def test_reclick_active_chip_never_empties_scope(self, page):
+        """单选语义不允许「全部不选」：再点当前 chip 恢复选中态（防
+        checkable 被 toggle 成未选中后范围悬空）"""
+        page._input.setText("归档")
+        page._on_chip_clicked("note")
+        page._kind_chips["note"].click()
+        assert page._chip_key == "note"
+        assert page._kind_chips["note"].isChecked()
+        assert page._selected_kinds() == ["note"]
 
     def test_jump_self_heal_uses_empty_keyword(self, page):
         """模拟过滤必空 → jump 收到空关键词 + toast（只切页）"""

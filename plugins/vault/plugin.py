@@ -157,10 +157,52 @@ def get_vault(ctx):
     v = _STATE.get("vault")
     if v is None or _STATE.get("data_dir") != data_dir:
         v = core.Vault(data_dir)
+        _try_auto_unlock(v, data_dir, ctx)
         _STATE["vault"] = v
         _STATE["data_dir"] = data_dir
     _STATE["ctx"] = ctx
     return v
+
+
+def _try_auto_unlock(v, data_dir, ctx) -> None:
+    """「永不锁定」档的记住解锁：有 session.bin 就静默开箱（失败静默）。
+
+    凭据是 DPAPI（本机 + 本 Windows 账户）加密的派生密钥：主密码不落盘；
+    改密 / 换环境 / 手动上锁都会让旧凭据自然失效，走这里失败即回退到
+    正常的密码解锁页，无任何副作用。
+    """
+    try:
+        if v.status() != "ready" or not v.locked:
+            return
+        if core.load_settings(data_dir).get("idle_minutes") != 0:
+            return
+        key = core.load_session(data_dir)
+        if key is None:
+            return
+        if v.unlock_entropy(key):
+            touch_activity()
+            _log(ctx, "info", "记住解锁：已按「永不锁定」自动开箱")
+    except Exception:                             # noqa: BLE001 - 自动解锁绝不阻塞
+        pass
+
+
+def remember_session_if_never(v, data_dir) -> None:
+    """解锁成功后按档位同步凭据：「永不」记住，「非永不」清除。
+
+    所有解锁入口（主页面 / 快速取用 / 创建向导 / 改密）共用，
+    保证 session.bin 与档位设置始终一致。
+    """
+    try:
+        if v.locked:
+            return
+        if core.load_settings(data_dir).get("idle_minutes") == 0:
+            key = v.session_key
+            if key is not None:
+                core.save_session(data_dir, key)
+        else:
+            core.clear_session(data_dir)
+    except Exception:                             # noqa: BLE001
+        pass
 
 
 def ensure_idle_timer(ctx) -> None:
@@ -531,6 +573,7 @@ class QuickCopyDialog(PluginDialog):
             self._pw.clear()
             touch_activity()
             ensure_idle_timer(self._plugin_ctx)
+            remember_session_if_never(self._vault, self._vault.data_dir)
             self._sync_state()
         else:
             self._lock_err.setText("主密码错误，或数据/账户环境已变化")
@@ -816,6 +859,7 @@ class VaultPage(QWidget):
             self._unlock_pw.clear()
             self._unlock_err.setText("")
             touch_activity()
+            remember_session_if_never(self._vault, self._vault.data_dir)
             self._refresh_all()
             self._sync_overlay()
         else:
@@ -848,6 +892,7 @@ class VaultPage(QWidget):
         self._wz_pw2.clear()
         self._wz_err.setText("")
         touch_activity()
+        remember_session_if_never(self._vault, self._vault.data_dir)
         self._refresh_all()
         self._sync_overlay()
         self._toast("保险箱已创建")
@@ -1077,6 +1122,8 @@ class VaultPage(QWidget):
 
     def _on_lock(self):
         self._vault.lock()
+        # 手动上锁 = 用户明确要密码保护：记住的解锁凭据一并作废
+        core.clear_session(self._vault.data_dir)
         self._shown_secret = {}
         touch_activity()
         self._refresh_all()
@@ -1153,7 +1200,18 @@ class VaultPage(QWidget):
         minutes = self._idle_combo.itemData(index)
         if core.save_settings(self._vault.data_dir, {"idle_minutes": int(minutes or 0)}):
             label = self._idle_combo.currentText()
-            self._toast(f"空闲锁定已设为：{label}")
+            if int(minutes or 0) == 0:
+                # 「永不」：记住解锁凭据，重启后免输主密码（DPAPI 绑定本机本账户）
+                if not self._vault.locked:
+                    key = self._vault.session_key
+                    if key is not None:
+                        core.save_session(self._vault.data_dir, key)
+                self._toast(f"空闲锁定已设为：{label}（重启后自动解锁）")
+                _log(self._ctx, "info",
+                     "记住解锁已启用：重启后凭本机凭据自动开箱")
+            else:
+                core.clear_session(self._vault.data_dir)
+                self._toast(f"空闲锁定已设为：{label}")
 
     def _on_change_password(self):
         if self._vault.locked:
@@ -1168,6 +1226,8 @@ class VaultPage(QWidget):
             self._toast(f"改密失败：{exc}")
             return
         if ok:
+            # 改密后派生密钥已换：按档位重写 / 清除记住的凭据
+            remember_session_if_never(self._vault, self._vault.data_dir)
             self._toast("主密码已修改")
             _log(self._ctx, "info", "主密码已修改")
         else:

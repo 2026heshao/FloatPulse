@@ -72,7 +72,11 @@ _PRESS_SCALE = 0.98     # 按下微缩
 _SMOOTH_OVERLAYS = {
     "secondaryBtn":     (("primary", 18), None),
     "textBtn":          (("primary", 20), ("primary", 31)),
-    "dangerBtn":        (("danger", 26), ("danger", 46)),
+    # 2026-10 对比度修复（GlassMessageBox danger 按钮专项拍板）：hover 端点
+    # 从 danger a26 淡染改为 $danger_hover 实底（红底白字才读得清，QSS 侧
+    # `#dangerBtn:hover { color: white }` 同批同步）；press 保持同实底，
+    # 反馈由绘制级下沉/微缩承担。
+    "dangerBtn":        (("danger_hover", 255), ("danger_hover", 255)),
     # 小卡片碎片页页脚两个按钮（UI 重构 06）：随页脚一起从「行内彩色小胶囊」
     # 改成高仿真 .mini-foot .ib 的「裸露图标钮」—— 常态透明无边框，hover 只
     # 叠一层淡底。故端点从实底（danger/primary 255）换成 surface_2/3 实色。

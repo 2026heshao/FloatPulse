@@ -1013,7 +1013,8 @@ class PluginContext:
 
         方法：``update_task`` / ``set_task_done`` / ``delete_task`` /
         ``update_fragment`` / ``delete_fragment`` / ``update_note`` /
-        ``delete_note`` / ``undo_delete``。
+        ``delete_note`` / ``update_knowledge`` / ``delete_knowledge`` /
+        ``undo_delete``。
 
         与 ``ctx.write`` 是同一个门面对象，门禁在方法级按能力判定：
         只声明 write 的插件调这些方法 → 记 warning 并返回 False/0。

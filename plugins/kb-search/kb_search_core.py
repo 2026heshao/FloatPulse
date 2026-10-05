@@ -311,6 +311,20 @@ def tokenize(text):
     return _DEFAULT.terms(text)
 
 
+def is_weak_query(query) -> bool:
+    """单字符或 ≤2 位纯数字（全角归一后）→ 弱查询（v1.5.0）。
+
+    这类查询区分度极低：「6」能命中一切含 2026 的日期，BM25 对单一
+    查询项几乎拉不开差距，弱相关大段文字会整块涌入首页。调用方判得
+    True 时应配合 ``search(weak_query=True)`` 把正文顺带命中降级进
+    「低相关」折叠组，只让标题/文件名/编号级的强命中上主列表。
+    """
+    q = _DEFAULT.normalize(query).strip()
+    if not q:
+        return False
+    return len(q) <= 1 or (len(q) <= 2 and q.isdigit())
+
+
 # ====================================================================
 # 检索结果
 # ====================================================================
@@ -318,9 +332,10 @@ class Hit:
     """一条命中结果（纯数据，UI 直接拿来渲染）"""
 
     __slots__ = ("uid", "kind", "title", "text", "score", "matched",
-                 "snippet", "spans")
+                 "snippet", "spans", "tier")
 
-    def __init__(self, uid, kind, title, text, score, matched, snippet, spans):
+    def __init__(self, uid, kind, title, text, score, matched, snippet, spans,
+                 tier="strong"):
         self.uid = uid                # 调用方给的稳定标识（如 "knowledge:3"）
         self.kind = kind              # 数据源标识（knowledge / note / ...）
         self.title = title            # 展示用标题
@@ -329,6 +344,7 @@ class Hit:
         self.matched = matched        # 命中的检索项（去重、按出现顺序）
         self.snippet = snippet        # 命中上下文片段（纯文本）
         self.spans = spans            # snippet 里命中项的 (start, end) 区间
+        self.tier = tier              # 相关度分层（strong/weak，v1.5.0）
 
     def __repr__(self):               # pragma: no cover - 只为调试可读
         return (f"Hit(uid={self.uid!r}, score={self.score:.3f}, "
@@ -413,7 +429,8 @@ class SearchIndex:
             return 0.0
         return math.log(1.0 + (self._n - df + 0.5) / (df + 0.5))
 
-    def search(self, query, top_n: int = 20, kind=None, ranking: str = "bm25"):
+    def search(self, query, top_n: int = 20, kind=None, ranking: str = "bm25",
+               min_score_rel: float = 0.0, weak_query: bool = False):
         """返回 ``[Hit, ...]``（按分数降序，分数相同按标题稳定排序）
 
         ``kind`` 给定时只在该数据源内检索（UI 的分类筛选）；也接受
@@ -427,6 +444,15 @@ class SearchIndex:
             长文档占便宜，给用户一个可感知差异的对照选项
         其他取值一律按 bm25（枚举合法性由 manifest 校验层收窄，核心层
         宽容兜底，宁可退回默认也不抛异常）。
+
+        v1.5.0 相关度分层（只贴 ``tier`` 标记，**不改分数与排序**）：
+          - ``min_score_rel``：相对分数下限——score < top×min_score_rel
+            的命中 tier 记为 "weak"（低相关），其余 "strong"。缺省 0.0
+            不分层，行为与旧版逐条一致
+          - ``weak_query``：弱查询口径（配 :func:`is_weak_query` 用）——
+            True 时只有「标题（碎片另加首行）」字面含查询项的命中算
+            strong，正文内部顺带命中（如日期「2026」里的「6」）一律降级。
+            纯数字/单字符这类区分度极低的查询，不再让大段正文涌入首页
         """
         empty = []
         qterms = self._tk.terms(query)
@@ -483,7 +509,38 @@ class SearchIndex:
                             spans=spans))
         # 分数降序；同分用 uid 兜底，保证结果稳定（否则每次查询顺序会跳）
         hits.sort(key=lambda h: (-h.score, h.uid))
+        if min_score_rel > 0 or weak_query:
+            self._mark_tiers(hits, uniq, min_score_rel, weak_query)
         return hits[:max(0, int(top_n))]
+
+    # ---------------- 相关度分层（v1.5.0） ----------------
+    def _mark_tiers(self, hits, terms, min_score_rel, weak_query):
+        """就地贴 tier 标记：weak_query 口径优先，再看相对分数下限。
+
+        只改 ``hit.tier``，分数与顺序零触碰（双 ranking 的排序契约不动）。
+        """
+        top = hits[0].score if hits else 0.0
+        floor = top * max(0.0, float(min_score_rel))
+        for hit in hits:
+            if weak_query and not self._head_matched(hit, terms):
+                hit.tier = "weak"
+            elif hit.score < floor:
+                hit.tier = "weak"
+
+    @staticmethod
+    def _head_matched(hit, terms) -> bool:
+        """弱查询口径的「强命中」判定：标题字面含任一查询项。
+
+        碎片没有真正的标题（title 只是「碎片 · 来源」），它的身份锚点是
+        **首行**——所以碎片的判定域是标题 ∪ 首行（截 80 字）。其余数据源
+        标题即身份（任务标题 / 知识库段号 / 素材文件名都在 title 里），
+        正文命中一律算顺带。
+        """
+        hay = _DEFAULT.normalize(str(hit.title or ""))
+        if hit.kind == "fragment":
+            first_line = str(hit.text or "").split("\n", 1)[0][:80]
+            hay += "\n" + _DEFAULT.normalize(first_line)
+        return any(t and t in hay for t in terms)
 
 
 # ====================================================================

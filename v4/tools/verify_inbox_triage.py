@@ -5,9 +5,11 @@
   A. 实时算 + 三条件 AND：候选集恰好是「久 + 未命中 + 短」那几条
   B. 阈值可调真生效：改 triage_min_days / triage_max_len → 候选集变化
   C. 单条删除真落盘：真读 fragments.json 内容核对（该条已消失）
-  D. **delete_fragments 全程零调用**（本卡安全红线）
+  D. 单条路径 **delete_fragments 零调用**（单条红线保持）
   E. 不产生任何缓存/快照文件（目录文件名前后比对；无 data_backups 目录）
   F. 老数据零迁移：写一份缺 hit_count 键的旧 json → 读出 hit_count==0 且不崩
+  G. 全部删除（2026-10-04 放开）：按钮随候选数启停；确认后批量恰一次、
+     只删候选；取消一条不删；盘上核对 + 无额外快照文件
 
 运行（offscreen）：
   python tools/run_gui_check.py tools/verify_inbox_triage.py
@@ -213,16 +215,73 @@ def main():
     check(f_old_short in ids_on_disk, "C2 未删的候选碎片仍在盘上")
     check(f_new_short in ids_on_disk, "C3 非候选碎片未被误删")
 
-    # D. 安全红线：全程零调用批量删除
+    # D. 单条路径红线：delete_fragments 零调用
     check(spy["single"] == 1, "D1 单条 delete_fragment 恰好调用 1 次 (实际 %d)"
           % spy["single"])
     check(spy["batch"] == 0,
-          "★D2 红线：delete_fragments 全程零调用 (实际 %d)" % spy["batch"])
+          "★D2 红线：单条路径 delete_fragments 零调用 (实际 %d)" % spy["batch"])
+
+    # ---------------- G. 全部删除：按钮启停 + 确认/取消双路径 ----------------
+    # 重新挂 spy（上面 D 后已还原），换新对话框验完整链
+    spy2 = {"batch": 0}
+    real_batch2 = mgr.delete_fragments
+
+    def s_batch2(ids):
+        spy2["batch"] += 1
+        return real_batch2(ids)
+
+    mgr.delete_fragments = s_batch2
+    dlg2 = _open_dialog(panel)
+
+    # G1 按钮存在且有候选时可点
+    check(dlg2._triage_delete_all_btn is not None
+          and dlg2._triage_delete_all_btn.isEnabled(),
+          "G1 「全部删除」按钮存在且有候选时可点")
+    # G2 无候选 → 禁用（阈值拉满）
+    dlg2._triage_days_stepper.setValue(3650)
+    check(not dlg2._triage_delete_all_btn.isEnabled(),
+          "G2 候选清空后按钮自动禁用")
+    dlg2._triage_days_stepper.setValue(30)
+
+    # G3 取消 → 一条不删（此时候选仅剩 f_old_short：C 段已单删 f_old_short2）
+    fp_mod.QMessageBox.question = staticmethod(
+        lambda *a, **k: fp_mod.QMessageBox.StandardButton.No)
+    dlg2._triage_delete_all()
+    check(spy2["batch"] == 0 and len(dlg2._triage_candidates()) == 1,
+          "G3 取消确认 → 批量零调用、候选原样")
+
+    # G4 确认 → 批量恰一次、候选全清、非候选保留；真读盘核对
+    fp_mod.QMessageBox.question = staticmethod(
+        lambda *a, **k: fp_mod.QMessageBox.StandardButton.Yes)
+    dlg2._triage_delete_all()
+    mgr.flush()
+    check(spy2["batch"] == 1, "G4 确认后 delete_fragments 恰好调用 1 次")
+    check(dlg2._triage_candidates() == [] and
+          not dlg2._triage_delete_all_btn.isEnabled(),
+          "G5 删完候选清空且按钮自动禁用")
+    with open(json_path, "r", encoding="utf-8") as fh:
+        raw2 = json.load(fh)
+    ids_after = {int(r.get("fragment_id")) for r in raw2.get("fragments", [])}
+    check(f_old_short not in ids_after and f_old_long in ids_after
+          and f_old_hit in ids_after and f_new_short in ids_after,
+          "G6 盘上核对：候选全删，非候选（长/命中/新）全部保留")
+
+    # G7 全部删除不得产生额外快照/回收站文件
+    files_final = listing()
+    today_g = datetime.now().strftime("%Y%m%d")
+    routine_g = os.path.join("backups", "fragments-%s.json" % today_g)
+    new_files2 = [f for f in files_final if f not in files_before]
+    unexpected2 = [f for f in new_files2 if f != routine_g]
+    check(not unexpected2, "G7 全部删除无额外缓存/快照文件 (%s)" % new_files2)
+    check(not os.path.exists(os.path.join(data_dir, "data_backups"))
+          and not os.path.exists(os.path.join(data_dir, "trash")),
+          "G8 未创建 data_backups / trash 目录（未触碰 rotate_backup）")
 
     # 关掉对话框（还原 spy 后再 reject，避免误触）
     mgr.delete_fragment = real_single
     mgr.delete_fragments = real_batch
     dlg.reject()
+    dlg2.reject()
 
     # ---------------- E. 不产生**额外的**缓存/快照文件 ----------------
     # 说明：``json_store.save_records`` 自身带「当日首次覆盖写前滚动备份」

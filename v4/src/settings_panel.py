@@ -13,13 +13,14 @@
 """
 
 import os
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame, QStackedWidget,
     QLineEdit, QComboBox,
     QMenu, QCheckBox, QWidgetAction, QButtonGroup,
-    QMessageBox, QFileDialog,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QSize
 # ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
@@ -32,10 +33,12 @@ from PyQt6.QtGui import QAction, QDesktopServices
 from src.controls import (SmoothButton, IconButton, IconLabel, PageTitle,
                           Stepper, ToggleSwitch)
 from src.glass_dialog import make_separator
+from src.glass_message_box import GlassMessageBox
 from src.plugin_net import make_async_getter, make_async_poster
 from src.ai_server import AI_SERVER, ST_READY, ST_STARTING, sync_loopback_allowlist
 from src.app_version import APP_VERSION
 from src.app_paths import get_data_dir
+from src.data_backups import snapshot_status
 from src.theme import (resolve_theme_name, apply_app_font, get_colors,
                        UI_SCALE_VALUES)
 from src import accent
@@ -1009,9 +1012,22 @@ class SettingsPanel(QWidget):
         self._open_log_btn.clicked.connect(self._on_open_log)
         log_row.addWidget(self._open_log_btn)
         add_row(gv, "打开日志",
-                "在文件管理器中打开数据目录 float_data/（app.log 在里面，"
-                "报障时可整份提供给开发者）",
-                log_ctl, last=True)
+                "在文件管理器中打开数据目录 float_data/（app.log 与自动快照"
+                " backups/ 都在里面，报障时可整份提供给开发者）",
+                log_ctl)
+
+        # ---- 自动快照状态（细节强化 P2-8，被动展示零入口）：写前滚动
+        # 备份每天每文件一份，此前完全静默——用户不知道有这份保险丝。
+        # 只读展示，不提供任何操作入口（备份入口红线不破）。
+        self._backup_status = QLabel("")
+        self._backup_status.setObjectName("hintLabel")
+        self._backup_status.setMinimumHeight(18)
+        self._backup_status.setWordWrap(True)
+        self._refresh_backup_status()
+        add_row(gv, "自动快照",
+                "每天首次保存前自动留一份当日快照（每文件保留最近 7 天），"
+                "兜底误删与误改",
+                self._backup_status, last=True)
 
         av.addWidget(about_box)
 
@@ -1080,6 +1096,10 @@ class SettingsPanel(QWidget):
             return
         btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
         self._cat_stack.setCurrentIndex(self._cat_index[key])
+        # 自动快照状态随现场变（保存数据即产生新快照），切到「关于」时
+        # 重读一次保证不过期；其它分类无现场数据，不需要这个钩子
+        if key == "about":
+            self._refresh_backup_status()
 
     def _make_theme_btn(self, icon_name: str, text: str, mode: str):
         """主题三按钮的统一构造：自绘图标 + 文字（UI 重构 04 样板）。
@@ -1237,28 +1257,47 @@ class SettingsPanel(QWidget):
         self._set_wallpaper.blockSignals(False)
 
     def _apply_wallpaper_live(self):
-        """壁纸参数改动后的即时生效（写盘交给各 setter，这里只管刷新）"""
-        self._host.refresh_appearance()
+        """壁纸改动后的即时生效（写盘交给各 setter，这里只管刷新）。
+
+        2026-10-05 起走 ``refresh_wallpaper`` 轻量刷新：壁纸参数不改变
+        任何取色与 QSS，原先的 ``refresh_appearance`` 会整窗重刷 QSS /
+        图标取色，是背景图三个步进器 ± 连点卡顿的根源。
+        """
+        self._host.refresh_wallpaper()
 
     def _on_wallpaper_changed(self, index: int):
         name = self._set_wallpaper.itemData(index)
         if name is None:
             return
-        self._config.set("wallpaper", name)
+        if name != self._config.get("wallpaper", ""):
+            self._config.set("wallpaper", name)
+            self._config.save()
         self._wallpaper_status.setText("")
         self._apply_wallpaper_live()
 
     def _on_wallpaper_param_changed(self, _index_or_value=None):
-        self._config.set("wallpaper_mode",
-                         self._set_wallpaper_mode.currentData()
-                         or wallpaper.DEFAULT_MODE)
-        self._config.set("wallpaper_veil",
-                         int(self._set_wallpaper_veil.value()))
-        self._config.set("wallpaper_blur",
-                         int(self._set_wallpaper_blur.value()))
-        self._config.set("wallpaper_opacity",
-                         int(self._set_wallpaper_opacity.value()))
-        self._apply_wallpaper_live()
+        """壁纸四参数（适配 / 遮罩 / 模糊 / 不透明度）任一变更：
+        有实际变化才写盘，并走轻量刷新（只重挂壁纸图层，不整窗重刷）"""
+        changed = False
+        mode = self._set_wallpaper_mode.currentData() or wallpaper.DEFAULT_MODE
+        if mode != self._config.get("wallpaper_mode", wallpaper.DEFAULT_MODE):
+            self._config.set("wallpaper_mode", mode)
+            changed = True
+        for stepper, key, default in (
+            (self._set_wallpaper_veil, "wallpaper_veil",
+             wallpaper.DEFAULT_VEIL),
+            (self._set_wallpaper_blur, "wallpaper_blur",
+             wallpaper.DEFAULT_BLUR),
+            (self._set_wallpaper_opacity, "wallpaper_opacity",
+             wallpaper.DEFAULT_OPACITY),
+        ):
+            value = int(stepper.value())
+            if value != self._config.get(key, default):
+                self._config.set(key, value)
+                changed = True
+        if changed:
+            self._config.save()
+            self._apply_wallpaper_live()
 
     def _on_wallpaper_import(self):
         path, _selected = QFileDialog.getOpenFileName(
@@ -1271,6 +1310,7 @@ class SettingsPanel(QWidget):
             self._wallpaper_status.setText("导入失败：%s" % err)
             return
         self._config.set("wallpaper", name)
+        self._config.save()
         self._refresh_wallpaper_list()
         self._set_wallpaper.setCurrentIndex(
             max(0, self._set_wallpaper.findData(name)))
@@ -1546,8 +1586,8 @@ class SettingsPanel(QWidget):
         enabled = bool(checked)
         ok = autostart.set_autostart(enabled)
         if not ok:
-            QMessageBox.warning(self, "设置失败",
-                                "写入开机自启注册表失败，请检查系统权限。")
+            GlassMessageBox.warning(self, "设置失败",
+                                    "写入开机自启注册表失败，请检查系统权限。")
             self._set_autostart.blockSignals(True)
             self._set_autostart.setChecked(not enabled)
             self._set_autostart.blockSignals(False)
@@ -1636,9 +1676,9 @@ class SettingsPanel(QWidget):
             return
         from src.global_hotkey import parse_hotkey
         if parse_hotkey(text) is None:
-            QMessageBox.warning(self, "热键无效",
-                                f"「{text}」不是有效的热键组合。\n"
-                                "格式如 Ctrl+Alt+S，需含 Ctrl/Alt/Shift/Win 修饰键。")
+            GlassMessageBox.warning(self, "热键无效",
+                                    f"「{text}」不是有效的热键组合。\n"
+                                    "格式如 Ctrl+Alt+S，需含 Ctrl/Alt/Shift/Win 修饰键。")
             self._set_screenshot_hotkey.setText(old)
             return
         self._config.set("screenshot_hotkey", text)
@@ -1975,17 +2015,28 @@ class SettingsPanel(QWidget):
         """
         QDesktopServices.openUrl(QUrl.fromLocalFile(get_data_dir()))
 
+    def _refresh_backup_status(self):
+        """「自动快照」状态行文案（P2-8 被动展示）：只读 backups/ 现场现算。
+
+        面板懒构建后长驻整个会话，快照在会话内持续产生，故每次切到
+        「关于」分类都重算一次（纯目录扫描，零写零开销）。
+        """
+        latest, count = snapshot_status(get_data_dir())
+        if not count:
+            self._backup_status.setText("暂无快照（首次保存数据后自动生成）")
+            return
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(latest))
+        self._backup_status.setText(
+            f"最近一次：{when}（现存 {count} 份）")
+
     def _on_reset_settings(self):
         """恢复默认设置：二次确认 → 重置配置 → 广播全部联动信号 → 刷新面板"""
-        ret = QMessageBox.question(
-            self, "恢复默认设置",
-            "将把所有设置恢复为默认值（主题、剪贴板、悬浮球行为等）。\n"
-            "软件导航条目、窗口位置、悬浮球位置会保留；\n"
-            "插件中心里单独停用过的插件会一并恢复为启用。\n\n确定继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not GlassMessageBox.question(
+                self, "恢复默认设置",
+                "将把所有设置恢复为默认值（主题、剪贴板、悬浮球行为等）。\n"
+                "软件导航条目、窗口位置、悬浮球位置会保留；\n"
+                "插件中心里单独停用过的插件会一并恢复为启用。\n\n确定继续？",
+                danger=True):
             return
 
         # 1. 备份需保留的键 → 重置 → 回写
@@ -2028,7 +2079,7 @@ class SettingsPanel(QWidget):
 
         # 3. 刷新面板控件（含自启勾选框——注册表未被本次重置触及）
         self.refresh()
-        QMessageBox.information(self, "已恢复", "所有设置已恢复为默认值。")
+        self._host.show_toast("所有设置已恢复为默认值")
 
     def _on_card_size_changed(self, value: int):
         """卡片尺寸步进：即时持久化并刷新导航页卡片"""

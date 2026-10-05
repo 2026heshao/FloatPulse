@@ -284,6 +284,7 @@ class MainWindow(QWidget):
 
     # ---- 信号 ----
     theme_changed = pyqtSignal(str)   # 主题切换时发射，参数为 "light"/"dark"
+    wallpaper_changed = pyqtSignal()  # 壁纸参数（图/适配/模糊/遮罩/不透明度）变更
     data_changed = pyqtSignal(str)    # 数据变更时发射，参数为数据类型标识
     ball_visibility_changed = pyqtSignal(bool)  # 悬浮球显示/隐藏切换
     card_always_show_changed = pyqtSignal(bool)  # 小卡片保持显示模式切换
@@ -896,9 +897,26 @@ class MainWindow(QWidget):
 
         self.setWindowOpacity(0.0)
         self.move(start_pos)
-        fade.start()
-        slide.start()
         self._entrance_anims = [fade, slide]
+        # ★ 2026-10-05（用户实测：主窗弹出瞬间闪现小黑窗）首帧守卫：
+        #   半透明窗的首个 UpdateLayeredWindow 若晚于 ShowWindow 落地，
+        #   DWM 会拿未初始化表面（黑）参与合成，入场淡入把这段黑帧
+        #   放大成可见的"小黑窗闪一下"。映射完成（showEvent 已返回、
+        #   native show 结束）后，先在 opacity=0 强制同步 paint+flush
+        #   一次，把真实内容写进分层表面，再抬升透明度 —— 淡入全程
+        #   看到的都是有内容的表面。
+        QTimer.singleShot(0, self._start_entrance_anims)
+
+    def _start_entrance_anims(self):
+        """首帧守卫续段（singleShot 0）：窗口已映射，先补首帧再起播。"""
+        anims = self._entrance_anims
+        if not anims:
+            return
+        self._entrance_anims = []
+        if self.isVisible():
+            self.repaint()      # 此刻 opacity 仍为 0：flush 不可见，只填表面
+        for anim in anims:
+            anim.start()
 
     # ==================================================================
     # 全屏/还原切换
@@ -1593,7 +1611,6 @@ class MainWindow(QWidget):
             cv.insertWidget(i, self._nav_widget(kind, ref))
         self._nav_layout_seq = seq
         self._nav_order = list(order)
-        cv.activate()
         # 进行中的展开/折叠动画必须先落终态：动画把条目的 maximumHeight
         # 压在 0~row_h 之间，此时重排会按"半截高度"排布，而且动画还会
         # 继续改几何 → 重排结果被动画覆盖。
@@ -1601,8 +1618,40 @@ class MainWindow(QWidget):
         #   → setVisible(True)，此时按钮必须已带父级 —— 首次铺开时按钮
         #   还是无父级的裸控件，提前 setVisible 会把它们变成真实顶层
         #   窗口，在屏幕左上角闪现一排小黑窗（2026-09-29 启动闪窗排查）。
+        # ★ 必须在 activate **之前**（2026-10-05 用户实测：插件停用→再
+        #   启用后导航键重叠错乱）：新注册的插件键此前从未 show 过，而
+        #   QBoxLayout 的 sizeHint **不统计隐藏项** —— 不先显形，activate
+        #   拿到的内容高度少了这一行；布局把条目压扁挤进旧高度（相邻行
+        #   重叠），落定动画再把错位坐标钉成终点值，之后没有任何布局再
+        #   跑，错乱就此定格。
         self._stop_nav_group_anims()
+        # ★ QScrollArea(widgetResizable) 对内容部件的跟随 resize 是**异步**
+        #   的——条目增减后 sizeHint 立刻变化，但 _nav_content 还握着旧
+        #   高度。先把内容部件校到 widgetResizable 将会给的高度，activate
+        #   才能按真实高度铺开，落定动画的终点才是最终位置。
+        self._sync_nav_content_height()
+        cv.activate()
         self._nav_free_layout = False
+
+    def _sync_nav_content_height(self):
+        """把导航滚动内容部件立刻校到 widgetResizable 迟早会给它的高度。
+
+        QScrollArea 的 widgetResizable 跟随是异步的（事件循环里才发生），
+        而 _relayout_nav 的调用方往往紧接着取几何（落定动画终点、指示条
+        对位、拖拽槽位冻结），等不得。规则与 QScrollArea 一致：内容高度
+        = max(布局 sizeHint，视口高度)——内容矮于视口时被拉伸铺满，超出
+        时出滚动条。宽度不动（视口宽度由滚动区自己同步，横向不滚）。
+        """
+        sa = getattr(self, "_nav_scroll", None)
+        content = getattr(self, "_nav_content", None)
+        if sa is None or content is None:
+            return
+        hint = content.sizeHint().height()
+        if hint <= 0:
+            return
+        target = max(hint, sa.viewport().height())
+        if content.height() != target:
+            content.resize(content.width(), target)
 
     def _nav_sequence(self, order: list) -> list:
         """完整铺开序列 ``[(kind, ref), ...]``：``header`` / ``item``。
@@ -2172,13 +2221,19 @@ class MainWindow(QWidget):
         self._settle_nav_shift_anims(keep=btn)
         self._nav_drag_order = []
         drag_pos = QPoint(btn.x(), btn.y())   # 松手时的实时位置（落定动画起点）
-        # 只移除占位 spacer，**不**把按钮先插回旧顺序的布局：
-        # 否则邻居会被 Layout 拽回旧槽位再滑一次（松手处二次抖动）。
-        # _apply_nav_order 会按新顺序把按钮插回布局并补落定动画。
-        # 注意 _nav_free_layout 保持 True，直到 _restore_nav_layout 真正交还布局
-        if self._nav_free_spacer is not None:
-            self._nav_btns_layout.removeItem(self._nav_free_spacer)
-            self._nav_free_spacer = None
+        # ★ 占位 spacer 留在布局里，这里**不要**摘（2026-10-05 用户实测：
+        #   导航键往组外拉动一松手，导航栏闪动一下、像"重新分布的残影"）。
+        #   位置未变路径（往组外拖被钳回组边缘槽位是典型）走
+        #   _animate_nav_drop —— 落定动画跑完才 _restore_nav_layout 交还
+        #   布局；这期间 _clear_nav_drag_lift 的 updateGeometry() 投递的
+        #   LayoutRequest 一旦触发 activate()，布局处于"脏 + 被拖组按钮
+        #   未交还"态：该组塌缩、下方整栏上移，动画结束再弹回 = 闪动
+        #   （离屏实测 settings 444→249 持续约 180ms 后复原）。spacer 顶住
+        #   空间则中途任何布局激活都无害；_relayout_nav 开头本来就会摘它，
+        #   _apply_nav_order / _restore_nav_layout 两条收尾路径都经过那里。
+        #   同理也不把按钮先插回旧顺序的布局：否则邻居会被 Layout 拽回
+        #   旧槽位再滑一次（松手处二次抖动）。_nav_free_layout 保持 True
+        #   直到 _restore_nav_layout 真正交还布局。
         # 组内拖拽**只改组内相对顺序**：其它组与未注册插件键的槽位不动
         # （reorder_within_group 的契约；集合对不上返回 None → 不落盘）
         new_order = reorder_within_group(self._nav_order, group, new_group_order)
@@ -2609,6 +2664,10 @@ class MainWindow(QWidget):
         if btn is not None:
             self._nav_group.removeButton(btn)
             self._nav_btns_layout.removeWidget(btn)
+            # ★ deleteLater 是延迟回收（回到事件循环才销毁）：不先 hide 的
+            #   话，旧按钮会带着最后几何继续可见地漂在布局外，与新布局的
+            #   条目叠画（2026-10-05 插件停用→启用错乱排查的伴生问题）。
+            btn.hide()
             btn.deleteLater()
         # 顺序表同步移除并重排落盘（插件键参与换位后它是 order 成员，
         # 留着会让 _apply_nav_order 引用已删除的按钮）
@@ -2836,6 +2895,24 @@ class MainWindow(QWidget):
         """
         self._apply_theme()
         self.theme_changed.emit(self._theme)
+
+    def refresh_wallpaper(self):
+        """壁纸参数改动后的轻量刷新（设置面板调用，2026-10-05）。
+
+        与 :meth:`refresh_appearance` 的区别：壁纸参数（图片 / 适配方式 /
+        模糊 / 遮罩 / 不透明度）不改变任何取色与 QSS，全量 ``_apply_theme``
+        （整窗 QSS repolish + 全部 IconButton 重取色 + 菜单/便签换肤）对
+        每次 ± 点击都是纯浪费 —— 壁纸三步进器连点卡顿的根源。这里只重挂
+        主窗壁纸图层（GlassPanel 内部按参数缓存，没变不重绘），并广播
+        ``wallpaper_changed`` 让小卡片跟进自己的背景。
+        """
+        spec = appearance.wallpaper_spec(self._config)
+        colors = get_colors(self._theme)
+        if isinstance(self._container, GlassPanel):
+            self._container.set_background(
+                spec["path"], spec["mode"], spec["opacity"],
+                spec["blur"], spec["veil"], colors.get("bg", "#FAFAF8"))
+        self.wallpaper_changed.emit()
 
     @property
     def allow_close(self) -> bool:
@@ -3115,6 +3192,7 @@ class MainWindow(QWidget):
         <p style="color:PHCOLOR; font-size:12px;">悬浮球弹出的七页迷你面板：轻量看内容、随手记，编辑仍回主窗口。</p>
         <ul>
         <li><b>七个页签</b>（左侧竖排图标）：碎片 / 知识卡片 / 日程任务 / 临时笔记 / 网址导航 / 临时素材 / 软件导航</li>
+        <li><b>页签快捷键</b>：[[Ctrl+1]] ~ [[Ctrl+7]] 按左栏图标顺序直达对应页签（与主窗 [[Ctrl+1]] ~ [[Ctrl+8]] 同一口径）；[[Esc]] 收起卡片</li>
         <li><b>弹出与收起</b>：悬停球自动弹出；鼠标移出「球 + 卡片」区域后自动收起（勾选设置里的「小卡片保持显示」可常驻）</li>
         <li><b>拖动卡片</b>：在顶部空白条或内容空白处按住左键拖动整张卡片，悬浮球同步跟随、保持相对位置</li>
         <li><b>模式记忆</b>：收起时所处的页签会被记住，下次弹出直接回到该页签</li>
@@ -3191,6 +3269,7 @@ class MainWindow(QWidget):
         <li><b>收录方式</b>：拖图片 / 文件到悬浮球；复制图片到剪贴板（Excel、Word 一类图文混排仍按文本收集）</li>
         <li><b>打开</b>：双击用系统默认程序打开；右键 打开 / 另存为 / 删除</li>
         <li><b>批量</b>：「打开素材文件夹」「刷新」「清空全部」</li>
+        <li><b>会话分组</b>：开启后按收录时间把连拍/批量收录聚成若干「会话堆」，堆首上方显示标题条（默认名如「3 张 · 09:12」）；右键堆内素材可「重命名会话堆」（留空保存 = 恢复默认名）或「从会话堆移出」——被移出的素材单独渲染，右键「取消移出」一键回到原堆。分组只是显示方式，不改动素材数据本身</li>
         <li><b>容量</b>：条数上限与保留天数在「设置 → 临时素材上限 / 素材保留天数」调整</li>
         </ul>
         <table width="100%"><tr><td bgcolor="TIPBG" style="padding:9px 12px; font-size:12px;"><b style="color:PRIMCOLOR">提示</b>　保留天数填 0 表示不按天数清理，只受条数上限约束。</td></tr></table>

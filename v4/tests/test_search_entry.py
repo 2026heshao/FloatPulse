@@ -261,10 +261,19 @@ class TestPluginJumpHelpers:
         assert 'str(hit.uid).split(":", 1)[1]' in src
 
     def test_page_binds_anchor_click(self, plug):
+        """锚点分发绑定契约。v1.5.0 起结果区是卡片列：卡内 QLabel 链接
+        （标题/正文/尾行）统一经 _on_card_link 转 QUrl 走 _on_anchor 单点
+        分发；setOpenExternalLinks(False) 防止自定义 scheme 被系统浏览器
+        抢走的红线保留在每张卡的链接标签上"""
         src = _read(PLUGIN_PATH)
-        assert "self._view.anchorClicked.connect(self._on_anchor)" in src
-        assert "self._view.setOpenLinks(False)" in src
-        assert "self._view.setOpenExternalLinks(False)" in src
+        # 标题的绑定在 _ElidedTitle 内部（self.linkActivated），
+        # 正文/尾行在 ResultCard 上（self._body / self._foot）
+        assert "self.linkActivated.connect(page._on_card_link)" in src
+        assert "self._body.linkActivated.connect(page._on_card_link)" in src
+        assert "self._foot.linkActivated.connect(page._on_card_link)" in src
+        assert "def _on_card_link(self, href):" in src
+        assert "self._on_anchor(QUrl(href))" in src
+        assert src.count("setOpenExternalLinks(False)") >= 3
 
     def test_hits_cache_is_reset_on_every_path(self, plug):
         """渲染用的 hits 与点击时反查的 _hits 必须是同一个列表；

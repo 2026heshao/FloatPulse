@@ -42,11 +42,11 @@ import re
 
 from src.plugin_loader import PLUGIN_PACKAGE_EXT
 
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QTimer
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QLabel,
-    QPushButton, QScrollArea, QFrame, QTextBrowser, QMessageBox,
+    QPushButton, QScrollArea, QFrame, QTextBrowser,
     QSizePolicy, QApplication, QLineEdit, QMenu, QWidgetAction,
     QComboBox,
 )
@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
 # 弹窗基类：PluginStoreDialog 在模块加载期就需要它作基类，
 # 因此必须是模块级 import（_build_usage_viewer 里的局部 import 只是历史写法）。
 from src.glass_dialog import GlassDialog
+from src.glass_message_box import GlassMessageBox
 
 from src import plugin_market
 from src import plugin_settings
@@ -267,7 +268,7 @@ def _startfile_warn(parent, path: str):
     try:
         os.startfile(path)                        # noqa: S606
     except OSError as e:
-        QMessageBox.warning(
+        GlassMessageBox.warning(
             parent, "无法打开",
             f"系统没有找到能打开此文件的程序：\n{path}\n\n{e}\n\n"
             f"可以关联一个 Markdown 编辑器，或直接在本窗口查看。")
@@ -275,6 +276,10 @@ def _startfile_warn(parent, path: str):
 
 class PluginsPanel(QWidget):
     """插件中心面板（主窗口 9 号页）"""
+
+    # 「重新扫描」点击 → 真正开扫的延迟（毫秒）：留出让按钮禁用态与
+    # 「正在扫描」轻提示先上屏的一拍（见 _on_rescan 的黑闪修复注释）
+    RESCAN_DEFER_MS = 80
 
     def __init__(self, host):
         super().__init__()
@@ -292,6 +297,7 @@ class PluginsPanel(QWidget):
         self._dir_label = None
         self._store_dir_label = None
         self._rescan_btn = None
+        self._rescan_pending = False  # 重扫描两步走（见 _on_rescan）进行中
         # 搜索 + 状态筛选（2026-10-04 三件套之二）
         self._search_input = None
         self._seg_buttons = {}        # "all"/"on"/"off" -> QPushButton
@@ -818,20 +824,73 @@ class PluginsPanel(QWidget):
             return 0
 
     def _on_rescan(self):
-        """重新扫描插件目录（不必重启程序）"""
-        loader = getattr(self._host, "plugin_loader", None)
-        if loader is not None:
-            rescan = getattr(loader, "rescan", None)
+        """重新扫描插件目录（不必重启程序）——两步走 + 轻提示。
+
+        2026-10-05 黑闪修复：原实现把「扫描装配 + 菜单重建 + 整页重建
+        卡片」整段压在一个点击处理器里同步跑完，半透明玻璃壳
+        （WA_TranslucentBackground）在整个期间无法重绘，重绘空档被 DWM
+        合成成黑帧（与 refresh() 的 build-then-swap 修的是同族根因），
+        且动作完成前没有任何反馈。现在点击只禁用按钮 + 弹「正在扫描」
+        轻提示并立即返回（这两件事先上屏），重活由单发定时器延到下一拍
+        （``_do_rescan``）执行，完成后用结果轻提示收尾。
+        """
+        if self._rescan_pending:
+            return
+        self._rescan_pending = True
+        if self._rescan_btn is not None:
+            self._rescan_btn.setEnabled(False)
+        self._toast("正在重新扫描插件…")
+        # 定时器挂 self：面板销毁时一并销毁，不会回调到已删除的对象
+        self._rescan_timer = QTimer(self)
+        self._rescan_timer.setSingleShot(True)
+        self._rescan_timer.timeout.connect(self._do_rescan)
+        self._rescan_timer.start(self.RESCAN_DEFER_MS)
+
+    def _do_rescan(self):
+        """deferred 槽：真正执行扫描 + 装配 + 刷新（见 _on_rescan 注释）"""
+        try:
+            loader = getattr(self._host, "plugin_loader", None)
+            n_ok = n_err = 0
+            scan_error = None
+            if loader is not None:
+                rescan = getattr(loader, "rescan", None)
+                try:
+                    plugins = (rescan() if callable(rescan)
+                               else loader.load_all())
+                    plugins = list(plugins or [])
+                    n_ok = len(plugins)
+                    try:
+                        n_err = len(loader.load_errors())
+                    except Exception:              # 旧 loader 无此接口
+                        n_err = 0
+                except Exception as e:             # noqa: BLE001 - 扫描失败不崩 UI
+                    print(f"[插件中心] 重新扫描失败: {e}")
+                    scan_error = str(e) or type(e).__name__
+            # 插件增减会影响悬浮球右键菜单，通知宿主动作表重建
+            self._notify_menu_rebuild()
+            self.refresh()
+            if scan_error is not None:
+                done = f"重新扫描失败：{scan_error}"
+            elif n_ok or n_err:
+                done = f"重新扫描完成：{n_ok} 个插件可用"
+                if n_err:
+                    done += f"，{n_err} 个加载失败"
+            else:
+                done = "重新扫描完成：未发现插件"
+            self._toast(done)
+        finally:
+            self._rescan_pending = False
+            if self._rescan_btn is not None:
+                self._rescan_btn.setEnabled(True)
+
+    def _toast(self, text: str):
+        """轻提示（宿主无 show_toast 能力时静默跳过，测试替身同款容错）"""
+        toast = getattr(self._host, "show_toast", None)
+        if callable(toast):
             try:
-                if callable(rescan):
-                    rescan()
-                else:                              # 旧 loader：退化为刷新
-                    loader.load_all()
-            except Exception as e:                 # noqa: BLE001 - 扫描失败不崩 UI
-                print(f"[插件中心] 重新扫描失败: {e}")
-        # 插件增减会影响悬浮球右键菜单，通知宿主动作表重建
-        self._notify_menu_rebuild()
-        self.refresh()
+                toast(text)
+            except Exception:                      # noqa: BLE001 - 展示层兜底
+                pass
 
     def _notify_menu_rebuild(self):
         """让悬浮球右键菜单反映最新的插件动作（能力缺失时静默跳过）。
@@ -1643,9 +1702,9 @@ class PluginsPanel(QWidget):
         """
         loader = getattr(self._host, "plugin_loader", None)
         if loader is None or not hasattr(loader, "install_from_store"):
-            QMessageBox.warning(self, "无法安装",
-                                "当前插件加载器不支持从商店安装，"
-                                "请手动把插件包解压到插件安装目录。")
+            GlassMessageBox.warning(self, "无法安装",
+                                    "当前插件加载器不支持从商店安装，"
+                                    "请手动把插件包解压到插件安装目录。")
             return
         try:
             ok, msg = loader.install_from_store(plugin_id)
@@ -1659,13 +1718,13 @@ class PluginsPanel(QWidget):
             # 商店弹窗若开着，同步刷新它的卡片（安装按钮 →「✓ 已安装」）
             if self._store_dialog is not None:
                 self._store_dialog.reload()
-            # 反馈框挂**当前活动窗口**：挂 self（藏在主窗口 stack 里）时，
-            # ApplicationModal 消息框可能被模态弹窗盖住 → 用户点不到「确定」
-            # → 全应用看似锁死（2026-09-28 用户实测）
-            QMessageBox.information(self._active_dialog_or_self(), "已安装",
-                                    f"{msg}\n\n插件已加载，可直接使用。")
+            # 成功回执降级为屏幕 toast：与窗口 z 序无关，天然不会被
+            # 商店弹窗等模态窗口盖住（2026-10 统一改造，交互变化已拍板）
+            toast = getattr(self._host, "show_toast", None)
+            if callable(toast):
+                toast(f"已安装：{msg}（插件已加载，可直接使用）")
         else:
-            QMessageBox.warning(self._active_dialog_or_self(), "安装失败", msg)
+            GlassMessageBox.warning(self._active_dialog_or_self(), "安装失败", msg)
 
     def _active_dialog_or_self(self) -> QWidget:
         """消息框应该挂的 parent：商店弹窗开着就挂弹窗（保证 z 序可控），
@@ -1686,25 +1745,22 @@ class PluginsPanel(QWidget):
         """
         loader = getattr(self._host, "plugin_loader", None)
         if loader is None or not hasattr(loader, "uninstall"):
-            QMessageBox.warning(self, "无法卸载",
-                                "当前插件加载器不支持卸载，请手动删除插件目录。")
+            GlassMessageBox.warning(self, "无法卸载",
+                                    "当前插件加载器不支持卸载，请手动删除插件目录。")
             return
 
-        ret = QMessageBox.question(
-            self, "卸载插件",
-            f"确定要卸载插件「{name}」吗？\n\n"
-            f"将删除目录：\n{path}\n\n"
-            f"该插件的动作、热键、右键菜单项与插件页面会一并失效，"
-            f"重启后不再加载。\n\n"
-            f"注意：以下内容**不会**被删除——\n"
-            f"  · 插件私有数据：float_data/plugins/{plugin_id}/\n"
-            f"  · 商店里的源包：plugin_store/{plugin_id}.fpplug（若存在）\n"
-            f"卸载后商店卡片会回到「未安装」，可随时重装。\n\n"
-            f"此操作不可撤销，确定继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
+        if not GlassMessageBox.question(
+                self, "卸载插件",
+                f"确定要卸载插件「{name}」吗？\n\n"
+                f"将删除目录：\n{path}\n\n"
+                f"该插件的动作、热键、右键菜单项与插件页面会一并失效，"
+                f"重启后不再加载。\n\n"
+                f"注意：以下内容**不会**被删除——\n"
+                f"  · 插件私有数据：float_data/plugins/{plugin_id}/\n"
+                f"  · 商店里的源包：plugin_store/{plugin_id}.fpplug（若存在）\n"
+                f"卸载后商店卡片会回到「未安装」，可随时重装。\n\n"
+                f"此操作不可撤销，确定继续？",
+                danger=True):
             return
 
         try:
@@ -1716,10 +1772,12 @@ class PluginsPanel(QWidget):
             # 卸载会改变动作集合 → 重建右键菜单 + 刷新卡片
             self._notify_menu_rebuild()
             self.refresh()
-            # parent 用当前活动窗口（同 _on_install：防消息框被模态弹窗盖住）
-            QMessageBox.information(self._active_dialog_or_self(), "已卸载", msg)
+            # 成功回执降级为屏幕 toast（同 _on_install 口径）
+            toast = getattr(self._host, "show_toast", None)
+            if callable(toast):
+                toast(f"已卸载：{msg}")
         else:
-            QMessageBox.warning(self._active_dialog_or_self(), "卸载失败", msg)
+            GlassMessageBox.warning(self._active_dialog_or_self(), "卸载失败", msg)
 
 
 class PluginStoreDialog(GlassDialog):
@@ -2321,7 +2379,7 @@ class PluginSettingsDialog(GlassDialog):
             else:
                 failed.append(f"{entry.get('label') or key}：{msg}")
         if failed:
-            QMessageBox.warning(self, "保存失败",
+            GlassMessageBox.warning(self, "保存失败",
                                 "以下设置项未能保存：\n· "
                                 + "\n· ".join(failed))
             return

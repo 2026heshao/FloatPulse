@@ -16,7 +16,7 @@ import os
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QMenu, QDialog, QFormLayout, QMessageBox,
+    QLineEdit, QMenu, QDialog, QFormLayout,
     QScrollArea, QFrame, QGraphicsDropShadowEffect,
 )
 from PyQt6.QtCore import (
@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import QDesktopServices, QColor
 
+from src.glass_message_box import GlassMessageBox
 from src.glass_dialog import make_dialog_buttons
 from src.controls import SmoothButton, EmptyState, PageTitle
 
@@ -398,13 +399,14 @@ class NavPanel(QWidget):
         title = self._nav_title_input.text().strip()
         url = self._nav_url_input.text().strip()
         if not title or not url:
-            QMessageBox.warning(self, "提示", "请填写站点名称和 URL")
+            GlassMessageBox.warning(self, "提示", "请填写站点名称和 URL")
             return
         self._nav_manager.add_site_simple(title, url)
         self._nav_title_input.clear()
         self._nav_url_input.clear()
         self.refresh()
         self._host.data_changed.emit("nav")
+        self._host.show_toast(f"已添加站点：{title}")
 
     def _show_row_menu(self, nav_id, gpos):
         if not self._nav_manager:
@@ -429,6 +431,7 @@ class NavPanel(QWidget):
             self._nav_manager.delete_site_simple(nav_id)
             self.refresh()
             self._host.data_changed.emit("nav")
+            self._host.show_toast(f"已删除站点：{site.title}")
 
     def _edit_site(self, site):
         """编辑站点（简化版，自动查找所在分组）"""

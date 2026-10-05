@@ -10,13 +10,14 @@
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
-    QSplitter, QDialog, QMessageBox,
+    QSplitter, QDialog,
     QAbstractItemView, QStyledItemDelegate,
 )
 from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QPainter, QPen
 
 from src.glass_dialog import make_dialog_buttons
+from src.glass_message_box import GlassMessageBox
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src.constants import (
     NOTE_AUTOSAVE_INTERVAL_MS,
@@ -377,28 +378,26 @@ class NotesPanel(QWidget):
     def _on_delete(self):
         """删除当前笔记（临时笔记不可删除，需给出明确反馈）"""
         if self._current_note_id is None:
-            QMessageBox.information(self, "提示", "未选中任何笔记。")
+            GlassMessageBox.information(self, "提示", "未选中任何笔记。")
             return
         note = self._note_manager.get_note(self._current_note_id)
         if note is None:
             self._current_note_id = None
             self.refresh()
-            QMessageBox.information(self, "提示", "该笔记已不存在，列表已刷新。")
+            GlassMessageBox.information(self, "提示", "该笔记已不存在，列表已刷新。")
             return
         if note.title == Note.TEMP_NOTE_TITLE:
-            QMessageBox.information(
+            GlassMessageBox.information(
                 self, "提示",
                 "「📌 临时笔记」是悬浮球小卡片的专用笔记，不可删除。"
             )
             return
-        ret = QMessageBox.question(
-            self, "确认删除",
-            "确认删除当前笔记？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认删除",
+                "确认删除当前笔记？",
+                danger=True):
             if not self._note_manager.delete_note(self._current_note_id):
-                QMessageBox.warning(self, "删除失败", "笔记未能删除，请重试。")
+                GlassMessageBox.warning(self, "删除失败", "笔记未能删除，请重试。")
                 return
             self._current_note_id = None
             self._loading_note = True
@@ -446,24 +445,22 @@ class NotesPanel(QWidget):
                 self.refresh()
                 self._host.data_changed.emit("note")
             else:
-                QMessageBox.warning(self, "操作失败", "该笔记的标题不可调整。")
+                GlassMessageBox.warning(self, "操作失败", "该笔记的标题不可调整。")
         elif action == act_delete:
             if target is None:
                 self.refresh()
                 return
             if target.title == Note.TEMP_NOTE_TITLE:
-                QMessageBox.information(
+                GlassMessageBox.information(
                     self, "提示",
                     "「📌 临时笔记」是悬浮球小卡片的专用笔记，不可删除。"
                 )
                 return
-            ret = QMessageBox.question(
-                self, "确认删除", "确认删除此笔记？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if ret == QMessageBox.StandardButton.Yes:
+            if GlassMessageBox.question(
+                    self, "确认删除", "确认删除此笔记？",
+                    danger=True):
                 if not self._note_manager.delete_note(note_id):
-                    QMessageBox.warning(self, "删除失败", "笔记未能删除，请重试。")
+                    GlassMessageBox.warning(self, "删除失败", "笔记未能删除，请重试。")
                     return
                 if self._current_note_id == note_id:
                     self._current_note_id = None
@@ -483,7 +480,7 @@ class NotesPanel(QWidget):
         """把当前笔记钉成桌面便签（管理器由宿主晚绑定注入；None 给轻提示）"""
         manager = self._host.sticky_manager
         if manager is None:
-            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            GlassMessageBox.information(self, "提示", "便签功能尚未就绪。")
             return
         ok, reason = manager.open(note_id)
         if not ok and reason == "limit":

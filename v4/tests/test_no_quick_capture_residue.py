@@ -31,8 +31,11 @@ TOKENS = ("quick_capture", "QuickCapture", "快速捕捉", "Ctrl+Alt+K")
 
 # 刻意保留：test_onboarding 的负向钉子要求 Ctrl+Alt+K **不**出现，
 # 它自身必然含该字面量；只放行这一个 token，不放行整个文件。
+# test_no_native_messagebox：docstring 里引用了本文件名作「体例出处」，
+# 同为护栏自指（token 级放行，非整文件跳过）。
 ALLOWED = {
     "tests/test_onboarding.py": {"Ctrl+Alt+K"},
+    "tests/test_no_native_messagebox.py": {"quick_capture"},
 }
 
 # 不扫 CHANGELOG.md：`### Removed` 那条记录本就要写明删了什么（题面许可）。

@@ -25,11 +25,12 @@ from datetime import date as _date
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QLineEdit, QListWidget, QListWidgetItem, QMenu, QDialog,
-    QFormLayout, QMessageBox, QDateEdit,
+    QFormLayout, QDateEdit,
 )
 from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
 from src.glass_dialog import make_dialog_buttons
+from src.glass_message_box import GlassMessageBox
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.task_manager import (
     task_state, format_relative_deadline, format_completed_date, group_title,
@@ -358,6 +359,9 @@ class TasksPanel(QWidget):
         self._task_title_input.clear()
         self.refresh()
         self._host.data_changed.emit("task")
+        # 轻提示反馈（2026-10-05）：添加任务此前静默，长标题截断展示
+        shown = title if len(title) <= 16 else title[:15] + "…"
+        self._host.show_toast(f"已添加任务：{shown}")
 
     def _on_context_menu(self, pos):
         item = self._task_list.itemAt(pos)
@@ -405,6 +409,7 @@ class TasksPanel(QWidget):
             self._task_manager.delete_task(task_id)
             self.refresh()
             self._host.data_changed.emit("task")
+            self._host.show_toast("已删除任务")
 
     def _stop_animations(self):
         """停止正在播放的动画并清空进度（用于非动画路径的数据变更）。"""
@@ -417,7 +422,7 @@ class TasksPanel(QWidget):
         """把任务钉成桌面便签（管理器由宿主晚绑定注入；None 给轻提示）"""
         manager = self._host.sticky_manager
         if manager is None:
-            QMessageBox.information(self, "提示", "便签功能尚未就绪。")
+            GlassMessageBox.information(self, "提示", "便签功能尚未就绪。")
             return
         ok, reason = manager.open_task(task_id)
         if not ok and reason == "limit":
@@ -478,7 +483,7 @@ class TasksPanel(QWidget):
         """批量切换任务完成状态"""
         ids = self._get_selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择要操作的任务。")
+            GlassMessageBox.information(self, "提示", "请先选择要操作的任务。")
             return
         self._stop_animations()
         for tid in ids:
@@ -490,34 +495,32 @@ class TasksPanel(QWidget):
         """批量删除任务"""
         ids = self._get_selected_ids()
         if not ids:
-            QMessageBox.information(self, "提示", "请先选择要删除的任务。")
+            GlassMessageBox.information(self, "提示", "请先选择要删除的任务。")
             return
-        ret = QMessageBox.question(
-            self, "确认删除",
-            f"确认删除选中的 {len(ids)} 条任务？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认删除",
+                f"确认删除选中的 {len(ids)} 条任务？",
+                danger=True):
             self._stop_animations()
             for tid in ids:
                 self._task_manager.delete_task(tid)
             self.refresh()
             self._host.data_changed.emit("task")
+            self._host.show_toast(f"已删除 {len(ids)} 条任务")
 
     def _on_clear_done(self):
         """清除所有已完成的任务"""
         done_ids = [t.task_id for t in self._task_manager.get_all_tasks() if t.done]
         if not done_ids:
-            QMessageBox.information(self, "提示", "没有已完成的任务。")
+            GlassMessageBox.information(self, "提示", "没有已完成的任务。")
             return
-        ret = QMessageBox.question(
-            self, "确认清除",
-            f"确认清除 {len(done_ids)} 条已完成的任务？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认清除",
+                f"确认清除 {len(done_ids)} 条已完成的任务？",
+                danger=True):
             self._stop_animations()
             for tid in done_ids:
                 self._task_manager.delete_task(tid)
             self.refresh()
             self._host.data_changed.emit("task")
+            self._host.show_toast(f"已清除 {len(done_ids)} 条已完成任务")

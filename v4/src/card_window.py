@@ -653,6 +653,14 @@ class CardWindow(QWidget):
         esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         esc.activated.connect(self.hide)
 
+        # Ctrl+1~7 → 切换页签（2026-10-04 细节强化 P2-7 最小集）：与主窗
+        # Ctrl+1~8 切面板同一口径，数字对应左栏图标顺序。default-arg 绑定
+        # 防闭包陷阱；超出页签数的数字键位不注册（未来加页自动跟上）。
+        for i, tab_key in enumerate(_TAB_KEYS[:7]):
+            sc = QShortcut(QKeySequence("Ctrl+%d" % (i + 1)), self)
+            sc.activated.connect(
+                lambda _checked=False, k=tab_key: self._switch_mode(k))
+
     # ---------------- 初始化 ----------------
     def _init_window(self):
         self.setWindowFlags(

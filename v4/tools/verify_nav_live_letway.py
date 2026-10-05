@@ -10,6 +10,8 @@
   F. 异常中断（WindowDeactivate）：回滚顺序、按钮回原槽位、布局交还、光标还原
   G. 连续两次拖拽（第一次落定动画未结束）：结果正确、状态干净
   H. 无残留：自由布局已交还、按钮全部回到布局、无 graphicsEffect/动画引用
+  I. ★往组外拖动松手（位置未变路径）：落定动画期间布局零塌缩（2026-10-05
+     用户报"闪动/重新分布残影"的回归钉）
 
 运行方式（必须 offscreen 平台）：
   QT_QPA_PLATFORM=offscreen python tools/verify_nav_live_letway.py [--shots]
@@ -191,7 +193,19 @@ def main() -> int:
     assert live_y != base_y + target_slot * step, "D. 前置：松手位置应偏离槽位"
     release(dragged, anchor + QPoint(0, int(step * 1.5)))
     pump(app)
-    assert win._nav_free_spacer is None, "D. 落定时应立刻交还布局占位"
+    # ★2026-10-05 修复后不变量：落定滑入期间布局必须始终自洽——
+    #   · 位置未变路径（往组外拖被钳回，走 _animate_nav_drop）：spacer
+    #     保留顶住空间，布局交还推迟到动画结束。提前摘 spacer 的话，
+    #     动画期间一次布局激活（_clear_nav_drag_lift 的 updateGeometry
+    #     投递的 LayoutRequest）就会让被拖组塌缩、整栏上移再弹回 =
+    #     用户报的"闪动 / 重新分布残影"（离屏实测 settings 444→249）。
+    #   · 顺序有变路径：_apply_nav_order 同步重排，spacer 已被
+    #     _relayout_nav 摘除。
+    if win._nav_drop_anim is not None:
+        assert win._nav_free_spacer is not None and win._nav_free_layout, \
+            "D. 落定动画进行中 spacer 应仍顶住空间（防塌缩闪动）"
+    else:
+        assert win._nav_free_spacer is None, "D. 同步重排路径布局应已交还"
     anims = list(win._nav_settle_animations)
     drop = win._nav_drop_anim
     assert anims or drop is not None, "D. 松手位置偏离槽位 → 应有滑入动画"
@@ -293,6 +307,42 @@ def main() -> int:
             f"H. {k} 被移出了布局（折叠 ≠ 移出布局）"
     assert win._nav_btns_layout.indexOf(win._settings_btn) >= 0, "H. 设置按钮不在布局"
     ok("H. 无残留：布局完整、按钮归位、无 effect/动画引用")
+
+    # ---------------- I. 往组外拖动松手（位置未变路径）：布局零塌缩 ----------------
+    # ★ 2026-10-05 用户报障回归钉：把组内**边缘**条目往组外拖（向上/向下），
+    #   被钳回边缘槽位、顺序不变 → 走 _animate_nav_drop。修复前 spacer 在
+    #   松手瞬间被摘，落定动画期间（~180ms）一次布局激活就让被拖组塌缩、
+    #   下方整栏上移再弹回 = 用户看到的"闪动 / 重新分布残影"（离屏实测
+    #   settings 444→249）。修复后 spacer 顶住空间：松手后 300ms 内
+    #   设置/使用说明必须纹丝不动。
+    settings_btn = win._settings_btn
+    order_i = list(win._nav_order)   # I 段起点顺序（G 段已改过 order，别用旧值）
+    for direction in (-1, 1):
+        probe = win._nav_btns[_gorder()[0] if direction < 0 else _gorder()[-1]]
+        settings_y0 = settings_btn.y()
+        anchor = probe.mapToGlobal(probe.rect().center())
+        press(probe)
+        move_to(probe, anchor + QPoint(0, direction * int(step * 3)))  # 拖出组
+        pump(app, 100)
+        release(probe, anchor + QPoint(0, direction * int(step * 3)))
+        samples = []
+        end = time.time() + 0.3
+        while time.time() < end:
+            app.processEvents()
+            samples.append(settings_btn.y())
+            time.sleep(0.005)
+        assert len(samples) >= 30, f"I. 采样过少: {len(samples)}"
+        drift = sorted(set(samples))
+        assert drift == [settings_y0], \
+            (f"I. ★{'向上' if direction < 0 else '向下'}出组松手整栏塌缩闪动"
+             f"（settings {settings_y0}→{drift}）")
+        pump(app, 400)   # 等落定动画结束、布局交还
+        expected_slot = (base_y if direction < 0
+                         else base_y + (len(_gorder()) - 1) * step)
+        assert probe.y() == expected_slot, \
+            f"I. 被拖键未回原槽位: {probe.y()} != {expected_slot}"
+        assert list(win._nav_order) == order_i, "I. 出组拖动不应改动顺序"
+    ok("I. 往组外拖动松手（上/下）：布局零塌缩、被拖键回原槽位、顺序零副作用")
 
     win._allow_close = True
     win.close()

@@ -20,7 +20,7 @@ import shutil
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QListWidget, QListWidgetItem, QMenu, QMessageBox, QFileDialog,
+    QListWidget, QListWidgetItem, QMenu, QFileDialog,
     QStackedWidget, QStyledItemDelegate, QStyle, QToolButton, QLineEdit,
 )
 from PyQt6.QtCore import (
@@ -34,6 +34,7 @@ from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
 from src.icon_render import icon as render_icon, paint_icon
 from src.controls import EmptyState, IconButton, PageTitle
+from src.glass_message_box import GlassMessageBox
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src import motion
 # 会话分组纯逻辑（零 PyQt6）：按 added_time 间隔聚类，渲染时派生、不落库
@@ -909,12 +910,13 @@ class AssetsPanel(QWidget):
             if removed:
                 self.refresh()
                 self._host.data_changed.emit("asset")
+                self._host.show_toast(f"已删除 {removed} 个素材")
 
     def _open(self, asset_id: int) -> bool:
         """打开素材；失败时提示（供双击/右键共用）"""
         if self._temp_asset_manager.open_asset(asset_id):
             return True
-        QMessageBox.warning(self, "打开失败", "无法打开此素材，文件可能已被删除。")
+        GlassMessageBox.warning(self, "打开失败", "无法打开此素材，文件可能已被删除。")
         return False
 
     def _on_double_click(self, item):
@@ -933,9 +935,9 @@ class AssetsPanel(QWidget):
             return
         try:
             shutil.copy2(asset.stored_path, target)
-            QMessageBox.information(self, "已另存为", f"文件已保存到：\n{target}")
+            self._host.show_toast(f"已另存为：{target}")
         except OSError as e:
-            QMessageBox.warning(self, "另存失败", f"另存失败：{e}")
+            GlassMessageBox.warning(self, "另存失败", f"另存失败：{e}")
 
     def _on_open_folder(self):
         """在资源管理器中打开 temp_assets 文件夹"""
@@ -945,7 +947,7 @@ class AssetsPanel(QWidget):
         try:
             os.startfile(folder)
         except OSError:
-            QMessageBox.warning(self, "打开失败", f"无法打开文件夹：\n{folder}")
+            GlassMessageBox.warning(self, "打开失败", f"无法打开文件夹：\n{folder}")
 
     def _on_clear(self):
         """清空所有临时素材"""
@@ -953,15 +955,13 @@ class AssetsPanel(QWidget):
             return
         count = self._temp_asset_manager.count()
         if count == 0:
-            QMessageBox.information(self, "提示", "当前没有临时素材。")
+            GlassMessageBox.information(self, "提示", "当前没有临时素材。")
             return
-        ret = QMessageBox.question(
-            self, "确认清空",
-            f"确认清空所有 {count} 个临时素材？\n（仅删除程序目录下的副本，不影响原文件）",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if ret == QMessageBox.StandardButton.Yes:
+        if GlassMessageBox.question(
+                self, "确认清空",
+                f"确认清空所有 {count} 个临时素材？\n（仅删除程序目录下的副本，不影响原文件）",
+                danger=True):
             cleared = self._temp_asset_manager.clear_all()
             self.refresh()
             self._host.data_changed.emit("asset")
-            QMessageBox.information(self, "已清空", f"已清理 {cleared} 个临时素材。")
+            self._host.show_toast(f"已清理 {cleared} 个临时素材")

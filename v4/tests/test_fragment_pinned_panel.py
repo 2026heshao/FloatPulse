@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-一键粘回面板集成单测（reuse 卡，offscreen 真面板）。
+碎片面板置顶（原 reuse 卡保留部分）集成单测（offscreen 真面板）。
 
 护栏点：
-  · 底部「粘回选中」按钮存在，且面板无裸 QPushButton（沿用 IconButton）
-  · 无选中时「粘回」只提示、不炸
-  · 有选中时：内容进剪贴板 + 计数埋点 + 焦点还原 + 发键（替身后端）
-  · 粘贴失败 → 降级「已复制到剪贴板」提示，不抛异常
-  · 配置关闭 fragment_paste_enabled → 退化为仅复制（不触发发键）
+  · 面板无裸 QPushButton（统一走 SmoothButton/IconButton）
   · 置顶条目在列表中排到最前
+  · 置顶行有 ★ 标记（图标/字符承载按实现）
+
+历史注：本文件原名 ``test_reuse_panel.py``，还覆盖「一键粘回」面板链路
+（底部按钮 / 右键菜单 / 焦点还原 / 发键 / 配置开关退化）。粘回功能已于
+2026-10-05 经用户拍板整体删除（真机不可靠 + 无区分反馈），相关用例与
+按键替身随底层执行器模块一起移除；残留由闸门测试钉死。
 """
 
 import os
@@ -19,11 +21,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.paste_helper import (  # noqa: E402
-    REASON_RESTORE_FAILED, PasteHelper,
-)
-
 
 class _FakeConfig:
     def __init__(self):
@@ -78,28 +75,6 @@ def qapp():
     yield app
 
 
-class _PanelApis:
-    """面板用替身后端（可切成功 / 失败）。"""
-
-    def __init__(self, ok=True, reason=None):
-        self.ok = ok
-        self.reason = reason
-        self.sent = 0
-
-    def get_foreground_window(self):
-        return 4321
-
-    def is_window(self, hwnd):
-        return True
-
-    def set_foreground_window(self, hwnd):
-        return self.ok and self.reason != REASON_RESTORE_FAILED
-
-    def send_ctrl_v(self):
-        self.sent += 1
-        return self.ok
-
-
 def _make_panel(tmp_path, contents):
     from src.fragment_manager import FragmentManager
     from src.fragments_panel import FragmentsPanel
@@ -112,10 +87,6 @@ def _make_panel(tmp_path, contents):
     panel = FragmentsPanel(host)
     panel.refresh(preserve_view=False)
     return panel, mgr, host
-
-
-def _inject_backend(panel, apis):
-    panel._paste_helper = PasteHelper(apis=apis, sleep=lambda _s: None)
 
 
 def _select_first_fragment(panel):
@@ -135,74 +106,6 @@ def test_no_bare_qpushbutton_in_panel(qapp, tmp_path):
         type(w).__module__.startswith("src.") or
         type(w).__name__ != "QPushButton"
         for w in panel.findChildren(QPushButton))
-
-
-def test_paste_with_no_selection_shows_toast(qapp, tmp_path):
-    panel, _m, host = _make_panel(tmp_path, ["a"])
-    _inject_backend(panel, _PanelApis())
-    panel._on_paste()
-    assert any("选中" in t for t in host.toasts)
-
-
-def test_paste_success_copies_and_sends(qapp, tmp_path):
-    panel, _m, host = _make_panel(tmp_path, ["要粘回的内容"])
-    apis = _PanelApis(ok=True)
-    _inject_backend(panel, apis)
-    panel._last_foreign_hwnd = 4321
-    fid = _select_first_fragment(panel)
-    assert fid is not None
-    panel._on_paste()
-    assert host._clipboard_monitor.text == "要粘回的内容"
-    assert apis.sent == 1
-    assert panel._reuse_counter.count_of("要粘回的内容") == 1
-
-
-def test_paste_records_duplicate_count(qapp, tmp_path):
-    panel, _m, _h = _make_panel(tmp_path, ["重复内容"])
-    _inject_backend(panel, _PanelApis(ok=True))
-    panel._last_foreign_hwnd = 4321
-    _select_first_fragment(panel)
-    panel._on_paste()
-    panel._on_paste()
-    assert panel._reuse_counter.count_of("重复内容") == 2
-    assert panel._reuse_counter.duplicate_total() == 1
-
-
-def test_paste_failure_degrades_to_copy(qapp, tmp_path):
-    """还原焦点失败 → 内容仍进剪贴板 + 提示手动粘贴，不抛异常。"""
-    panel, _m, host = _make_panel(tmp_path, ["降级内容"])
-    apis = _PanelApis(ok=True, reason=REASON_RESTORE_FAILED)
-    _inject_backend(panel, apis)
-    panel._last_foreign_hwnd = 4321
-    _select_first_fragment(panel)
-    panel._on_paste()          # 不得抛
-    assert host._clipboard_monitor.text == "降级内容"
-    assert any("手动" in t or "剪贴板" in t for t in host.toasts)
-    assert apis.sent == 0
-
-
-def test_paste_disabled_by_config_only_copies(qapp, tmp_path):
-    panel, _m, host = _make_panel(tmp_path, ["配置内容"])
-    apis = _PanelApis(ok=True)
-    _inject_backend(panel, apis)
-    panel._last_foreign_hwnd = 4321
-    panel._host._config.set("fragment_paste_enabled", False)
-    _select_first_fragment(panel)
-    panel._on_paste()
-    assert host._clipboard_monitor.text == "配置内容"
-    assert apis.sent == 0
-    assert any("已复制" in t for t in host.toasts)
-
-
-def test_paste_context_menu_entry_works(qapp, tmp_path):
-    panel, mgr, host = _make_panel(tmp_path, ["右键粘回内容"])
-    apis = _PanelApis(ok=True)
-    _inject_backend(panel, apis)
-    panel._last_foreign_hwnd = 4321
-    fid = mgr.get_all_fragments()[0].fragment_id
-    panel._paste_fragment(fid)
-    assert host._clipboard_monitor.text == "右键粘回内容"
-    assert apis.sent == 1
 
 
 def test_pinned_fragment_rendered_first(qapp, tmp_path):

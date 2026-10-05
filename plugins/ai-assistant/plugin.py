@@ -21,6 +21,12 @@ AI 助手  -  FloatPulse 外置插件（ai-assistant）
   会话、＋新开、🗑删除（最后一条=清空内容）。提示类气泡与动作结果卡
   不落档，恢复只重现问答主线。
 
+轻量智能路由（v1.16.0）：
+  输入框自由发送的消息做关键词路由（detect_data_kinds），命中即自动
+  附带对应数据块（快捷指令 / 自定义指令路径不受影响）；系统提示词
+  注入知识库概况 + 「生成类任务直接用 add_* 动作产出」指令——修掉
+  自由聊天时模型看不到应用数据、向用户索要已有内容的问题。
+
 功能：读应用内任务 / 碎片 / 笔记的只读快照，交给 OpenAI 兼容接口做
 总结、分类与问答。
 
@@ -44,6 +50,7 @@ AI 后端（2026-09-29 起收归宿主，本插件**零配置**）：
 import json
 import math
 import os
+import re
 import uuid
 from datetime import datetime
 
@@ -86,12 +93,24 @@ SYSTEM_PROMPT = (
     "碎片（随手记的片段）、笔记数据发给你。要求：\n"
     "1. 用简体中文回答，简洁直接，结果类内容用 Markdown 列表组织；\n"
     "2. 只依据用户给出的数据回答，绝不虚构不存在的任务或笔记；\n"
-    "3. 数据为空时直说「数据为空」，不要编造。"
+    "3. 数据为空时直说「数据为空」，不要编造；\n"
+    "4. 应用内数据说明：只有随消息附上的数据块才是你能看到的真实数据；"
+    "没附上的部分你没有读过，不要假装知道其内容，也不要向用户索要粘贴。"
+)
+
+# 生成类任务指令（v1.16.0）：与动作协议绑定（can_manage 时才下发）——
+# 提到 add_* 动作的前提是模型拿得到动作协议，否则反而诱导它编造操作。
+GENERATION_DIRECTIVE = (
+    "\n\n生成 / 新增指引：当用户要求生成内容并写入应用（如往知识库 / "
+    "任务 / 碎片添加）时，直接用对应的 add_* 动作批量产出（可多条），"
+    "不要反问用户要已有内容；只有修改 / 删除已有条目且不确定指哪条时"
+    "才先确认。"
 )
 
 
-def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
-    """基础系统提示词 + 规则库中已启用的用户规则（+ 动作协议）。
+def build_system_prompt(custom_rules, can_manage: bool = False,
+                        kb_brief: str = "") -> str:
+    """基础系统提示词 + 规则库中已启用的用户规则（+ 动作协议 + 知识库概况）。
 
     规则库是用户在页面上自己编辑的（config.json 的 custom_rules），
     插件不预置任何条目。脏数据（非 dict / 空文本 / 缺键）一律宽容
@@ -100,6 +119,10 @@ def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
 
     ``can_manage``：插件是否被授权改删数据（manifest 声明 manage）。
     未授权时**不下发动作协议**——否则模型会承诺一堆做不到的操作。
+
+    ``kb_brief``：知识库概况文本（build_kb_brief 产出）。非空时追加
+    一段，让模型始终知道知识库存在、有多少段、大概是什么内容；空串
+    （无数据源 / 知识库为空 / 读取异常）不注入，行为与旧版一致。
     """
     rules = []
     for r in custom_rules or []:
@@ -114,6 +137,9 @@ def build_system_prompt(custom_rules, can_manage: bool = False) -> str:
     prompt = SYSTEM_PROMPT
     if can_manage:
         prompt += ACTION_PROTOCOL
+        prompt += GENERATION_DIRECTIVE
+    if kb_brief:
+        prompt += "\n\n" + str(kb_brief)
     if not rules:
         return prompt
     joined = "\n".join(f"{i}. {t}" for i, t in enumerate(rules, 1))
@@ -425,12 +451,21 @@ def format_knowledge(items, limit: int) -> str:
 
 
 def build_data_block(ctx, kind: str, limit: int) -> str:
-    """按指令类型取对应数据并格式化（kind: tasks/fragments/weekly/knowledge）"""
+    """按指令类型取对应数据并格式化
+    （kind: tasks/fragments/notes/knowledge/weekly）
+
+    ``notes`` 是 v1.16.0 轻量路由新增的单类分支（内置快捷指令没有
+    「笔记」按钮，此前 notes 只随 weekly 全量块出现）；tasks / fragments /
+    knowledge / weekly 四种原样保留，既有调用方零影响。
+    """
     if kind == "tasks":
         return f"以下是应用内的全部任务数据：\n{format_tasks(ctx.data.tasks(), limit)}"
     if kind == "fragments":
         return (f"以下是应用内的全部碎片（随手记片段）数据：\n"
                 f"{format_fragments(ctx.data.fragments(), limit)}")
+    if kind == "notes":
+        return (f"以下是应用内的全部笔记数据：\n"
+                f"{format_notes(ctx.data.notes(), limit)}")
     if kind == "knowledge":
         return ("以下是知识库（float_data/知识库.docx）的全部段落，"
                 "方括号里是编号：\n"
@@ -442,6 +477,63 @@ def build_data_block(ctx, kind: str, limit: int) -> str:
             f"== 任务 ==\n{format_tasks(ctx.data.tasks(), limit)}\n\n"
             f"== 碎片 ==\n{format_fragments(ctx.data.fragments(), limit)}\n\n"
             f"== 笔记 ==\n{format_notes(ctx.data.notes(), limit)}")
+
+
+# ---------------- 轻量智能路由（v1.16.0） ----------------
+# 用户在输入框自由发送的消息做关键词路由：命中即自动附带对应数据块，
+# 修掉「自由聊天路径 data_block=None、模型看不到任何应用数据」的问题。
+# 只作用于自由发送路径——send_quick（显式指定数据）与 _send_custom_quick
+# （设计语义就是「不附加应用内数据」）零改动。
+AUTO_DATA_NOTE = "（以下是根据你消息中提到的内容自动附上的应用内数据）"
+
+# 关键词 → 数据类型（大小写不敏感；英文关键词如 todo）。固定元组：
+# 迭代顺序确定，函数天然确定性。「常识」在用户语境里常指要入库的知识，
+# 归入 knowledge；「段落」同理（知识库是段落列表）。
+_KIND_KEYWORDS = (
+    ("tasks", ("任务", "待办", "todo", "截止")),
+    ("fragments", ("碎片", "随手记")),
+    ("notes", ("笔记",)),
+    ("knowledge", ("知识库", "段落", "常识")),
+)
+# 返回值的固定排列顺序（子集按此序输出，与快捷指令的数据类型口径一致）
+_DATA_KIND_ORDER = ("tasks", "fragments", "notes", "knowledge")
+
+
+def detect_data_kinds(text) -> list:
+    """自由聊天消息 → 命中的数据类型列表（纯函数：确定性、无副作用）。
+
+    返回值是 "tasks"/"fragments"/"notes"/"knowledge" 的子集，按固定
+    顺序排列；无命中 / 空串 / None 返回 []。误命中可接受（如「把笔记
+    记下来」也会附带笔记数据）——多附数据比漏附好，data block 有
+    max_data_chars 长度上限兜底，不会挤爆提示词。
+    """
+    low = str(text or "").lower()
+    if not low.strip():
+        return []
+    hits = {kind for kind, words in _KIND_KEYWORDS
+            if any(w in low for w in words)}
+    return [k for k in _DATA_KIND_ORDER if k in hits]
+
+
+KB_BRIEF_ITEMS = 5       # 概况最多展示的段落数
+KB_BRIEF_LIMIT = 600     # 概况文本截断上限（比数据块的 6000 小得多）
+
+
+def build_kb_brief(items) -> str:
+    """知识库快照 → 系统提示词里的「知识库概况」一段（纯函数）。
+
+    让模型始终知道知识库存在、有多少段、大概是什么内容——生成类任务
+    （如「生成 N 条 XX 常识」）就不会再向用户索要应用内已有的知识。
+    行格式复用 format_knowledge（「[编号] 摘要」），与数据块同源。
+    空库 / None / 脏数据返回空串（调用方不注入，行为与旧版一致）。
+    """
+    rows = [r for r in (items if isinstance(items, (list, tuple)) else [])
+            if isinstance(r, dict)]
+    if not rows:
+        return ""
+    return ("知识库概况：现有 %d 段，开头几条是（方括号里是编号）：\n%s"
+            % (len(rows), format_knowledge(rows[:KB_BRIEF_ITEMS],
+                                           KB_BRIEF_LIMIT)))
 
 
 # 快捷指令：(按钮文案, 数据类型, 指令全文)
@@ -482,7 +574,18 @@ ACTION_OPS = {
     # 「将任务清空」时模型只能编造逐条 delete_task 编号被护栏全跳过）
     "clear_tasks": "manage",
 }
-MAX_ACTIONS = 10          # 单轮动作数上限：防模型刷屏式输出
+MAX_ACTIONS = 50          # 单轮动作数上限：防模型刷屏式输出（v1.16.1：10→50，
+                          # 「覆盖前 50 条知识点」这类整批改写一轮就能完成）
+# 云端请求缺省输出预算（v1.16.1）：批量动作 + 成段正文需要大输出；不设的话
+# glm-4-flash 等按服务商默认（~1k）截断，动作块 JSON 断在半路 → 整块丢弃。
+CLOUD_MAX_TOKENS = 4000
+
+# 假完成检测（v1.16.1）：正文**同时**命中「完成动词」与「数据对象词」、
+# 且本条回复没有任何动作块时，判定为假完成（模型用文字谎称改了数据）。
+# 渲染层追加确定性警示——不依赖模型自觉，弱模型也不怕。
+_FALSE_CLAIM_ACTION_RE = re.compile(
+    "已修改|已改写|已删除|已清空|已添加|已写入|已标记|已全部")
+_FALSE_CLAIM_TARGET_RE = re.compile("知识库|任务|碎片|笔记")
 
 # 动作 → 目标数据源（用于把 id 校验到快照里的真实记录）
 # 知识库的 id 键是 ``num``：知识库段落用「编号」寻址（位置型标识）
@@ -506,10 +609,19 @@ _KB_FAIL_HINT = ("（该段内容可能已变化，或知识库被外部改动�
 
 ACTION_PROTOCOL = (
     "\n\n== 你可以执行的应用操作 ==\n"
+    "你**具备**直接修改应用数据的能力——下列动作由应用原生执行，"
+    "不是空话。用户要求新增 / 修改 / 删除任务、碎片、笔记或知识库时，"
+    "**必须**输出动作块完成操作；回复「我无法直接操作 / 我只能提供建议"
+    " / 请手动修改」属于错误回答，**禁止出现**。\n"
     "当用户**明确要求**修改应用内数据时，除文字回答外，还要在回复**最后**"
     "输出一个动作块（普通问答不要输出）：\n"
     "```actions\n"
     '{"actions":[{"op":"complete_task","id":3,"why":"用户要求标记完成"}]}\n'
+    "```\n"
+    "批量改动示例（一次改两条知识——批量时就是这样一个 op 一条地列）：\n"
+    "```actions\n"
+    '{"actions":[{"op":"update_knowledge","id":1,"content":"新正文..."},'
+    '{"op":"update_knowledge","id":2,"content":"新正文..."}]}\n'
     "```\n"
     "可用 op（需要 id 的，id 只能取自上面数据里的真实编号，**禁止编造**）：\n"
     "- add_task{title,note?,deadline?} / add_fragment{content} / "
@@ -524,10 +636,15 @@ ACTION_PROTOCOL = (
     "就是它方括号里的编号\n"
     "- clear_tasks{} —— 一键清空**全部**任务（无参数；危险操作，会弹确认卡）\n"
     "规则：①只在用户明确要求改动时输出动作；②不确定是哪条记录就先问，"
-    "不要猜；③一次最多 10 条；④动作块之外照常用文字说明你做了什么。"
+    "不要猜；③一次最多 50 条；内容较长的批量任务优先每轮 20 条左右"
+    "（说「先改前 20 条」式的分轮更稳），超过就先做能做的并告知剩余；"
+    "④动作块之外照常用文字说明你做了什么。"
     "⑤清空/批量删除全部任务用 clear_tasks{}（不要逐条编造 delete_task）；"
     "⑥文字说明必须与动作一致——动作被跳过或失败时如实说明未完成，"
     "**禁止声称已删除/已清空**。"
+    "⑦批量任务（如改写 50 条）也必须**逐条输出动作块**，每条都带完整"
+    "新内容——没有动作块就什么都不会发生，**绝对禁止**只用文字声称"
+    "「已修改/已完成」。"
 )
 
 
@@ -624,6 +741,10 @@ def _extract_action_json(text: str) -> str:
          而不是当正文显示给用户
       ② ```` ```json ```` 围栏 —— 取最后一个「像动作块」的
       ③ 裸 JSON —— 取最后一个「像动作块」的
+      ④ **未闭合围栏**（v1.16.1）—— 输出顶到 max_tokens 被掐断时收尾
+         ```` ``` ```` 没了：从最后一个 ```actions 起取到文末。截断的 JSON
+         由 parse_actions 的抢救逻辑逐条捞回，**绝不把裸 JSON 当正文吐给
+         用户**（那正是用户看到的「乱码」）。
     只取最后一个：容忍模型在结论后再补一段动作块。
     """
     import re
@@ -638,7 +759,38 @@ def _extract_action_json(text: str) -> str:
         cand = text[left:right + 1]
         if _looks_like_actions(cand):
             return cand
+    opens = re.findall(r"```actions\s*(.*)$", text, re.S)
+    if opens:
+        return opens[-1]
     return ""
+
+
+def _salvage_action_json(raw: str):
+    """截断动作块抢救（v1.16.1）：修尾逗号 → 逐条捞完整对象。
+
+    glm-4-flash 输出大批量动作时容易顶满 max_tokens 被掐断：JSON 断在
+    半路必然 ``json.loads`` 失败。这里两段式抢救——先修最常见的「尾逗号」
+    再整体解析；不行就用正则把**完整的** ``{...}`` 条目一个个捞出来拼回
+    ``{"actions":[...]}``。捞回任何条目就返回（带 ``_salvaged`` 标记，
+    调用方据此提示「部分执行」）；一条都捞不回返回 None。
+    """
+    fixed = re.sub(r",\s*([}\]])", r"\1", raw)
+    try:
+        data = json.loads(fixed)
+        return data if isinstance(data, dict) else None
+    except (ValueError, TypeError):
+        pass
+    items = []
+    for m in re.findall(r"\{[^{}]*\}", raw):
+        try:
+            obj = json.loads(re.sub(r",\s*([}\]])", r"\1", m))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and "op" in obj:
+            items.append(obj)
+    if items:
+        return {"actions": items, "_salvaged": True}
+    return None
 
 
 def parse_actions(text: str, snapshot: dict | None = None):
@@ -667,7 +819,11 @@ def parse_actions(text: str, snapshot: dict | None = None):
     try:
         data = json.loads(raw)
     except (ValueError, TypeError) as exc:
-        return clean, [], [f"动作块不是合法 JSON（{exc}），未执行"]
+        # 截断抢救（v1.16.1）：输出顶满 max_tokens 掐断的块，完整的条目
+        # 逐条捞回继续走确认流程，其余给「未执行」原因——而不是整块作废。
+        data = _salvage_action_json(raw)
+        if data is None:
+            return clean, [], [f"动作块不是合法 JSON（{exc}），未执行"]
     if not isinstance(data, dict):
         return clean, [], ["动作块必须是 JSON 对象，未执行"]
     items = data.get("actions")
@@ -675,6 +831,9 @@ def parse_actions(text: str, snapshot: dict | None = None):
         return clean, [], ["动作块缺少 actions 数组，未执行"]
 
     actions, errors = [], []
+    if data.pop("_salvaged", False):
+        errors.append(f"动作块疑似被输出截断，已抢救回 {len(items)} 条，"
+                      "其余未执行")
     if len(items) > MAX_ACTIONS:
         errors.append(f"动作条数 {len(items)} 超过上限 {MAX_ACTIONS}，"
                       f"只取前 {MAX_ACTIONS} 条")
@@ -807,6 +966,12 @@ def build_request(params: dict, messages: list, max_tokens=None,
             "temperature": clamp_temperature(temperature), "stream": False}
     if max_tokens:
         body["max_tokens"] = int(max_tokens)
+    elif params.get("mode") != "local":
+        # 云端不传 max_tokens 时很多服务商默认只给 ~1k 输出预算——批量动作
+        # （50 条 update_knowledge 每条带成段正文）轻松超限被静默截断。
+        # 4000 在 glm-4-flash 输出上限（4095）之内，也低于主流模型 8k 出头
+        # 的输出上限；本地 llama-server 不设（默认吃满上下文）。
+        body["max_tokens"] = CLOUD_MAX_TOKENS
     return url, headers, body
 
 
@@ -1032,6 +1197,7 @@ class AiChatPage(QWidget):
         self._history = []          # 成功轮次 [{"role","content"}, ...]
         self._pending_user = ""     # 在途请求的用户消息（成功后落进历史）
         self._pending_display = ""  # 在途请求的界面文案（气泡/会话存档用）
+        self._fake_retried = False  # 本轮已做过「谎报完成」自动重试（每轮一次）
         self._busy = False
         # 会话持久化（A1）：多会话存档 + 重启恢复。self._session 永远指向
         # _store["sessions"] 里的一条（聊天页至少有一个会话，删到最后一条
@@ -1828,7 +1994,14 @@ class AiChatPage(QWidget):
         """本插件是否被授权改删数据（manifest 声明 manage；否则不下发协议）"""
         try:
             return bool(self._ctx.manage.can_manage())
-        except Exception:                            # noqa: BLE001
+        except Exception as exc:                     # noqa: BLE001
+            # 静默 False 的代价是「模型永远拿不到动作协议、说无法操作」，
+            # 且无从排查（2026-10-04 知识库不可操作事故的教训）——必须留痕
+            try:
+                self._ctx.logger.warning(
+                    f"[ai-assistant] manage 能力判定失败，动作协议未下发：{exc!r}")
+            except Exception:                        # noqa: BLE001
+                pass
             return False
 
     def _save_as_note(self, text: str):
@@ -1981,7 +2154,37 @@ class AiChatPage(QWidget):
             self._status.setText("先输入内容再发送")
             return
         self._input.clear()
-        self._dispatch(text, None, text)
+        # 轻量智能路由（v1.16.0）：自由文本按关键词命中自动附带数据块；
+        # 无命中保持 None，行为与路由上线前完全一致
+        self._dispatch(text, self._auto_data_block(text), text)
+
+    def _auto_data_block(self, text: str):
+        """自由文本 → 关键词路由拼出的数据块；无命中返回 None（现状等价）。
+
+        命中的 kind 各自复用 build_data_block（每块都按 max_data_chars
+        截断），用空行连接，开头加一句说明让模型知道这不是用户粘贴的。
+        只被自由发送路径调用：send_quick（显式指定数据）与
+        _send_custom_quick（设计语义就是「不附加应用内数据」）零改动。
+        """
+        kinds = detect_data_kinds(text)
+        if not kinds:
+            return None
+        limit = int(self._cfg.get("max_data_chars") or 6000)
+        blocks = [build_data_block(self._ctx, k, limit) for k in kinds]
+        return AUTO_DATA_NOTE + "\n\n" + "\n\n".join(blocks)
+
+    def _kb_brief(self) -> str:
+        """知识库概况（系统提示词注入用）；无数据源 / 读取异常 → 空串不注入。
+
+        宿主 knowledge provider 是内存段落副本（docx_manager 缓存段落
+        列表，get_paragraphs 只做列表拷贝、不重解析 docx），每次发送
+        直取一次即可，无需页面级缓存；知识库被外部改动时概况随之刷新
+        （动作块另有段落指纹校验兜底，概况略旧无害）。
+        """
+        try:
+            return build_kb_brief(self._ctx.data.knowledge())
+        except Exception:                 # noqa: BLE001 - 概况缺失不反噬发送
+            return ""
 
     def send_quick(self, kind: str, prompt: str):
         """快捷指令：指令 + 应用内数据一起发给模型"""
@@ -2043,17 +2246,20 @@ class AiChatPage(QWidget):
         self._apply_settings()
 
     def _dispatch(self, display_text: str, data_block, prompt: str):
-        """统一发送入口；data_block 非空 = 快捷指令（附加数据）"""
+        """统一发送入口；data_block 非空 = 随消息附带应用内数据
+        （快捷指令 / 自定义指令 / 轻量路由命中）"""
         # 用户主动发起（手动发送 / 快捷指令）→ 视角无条件回到最新：哪怕此前
         # 正在翻历史，此刻他想看的也是这一轮的结果（含下面的「未接入」提示）
         self._stick_bottom = True
+        self._fake_retried = False   # 新的 user 轮：谎报自动重试机会重置
         user_content = prompt
         if data_block:
             user_content = f"{prompt}\n\n{data_block}"
         messages = ([{"role": "system",
                       "content": build_system_prompt(
                           self._cfg.get("custom_rules"),
-                          can_manage=self._can_manage())}]
+                          can_manage=self._can_manage(),
+                          kb_brief=self._kb_brief())}]
                     + self._history
                     + [{"role": "user", "content": user_content}])
         # 后端唯一来源：设置页「AI 总配置」。未接入 / 本地未就绪都只引导，
@@ -2103,11 +2309,54 @@ class AiChatPage(QWidget):
         elif not (actions or action_errs):
             self.add_bubble("AI", reply)       # 异常兜底：别吞掉模型的话
             body = reply
+        # 假完成防线（v1.16.1）：没有动作块却声称改动了数据。
+        # 第一次：带系统级提醒**自动重试一次**——谎报轮不进历史/存档，
+        # 不能让模型把「文字邀功也能过」学进上下文；再犯才显示警示。
+        fake_done = (body and not (actions or action_errs)
+                     and bool(_FALSE_CLAIM_ACTION_RE.search(body))
+                     and bool(_FALSE_CLAIM_TARGET_RE.search(body)))
+        if fake_done and not self._fake_retried and self._can_manage():
+            self._fake_retried = True
+            self.add_bubble("提示", "模型未输出动作块，自动重试一次…")
+            self._set_busy(True, "重试中…")
+            self._show_thinking()
+            self._pending_user += (
+                "\n\n（重试提醒：你上一条回复没有任何 ```actions 动作块，"
+                "等于什么都没有做。请重新完成上面的要求：逐条输出动作块，"
+                "禁止只用文字声称已完成。）")
+            params = self._attached_params()
+            messages = ([{"role": "system",
+                          "content": build_system_prompt(
+                              self._cfg.get("custom_rules"),
+                              can_manage=self._can_manage(),
+                              kb_brief=self._kb_brief())}]
+                        + self._history
+                        + [{"role": "user", "content": self._pending_user}])
+            url, headers, rbody = build_request(
+                params, messages, temperature=self._temperature)
+            if url is not None:
+                if self._ctx.http_post_json_async(
+                        url, headers, rbody, timeout=120.0,
+                        on_done=self._on_reply):
+                    return
+            self._hide_thinking()
+            self._set_busy(False)
+        if fake_done:
+            self.add_bubble(
+                "提示",
+                "⚠ 上一条回复里「已完成操作」的说法不可信：它没有携带"
+                "任何实际操作动作，应用内数据没有任何改变。可以重试，"
+                "或把要求拆小一点（如先改 5 条）。")
         # 成功轮次才进历史；超限丢最旧的（保留偶数条，问答成对）。
-        # 历史里不放动作块 JSON，避免模型下一轮照抄格式刷动作。
+        # 动作轮**存带动作块的原文**（v1.16.1 反转旧决策）：此前只存剥块
+        # 后的正文，模型在历史里见过的自己永远是「纯文字邀功」形态，弱
+        # 模型会照着学——这正是谎报完成的结构性诱因。普通问答轮无动作
+        # 块，行为不变；「刷动作」风险由协议规则①约束。
         self._history.append({"role": "user", "content": self._pending_user})
-        self._history.append({"role": "assistant",
-                              "content": body or "（已按要求操作应用数据）"})
+        self._history.append({
+            "role": "assistant",
+            "content": (reply if (actions or action_errs)
+                        else (body or "（已按要求操作应用数据）"))})
         if len(self._history) > self._max_history:
             self._history = self._history[-self._max_history:]
         # 会话存档（A1）：同一内容落盘，供重启恢复 / 多会话切换
@@ -2289,7 +2538,7 @@ class ChatAction(BallAction):
 class AiAssistantPlugin(BallPlugin):
     id = PLUGIN_ID
     name = "AI 助手"
-    version = "1.15.0"
+    version = "1.16.0"
 
     def create_actions(self, ctx) -> list:
         return [ChatAction()]

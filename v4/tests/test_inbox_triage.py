@@ -11,6 +11,8 @@
   · hit_count 零迁移：from_dict 缺键 → 0；to_dict 往返一致；位置传参兼容
   · note_search_hit：正常 +1 / 空列表安全 / 脏 id 安全
   · **安全护栏**：模拟 UI 单条删除路径后断言 delete_fragments 从未被调用
+  · **全部删除**（2026-10-04 放开）：按钮随候选数启停；确认后走批量接口
+    恰一次、只删候选不碰非候选；取消则一条不删
   · 建议清单实时算：改数据后再次拉取结果跟着变（钉死「不落缓存文件」）
 """
 import os
@@ -391,9 +393,8 @@ def test_single_delete_never_calls_batch(tmp_path, qapp, monkeypatch):
     panel.refresh(preserve_view=False)
 
     # 自动确认二次确认框
-    monkeypatch.setattr(fp_mod.QMessageBox, "question",
-                        staticmethod(lambda *a, **k:
-                                     fp_mod.QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr(fp_mod.GlassMessageBox, "question",
+                        staticmethod(lambda *a, **k: True))
 
     dlg = _open_triage(panel)
     try:
@@ -418,9 +419,8 @@ def test_delete_cancelled_calls_nothing(tmp_path, qapp, monkeypatch):
     panel = FragmentsPanel(host)
     panel.refresh(preserve_view=False)
 
-    monkeypatch.setattr(fp_mod.QMessageBox, "question",
-                        staticmethod(lambda *a, **k:
-                                     fp_mod.QMessageBox.StandardButton.No))
+    monkeypatch.setattr(fp_mod.GlassMessageBox, "question",
+                        staticmethod(lambda *a, **k: False))
     dlg = _open_triage(panel)
     try:
         dlg._triage_delete_one(fid)
@@ -457,9 +457,8 @@ def test_threshold_change_recomputes(tmp_path, qapp):
         dlg.reject()
 
 
-def test_no_bulk_controls_in_dialog(tmp_path, qapp):
-    """对话框内不得出现「全选 / 批量删除 / 一键清理」控件。"""
-    from PyQt6.QtWidgets import QPushButton
+def test_delete_all_button_gated_by_candidates(tmp_path, qapp):
+    """「全部删除」按钮随候选数启用/禁用：有候选可点，空清单禁用。"""
     from src.fragments_panel import FragmentsPanel
 
     mgr, _fid = _old_manager(tmp_path)
@@ -470,13 +469,90 @@ def test_no_bulk_controls_in_dialog(tmp_path, qapp):
 
     dlg = _open_triage(panel)
     try:
-        banned = ("全选", "批量", "一键", "全部删除", "全部清理")
-        for btn in dlg.findChildren(QPushButton):
-            text = btn.text()
-            assert not any(b in text for b in banned), \
-                "对话框出现批量控件：%r" % text
+        assert dlg._triage_candidates(), "前置条件：应有候选"
+        assert dlg._triage_delete_all_btn.isEnabled()
+        # 阈值拉满 → 无候选 → 按钮禁用（实时跟随）
+        dlg._triage_days_stepper.setValue(3650)
+        assert dlg._triage_candidates() == []
+        assert not dlg._triage_delete_all_btn.isEnabled()
+        # 放宽 → 候选回来 → 按钮恢复可点
+        dlg._triage_days_stepper.setValue(30)
+        assert dlg._triage_candidates()
+        assert dlg._triage_delete_all_btn.isEnabled()
     finally:
         dlg.reject()
+
+
+def test_delete_all_confirmed_deletes_only_candidates(tmp_path, qapp,
+                                                      monkeypatch):
+    """确认后走 delete_fragments 批量：候选全删，非候选一律不碰。"""
+    from src.fragments_panel import FragmentsPanel
+    from src import fragments_panel as fp_mod
+
+    mgr = FragmentManager(str(tmp_path / "fragments.json"))
+    f_old1 = mgr.add_clipboard_text("旧短一")
+    f_old2 = mgr.add_clipboard_text("旧短二")
+    f_keep = mgr.add_clipboard_text("被搜过所以留下")
+    for fid in (f_old1, f_old2, f_keep):
+        mgr.get_fragment(fid).created_at = ts_days_ago(60)
+    mgr.note_search_hit([f_keep])
+
+    calls = {"batch": 0, "single": 0}
+    real_single = mgr.delete_fragment
+    real_batch = mgr.delete_fragments
+
+    def spy_single(fid):
+        calls["single"] += 1
+        return real_single(fid)
+
+    def spy_batch(ids):
+        calls["batch"] += 1
+        return real_batch(ids)
+
+    monkeypatch.setattr(mgr, "delete_fragment", spy_single)
+    monkeypatch.setattr(mgr, "delete_fragments", spy_batch)
+
+    host = _FakeHost()
+    host._fragment_manager = mgr
+    panel = FragmentsPanel(host)
+    panel.refresh(preserve_view=False)
+
+    monkeypatch.setattr(fp_mod.GlassMessageBox, "question",
+                        staticmethod(lambda *a, **k: True))
+    dlg = _open_triage(panel)
+    try:
+        assert set(f.fragment_id for f in dlg._triage_candidates()) == \
+            {f_old1, f_old2}
+        dlg._triage_delete_all()
+    finally:
+        dlg.reject()
+
+    assert calls["batch"] == 1, "全部删除应恰好调用一次批量接口"
+    assert calls["single"] == 0, "全部删除不该走单条路径"
+    assert mgr.get_fragment(f_old1) is None
+    assert mgr.get_fragment(f_old2) is None
+    assert mgr.get_fragment(f_keep) is not None, "非候选绝不能被误删"
+
+
+def test_delete_all_cancelled_deletes_nothing(tmp_path, qapp, monkeypatch):
+    """二次确认选 No → 一条都不删。"""
+    from src.fragments_panel import FragmentsPanel
+    from src import fragments_panel as fp_mod
+
+    mgr, fid = _old_manager(tmp_path)
+    host = _FakeHost()
+    host._fragment_manager = mgr
+    panel = FragmentsPanel(host)
+    panel.refresh(preserve_view=False)
+
+    monkeypatch.setattr(fp_mod.GlassMessageBox, "question",
+                        staticmethod(lambda *a, **k: False))
+    dlg = _open_triage(panel)
+    try:
+        dlg._triage_delete_all()
+    finally:
+        dlg.reject()
+    assert mgr.get_fragment(fid) is not None
 
 
 def _open_triage(panel):

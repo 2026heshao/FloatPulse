@@ -15,6 +15,12 @@
 """
 
 import os
+import sys
+
+# ★路径自举：本文件必须可**单独**跑（pytest v4/tests/test_assets_grouping.py），
+# 不能吸血其它测试模块先插好的 sys.path——此前无自举，单跑必挂
+# ModuleNotFoundError: No module named 'src'（2026-10-04 终检发现）。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 

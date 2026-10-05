@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QTimer, QPropertyAnimation, QEasingCurve,
     QRectF, QSequentialAnimationGroup, pyqtProperty, pyqtSignal, QObject,
+    QAbstractAnimation,
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QFontMetrics, QPen, QAction, QCursor,
@@ -628,6 +629,9 @@ class FloatingBall(QWidget):
         self._anim = None                # 宿主位移动画（吸边/滑出）
         self._startup_pop_anims = []     # 启动压轴浮现动画（持引用防 GC）
         self._out_count = 0
+        # 收回淡出动画代号：每次 _hide_card_faded / _cancel_card_fade 递增，
+        # finished 回调按代号对账——过期回调（已被取消/被新一轮取代）直接作废
+        self._card_fade_gen = 0
         # 空闲吸边自动隐藏总开关（设置页可关）：关闭后球始终完整显示，
         # 贴边不再半隐藏。启动时由 _apply_auto_hide_config() 从配置读取覆盖。
         self._auto_hide_enabled = True
@@ -871,10 +875,18 @@ class FloatingBall(QWidget):
             self._surface.scale = 1.0
             self.setWindowOpacity(1.0)
             self.show()
+            self.repaint()           # 同首帧守卫：映射后立刻补首帧
             return
         self._surface.scale = 0.7        # 球心不动，从 70% 弹到 100%
         self.setWindowOpacity(0.0)
         self.show()
+        # ★ 2026-10-05（用户实测：主窗弹出瞬间闪现小黑窗）首帧守卫：
+        #   球的首次 show 在 opacity=0 下映射，若首个 UpdateLayeredWindow
+        #   晚于 ShowWindow，DWM 会拿未初始化表面（黑）参与合成 —— 104px
+        #   的黑方块随淡入显形再被真实球面替换，正是「小黑窗闪一下」。
+        #   show 返回后窗口已映射可见，此刻（opacity 仍为 0）强制同步
+        #   paint+flush 把真实球面写进分层表面，再起播淡入。
+        self.repaint()
         fade = QPropertyAnimation(self, b"windowOpacity", self)
         fade.setDuration(pop_ms)
         fade.setStartValue(0.0)
@@ -2046,6 +2058,11 @@ class FloatingBall(QWidget):
             timer.setInterval(interval)
 
     def _show_card_on_hover(self):
+        # 在途收回淡出先作废（★2026-10-05「连续弹出两次」修复）：
+        # _hide_card_faded 有 140ms 淡出窗口，期间 isVisible() 仍为 True，
+        # 本方法的弹出分支会误判「卡片还在」而跳过；随后 finished 照旧
+        # hide() → 卡片在球上凭空消失，再移入即第二次弹出。先接管再判断。
+        self._cancel_card_fade()
         if not self._card_window.isVisible():
             if not self._card_window.has_shown_content():
                 self._card_window.show_next_random()
@@ -2053,6 +2070,21 @@ class FloatingBall(QWidget):
         self._out_count = 0
         self._note_poll_activity()   # 卡片显隐切换 = 活动（滑出唤起路径也经此处）
         self._hover_check_timer.start(self.HOVER_CHECK_INTERVAL)
+
+    def _cancel_card_fade(self):
+        """作废在途的收回淡出动画（弹出路径先接管，防 hide 与 show 竞态）。
+
+        只停「收回淡出」（_card_fade_anim），不碰卡片自己的弹入动画；
+        stop() 会同步触发 finished → 旧代号回调按代号对账后 no-op。
+        """
+        self._card_fade_gen += 1
+        anim = getattr(self, '_card_fade_anim', None)
+        if anim is None:
+            return
+        self._card_fade_anim = None
+        if anim.state() == QAbstractAnimation.State.Running:
+            anim.stop()
+            self._card_window.setWindowOpacity(1.0)
 
     def _hide_card_faded(self):
         """卡片收起：140ms 淡出后隐藏（透明度复位，保证下次弹出正常）"""
@@ -2062,17 +2094,31 @@ class FloatingBall(QWidget):
         # 定位线索：真机日志确认收回链路是否真正走到（偶发滞留 bug 排查）
         from src.logger import get_logger
         get_logger().debug("卡片自动收回")
+        self._card_fade_gen += 1
+        gen = self._card_fade_gen
         anim = QPropertyAnimation(w, b"windowOpacity", self)
         anim.setDuration(140)
         anim.setStartValue(w.windowOpacity())
         anim.setEndValue(0.0)
-        anim.finished.connect(self._on_card_fade_done)
+        anim.finished.connect(lambda: self._on_card_fade_done(gen))
         self._card_fade_anim = anim  # 持引用防 GC
         anim.start()
 
-    def _on_card_fade_done(self):
+    def _on_card_fade_done(self, gen):
+        # 代号对账：只认最新一轮收回。被 _cancel_card_fade 作废的旧回调
+        # （stop() 触发的 finished）在这里直接短路，绝不执行 hide。
+        if gen != self._card_fade_gen:
+            return
         w = self._card_window
         w.setWindowOpacity(1.0)
+        # ★竞态兜底：140ms 淡出期间鼠标可能已回到球/卡片上（手抖擦边、
+        # 快速去而复返）。此刻收起会把球上的卡片凭空夺走——用户看到的就是
+        # 「弹出→消失→再弹出 = 连续弹两次」。改为留守并重启收回检测。
+        pos = QCursor.pos()
+        if self._ball_hit(pos) or w.geometry().contains(pos):
+            self._out_count = 0
+            self._hover_check_timer.start(self.HOVER_CHECK_INTERVAL)
+            return
         w.hide()
 
     def _check_hover_state(self):
@@ -3003,17 +3049,25 @@ def main():
             fid = fragment_manager.add_fragment(
                 TYPE_CLIPBOARD_TEXT, content, source)
             main_window.refresh_fragments()
+            if fid:
+                # 轻提示反馈（2026-10-05）：插件 AI 动作写入此前静默
+                main_window.show_toast("已加入碎片")
             return fid
 
         def _add_task(title, note, deadline):
             tid = task_manager.add_task(title, note, deadline)
             main_window.refresh_tasks()
             ball.refresh_badge()          # 任务数变了，球体徽标同步
+            if tid:
+                shown = title if len(title) <= 16 else title[:15] + "…"
+                main_window.show_toast(f"已添加任务：{shown}")
             return tid
 
         def _add_note(title, content):
             nid = note_manager.add_note(content, title)
             main_window.refresh_notes()
+            if nid:
+                main_window.show_toast("已存为笔记")
             return nid
 
         def _add_knowledge(content):
@@ -3470,6 +3524,14 @@ def main():
     main_window.theme_changed.connect(ball.apply_theme)
     # 3b. 主题切换 → 桌面便签全部换肤
     main_window.theme_changed.connect(sticky_manager.apply_theme)
+
+    # 3b+. 壁纸参数改动（图 / 适配 / 模糊 / 遮罩 / 不透明度）→ 小卡片跟进
+    # 背景。主窗在 refresh_wallpaper 里自己刷 GlassPanel，不走
+    # theme_changed 全量换肤（那会把卡片整套 QSS / 图标重刷一遍，
+    # 设置页步进器每档 ± 都白付一次）。
+    def _on_wallpaper_changed():
+        ball.card_window.apply_background_from_config(config_manager)
+    main_window.wallpaper_changed.connect(_on_wallpaper_changed)
 
     # 3c. 系统深浅色变化 → 「跟随系统」模式整链路换肤（3.1）
     # 只复用既有换主题路径：主窗口 _apply_theme 重取配色（get_colors 内部

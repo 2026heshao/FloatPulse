@@ -203,11 +203,13 @@ def test_primary_hover_is_a_lift_not_a_darken():
 
 
 def test_danger_and_disabled_states_still_use_their_own_colors():
-    """守卫改动边界：danger 按钮用 $danger（文字按钮，不做红胶囊）、disabled
-    的灰字都不该被顺手改掉。
+    """守卫改动边界：danger 按钮静止态用 $danger、disabled 的灰字都不该被
+    顺手改掉。
 
-    ★ UI 重构 01：``#dangerBtn`` 从红胶囊改成文字按钮（透明底 + $danger），
-    hover 的淡红底归 SmoothButton overlay，QSS 侧不再有白字/背景声明。
+    ★ 2026-10 对比度修复（GlassMessageBox danger 按钮专项拍板）：hover
+    端点改回 $danger_hover 实底（红底上 $danger 红字几乎不可读），文字
+    同步改白 —— 与 test_smooth_buttons 的白字契约并轨；静止态仍守
+    $danger 文字钮口径（红胶囊不得回归）。
     """
     for theme in ("light", "dark"):
         qss = get_main_window_qss(theme)
@@ -218,8 +220,8 @@ def test_danger_and_disabled_states_still_use_their_own_colors():
             % (THEMES[theme]["danger"], danger_body.strip())
         )
         hover_body = rules.get("QPushButton#dangerBtn:hover", "")
-        assert "#FFFFFF" not in _text_colors(hover_body), (
-            "danger 按钮 hover 不应压白字（已是文字按钮，不做红胶囊）"
+        assert "#FFFFFF" in _text_colors(hover_body), (
+            "danger 按钮 hover 实底红上必须白字（对比度修复契约）"
         )
         assert "background-color" not in hover_body, (
             "danger hover 背景过渡归 SmoothButton overlay，QSS 不应再写背景色"

@@ -46,6 +46,35 @@ def _backup_dir(json_path: str) -> str:
                         BACKUPS_DIRNAME)
 
 
+def snapshot_status(data_dir: str) -> tuple:
+    """扫描数据目录下 backups/ 内全部快照，返回 (最近mtime, 快照总数)。
+
+    仅供设置页**被动展示**（细节强化 P2-8：自动快照此前完全静默，
+    用户不知道有这份保险丝）：只读不写，绝不触碰快照文件本身。
+
+    - mtime 取各快照 ``st_mtime`` 的最大值（rotate_backup 每天每文件
+      一份、多文件并存，最大 mtime ≈ 最近一次自动快照的生成时刻）；
+      无快照时为 0.0
+    - 目录缺失 / 为空 / 扫描失败（权限等）一律 ``(0.0, 0)``——展示层
+      据此显示「暂无」，与本模块「备份失败绝不抛异常」同口径
+    """
+    try:
+        backup_dir = os.path.join(os.path.abspath(data_dir), BACKUPS_DIRNAME)
+        latest = 0.0
+        count = 0
+        with os.scandir(backup_dir) as it:
+            for entry in it:
+                if not entry.is_file():
+                    continue      # 子目录/非常规条目不计入
+                count += 1
+                mtime = entry.stat().st_mtime
+                if mtime > latest:
+                    latest = mtime
+        return (latest, count)
+    except OSError:
+        return (0.0, 0)
+
+
 def reset_rotation_state() -> None:
     """清空当日已备份登记表（仅供测试隔离使用，业务代码勿调）。"""
     _ROTATED_ON.clear()
