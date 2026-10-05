@@ -130,6 +130,23 @@ class _FakeHost(QObject):
         self.anim_speed = 1.0
 
 
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def task_manager(self):
+        return self._task_manager
+
+    @property
+    def fragment_manager(self):
+        return self._fragment_manager
+
+    @property
+    def note_manager(self):
+        return self._note_manager
+
+
 @pytest.fixture(scope="module")
 def qapp():
     from PyQt6.QtWidgets import QApplication

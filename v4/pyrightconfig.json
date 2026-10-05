@@ -1,5 +1,37 @@
 {
+  // pyright 配置（CI 与本地共用；pyright 支持 JSONC 注释）。
+  // 策略：**基线模式** —— 存量告警按规则一次性豁免（每条注明基线日期与
+  // 数量），CI 只拦「新增规则类别」与「新增文件把豁免规则之外的告警带
+  // 回来」。后续按模块逐步收敛后，再把对应规则从豁免清单里摘掉转真阻断。
   "extraPaths": ["."],
+  // 解释器：pyright 会从 PATH 上找 `python` 取 sys.path —— CI 由
+  // setup-python 装好 requirements.txt（含 PyQt6）后即为正确环境；
+  // 本地跑 `pyright v4/src` 前请确保 PATH 上是装了 PyQt6 的解释器
+  // （否则会有大批 reportMissingImports 噪音，但已被下方基线豁免兜住）。
   "reportMissingModuleSource": false,
-  "reportIncompatibleMethodOverride": "none"
+  "reportIncompatibleMethodOverride": "none",
+
+  // ---- 存量豁免（基线 2026-10-05，pyright 1.1.414，共 247 errors）----
+  // reportMissingImports 100（PyQt6*96 + python-docx 4；解释器不在 PATH 时必现）
+  // reportOptionalMemberAccess 67
+  // reportArgumentType 39
+  // reportReturnType 21
+  // reportGeneralTypeIssues 6
+  // reportOptionalSubscript 5
+  // reportOperatorIssue 5
+  // reportAssignmentType 1
+  // reportOptionalIterable 1
+  // reportOptionalCall 1
+  // reportOptionalOperand 1
+  "reportMissingImports": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportArgumentType": "none",
+  "reportReturnType": "none",
+  "reportGeneralTypeIssues": "none",
+  "reportOptionalSubscript": "none",
+  "reportOperatorIssue": "none",
+  "reportAssignmentType": "none",
+  "reportOptionalIterable": "none",
+  "reportOptionalCall": "none",
+  "reportOptionalOperand": "none"
 }

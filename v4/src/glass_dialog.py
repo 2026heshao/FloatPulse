@@ -207,7 +207,7 @@ class GlassDialog(QDialog):
         """
         theme = getattr(self._host, "current_theme", None) or DEFAULT_THEME
         qss = ""
-        host_container = getattr(self._host, "_container", None)
+        host_container = getattr(self._host, "container", None)
         if host_container is not None:
             qss = host_container.styleSheet()
         if not qss:

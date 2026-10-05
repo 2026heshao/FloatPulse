@@ -528,6 +528,10 @@ def test_page_title_subscribes_to_theme_changed_and_follows():
             super().__init__()
             self._theme = "light"
 
+        @property
+        def current_theme(self):
+            return self._theme
+
     host = Host()
     row = PageTitle("tasks", "日程任务", host)
     assert row.icon.color.name().upper() == \
@@ -629,6 +633,10 @@ def test_icon_button_subscribes_to_host_theme_changed():
         def __init__(self):
             super().__init__()
             self._theme = "light"
+
+        @property
+        def current_theme(self):
+            return self._theme
 
     host = Host()
     btn = IconButton("refresh", icon_size=32, host=host)

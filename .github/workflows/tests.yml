@@ -72,6 +72,33 @@ jobs:
       - name: Ruff 静态检查（零告警闸门）
         run: python -m ruff check .
 
+  pyright:
+    # 静态类型检查闸门（成熟化路线图）。**基线模式**起步：存量告警按
+    # 规则一次性豁免（豁免清单、基线日期与数量注释在 v4/pyrightconfig.json），
+    # 只拦「豁免规则之外的新增告警类别」—— 新文件带进 reportUndefinedVariable
+    # 这类问题会真的让 CI 变红。后续按模块收敛存量后，把对应规则从豁免
+    # 清单摘掉即转真阻断。
+    # 版本写死保证 CI 与本地一致；本地复现：装了 PyQt6 的解释器在 PATH 上
+    # （pyright 从 PATH 上的 python 取 sys.path），然后 pyright src。
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: v4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖与 pyright
+        run: |
+          pip install -r ../requirements.txt
+          pip install pyright==1.1.414
+
+      - name: pyright 类型检查（基线模式）
+        run: pyright src
+
   pip-audit:
     # 依赖漏洞审计（优化清单 3.5）——先给信号不拦发布：continue-on-error，
     # 等出现可升级的安全修复时，再把它转成正式闸门（去掉 continue-on-error）。

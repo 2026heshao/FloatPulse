@@ -5,9 +5,10 @@
 ==========
 临时素材的会话分组（``asset_group.py``）是**渲染时算出来的纯派生**——
 ``temp_assets.json`` 一个字节都不许改。用户要给某个堆**命名**、把某张
-素材**从堆里移出**，这两类标注必须另找落点：本模块管理的
-``float_data/asset_groups.json`` 就是那个旁路文件（细节强化项检索
-2026-10-04 P0-2，题面许可「命名/成员调整走旁路文件」）。
+素材**从堆里移出**、把某张素材**并入指定堆**（2026-10-05），这些标注
+必须另找落点：本模块管理的 ``float_data/asset_groups.json`` 就是那个
+旁路文件（细节强化项检索 2026-10-04 P0-2，题面许可「命名/成员调整走
+旁路文件」）。
 
 红线对齐
 ========
@@ -23,12 +24,17 @@
     {"data_version": 1,
      "asset_groups": {
          "names":    {"<堆首 asset_id>": "自定义堆名", ...},
-         "detached": [<asset_id>, ...]      # 被移出、永远单独渲染的素材
-     }}
+         "detached": [<asset_id>, ...],     # 被移出、永远单独渲染的素材
+         "merged":   {"<asset_id>": "<目标堆首 asset_id>", ...}
+     }}                                     # 被强制并入指定堆（2026-10-05）
 
-堆身份 = **堆首 asset_id**：时间聚类的锚点在每个堆的首成员上，新增
-素材只会并入堆尾或新开一堆，堆首不变；堆首素材被删除时标注成为孤儿，
-由 :func:`prune` 在面板刷新时惰性清理（不主动全量重写）。
+``merged`` 是 2026-10-05「并入任意堆」新增的**旁路键**（v1 结构的加法
+扩展：旧版本读到这里会静默忽略，不破坏旧读者）。值为素材自有时表示
+「新建堆」——素材自锚成一堆，后续还能往里并。堆身份 = **堆首
+asset_id**：时间聚类的锚点在每个堆的首成员上，新增素材只会并入堆尾
+或新开一堆，堆首不变（被并入的素材接在堆尾，不抢堆首）；堆首素材被
+删除时标注成为孤儿，由 :func:`prune` 在面板刷新时惰性清理（不主动
+全量重写）。
 """
 
 import json
@@ -44,14 +50,15 @@ STORE_KEY = "asset_groups"
 
 NAMES_KEY = "names"          # {str(head_asset_id): 自定义堆名}
 DETACHED_KEY = "detached"    # [asset_id]（移出堆，永远单独渲染）
+MERGED_KEY = "merged"        # {str(asset_id): str(目标堆首 id)}（并入任意堆）
 
 # 堆名上限：标题条宽约一张缩略图，超长名字反而截成一团（渲染层还会再省略）
 NAME_MAX = 40
 
 
 def empty_store() -> dict:
-    """一份合法的空标注结构（两键恒在，调用方无需判键）。"""
-    return {NAMES_KEY: {}, DETACHED_KEY: []}
+    """一份合法的空标注结构（三键恒在，调用方无需判键）。"""
+    return {NAMES_KEY: {}, DETACHED_KEY: [], MERGED_KEY: {}}
 
 
 def sanitize(raw) -> dict:
@@ -59,7 +66,9 @@ def sanitize(raw) -> dict:
 
     - ``names``：键必须是纯数字字符串（堆首 id），值截到 NAME_MAX、
       空白名丢弃——空名等价「恢复默认」，存它没有意义；
-    - ``detached``：只留正整数，去重保序。
+    - ``detached``：只留正整数，去重保序；
+    - ``merged``（并入任意堆）：键值都收敛为正整数 id（自并为合法值
+      =「新建堆」锚点），键归一化成 ``str(int)``，脏键值静默丢弃。
     """
     out = empty_store()
     if not isinstance(raw, dict):
@@ -77,6 +86,13 @@ def sanitize(raw) -> dict:
             iv = safe_int(v, 0)
             if iv > 0 and iv not in out[DETACHED_KEY]:
                 out[DETACHED_KEY].append(iv)
+    merged = raw.get(MERGED_KEY)
+    if isinstance(merged, dict):
+        for k, v in merged.items():
+            aid = safe_int(k, 0)
+            head = safe_int(v, 0)
+            if aid > 0 and head > 0:
+                out[MERGED_KEY][str(aid)] = str(head)
     return out
 
 
@@ -122,4 +138,11 @@ def prune(store: dict, valid_ids) -> dict:
     names = {k: v for k, v in (store.get(NAMES_KEY) or {}).items()
              if safe_int(k, 0) in valid}
     detached = [i for i in (store.get(DETACHED_KEY) or []) if i in valid]
-    return {NAMES_KEY: names, DETACHED_KEY: detached}
+    # 并入标注：素材或目标堆首任一被删 → 整条成孤儿（应用不到任何堆，
+    # 渲染层也会退化成独立单元），一并清掉。
+    merged = {}
+    for k, v in (store.get(MERGED_KEY) or {}).items():
+        aid, head = safe_int(k, 0), safe_int(v, 0)
+        if aid in valid and head in valid:
+            merged[str(aid)] = str(head)
+    return {NAMES_KEY: names, DETACHED_KEY: detached, MERGED_KEY: merged}

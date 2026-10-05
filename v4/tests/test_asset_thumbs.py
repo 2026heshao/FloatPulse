@@ -42,6 +42,15 @@ class _Host:
         self.data_changed = SimpleNamespace(emit=lambda *a: None)
 
 
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def temp_asset_manager(self):
+        return self._temp_asset_manager
+
+
 class _GatePool:
     """手动闸门线程池替身：start 只入队，由测试显式放行（测过期语义）"""
 
@@ -378,6 +387,11 @@ class _HostWithShell(_Host):
         from PyQt6.QtWidgets import QWidget
         self._container = QWidget()
         self._container.setStyleSheet("QWidget { color: #000000; }")
+
+
+    @property
+    def container(self):
+        return self._container
 
 
 def test_context_menu_builds_without_attribute_error(env, monkeypatch):

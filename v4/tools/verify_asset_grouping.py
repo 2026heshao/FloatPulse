@@ -11,6 +11,10 @@
   G. 不落库：开关分组前后 temp_assets.json 字节不变
   H. 观感返工（2026-10-03）：单张堆不画标题 / 堆内非首格挂序号 /
      标题条走专属高度且平铺态单元尺寸一字不变
+  I. 旁路标注（2026-10-04 P0-2）：命名 / 移出 / 取消移出 /
+     堆身份=堆首 / temp_assets.json 零接触
+  J. 并入任意堆（2026-10-05）：目标清单互斥 / 并入既有堆 /
+     新建堆自锚 / 移出并入者清标注 / temp_assets.json 零接触
 
 运行（offscreen）：
   python tools/run_gui_check.py tools/verify_asset_grouping.py
@@ -350,6 +354,72 @@ def main():
     panel._apply_pile_rename(head_id, "")
     check(panel._thumb_delegate._header_texts.get(head_id) == "5 张 · 09:00",
           "I5 清空堆名 = 恢复默认名")
+
+    # ---- J. 并入任意堆（merged 旁路标注；2026-10-05）----
+    # 此刻两堆：堆首 1（连拍 5 张，09:00–09:01）+ 堆首 6（晚片 2 张，10:00）
+    check(panel._is_grouping() and panel._pile_heads == [1, 6],
+          "J0 前置：分组态两堆 (实际 %r)" % (panel._pile_heads,))
+
+    # J1. 目标清单：不含素材当前所在堆，文案带张数与时间
+    targets = panel._merge_targets(2)
+    check([h for h, _ in targets] == [6],
+          "J1 并入目标清单不含当前所在堆 (实际 %r)" % (targets,))
+    check(bool(targets) and targets[0][1] == "2 张 · 10:00",
+          "J1 目标文案 = '2 张 · 10:00' (实际 %r)" % (targets,))
+    check(panel._merge_targets(6) and
+          [h for h, _ in panel._merge_targets(6)] == [1],
+          "J1 目标堆一侧同样互斥（只列对方堆）")
+
+    # J2. 并入既有堆：渲染归目标堆尾、堆首不变、标题计数更新
+    panel._merge_asset(2, 6)
+    check(panel._pile_of.get(2) == 6, "J2 并入后归属目标堆（堆首 6）")
+    check(panel._thumb_delegate._header_texts.get(6) == "3 张 · 10:00",
+          "J2 目标堆标题计数更新 (实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(6),))
+    check(panel._thumb_delegate._header_texts.get(1) == "4 张 · 09:00",
+          "J2 原堆标题计数更新 (实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(1),))
+    check(2 in panel._thumb_delegate._member_ordinals, "J2 并入者挂堆内序号")
+    check(len(list_ids(panel)) == 7, "J2 并入只搬家不丢图 (实际 %d)"
+          % len(list_ids(panel)))
+    data = _json.loads(open(groups_path, encoding="utf-8").read())
+    check(data["asset_groups"].get("merged") == {"2": "6"},
+          "J2 并入标注落 asset_groups.json merged 键 (实际 %r)"
+          % (data["asset_groups"].get("merged"),))
+
+    # J3. 红线：并入全程 temp_assets.json 零接触
+    check((digest(json_path) if os.path.exists(json_path) else None)
+          == d_before_annotation,
+          "J3 并入全程 temp_assets.json 字节不变")
+
+    # J4. 「新建堆」：素材自锚成堆、单成员也挂标题；后续并入不抢锚点
+    panel._merge_asset(5, None)
+    check(panel._pile_of.get(5) == 5 and 5 in panel._pile_heads,
+          "J4 新建堆：素材自锚成堆（锚点 5）")
+    check(panel._thumb_delegate._header_texts.get(5) == "1 张 · 09:01",
+          "J4 新建堆单成员也挂标题 (实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(5),))
+    panel._merge_asset(1, 5)
+    ids_new = list_ids(panel)
+    check(panel._pile_of.get(1) == 5 and ids_new.index(5) < ids_new.index(1),
+          "J4 二次并入不抢锚点首格（时间更早也排后）")
+    check(panel._thumb_delegate._header_texts.get(5) == "2 张 · 09:01",
+          "J4 新建堆计数更新 (实际 %r)"
+          % (panel._thumb_delegate._header_texts.get(5),))
+
+    # J5. 移出并入者 = 并入标注一并清除；取消移出回天然聚类
+    panel._detach_asset(1, detach=True)
+    data = _json.loads(open(groups_path, encoding="utf-8").read())
+    check("1" not in data["asset_groups"].get("merged", {}),
+          "J5 移出并入者时并入标注一并清除 (实际 %r)"
+          % (data["asset_groups"].get("merged"),))
+    panel._detach_asset(1, detach=False)
+    check(panel._pile_of.get(1) == 1, "J5 取消移出回天然聚类（堆首 1）")
+    check(panel._thumb_delegate._header_texts.get(6) == "3 张 · 10:00",
+          "J5 J2 的并入者不受影响（堆首 6 仍 3 张）")
+    check((digest(json_path) if os.path.exists(json_path) else None)
+          == d_before_annotation,
+          "J5 全程 temp_assets.json 字节不变（红线复验）")
 
     print("\n==== 结果：%d 通过 / %d 失败 ====" % (PASS, FAIL))
     sys.stdout.flush()

@@ -135,7 +135,7 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         self._header_texts = {}      # asset_id -> 会话堆标题(仅 ≥2 张的堆;平铺=空)
         self._member_ordinals = {}   # asset_id -> "#2" 堆内序号(非堆首;平铺=空)
         self._group_mode = False     # 分组态才垫高 HEADER_H(见 HEADER_H 注释)
-        config = getattr(host, "_config", None)
+        config = getattr(host, "config", None)
         init_w = (int(config.get("asset_thumb_size", self.DEFAULT_THUMB_W))
                   if config is not None else self.DEFAULT_THUMB_W)
         self.set_thumb_size(init_w)
@@ -351,6 +351,9 @@ class _AssetThumbDelegate(QStyledItemDelegate):
 class AssetsPanel(QWidget):
     """临时素材面板（缩略图网格）"""
 
+    # 「并入其他堆」弹窗每行目标按钮的估高（弹窗高度按行数推算）
+    _TITLE_ROW_H = 40
+
     def __init__(self, host):
         super().__init__()
         self._host = host
@@ -368,11 +371,16 @@ class AssetsPanel(QWidget):
         except (AttributeError, TypeError, OSError):
             self._groups_path = ""
         # 堆归属速查（_build_sequence 在 refresh 时维护）：
-        #   _pile_of      asset_id -> 所在堆的堆首 asset_id（单张/独立不在表内）
-        #   _pile_heads   [堆首 asset_id]（≥2 张的堆，按时间序）
+        #   _pile_of      asset_id -> 所在堆的堆首 asset_id
+        #                 （单张/独立不在表内；用户新建堆的自锚素材映射到自身）
+        #   _pile_heads   [堆首 asset_id]（≥2 张的堆 + 用户新建堆，按时间序）
+        #   _pile_size    堆首 asset_id -> 堆内成员数（并入弹窗文案用）
+        #   _merged_anchor_ids 用户「新建堆」的锚点 asset_id 集合（单成员也挂标题）
         #   _detached_ids 被用户移出时间聚类的 asset_id 集合
         self._pile_of = {}
         self._pile_heads = []
+        self._pile_size = {}
+        self._merged_anchor_ids = set()
         self._detached_ids = set()
         self._thumb_cache = {}
         # ---- 异步缩略图管线(丝滑化):paint 永不解码 ----
@@ -424,7 +432,7 @@ class AssetsPanel(QWidget):
 
         # 会话分组：一键在「平铺列表 ↔ 会话堆」之间切换
         # （默认取配置 asset_group_enabled；默认 False = 等价改动前的平铺）
-        cfg = getattr(self._host, "_config", None)
+        cfg = getattr(self._host, "config", None)
         grouped = bool(cfg.get("asset_group_enabled", False)) if cfg else False
         self._group_btn = IconButton("merge", text="会话分组", icon_size=14,
                                      object_name="secondaryBtn",
@@ -656,25 +664,37 @@ class AssetsPanel(QWidget):
 
         分组关闭 → 原样返回（与改动前逐项一致，两张表都为空）。
         分组开启 → 按 ``asset_group.cluster_assets`` 时间聚类，再套旁路
-        标注（``asset_groups_store``：移出的素材拆成独立单元），堆内按
-        时间升序铺开，**只有 ≥2 张的堆才挂标题**：单张素材本来就不是
-        一次"会话"，给它画标题条纯属噪音 —— 真实数据 18 张里 11 张是
-        单张，这正是 2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"
-        的来源。堆名优先取用户自定义（asset_groups.json），无则默认
-        ``N 张 · HH:MM``。非堆首格挂 ``"#2"``/``"#3"`` 序号，避免堆内
-        重复渲染雷同文件名。
+        标注（``asset_groups_store``：移出的素材拆成独立单元；并入的
+        素材强制挂到目标堆尾），堆内按时间升序铺开，**≥2 张的堆或用户
+        「新建堆」才挂标题**：单张素材本来就不是一次"会话"，给它画
+        标题条纯属噪音 —— 真实数据 18 张里 11 张是单张，这正是
+        2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"的来源
+        （新建堆例外：用户显式建的堆若不挂标题，界面上不可见，后续
+        无从往里并）。堆名优先取用户自定义（asset_groups.json），无则
+        默认 ``N 张 · HH:MM``。非堆首格挂 ``"#2"``/``"#3"`` 序号，避免
+        堆内重复渲染雷同文件名。
         """
         # 先清堆归属速查（平铺态也必须清干净，不能残留分组态的表）
         self._pile_of = {}
         self._pile_heads = []
+        self._pile_size = {}
+        self._merged_anchor_ids = set()
         self._detached_ids = set(
             self._group_store.get(asset_groups_store.DETACHED_KEY, []))
         if not self._is_grouping():
             return list(assets), {}, {}
         gap = self._group_gap_seconds()
+        merged_map = self._group_store.get(asset_groups_store.MERGED_KEY, {})
+        # 「新建堆」锚点：merged 键=值（素材自锚成堆，单成员也挂标题）
+        for k, v in merged_map.items():
+            try:
+                if int(k) == int(v):
+                    self._merged_anchor_ids.add(int(k))
+            except (TypeError, ValueError):
+                continue
         groups = asset_group.cluster_assets(assets, gap_seconds=gap)
         groups = asset_group.apply_group_overrides(
-            groups, detached=self._detached_ids)
+            groups, detached=self._detached_ids, merged=merged_map)
         names = self._group_store.get(asset_groups_store.NAMES_KEY, {})
         headers = {}
         ordinals = {}
@@ -682,7 +702,10 @@ class AssetsPanel(QWidget):
         for i, group in enumerate(groups):
             sequence.extend(group)
             head_id = group[0].asset_id if group else None
-            if len(group) >= 2 and head_id is not None:
+            if head_id is not None:
+                self._pile_size[head_id] = len(group)
+            if head_id is not None and (
+                    len(group) >= 2 or head_id in self._merged_anchor_ids):
                 self._pile_heads.append(head_id)
                 custom = names.get(str(head_id), "")
                 headers[head_id] = asset_group.group_label(
@@ -700,7 +723,7 @@ class AssetsPanel(QWidget):
 
     def _group_gap_seconds(self) -> float:
         """读分组间隔阈值配置（缺配置/脏值 → 回退纯逻辑模块默认值）。"""
-        cfg = getattr(self._host, "_config", None)
+        cfg = getattr(self._host, "config", None)
         if cfg is None:
             return float(asset_group.DEFAULT_GAP_SECONDS)
         try:
@@ -714,7 +737,7 @@ class AssetsPanel(QWidget):
 
         分组是纯渲染派生 —— 落盘的只有这个 bool 开关，temp_assets.json 不动。
         """
-        cfg = getattr(self._host, "_config", None)
+        cfg = getattr(self._host, "config", None)
         if cfg is not None:
             if cfg.set("asset_group_enabled", bool(checked)):
                 save = getattr(cfg, "save", None)
@@ -777,6 +800,10 @@ class AssetsPanel(QWidget):
         移出后该素材脱离时间聚类、单独渲染（单张不画标题）；取消移出
         即回到纯时间聚类的天然归属。平铺视图不受任何影响（两条标注
         只在分组渲染路径被消费）。
+
+        ★ 与「并入」标注互斥：移出时顺带清掉该素材的并入标注（同一
+        素材两条并存属脏数据，渲染层 detached 优先，但旁路文件里不留
+        自相矛盾的标注）；取消移出只清 detached、不恢复并入。
         """
         aid = int(asset_id)
         lst = self._group_store.setdefault(asset_groups_store.DETACHED_KEY, [])
@@ -785,8 +812,108 @@ class AssetsPanel(QWidget):
         elif not detach:
             self._group_store[asset_groups_store.DETACHED_KEY] = [
                 i for i in lst if i != aid]
+        merged = self._group_store.get(asset_groups_store.MERGED_KEY) or {}
+        if detach and str(aid) in merged:
+            merged.pop(str(aid))
+            self._group_store[asset_groups_store.MERGED_KEY] = merged
         self._save_group_store()
         self.refresh()
+
+    def _merge_asset(self, asset_id: int, target_head=None):
+        """并入目标堆：标注 ``merged[asset_id] = 目标堆首`` → 落盘 → 重渲染。
+
+        ``target_head=None`` 表示「新建堆」——锚点就是素材自身
+        （``merged[aid] = aid``），单成员也挂标题，后续还能往里并。
+        该素材脱离时间聚类、强制归入目标堆尾（堆首不变）；若它原本
+        被移出（detached），移出标注同时清除（并入必然回到堆里）。
+        """
+        aid = int(asset_id)
+        head = int(target_head) if target_head else aid
+        merged = self._group_store.setdefault(asset_groups_store.MERGED_KEY,
+                                              {})
+        merged[str(aid)] = str(head)
+        detached = self._group_store.get(asset_groups_store.DETACHED_KEY, [])
+        if aid in detached:
+            self._group_store[asset_groups_store.DETACHED_KEY] = [
+                i for i in detached if i != aid]
+        self._save_group_store()
+        self.refresh()
+
+    def _merge_targets(self, asset_id):
+        """并入目标清单（纯数据，供弹窗消费、可脱离 GUI 单测）。
+
+        返回 ``[(head_id, 文案), ...]``（渲染顺序），不含该素材当前
+        所在的堆（自己并回自己没有意义）。
+        """
+        if not self._is_grouping():
+            return []
+        aid = int(asset_id)
+        current = self._pile_of.get(aid)
+        targets = []
+        for head, label in self._thumb_delegate._header_texts.items():
+            if head == current:
+                continue
+            custom = self._pile_display_name(head)
+            n = self._pile_size.get(head, 0)
+            text = "%s（%d 张）" % (custom, n) if custom else label
+            targets.append((head, text))
+        return targets
+
+    def _open_merge_dialog(self, asset_id):
+        """「并入其他堆…」目标选择弹窗：列出全部会话堆 + 新建堆。
+
+        弹窗是薄壳：存取逻辑在 :meth:`_merge_asset`（可脱离 GUI 单测），
+        目标清单在 :meth:`_merge_targets`。选「新建堆」→ 素材自锚成堆。
+        """
+        from src.glass_dialog import GlassDialog
+        aid = int(asset_id)
+        targets = self._merge_targets(aid)
+        asset = self._temp_asset_manager.get_asset(aid) if \
+            self._temp_asset_manager is not None else None
+        subtitle = "选择目标会话堆，该素材将脱离时间聚类、归入堆尾"
+        dlg = GlassDialog(
+            self._host, title="并入其他堆", subtitle=subtitle,
+            size=(440, 96 + self._TITLE_ROW_H * (len(targets) + 1) + 64))
+
+        def _choose(head):
+            self._merge_asset(aid, head)
+            dlg.accept()
+
+        def _pick(head):
+            return lambda: _choose(head)
+
+        rows = QVBoxLayout()
+        rows.setSpacing(8)
+        # 「新建堆」置顶：素材自锚成一堆（merged[aid] = aid）
+        new_btn = IconButton("plus", text="新建堆", icon_size=14,
+                             object_name="secondaryBtn")
+        new_btn.setToolTip("以这张素材为锚点新建一个会话堆")
+        new_btn.clicked.connect(_pick(None))
+        rows.addWidget(new_btn)
+        for head, text in targets:
+            btn = IconButton("merge", text=text, icon_size=14,
+                             object_name="secondaryBtn")
+            btn.clicked.connect(_pick(head))
+            rows.addWidget(btn)
+        if len(targets) > 6:                 # 堆很多时收进滚动区，弹窗不撑爆
+            from PyQt6.QtWidgets import QScrollArea
+            inner = QWidget()
+            inner.setLayout(rows)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setWidget(inner)
+            dlg.body_layout.addWidget(scroll, 1)
+        else:
+            dlg.body_layout.addLayout(rows, 0)
+            dlg.body_layout.addStretch(1)    # 行少时目标列表靠上、按钮区沉底
+        if asset is not None:
+            hint = QLabel("并入后可在堆首右键「重命名会话堆」给堆起名")
+            hint.setObjectName("hintLabel")
+            hint.setWordWrap(True)
+            dlg.body_layout.addWidget(hint)
+        dlg.add_footer([("取消", "secondaryBtn", dlg.reject)])
+        dlg.exec()
 
     def _open_rename_dialog(self, head_id):
         """重命名会话堆弹窗：单行输入 + 保存/取消（Esc=取消）。
@@ -830,7 +957,9 @@ class AssetsPanel(QWidget):
         groups = asset_group.apply_group_overrides(
             asset_group.cluster_assets(assets, gap_seconds=gap),
             detached=self._group_store.get(
-                asset_groups_store.DETACHED_KEY, []))
+                asset_groups_store.DETACHED_KEY, []),
+            merged=self._group_store.get(
+                asset_groups_store.MERGED_KEY, {}))
         for group in groups:
             if group and group[0].asset_id == head_id:
                 return group
@@ -864,7 +993,7 @@ class AssetsPanel(QWidget):
         n = len(selected_ids) if aid in selected_ids else 1
 
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         act_open = menu.addAction("打开")
         act_save_as = menu.addAction("另存为...")
         menu.addSeparator()
@@ -875,9 +1004,11 @@ class AssetsPanel(QWidget):
             render_icon("trash", 14, self._colors()["danger"]))
 
         # ---- 会话堆操作（仅分组视图；2026-10-04 P0-2）----
-        # 堆名/移出是「会话分组」视图的专属语义：平铺态没有堆，菜单里
-        # 就不该出现这些项（也避免误触写了标注却看不到效果）。
-        act_rename = act_detach = act_restore = None
+        # 堆名/移出/并入是「会话分组」视图的专属语义：平铺态没有堆，
+        # 菜单里就不该出现这些项（也避免误触写了标注却看不到效果）。
+        # 并入（2026-10-05）：堆成员、独立素材、被移出素材都可并入
+        # 其他堆 —— 目标选择器里不含该素材当前所在的堆。
+        act_rename = act_detach = act_restore = act_merge = None
         if self._is_grouping():
             pile_head = self._pile_of.get(aid)
             if pile_head is not None:
@@ -886,12 +1017,19 @@ class AssetsPanel(QWidget):
                 act_rename = menu.addAction(
                     "重命名会话堆…" if not pile_name
                     else f"重命名会话堆（{pile_name}）…")
+                act_merge = menu.addAction("并入其他堆…")
+                act_merge.setToolTip(
+                    "这张素材脱离时间聚类，强制归入所选会话堆的堆尾")
                 act_detach = menu.addAction("从会话堆移出")
                 act_detach.setToolTip(
                     "这张素材不再参与时间聚类，单独渲染；可随时取消移出")
             elif aid in self._detached_ids:
                 menu.addSeparator()
                 act_restore = menu.addAction("取消移出（回到时间分组）")
+                act_merge = menu.addAction("并入其他堆…")
+            else:
+                menu.addSeparator()
+                act_merge = menu.addAction("并入其他堆…")
         action = menu.exec(self._asset_list.mapToGlobal(pos))
         if action == act_open:
             self._open(aid)
@@ -899,6 +1037,8 @@ class AssetsPanel(QWidget):
             self._save_as(aid)
         elif action == act_rename:
             self._open_rename_dialog(self._pile_of.get(aid))
+        elif action == act_merge:
+            self._open_merge_dialog(aid)
         elif action == act_detach:
             self._detach_asset(aid, detach=True)
         elif action == act_restore:

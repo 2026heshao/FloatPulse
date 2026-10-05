@@ -255,7 +255,7 @@ class KnowledgePanel(QWidget):
         index = item.data(Qt.ItemDataRole.UserRole)
 
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         act_edit = menu.addAction("编辑此段...")
         act_add_frag = menu.addAction("加入碎片池")
         menu.addSeparator()

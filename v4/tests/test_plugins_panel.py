@@ -205,6 +205,10 @@ class _FakeHost:
     def plugin_loader(self):
         return self._loader
 
+    @property
+    def config(self):
+        return self._config
+
 
 class TestPluginsPanel:
     def test_empty_state(self, qapp, tmp_path):
@@ -292,6 +296,10 @@ class _ToggleHost:
     def plugin_loader(self):
         return self._loader
 
+    @property
+    def config(self):
+        return self._config
+
     def _rebuild_context_menu(self):
         pass
 
@@ -377,6 +385,10 @@ class TestDisabledPersistence:
             @property
             def plugin_loader(self):
                 return None
+
+            @property
+            def config(self):
+                return self._config
 
         _ = _FakeAction()  # 构造不抛异常即视为通过（宿主无 config 时动作仍可实例化）
         panel = PluginsPanel(_NoCfgHost())
@@ -953,6 +965,10 @@ class _ToastHost:
     def plugin_loader(self):
         return self._loader
 
+    @property
+    def config(self):
+        return self._config
+
     def show_toast(self, text, ms=2800):
         self.toasts.append(text)
 
@@ -1035,3 +1051,52 @@ class TestRescanToastAndDefer:
         panel._do_rescan()
         assert host._loader.rescan_calls == 1
         assert host.toasts[-1] == "重新扫描完成：未发现插件"
+
+
+# ====================================================================
+# 启动小窗闪现回归护栏（2026-10-05）
+# ====================================================================
+class TestCardNeverTopLevel:
+    """插件卡在构建全程不得以「顶层窗」身份 Show。
+
+    根因（用户报「主窗口出现后上层连续闪现几个小窗口后消失」）：
+    「先建后拆」先批量建卡再挂网格，旧码卡片用 ``QFrame()`` 无 parent
+    构造——_apply_filter 对尚未挂入布局的卡 ``setVisible(True)`` 时，
+    每张卡瞬时成为屏幕 (0,0) 处的真实顶层 OS 窗口，随 addWidget
+    reparent 才消失。懒加载预热构建本页时逐张触发，即「连续闪现几个
+    小窗口」。修复后卡片以面板为临时 parent，永远不是顶层窗。
+    """
+
+    _CARD_NAMES = {"pluginCard", "pluginStoreCard", "pluginErrorCard"}
+
+    def test_no_top_level_show_during_build_and_filter(self, qapp, tmp_path):
+        from PyQt6.QtCore import QEvent, QObject
+        from src.plugins_panel import PluginsPanel
+
+        shown = []
+
+        class _TopLevelShowFilter(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Show:
+                    try:
+                        if (obj.isWindow()
+                                and obj.objectName() in self._CARD_NAMES):
+                            shown.append(obj.objectName())
+                    except RuntimeError:
+                        pass  # C++ 侧已销毁的对象不参与记录
+                return False
+
+        f = _TopLevelShowFilter()
+        f._CARD_NAMES = self._CARD_NAMES
+        qapp.installEventFilter(f)
+        try:
+            lps = [_make_loaded_plugin(tmp_path, plugin_id=f"p{i}")
+                   for i in range(3)]
+            panel = PluginsPanel(_FakeHost(loader=_FakeLoader(lps)))
+            # 复跑一次过滤（与启动预热/切页守卫同路径，验重入不闪）
+            panel._apply_filter()
+        finally:
+            qapp.removeEventFilter(f)
+
+        assert panel._cards_layout.count() == 3
+        assert shown == [], f"插件卡以顶层窗身份闪现：{shown}"

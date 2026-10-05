@@ -133,24 +133,59 @@ def group_label(group, index: int, custom_name: str = "") -> str:
     return "%d 张 · %02d:%02d" % (n, dt.hour, dt.minute)
 
 
-def apply_group_overrides(groups, detached=()):
-    """把「移出堆」标注套到时间聚类结果上（纯函数，无副作用）。
+def _coerce_id_set(values):
+    """任意脏输入 → 正整数 id 集合（纯函数辅助；脏值静默忽略）。"""
+    ids = set()
+    for v in (values or ()):
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            continue
+        if iv > 0:
+            ids.add(iv)
+    return ids
+
+
+def _coerce_merged_map(merged):
+    """任意脏输入 → ``{asset_id: 目标堆首 id}``（键值都收敛为正整数）。
+
+    目标堆首允许等于自身（=「新建堆」：素材自锚成堆，后续还能往里并）。
+    """
+    out = {}
+    for k, v in (merged or {}).items():
+        try:
+            aid, head = int(k), int(v)
+        except (TypeError, ValueError):
+            continue
+        if aid > 0 and head > 0:
+            out[aid] = head
+    return out
+
+
+def apply_group_overrides(groups, detached=(), merged=None):
+    """把「移出 / 并入」标注套到时间聚类结果上（纯函数，无副作用）。
 
     ``groups`` 是 :func:`cluster_assets` 的输出（堆内升序、堆间升序）；
     ``detached`` 是被用户移出的 asset_id 集合——这些素材**脱离任何堆**，
     作为独立单元按自己的时间插回渲染序列（单元成员数 <2 不画标题，
     与「单张堆不画标题」的既有规则自然汇合）。
 
-    返回新的堆列表：堆内成员仍按时间升序；单元（堆 / 独立素材）按
-    锚点时间（堆首 / 自身）升序。detached 里不属于任何输入素材的 id
-    静默忽略（素材可能已删，标注由 asset_groups_store.prune 惰性清理）。
+    ``merged``（2026-10-05 并入任意堆）是 ``{asset_id: 目标堆首 id}``
+    映射——这些素材同样**脱离时间聚类**，但强制归入目标堆：排在目标堆
+    现有成员**之后**（堆首不变，即使被并入素材时间更早也不抢堆首）；
+    目标堆首 = 自身时表示「新建堆」（素材自锚成一堆，单成员也挂标题，
+    否则用户刚建的堆在界面上不可见、后续无从往里并）。目标堆首已删除
+    或不存在时退化为独立单元（与 detached 同型，标注等 prune 清理）。
+    同一素材同时带 detached 与 merged 标注属脏数据，**detached 优先**
+    （渲染为独立单元）。
+
+    返回新的堆列表：堆内成员仍按时间升序（合并成员按时间接在尾部）；
+    单元（堆 / 独立素材）按锚点时间（堆首 / 自身）升序。detached /
+    merged 里不属于任何输入素材的 id 静默忽略（素材可能已删，标注由
+    asset_groups_store.prune 惰性清理）。
     """
-    detached_ids = set()
-    for v in (detached or ()):
-        try:
-            detached_ids.add(int(v))
-        except (TypeError, ValueError):
-            continue
+    detached_ids = _coerce_id_set(detached)
+    merged_map = _coerce_merged_map(merged)
 
     def _aid(a):
         try:
@@ -159,13 +194,40 @@ def apply_group_overrides(groups, detached=()):
             return 0
 
     units = []
+    merged_assets = {}                    # asset_id -> 素材本体（命中标注的）
     for group in groups or []:
-        remain = [a for a in group if _aid(a) not in detached_ids]
+        remain = [a for a in group
+                  if _aid(a) not in detached_ids and _aid(a) not in merged_map]
         if remain:
             units.append(sorted(remain, key=sort_key))
-        for a in group:                     # 被移出的按原位拆成独立单元
-            if _aid(a) in detached_ids:
-                units.append([a])
+        for a in group:                   # 被移出/并入的按原位拆出
+            aid = _aid(a)
+            if aid in detached_ids:
+                units.append([a])         # detached 优先：并集时按移出处理
+            elif aid in merged_map:
+                merged_assets[aid] = a
+
+    # ---- 归并：按目标堆首挂成员（堆首不变）----
+    by_head = {_aid(u[0]): u for u in units}
+    new_units = []
+    pending = {}                          # head_id -> [asset, ...]
+    for aid, a in merged_assets.items():
+        pending.setdefault(merged_map[aid], []).append(a)
+    for head, members in pending.items():
+        members.sort(key=sort_key)
+        target = by_head.get(head)
+        if target is not None:
+            # 既有堆（含被移出后独自成堆的素材）：成员按时间接在尾部，
+            # 不重排既有成员 → 堆首（首格）不变。
+            target.extend(members)
+        elif head in merged_assets:
+            # 新建堆：锚点素材自成一堆，其余并入者按时间跟在后面。
+            rest = [a for a in members if _aid(a) != head]
+            new_units.append([merged_assets[head]] + rest)
+        else:
+            # 目标堆首不存在（已删/脏标注）→ 退化为独立单元，不丢图。
+            units.extend([a] for a in members)
+    units.extend(new_units)
     units.sort(key=lambda u: sort_key(u[0]))
     return units
 

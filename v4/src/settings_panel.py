@@ -149,7 +149,7 @@ class SettingsPanel(QWidget):
     def __init__(self, host):
         super().__init__()
         self._host = host
-        self._config = host._config
+        self._config = host.config
         self._row_sep = {}          # 行 widget → 其下方分隔线（显隐联动用）
         self._build_ui()
 
@@ -302,7 +302,7 @@ class SettingsPanel(QWidget):
         self._set_ui_scale.currentIndexChanged.connect(self._on_ui_scale_changed)
         add_row(gv, "界面缩放",
                 "整体字号缩放（含各页面文字），改动即时生效；固定像素间距"
-                "不随缩放，85–150% 观感稳定",
+                "不随缩放，85–130% 观感稳定",
                 self._set_ui_scale)
 
         # 窗口透明度：步进器只存 50-100 的整数百分比（存 0 会让窗口整窗
@@ -358,7 +358,19 @@ class SettingsPanel(QWidget):
             self._on_mini_icon_size_changed)
         add_row(gv, "小卡片图标大小", "悬浮球旁小卡片里软件图标的边长，"
                 "每档 4px；不影响主窗口软件导航页",
-                self._set_mini_icon_size, last=True)
+                self._set_mini_icon_size)
+
+        # 提示条时长（2026-10-05 B4）：屏幕轻提示（ScreenToast）展示毫秒数。
+        # main_window.show_toast 未显式传 ms 时读 toast_duration_ms，改动
+        # 下次提示即生效（读取发生在每次弹出时，无需广播/刷新）。
+        self._set_toast_duration = Stepper(
+            1000, 6000, int(self._config.get("toast_duration_ms", 2800)),
+            suffix="ms", step=100)
+        self._set_toast_duration.valueChanged.connect(
+            self._on_toast_duration_changed)
+        add_row(gv, "提示条时长", "屏幕顶部操作反馈提示的停留时间，"
+                "每档 100ms；悬浮球短提示不受影响",
+                self._set_toast_duration, last=True)
 
         # ================= 1.5 主题配色（2026-10-03 主题扩展）=================
         # 单独成卡而不是挤进「外观与主题」：那张卡已有 6 行（主题 / 缩放 /
@@ -1433,6 +1445,11 @@ class SettingsPanel(QWidget):
             self._set_reduce_motion.setChecked(
                 bool(self._config.get("reduce_motion", False)))
             self._set_reduce_motion.blockSignals(False)
+        if hasattr(self, '_set_toast_duration'):
+            self._set_toast_duration.blockSignals(True)
+            self._set_toast_duration.setValue(
+                int(self._config.get("toast_duration_ms", 2800)))
+            self._set_toast_duration.blockSignals(False)
         motion.set_reduce_motion(
             bool(self._config.get("reduce_motion", False)))
         if hasattr(self, '_set_ball_size'):
@@ -1491,13 +1508,13 @@ class SettingsPanel(QWidget):
         self._config.save()
         apply_app_font(int(scale))
         host = self._host
-        apply_theme = getattr(host, "_apply_theme", None)
+        apply_theme = getattr(host, "reapply_theme", None)
         if callable(apply_theme):
             apply_theme()
         theme_signal = getattr(host, "theme_changed", None)
         if theme_signal is not None:
             theme_signal.emit(resolve_theme_name(
-                getattr(host, "_theme", "dark")))
+                getattr(host, "current_theme", "dark")))
 
     def _on_replay_onboarding(self):
         """「重看引导」（3.4）：置回未完成态并弹出同一欢迎向导。
@@ -1912,7 +1929,7 @@ class SettingsPanel(QWidget):
 
     def _ai_candidate_plugins(self) -> list:
         """接入下拉框的候选：已安装 + 已启用 + manifest 声明 ai 能力"""
-        loader = getattr(self._host, "_plugin_loader", None)
+        loader = getattr(self._host, "plugin_loader", None)
         if loader is None:
             return []
         disabled = set(self._config.get("plugins_disabled", []) or [])
@@ -2062,14 +2079,14 @@ class SettingsPanel(QWidget):
         self._host.ball_size_changed.emit(self._config.get("ball_size", 64))
         self._host.hide_on_fullscreen_changed.emit(
             self._config.get("hide_on_fullscreen", True))
-        if self._host._page_app_launcher is not None:
-            self._host._page_app_launcher.apply_card_size(self._config.get("app_card_size", 96))
+        if self._host.page_app_launcher is not None:
+            self._host.page_app_launcher.apply_card_size(self._config.get("app_card_size", 96))
         self._host.mini_icon_size_changed.emit(
             self._config.get("app_mini_icon_size", MINI_ICON_DEFAULT))
-        if getattr(self._host, "_page_assets", None) is not None:
-            self._host._page_assets.apply_thumb_size(
+        if getattr(self._host, "page_assets", None) is not None:
+            self._host.page_assets.apply_thumb_size(
                 self._config.get("asset_thumb_size", 128))
-        apply_op = getattr(self._host, "_apply_window_opacity", None)
+        apply_op = getattr(self._host, "apply_window_opacity", None)
         if callable(apply_op):
             apply_op()                            # 窗口透明度回 100% 不透明
         self._host.screenshot_changed.emit()     # 截图热键/开关可能被重置，重注册
@@ -2087,8 +2104,8 @@ class SettingsPanel(QWidget):
         if value != int(self._config.get("app_card_size", 96)):
             self._config.set("app_card_size", value)
             self._config.save()
-        if self._host._page_app_launcher is not None:
-            self._host._page_app_launcher.apply_card_size(value)
+        if self._host.page_app_launcher is not None:
+            self._host.page_app_launcher.apply_card_size(value)
 
     def _on_mini_icon_size_changed(self, value: int):
         """小卡片图标大小步进：即时持久化并广播（小卡片可见且在软件页才重建）"""
@@ -2104,8 +2121,8 @@ class SettingsPanel(QWidget):
         if value != int(self._config.get("asset_thumb_size", 128)):
             self._config.set("asset_thumb_size", value)
             self._config.save()
-        if getattr(self._host, "_page_assets", None) is not None:
-            self._host._page_assets.apply_thumb_size(value)
+        if getattr(self._host, "page_assets", None) is not None:
+            self._host.page_assets.apply_thumb_size(value)
 
     def _on_anim_speed_changed(self, value: int):
         """动画速度步进：即时持久化并广播到悬浮球（value 为内部整数，1/100 档）"""
@@ -2121,9 +2138,16 @@ class SettingsPanel(QWidget):
         if value != int(self._config.get("window_opacity", 100)):
             self._config.set("window_opacity", value)
             self._config.save()
-        apply_op = getattr(self._host, "_apply_window_opacity", None)
+        apply_op = getattr(self._host, "apply_window_opacity", None)
         if callable(apply_op):
             apply_op()
+
+    def _on_toast_duration_changed(self, value: int):
+        """提示条时长步进：即时持久化（下次 toast 弹出时读取即生效）"""
+        value = int(value)
+        if value != int(self._config.get("toast_duration_ms", 2800)):
+            self._config.set("toast_duration_ms", value)
+            self._config.save()
 
     def _on_reduce_motion_changed(self, checked: bool):
         """减弱动效开关：即时持久化 + 翻转 motion 总闸（界面下一帧即瞬显）"""

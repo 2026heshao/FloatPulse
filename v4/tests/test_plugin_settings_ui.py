@@ -70,6 +70,10 @@ class _FakeHost:
         self.plugin_loader = None
         self._config = self._Cfg()
 
+    @property
+    def config(self):
+        return self._config
+
 
 def _make_lp(tmp_path, settings=None, plugin_id="demo", with_ctx=True):
     """构造 LoadedPlugin 形状的替身（manifest 经 validate_manifest 归一化）"""

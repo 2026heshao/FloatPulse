@@ -77,7 +77,7 @@ class _FakeConfig:
 
 @pytest.fixture(scope="module")
 def panel(qapp):
-    host = types.SimpleNamespace(_config=_FakeConfig(), current_theme="dark")
+    host = types.SimpleNamespace(config=_FakeConfig(), current_theme="dark")
     return SettingsPanel(host)
 
 

@@ -416,7 +416,7 @@ class NavPanel(QWidget):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         act_open = menu.addAction("打开")
         act_edit = menu.addAction("编辑...")
         menu.addSeparator()

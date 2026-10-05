@@ -36,7 +36,11 @@ QT_EASING_NAMES = {
 }
 
 # 三处时长缩放接线点（A1 收敛目标）
-WIRED_SITES = ("src/card_window.py", "src/tasks_panel.py", "src/main_window.py")
+# ★ 2026-10-05（T03 D2 拆分随迁）：card_window 的页面家族（任务勾选动画等
+#   motion.duration 调用方）整体迁入 src/card_window_pages.py，钉子跟随
+#   代码迁址；main_window 的 _nav_anim_ms 唯一入口保持原位钉死。
+WIRED_SITES = ("src/card_window_pages.py", "src/tasks_panel.py",
+               "src/main_window.py")
 
 
 # ====================================================================

@@ -57,6 +57,11 @@ class _FakeHost(QWidget):
         self._container.setStyleSheet(get_main_window_qss(theme))
 
 
+    @property
+    def container(self):
+        return self._container
+
+
 # ---------------- A / D / E ----------------
 def test_is_glass_dialog_subclass(qapp):
     dlg = PluginDialog(None, title="t")

@@ -1085,8 +1085,13 @@ class PluginContext:
             return fallback
         return values[key]
 
-    def show_toast(self, text: str, ms: int = 2800) -> bool:
-        """弹主窗口轻提示；宿主未提供该能力时返回 False"""
+    def show_toast(self, text: str, ms: int = 0) -> bool:
+        """弹主窗口轻提示；宿主未提供该能力时返回 False
+
+        2026-10-05（B4）：默认值 2800 改为哨兵 0——宿主 show_toast
+        （main_window.show_toast）对 ms<=0 读配置项 toast_duration_ms，
+        插件未显式传时长时跟随用户设置；插件显式传 ms 的行为不变。
+        """
         if self._show_toast is None:
             self._warn("show_toast 不可用")
             return False

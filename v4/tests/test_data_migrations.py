@@ -137,14 +137,20 @@ class TestStoreVersions(unittest.TestCase):
     """STORE_VERSIONS / MIGRATIONS 注册表"""
 
     def test_all_stores_registered_at_current_version(self):
-        """8 个数据文件全部登记；config 已升到 v2（2026-10-03 分组阈值默认
-        120→900），其余 store 仍为 v1。新增迁移时同步改这里，别让它退化成
-        「全都写死 1」的摆设。（asset_groups = 素材会话堆旁路标注，2026-10-04）"""
+        """8 个数据文件全部登记；config 与 DEFAULT_CONFIG['schema_version']
+        动态同步（2026-10-03 升 v2 分组阈值默认 120→900；2026-10-05 升 v3
+        新增 toast_duration_ms 键），其余 store 仍为 v1。新增迁移时同步改
+        这里，别让它退化成「全都写死 1」的摆设。（asset_groups = 素材会话
+        堆旁路标注，2026-10-04）"""
+        from src.config import DEFAULT_CONFIG
         self.assertEqual(
             set(STORE_VERSIONS),
             {"config", "fragments", "notes", "tasks",
              "groups", "stickies", "assets", "asset_groups"})
-        self.assertEqual(STORE_VERSIONS["config"], 2)
+        self.assertEqual(STORE_VERSIONS["config"],
+                         DEFAULT_CONFIG.get("schema_version"),
+                         "config 版本应与 DEFAULT_CONFIG['schema_version'] "
+                         "同步升位")
         for store, version in STORE_VERSIONS.items():
             if store == "config":
                 continue
@@ -155,6 +161,8 @@ class TestStoreVersions(unittest.TestCase):
         self.assertEqual(set(MIGRATIONS), set(STORE_VERSIONS))
         self.assertIn(1, MIGRATIONS["config"],
                       "config v1→v2（分组阈值默认值迁移）应已注册")
+        self.assertIn(2, MIGRATIONS["config"],
+                      "config v2→v3（新增 toast_duration_ms 键）应已注册")
         self.assertIn(0, MIGRATIONS["fragments"], "示例迁移应挂在 fragments 0→1")
 
 

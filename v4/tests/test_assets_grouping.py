@@ -169,6 +169,15 @@ class _Host:
         self.data_changed = SimpleNamespace(emit=lambda *a: None)
 
 
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def temp_asset_manager(self):
+        return self._temp_asset_manager
+
+
 @pytest.fixture()
 def env(tmp_path):
     _app()
@@ -378,7 +387,10 @@ def test_migration_constants_pin_new_default():
     """
     from src.config import DEFAULT_CONFIG
     from src import json_store
-    assert json_store.STORE_VERSIONS["config"] == 2
+    # 2026-10-05 起 config 升 v3（新增 toast_duration_ms 键，与本功能无关），
+    # 这里只钉「至少到 v2」：当前版本号与 DEFAULT_CONFIG 的同步由下方
+    # schema_version 断言 + test_data_migrations 动态校验把守。
+    assert json_store.STORE_VERSIONS["config"] >= 2
     assert json_store.MIGRATIONS["config"][1] is \
         json_store._migrate_config_1_to_2
     assert json_store._CONFIG_V1_NEW_GAP_SECONDS == \
@@ -495,13 +507,14 @@ class TestGroupsStore:
     def test_missing_file_returns_empty(self, tmp_path):
         from src import asset_groups_store as gs
         st = gs.load(str(tmp_path / "nope.json"))
-        assert st == {gs.NAMES_KEY: {}, gs.DETACHED_KEY: []}
+        assert st == {gs.NAMES_KEY: {}, gs.DETACHED_KEY: [], gs.MERGED_KEY: {}}
 
     def test_save_roundtrip_and_version_stamp(self, tmp_path):
         import json
         from src import asset_groups_store as gs
         p = str(tmp_path / gs.FILE_NAME)
-        st = {gs.NAMES_KEY: {"3": "排障现场"}, gs.DETACHED_KEY: [7]}
+        st = {gs.NAMES_KEY: {"3": "排障现场"}, gs.DETACHED_KEY: [7],
+              gs.MERGED_KEY: {"9": "3"}}
         assert gs.save(p, st) is True
         data = json.loads(open(p, encoding="utf-8").read())
         assert data["data_version"] == 1                 # save_records 补版本
@@ -522,12 +535,20 @@ class TestGroupsStore:
             gs.NAMES_KEY: {"3": "  名字  ", "x": "非数字键", "4": 123,
                            "5": "   "},
             gs.DETACHED_KEY: ["7", 8, -1, 0, "abc", 7, None],
+            gs.MERGED_KEY: {"9": "3", "x": "y", 10: 3, "11": "z", "12": -1},
             "junk": 1,
         })
         assert out == {gs.NAMES_KEY: {"3": "名字"},
-                       gs.DETACHED_KEY: [7, 8]}
+                       gs.DETACHED_KEY: [7, 8],
+                       gs.MERGED_KEY: {"9": "3", "10": "3"}}
         assert gs.sanitize(None) == gs.empty_store()
         assert gs.sanitize(42) == gs.empty_store()
+
+    def test_sanitize_merged_self_anchor_is_legal(self):
+        """并入标注值=自身（新建堆锚点）是合法结构，不许被清洗掉。"""
+        from src import asset_groups_store as gs
+        out = gs.sanitize({gs.MERGED_KEY: {"5": "5", "6": 6}})
+        assert out[gs.MERGED_KEY] == {"5": "5", "6": "6"}
 
     def test_sanitize_truncates_long_name(self):
         from src import asset_groups_store as gs
@@ -537,9 +558,12 @@ class TestGroupsStore:
     def test_prune_drops_orphans(self):
         from src import asset_groups_store as gs
         st = {gs.NAMES_KEY: {"1": "活着", "9": "已删"},
-              gs.DETACHED_KEY: [1, 9, 10]}
+              gs.DETACHED_KEY: [1, 9, 10],
+              gs.MERGED_KEY: {"1": "2", "9": "1", "2": "9", "x": "1"}}
+        # merged：素材或目标堆首任一被删 → 整条清掉；键值收敛 str(int)
         out = gs.prune(st, valid_ids=[1, 2])
-        assert out == {gs.NAMES_KEY: {"1": "活着"}, gs.DETACHED_KEY: [1]}
+        assert out == {gs.NAMES_KEY: {"1": "活着"}, gs.DETACHED_KEY: [1],
+                       gs.MERGED_KEY: {"1": "2"}}
 
 
 class TestApplyOverrides:
@@ -573,6 +597,93 @@ class TestApplyOverrides:
         assert ag.group_label(g, 0, custom_name="排障现场") == "排障现场"
         assert ag.group_label(g, 0, custom_name="   ") == "2 张 · 09:00"
         assert ag.group_label(g, 0) == "2 张 · 09:00"      # 缺省参数兼容
+
+
+# ====================================================================
+# 6b. 并入任意堆（merged 标注；2026-10-05）—— 纯逻辑
+# ====================================================================
+class TestMergeOverrides:
+    """apply_group_overrides 的 merged 语义（零 PyQt6，纯逻辑单测）。"""
+
+    def _assets(self):
+        return [_Asset(1, _t(0)), _Asset(2, _t(10)),      # 同堆
+                _Asset(3, _t(300)), _Asset(4, _t(310)),   # 同堆
+                _Asset(5, _t(600))]                       # 天然单张
+
+    def _apply(self, assets, **kw):
+        from src import asset_group as ag
+        groups = ag.cluster_assets(assets, gap_seconds=120)
+        return ag.apply_group_overrides(groups, **kw)
+
+    def test_merge_into_existing_pile_appends_keeps_head(self):
+        """并入既有堆：脱离时间聚类挂到堆尾；堆首不变（时间更早也不抢）。"""
+        # 2 并入堆首为 3 的堆（2 的时间 09:00:10 比 3 的 09:05:00 早）
+        out = self._apply(self._assets(), merged={2: 3})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1], [3, 4, 2], [5]], ids
+        # 被并入者排堆尾（不按时间插队 → 堆首/身份稳定）
+        assert out[1][0].asset_id == 3
+
+    def test_merge_natural_singleton_into_pile(self):
+        """天然单张并入既有堆：脱离时间聚类挂到该堆尾，别堆不受影响。"""
+        # 5（天然单张）并入堆首为 1 的堆
+        out = self._apply(self._assets(), merged={5: 1})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1, 2, 5], [3, 4]], ids
+        # 堆首仍是 1（5 排堆尾，不按时间插队）
+
+    def test_new_pile_self_anchor(self):
+        """「新建堆」= merged[aid]=aid：素材自锚成一堆，仍按时间插回序列。"""
+        out = self._apply(self._assets(), merged={5: 5})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1, 2], [3, 4], [5]], ids
+
+    def test_merge_two_into_new_pile_anchor_stays_first(self):
+        """两人先后并入同一「新建堆」：锚点必排首格，其余按时间跟后。"""
+        # 5 自锚新建堆，1 再并入该堆（1 时间更早，也不许抢锚点首格）
+        out = self._apply(self._assets(), merged={5: 5, 1: 5})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[2], [3, 4], [5, 1]], ids
+
+    def test_detached_beats_merged_on_conflict(self):
+        """同一素材既移出又并入（脏数据）：detached 优先，渲染独立单元。"""
+        out = self._apply(self._assets(), detached=[2], merged={2: 3})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1], [2], [3, 4], [5]], ids
+
+    def test_orphan_target_degenerates_to_standalone(self):
+        """目标堆首不存在（已删/脏标注）→ 退化为独立单元，不丢图。"""
+        out = self._apply(self._assets(), merged={5: 999})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1, 2], [3, 4], [5]], ids
+
+    def test_merge_coverage_and_dirty_ids(self):
+        """并入不丢图；脏键值（非数字/非正数）静默忽略。"""
+        from src import asset_group as ag
+        assets = self._assets()
+        out = self._apply(assets, merged={"x": 3, 5: "0", 4: None, 2: 1})
+        assert sorted(a.asset_id for a in ag.flatten_groups(out)) == \
+            [1, 2, 3, 4, 5]
+        # 只有 2→1 是合法标注（"x"/0/None 都是脏值被忽略）
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[1, 2], [3, 4], [5]], ids
+
+    def test_merge_targeting_detached_head_forms_pile(self):
+        """目标堆首是「被移出」素材：并入后两人成堆（≥2 挂标题）。"""
+        out = self._apply(self._assets(), detached=[5], merged={1: 5})
+        ids = [[a.asset_id for a in g] for g in out]
+        assert ids == [[2], [3, 4], [5, 1]], ids
+
+    def test_merge_compatible_with_detached_only_calls(self):
+        """旧签名兼容：不传 merged 时与移出语义逐项一致（回归钉）。"""
+        from src import asset_group as ag
+        assets = self._assets()
+        old = self._apply(assets, detached=[2])
+        assert [[a.asset_id for a in g] for g in old] == \
+            [[1], [2], [3, 4], [5]]
+        # 传入空 merged 也等价
+        empty = self._apply(assets, detached=[2], merged={})
+        assert ag.group_signature(old) == ag.group_signature(empty)
 
 
 # ====================================================================
@@ -712,3 +823,122 @@ def test_flat_mode_has_no_pile_semantics(tmp_path):
     assert panel._pile_of == {} and panel._pile_heads == []
     panel.set_grouping(True)
     assert panel._pile_of, "重新进入分组后堆归属必须重建（refresh 路径）"
+
+
+# ====================================================================
+# 8. 并入任意堆（2026-10-05）—— 面板集成
+# ====================================================================
+def _two_pile_env(tmp_path):
+    """5 张同刻连拍（堆首 1）+ 2 张晚一小时（堆首 6）→ 分组开启、天然两堆。"""
+    _app()
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "mix.png"))
+    mgr._assets = [AssetInfo(i + 1, "连拍%d.png" % i, img, True, 10, _t(i))
+                   for i in range(5)] + \
+                  [AssetInfo(i + 6, "晚%d.png" % i, img, True, 10,
+                             _t(3600 + i)) for i in range(2)]
+    mgr._next_id = 8
+    mgr._save()
+    panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
+    return mgr, panel
+
+
+def test_merge_member_joins_target_pile_and_sidecar(tmp_path):
+    """并入 → 渲染归目标堆尾、堆首不变；标注落旁路文件 merged 键。"""
+    import hashlib
+    import json as _json
+    from src import asset_groups_store as gs
+    mgr, panel = _two_pile_env(tmp_path)
+
+    def _digest():
+        with open(mgr._json_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    before = _digest()
+    head_a, head_b = panel._pile_heads          # [1, 6]
+    assert (head_a, head_b) == (1, 6)
+    panel._merge_asset(2, head_b)               # 连拍第 2 张并入晚片堆
+    d = panel._thumb_delegate
+    assert panel._pile_of.get(2) == head_b, "并入后归属必须是目标堆"
+    assert d._header_texts[head_b] == "3 张 · 10:00", d._header_texts
+    assert d._header_texts[head_a] == "4 张 · 09:00"
+    assert d._member_ordinals.get(2) in ("#2", "#3"), "并入者挂堆内序号"
+    assert panel._asset_list.count() == 7, "并入只搬家不丢图"
+    data = _json.loads(open(panel._groups_path, encoding="utf-8").read())
+    assert data["asset_groups"][gs.MERGED_KEY] == {"2": str(head_b)}
+    assert _digest() == before, "并入动了 temp_assets.json（红线）"
+
+
+def test_merge_into_new_pile_self_anchor_with_header(tmp_path):
+    """「新建堆」：素材自锚成堆、单成员也挂标题；后续并入者不抢锚点。"""
+    mgr, panel = _two_pile_env(tmp_path)
+    panel._merge_asset(5, None)                 # 连拍第 5 张自锚新建堆
+    d = panel._thumb_delegate
+    assert 5 in panel._pile_heads and panel._pile_of.get(5) == 5
+    assert d._header_texts.get(5) == "1 张 · 09:00", d._header_texts
+    # 再把第 1 张并入该堆：锚点仍是 5（时间更早也不抢首格）
+    panel._merge_asset(1, 5)
+    assert panel._pile_of.get(1) == 5
+    assert d._header_texts.get(5) == "2 张 · 09:00"
+    assert d._member_ordinals.get(1) == "#2"
+    ids = _list_ids(panel)
+    assert ids.index(5) < ids.index(1), "新建堆锚点必须排首格"
+    assert panel._asset_list.count() == 7
+
+
+def test_merge_targets_exclude_current_pile(tmp_path):
+    """目标清单：不含素材当前所在堆；平铺态恒空（菜单据此不弹）。"""
+    mgr, panel = _two_pile_env(tmp_path)
+    targets = panel._merge_targets(2)           # 2 在堆首 1 的堆里
+    assert [h for h, _ in targets] == [6], targets
+    assert [t for _, t in targets] == ["2 张 · 10:00"], targets
+    targets6 = panel._merge_targets(6)
+    assert [h for h, _ in targets6] == [1], targets6
+    # 堆首自己也一样：并入目标不含自己所在的堆
+    assert [h for h, _ in panel._merge_targets(1)] == [6]
+    panel.set_grouping(False)
+    assert panel._merge_targets(2) == [], "平铺态无堆语义，目标清单必须为空"
+
+
+def test_detaching_merged_member_cancels_merge(tmp_path):
+    """移出并入者 → 并入标注一并清除；取消移出 → 回天然时间聚类。"""
+    import hashlib
+    from src import asset_groups_store as gs
+    mgr, panel = _two_pile_env(tmp_path)
+    panel._merge_asset(2, 6)
+
+    def _digest():
+        with open(mgr._json_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    before = _digest()
+    panel._detach_asset(2, detach=True)
+    assert str(2) not in panel._group_store[gs.MERGED_KEY], \
+        "移出后旁路文件不许残留并入标注"
+    assert 2 in panel._group_store[gs.DETACHED_KEY]
+    assert 2 not in panel._pile_of, "移出后独立渲染"
+    panel._detach_asset(2, detach=False)
+    assert panel._pile_of.get(2) == 1, "取消移出回天然聚类（堆首 1）"
+    assert 2 not in panel._group_store[gs.DETACHED_KEY]
+    assert _digest() == before, "全程 temp_assets.json 零接触（红线）"
+
+
+def test_merge_annotation_pruned_when_asset_or_target_deleted(tmp_path):
+    """素材或目标堆首被删 → merged 孤儿标注在刷新时惰性清理。"""
+    import json as _json
+    from src import asset_groups_store as gs
+    mgr, panel = _two_pile_env(tmp_path)
+    panel._merge_asset(2, 6)
+    # 素材本体被外部删除
+    mgr._assets = [a for a in mgr._assets if a.asset_id != 2]
+    panel.refresh()
+    assert panel._group_store[gs.MERGED_KEY] == {}
+    data = _json.loads(open(panel._groups_path, encoding="utf-8").read())
+    assert data["asset_groups"][gs.MERGED_KEY] == {}
+    # 目标堆首被外部删除
+    panel._merge_asset(2, 6)
+    mgr._assets = [a for a in mgr._assets if a.asset_id != 6]
+    panel.refresh()
+    assert panel._group_store[gs.MERGED_KEY] == {}, \
+        "目标堆首没了，并入标注成孤儿，须一并清理"

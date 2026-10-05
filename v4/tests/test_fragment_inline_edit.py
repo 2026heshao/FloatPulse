@@ -53,6 +53,23 @@ class _FakeHost(QObject):
         self.anim_speed = 1.0
 
 
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def task_manager(self):
+        return self._task_manager
+
+    @property
+    def fragment_manager(self):
+        return self._fragment_manager
+
+    @property
+    def note_manager(self):
+        return self._note_manager
+
+
 def _make_panel(tmp_path, contents):
     """造碎片管理器（每条内容唯一，避开 12 条去重窗口）+ 挂真面板"""
     from src.fragment_manager import FragmentManager, TYPE_CLIPBOARD_TEXT

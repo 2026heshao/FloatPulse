@@ -498,7 +498,7 @@ class _DayRecallView(QWidget):
 
     def _assets(self):
         """取当前素材列表（管理器由宿主晚绑定注入；缺省给空列表）。"""
-        manager = getattr(self._host, "_temp_asset_manager", None)
+        manager = getattr(self._host, "temp_asset_manager", None)
         if manager is None:
             return []
         try:
@@ -508,7 +508,7 @@ class _DayRecallView(QWidget):
 
     def _fragments(self):
         """取全部碎片（管理器缺省时给空列表，单测替身不炸）。"""
-        manager = getattr(self._host, "_fragment_manager", None)
+        manager = getattr(self._host, "fragment_manager", None)
         if manager is None:
             return []
         try:
@@ -518,7 +518,7 @@ class _DayRecallView(QWidget):
 
     def _tasks(self):
         """取全部任务（管理器缺省时给空列表）。"""
-        manager = getattr(self._host, "_task_manager", None)
+        manager = getattr(self._host, "task_manager", None)
         if manager is None:
             return []
         try:
@@ -604,7 +604,7 @@ class _DayRecallView(QWidget):
             return
         text = day_recall.format_day_text(group)
         title = "%s 回顾" % group.day
-        note_id = self._host._note_manager.add_note(text, title=title)
+        note_id = self._host.note_manager.add_note(text, title=title)
         if note_id:
             self._host.refresh_page("notes")
             self._host.data_changed.emit("note")
@@ -703,7 +703,7 @@ class FragmentsPanel(QWidget):
         self._day_btn.toggled.connect(self._on_day_view_toggled)
         toolbar.addWidget(self._day_btn)
 
-        preview_visible = bool(self._host._config.get(
+        preview_visible = bool(self._host.config.get(
             "fragment_preview_visible", True))
         self._preview_btn = SmoothButton("预览")
         self._preview_btn.setObjectName("secondaryBtn")
@@ -794,7 +794,7 @@ class FragmentsPanel(QWidget):
 
         # 恢复「按天」偏好：stack 已就绪后才设勾选态（配置默认 False =
         # 列表视图，与改动前等价）。设完补建一次当天数据。
-        if bool(self._host._config.get("fragment_day_view", False)):
+        if bool(self._host.config.get("fragment_day_view", False)):
             self._day_btn.setChecked(True)
             self._center_stack.setCurrentIndex(1)
             self._day_view.rebuild()
@@ -866,7 +866,7 @@ class FragmentsPanel(QWidget):
     # ---- 预览开关 ----
     def _on_preview_toggled(self, checked: bool):
         self._preview.setVisible(bool(checked))
-        config = self._host._config
+        config = self._host.config
         if bool(checked) != config.get("fragment_preview_visible", True):
             config.set("fragment_preview_visible", bool(checked))
             config.save()
@@ -882,7 +882,7 @@ class FragmentsPanel(QWidget):
         self._center_stack.setCurrentIndex(1 if checked else 0)
         if checked:
             self._day_view.rebuild()
-        config = self._host._config
+        config = self._host.config
         if bool(checked) != config.get("fragment_day_view", False):
             config.set("fragment_day_view", bool(checked))
             config.save()
@@ -1191,7 +1191,7 @@ class FragmentsPanel(QWidget):
         if fid is None:
             return
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         frag = self._fragment_manager.get_fragment(fid)
         act_pin = menu.addAction("取消置顶" if (frag and frag.pinned)
                                  else "置顶")
@@ -1803,13 +1803,13 @@ class FragmentsPanel(QWidget):
     def _triage_min_days(self) -> int:
         """读清仓天数阈值（配置兜底。缺失 / 越界由 inbox_triage 收敛）。"""
         return inbox_triage.sanitize_min_days(
-            self._host._config.get("triage_min_days",
+            self._host.config.get("triage_min_days",
                                    inbox_triage.DEFAULT_MIN_DAYS))
 
     def _triage_max_len(self) -> int:
         """读清仓长度阈值（配置兜底；越界由 inbox_triage 收敛）。"""
         return inbox_triage.sanitize_max_len(
-            self._host._config.get("triage_max_len",
+            self._host.config.get("triage_max_len",
                                    inbox_triage.DEFAULT_MAX_LEN))
 
     def _on_delete(self):

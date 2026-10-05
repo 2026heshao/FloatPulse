@@ -63,6 +63,10 @@ class _FakeHost:
     def plugin_loader(self):
         return self._loader
 
+    @property
+    def config(self):
+        return self._config
+
 
 def _make_loaded_plugin(description="", caps=(), requires=("PyQt6",),
                         plugin_id="demo", name="演示插件", version="1.2.3"):

@@ -27,6 +27,7 @@ v2 起项目采用多版本目录结构（v1_baseline / v2 / shared），源码�
 目录内）。旧数据的一次性迁移见 src/portable_migrate.py。
 """
 
+import json
 import os
 import sys
 
@@ -252,3 +253,38 @@ def get_screen_geometry() -> QRect:
     if screen is not None:
         return screen.availableGeometry()
     return QRect(0, 0, 1920, 1080)
+
+
+# ====================================================================
+# 启动时数据完整性检查（2026-10-05 T05 自 knowledge_ball 裁剪迁移）
+# ====================================================================
+def check_data_integrity(data_dir: str, logger):
+    """启动时扫描 float_data/ 下所有 JSON 文件，检测损坏（T05 自 knowledge_ball
+    迁入纯扫描段）。损坏文件逐个记日志，返回 [(文件名, 原因)] 由调用方决定
+    是否弹窗汇总——**弹窗不在此处**：v4/src 全域禁用原生 QMessageBox
+    （tests/test_no_native_messagebox.py 闸门），原生弹窗只允许留在入口层。
+    """
+    json_files = [
+        "config.json", "schedule.json", "notes.json",
+        "fragments.json", "docx_meta.json", "nav.json",
+        "temp_assets.json",
+    ]
+    corrupted = []
+    for fname in json_files:
+        fpath = os.path.join(data_dir, fname)
+        if not os.path.exists(fpath):
+            continue  # 缺失文件是正常的（首次运行）
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, (dict, list)):
+                raise ValueError(f"Invalid structure: expected dict/list, got {type(data).__name__}")
+            logger.debug(f"JSON 完整性检查通过: {fname}")
+        except json.JSONDecodeError as e:
+            corrupted.append((fname, f"JSON 解析失败: {e}"))
+            logger.warning(f"JSON 文件损坏: {fname} - {e}")
+        except Exception as e:
+            corrupted.append((fname, str(e)))
+            logger.warning(f"JSON 文件异常: {fname} - {e}")
+
+    return corrupted

@@ -378,7 +378,7 @@ class TasksPanel(QWidget):
             return
 
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         act_toggle = menu.addAction("取消完成" if task.done else "标记完成")
         # 番茄钟绑定：右键直接对该任务开始一次专注（悬浮球进度环可见）
         act_focus = menu.addAction("专注此任务")

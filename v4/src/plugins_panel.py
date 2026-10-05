@@ -510,7 +510,7 @@ class PluginsPanel(QWidget):
         store = []
         gate_on = True
         try:
-            gate_on = bool(self._host._config.get("plugins_enabled", True))
+            gate_on = bool(self._host.config.get("plugins_enabled", True))
         except (AttributeError, TypeError):
             gate_on = True
         if loader is not None and gate_on:
@@ -692,7 +692,7 @@ class PluginsPanel(QWidget):
         loader = getattr(self._host, "plugin_loader", None)
         gate_on = True
         try:
-            gate_on = bool(self._host._config.get("plugins_enabled", True))
+            gate_on = bool(self._host.config.get("plugins_enabled", True))
         except (AttributeError, TypeError):
             pass
         plugins = []
@@ -913,7 +913,7 @@ class PluginsPanel(QWidget):
             try:
                 gate_on = True
                 try:
-                    gate_on = bool(self._host._config.get("plugins_enabled", True))
+                    gate_on = bool(self._host.config.get("plugins_enabled", True))
                 except (AttributeError, TypeError):
                     gate_on = True
                 emit(gate_on)
@@ -936,7 +936,14 @@ class PluginsPanel(QWidget):
         驱动 QSS 属性选择器（``on`` / ``off`` / ``warn``），三处状态同源
         （见 :meth:`_state_key`），不会互相打架。
         """
-        card = QFrame()
+        # ★ 2026-10-05（启动小窗闪现修复）：卡片必须以 self 为构造 parent。
+        #   「先建后拆」把全部卡片建好后才由 _regrid 挂入网格，其间
+        #   _apply_filter 会先对卡片 setVisible(True)——无 parent 的卡片
+        #   此刻是**顶层原生窗口**，每张都在屏幕 (0,0) 真实闪现又随
+        #   reparent 消失（懒加载预热构建本页时逐张触发，即用户报的
+        #   「主窗口出现后上层连续闪现几个小窗口」）。挂上临时 parent 后
+        #   卡片永远不是顶层窗；_regrid 的 addWidget 会照常 reparent。
+        card = QFrame(self)
         card.setObjectName("pluginCard")
         state = self._state_key(lp)
         card.setProperty("state", state)
@@ -1192,7 +1199,7 @@ class PluginsPanel(QWidget):
         测试替身没有 _container / styleSheet → 返回空串，菜单退回系统
         默认样式，不崩。
         """
-        container = getattr(self._host, "_container", None)
+        container = getattr(self._host, "container", None)
         ss = getattr(container, "styleSheet", None)
         if callable(ss):
             try:
@@ -1276,7 +1283,8 @@ class PluginsPanel(QWidget):
           - 已安装       → 按钮禁用，显示「已安装」；同时给「打开目录」
           - 包不合法     → 标红展示 error + 提示，不给安装按钮
         """
-        card = QFrame()
+        # 同 _make_card：构造期挂临时 parent，杜绝顶层窗闪现（2026-10-05）
+        card = QFrame(self)
         card.setObjectName("pluginStoreCard")
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 12, 16, 12)
@@ -1387,7 +1395,8 @@ class PluginsPanel(QWidget):
 
     def _make_error_card(self, fe) -> QWidget:
         from src.plugin_loader import stage_label
-        card = QFrame()
+        # 同 _make_card：构造期挂临时 parent，杜绝顶层窗闪现（2026-10-05）
+        card = QFrame(self)
         card.setObjectName("pluginErrorCard")
         v = QVBoxLayout(card)
         v.setContentsMargins(16, 12, 16, 12)
@@ -1560,7 +1569,7 @@ class PluginsPanel(QWidget):
         """
         if not plugin_id:
             return
-        cfg = getattr(self._host, "_config", None)
+        cfg = getattr(self._host, "config", None)
         if cfg is None or not hasattr(cfg, "set"):
             print("[插件中心] 宿主没有配置管理器，启停状态未能持久化")
             return
@@ -2068,7 +2077,8 @@ class PluginStoreDialog(GlassDialog):
         刻意不复用 _make_store_card：那张卡的安装按钮走「包已在商店目录」
         的前提（_on_install → install_from_store），在线包还没落地，路径不同。
         """
-        card = QFrame()
+        # 同 _make_card：构造期挂临时 parent，杜绝顶层窗闪现（2026-10-05）
+        card = QFrame(self)
         card.setObjectName("pluginStoreCard")
         card._is_online_card = True       # 测试/刷新遍历用（区别于本地商店卡）
         card._market_item = dict(it)

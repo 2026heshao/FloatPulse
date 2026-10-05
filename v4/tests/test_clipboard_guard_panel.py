@@ -92,6 +92,27 @@ class _FakeHost(QObject):
         self.anim_speed = 1.0
         self.toasts = []
 
+
+    @property
+    def config(self):
+        return self._config
+
+    @property
+    def fragment_manager(self):
+        return self._fragment_manager
+
+    @property
+    def note_manager(self):
+        return self._note_manager
+
+    @property
+    def task_manager(self):
+        return self._task_manager
+
+    @property
+    def temp_asset_manager(self):
+        return self._temp_asset_manager
+
     def refresh_page(self, _name):
         pass
 

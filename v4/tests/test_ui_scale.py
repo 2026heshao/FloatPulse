@@ -2,8 +2,9 @@
 """界面缩放 / 字号（成熟化 3.5）单元测试。
 
 钉住的行为：
-  1. 缩放纯函数 scaled_font_pt：五个合法档位的换算正确
-  2. config 新键：ui_scale（int，85-150）与 first_run_done（bool）的
+  1. 缩放纯函数 scaled_font_pt：各合法档位的换算正确
+  2. config 新键：ui_scale（int，85-130；上限 2026-10-05 由 150 收窄，
+     150% 档设置页步进器溢出）与 first_run_done（bool）的
      类型 / 范围校验、非法值加载回退默认、set 拒写
   3. apply_app_font：offscreen 下真改 QApplication 字号（pointSize 对得上）
   4. 设置页「界面缩放」下拉改动 → 落盘 + 全局字号变化 + 主题刷新链
@@ -57,10 +58,12 @@ class _FakeConfig:
 # ====================================================================
 class TestScaledFontPt:
     def test_all_official_steps(self):
-        """五个合法档位的换算（基准 10pt；round half-to-even：85→8、115→12）"""
+        """各合法档位的换算（基准 10pt；round half-to-even：85→8、115→12）"""
         assert scaled_font_pt(100) == BASE_FONT_PT == 10
         # 具体值钉死（函数内是 BASE_FONT_PT * scale / 100，不重组浮点表达式）
-        assert [scaled_font_pt(s) for s in UI_SCALE_VALUES] == [8, 10, 12, 13, 15]
+        # 150 已从合法档位移除（2026-10-05 收窄），但纯函数对它的换算仍钉住
+        assert [scaled_font_pt(s) for s in UI_SCALE_VALUES] == [8, 10, 12, 13]
+        assert scaled_font_pt(150) == 15
 
     def test_monotonic_and_positive(self):
         pts = [scaled_font_pt(s) for s in range(85, 151)]
@@ -86,7 +89,8 @@ class TestConfigUiScaleKeys:
         cm = ConfigManager(_tmp_path("guard.json"))
         assert cm.set("ui_scale", "大") is False       # 类型错误
         assert cm.set("ui_scale", 84) is False         # 低于下限
-        assert cm.set("ui_scale", 151) is False        # 高于上限
+        assert cm.set("ui_scale", 150) is False        # ★ 高于收窄后的上限
+        assert cm.set("ui_scale", 151) is False        # 高于旧上限（历史用例）
         assert cm.set("ui_scale", 130) is True         # 合法档位放行
         assert cm.get("ui_scale") == 130
 
@@ -98,6 +102,18 @@ class TestConfigUiScaleKeys:
         cm = ConfigManager(path)
         assert cm.get("ui_scale") == 100
         assert cm.get("first_run_done") is False
+
+    def test_load_falls_back_for_stored_150_after_range_narrowing(self):
+        """★ 2026-10-05 收窄护栏：已存 150 的老配置加载 → 回落默认 100。
+
+        只收窄 RANGE 不动默认值（不走版本化迁移）——老用户不静默钳到
+        130，而是按既有「越界回落默认」策略回 100，需重新选择档位。
+        """
+        path = _tmp_path("old150.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ui_scale": 150}, f)
+        cm = ConfigManager(path)
+        assert cm.get("ui_scale") == 100
 
     def test_load_accepts_legal_values(self):
         path = _tmp_path("good.json")
@@ -137,10 +153,10 @@ class TestApplyAppFont:
 def panel(qapp):
     calls = {"theme": 0, "emitted": []}
     host = types.SimpleNamespace(
-        _config=_FakeConfig(),
+        config=_FakeConfig(),
         current_theme="dark",
         _theme="dark",
-        _apply_theme=lambda: calls.__setitem__("theme", calls["theme"] + 1),
+        reapply_theme=lambda: calls.__setitem__("theme", calls["theme"] + 1),
         theme_changed=types.SimpleNamespace(
             emit=lambda name: calls["emitted"].append(name)),
     )
@@ -285,3 +301,99 @@ class TestBallBadgeFont:
     def test_badge_floor(self):
         import knowledge_ball
         assert knowledge_ball.badge_font_px(1) == 9          # 下限 9px
+
+
+# ====================================================================
+# B2（2026-10-05）：scale_px 唯一换算点 + 未换算字号护栏
+# ====================================================================
+import re                                                        # noqa: E402
+
+from src.theme import scale_px                                   # noqa: E402
+
+# 与 theme._FONT_SIZE_PX_RE 同源的字段抓取（护栏自扫描用，故意独立一份
+# ——护栏要抓的是「最终产物里的字号」，不依赖实现内部那条正则的存在）
+_FINAL_FONT_SIZE_RE = re.compile(r"font-size\s*:\s*(\d+)px")
+
+# 全部成品 QSS 出口 × 模板（B2 护栏的扫描面：新增 QSS 出口必须登记进来）
+_QSS_OUTLETS = (
+    ("main_window", get_main_window_qss, "get_main_window_qss",
+     lambda: theme_mod._QSS_MAIN_WINDOW),
+    ("card_window", get_card_window_qss, "get_card_window_qss",
+     lambda: theme_mod._QSS_CARD_WINDOW),
+    ("menu", get_menu_qss, "get_menu_qss",
+     lambda: theme_mod._QSS_MENU),
+)
+
+
+class TestScalePx:
+    """唯一换算点：QSS 模板与自绘字号都必须走它（不许各写各的 round）。"""
+
+    def test_official_steps(self):
+        """五个合法档位的关键换算值钉死（half-to-even 基线，P1-3 同源）"""
+        assert scale_px(13, 100) == 13
+        assert scale_px(13, 85) == 11          # 11.05→11
+        assert scale_px(13, 130) == 17         # 16.9→17
+        assert scale_px(13, 150) == 20         # 19.5→20（half-to-even）
+        assert scale_px(11, 150) == 16         # 16.5→16
+        assert scale_px(15, 150) == 22         # 22.5→22
+
+    def test_monotonic_and_floor(self):
+        assert scale_px(10, 85) == 8           # 8.5→8（half-to-even）
+        assert scale_px(1, 1) == 1             # 下限 1px（QSS 不收 0）
+        assert scale_px(1, 150) == 2
+        vals = [scale_px(13, s) for s in range(85, 151)]
+        assert vals == sorted(vals), "档位越大字号不许回缩"
+
+    def test_scale_px_fonts_routes_through_scale_px(self):
+        """scale_px_fonts 的输出 = 逐处 scale_px（同源换算的回归钉）"""
+        qss = "A{font-size:13px}B{font-size: 10px}C{font-size:17px}"
+        for s in (85, 115, 130, 150):
+            out = scale_px_fonts(qss, s)
+            for src_v, out_v in zip(_FINAL_FONT_SIZE_RE.findall(qss),
+                                    _FINAL_FONT_SIZE_RE.findall(out)):
+                assert int(out_v) == scale_px(src_v, s)
+
+
+class TestNoUnscaledFontSizes:
+    """★ 护栏：成品 QSS 输出里不得再出现未换算的写死字号。
+
+    做法：对每个 QSS 出口，先把模板 substitute 出「未缩放基准」，逐处
+    记下写死字号；再按档位生成成品，逐处断言 = scale_px(原值, 档位)。
+    任何一处漏换算（值没变）都会让序列错位当场变红——比"值集合相等"
+    强得多：10px→15px 这类「缩放值撞上别的原值」也逃不掉。
+    反向验证：把 scale_px_fonts 改成原样返回（不缩放）→ 本类全红。
+    """
+
+    @pytest.mark.parametrize("scale", [s for s in UI_SCALE_VALUES if s != 100])
+    def test_every_font_size_is_scaled(self, qapp, scale):
+        for _, getter, getter_name, tpl_of in _QSS_OUTLETS:
+            template_qss = tpl_of().substitute(
+                theme_mod.get_colors("dark"))
+            src_values = _FINAL_FONT_SIZE_RE.findall(template_qss)
+            assert src_values, \
+                "%s 模板抓不到写死字号，护栏自检失败" % getter_name
+            try:
+                set_ui_scale(scale)
+                out = getter("dark")
+            finally:
+                set_ui_scale(100)
+            out_values = _FINAL_FONT_SIZE_RE.findall(out)
+            assert len(out_values) == len(src_values), \
+                "%s 输出字号处数变了" % getter_name
+            expected = [scale_px(v, scale) for v in src_values]
+            assert [int(v) for v in out_values] == expected, \
+                "%s 在 %d%% 档存在未换算的写死字号" % (getter_name, scale)
+
+    def test_all_scales_differ_from_baseline(self, qapp):
+        """非 100 档的成品必须与基准不同（整条 QSS 级别的粗护栏）"""
+        for _, getter, getter_name, _tpl in _QSS_OUTLETS:
+            set_ui_scale(100)
+            baseline = getter("dark")
+            for scale in (85, 115, 130, 150):
+                try:
+                    set_ui_scale(scale)
+                    assert getter("dark") != baseline, \
+                        "%s 在 %d%% 档与基准逐字节相同=没缩放" % (
+                            getter_name, scale)
+                finally:
+                    set_ui_scale(100)

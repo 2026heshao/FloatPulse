@@ -123,7 +123,7 @@ class _FakeConfig:
 @pytest.fixture(scope="module")
 def panel(qapp):
     from src.settings_panel import SettingsPanel
-    host = types.SimpleNamespace(_config=_FakeConfig(), current_theme="dark")
+    host = types.SimpleNamespace(config=_FakeConfig(), current_theme="dark")
     p = SettingsPanel(host)
     # 更新卡在「关于」分类：isVisibleTo 对未激活的 stack 页恒 False，
     # 先切过去再做可见性断言

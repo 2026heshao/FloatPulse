@@ -64,17 +64,24 @@
   - schema_version:       config.json 结构版本（系统保留键，非用户设置；
                           变更时 +1 并在 json_store.MIGRATIONS["config"] 注册
                           迁移，且必须与 json_store.STORE_VERSIONS["config"]
-                          同步）；当前 v2 = 分组阈值默认 120→900
+                          同步）；当前 v3 = 新增 toast_duration_ms 键（全新
+                          键无旧值可改，迁移按 fragments 0→1 的 setdefault
+                          先例补默认，存量用户值一律不动）
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
                           下载、失败静默、不上传任何数据」立场见 update_checker）
   - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
   - latest_known_version: 最近发现的新版本 tag（如 "v4.8.0"；空 = 未发现）
   - first_run_done:       首启引导已完成（3.4 三步欢迎向导只弹一次；「重看
                           引导」会置回 False，向导关闭时再落 True）
-  - ui_scale:             界面缩放百分比（85-150，默认 100；只缩放全局字号
-                          不缩放 px 布局，见 theme.scaled_font_pt）
+  - ui_scale:             界面缩放百分比（85-130，默认 100；只缩放全局字号
+                          不缩放 px 布局，见 theme.scaled_font_pt；上限
+                          2026-10-05 由 150 收窄到 130——150% 档设置页
+                          步进器溢出，见 theme.UI_SCALE_VALUES 注释）
   - window_opacity:       主窗口不透明度百分比（50-100，默认 100；低于 100
                           时窗口整体半透明，见 main_window._apply_window_opacity）
+  - toast_duration_ms:    屏幕轻提示（ScreenToast）展示时长毫秒（1000-6000，
+                          默认 2800；main_window.show_toast 未显式传 ms 时
+                          读取；悬浮球 1500ms 短提示与托盘气泡不受影响）
 ====================================================================
 """
 
@@ -142,8 +149,14 @@ DEFAULT_CONFIG = {
     "tray_hint_shown":      False,        # 已展示过「收进托盘」气泡提示（3.3，仅提示一次）
     # ===== 首启引导 / 界面缩放（成熟化 3.4 / 3.5）=====
     "first_run_done":       False,        # 已完成三步欢迎向导（onboarding.should_show 判定）
-    "ui_scale":             100,          # 界面缩放百分比（85-150，只缩放全局字号）
+    "ui_scale":             100,          # 界面缩放百分比（85-130，只缩放全局字号）
     "window_opacity":       100,          # 主窗口不透明度百分比（50-100，100=不透明）
+    # ===== 屏幕轻提示时长（2026-10-05 B4）=====
+    # ScreenToast 展示毫秒数：main_window.show_toast 未显式传 ms 时读这里。
+    # 下限 1000 保短提示来得及读，上限 6000 防提示条长期压住屏幕顶部；
+    # 悬浮球 1500ms 短提示（knowledge_ball._show_toast）与托盘气泡
+    # （tray / card_window 的 showMessage）各有独立时长，不读本键。
+    "toast_duration_ms":    2800,
     # ===== 强调色 / 壁纸（2026-10-03 主题扩展）=====
     "accent":               accent.DEFAULT_ACCENT,  # 强调色 id（accent.ACCENT_IDS）
     "accent_custom":        "",           # 自定义强调色 #RRGGBB（accent=custom 时生效）
@@ -204,7 +217,7 @@ DEFAULT_CONFIG = {
     #   落的版本号，若它落后于 STORE_VERSIONS，文件每次加载都会重跑迁移 ——
     #   用户把 asset_group_gap_seconds 显式设回 120 后，会被迁移再次改回 900，
     #   静默覆盖用户意图。由 test_assets_grouping 的 pin 用例钉死两边一致。
-    "schema_version":       2,
+    "schema_version":       3,
 }
 
 # 配置项类型映射（用于校验）
@@ -240,6 +253,7 @@ _CONFIG_TYPES = {
     "first_run_done":       bool,
     "ui_scale":             int,
     "window_opacity":       int,
+    "toast_duration_ms":    int,
     "accent":               str,
     "accent_custom":        str,
     "wallpaper":            str,
@@ -327,11 +341,17 @@ _CONFIG_RANGES = {
     # 番茄钟时长（分钟）：与设置页 Stepper 范围保持一致
     "pomodoro_focus_minutes": (1, 120),
     "pomodoro_break_minutes": (1, 60),
-    # 界面缩放百分比：与设置页「界面缩放」下拉档位（85/100/115/130/150）一致
-    "ui_scale":             (85, 150),
+    # 界面缩放百分比：与设置页「界面缩放」下拉档位（85/100/115/130）一致；
+    # 上限 2026-10-05 由 150 收窄到 130（150% 档设置页步进器溢出，见
+    # theme.UI_SCALE_VALUES）——只收窄 RANGE 不动默认值，不走版本化迁移
+    "ui_scale":             (85, 130),
     # 主窗口不透明度：与设置页「窗口透明度」Stepper 范围 50-100（每档 5%）一致；
     # 下限 50 保证文字仍可读（Qt windowOpacity 为 0 时窗口不可点击）
     "window_opacity":       (50, 100),
+    # 屏幕轻提示时长（毫秒）：与设置页「提示条时长」Stepper 范围 1000-6000
+    # （每档 100ms）一致；下限 1000 保短提示来得及读，上限 6000 防提示条
+    # 长期压住屏幕顶部
+    "toast_duration_ms":    (1000, 6000),
     # 强调色 / 壁纸（2026-10-03 主题扩展）：范围与 wallpaper.py 的常量同源，
     # 避免 EOS Delta 的两侧步长漂移
     "wallpaper_opacity":    (0, 100),

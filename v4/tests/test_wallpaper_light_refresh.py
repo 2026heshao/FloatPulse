@@ -139,7 +139,7 @@ def _make_panel():
     cfg = _FakeConfig()
     calls = {"wallpaper": 0, "appearance": 0}
     host = types.SimpleNamespace(
-        _config=cfg, current_theme="dark",
+        config=cfg, current_theme="dark",
         refresh_wallpaper=lambda: calls.__setitem__(
             "wallpaper", calls["wallpaper"] + 1),
         refresh_appearance=lambda: calls.__setitem__(

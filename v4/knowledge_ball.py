@@ -34,21 +34,22 @@
   - theme               : 主题系统（theme.py）
   - TrayController      : 系统托盘（tray.py，成熟化 4.3 D1-lite）
   - ConfigHotkeyBinding : 全局热键绑定样板（hotkey_binding.py，成熟化 4.3 D4）
+  - NavChromeMixin 等   : 主窗口导航/页面族 mixin（main_window_nav.py 等，T03）
+  - PluginHostBridge    : 插件受限能力门面（plugin_bridge.py，T04）
+  - ball_dragdrop       : 球拖放落盘/下载纯函数（ball_dragdrop.py，T04）
+  - wiring              : 装配编排层（wiring.py，T05；main() 只组装）
   - main                : 程序入口（本文件）
 ====================================================================
 """
 
 import sys
 import os
-import struct
 import time
-import json
 import logging
 import threading
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMenu, QMessageBox,
-    QSystemTrayIcon,
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QTimer, QPropertyAnimation, QEasingCurve,
@@ -63,78 +64,39 @@ from PyQt6.QtGui import (
 # 引入独立模块
 from src.single_instance import SingleInstance
 from src.card_window import CardWindow, card_modes
-from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
+from src.app_paths import (find_icon_file, get_base_dir,
+                           get_screen_geometry, check_data_integrity)
 from src.task_manager import (
     TaskManager, task_state, bucket_unfinished,
     STATE_TODAY, STATE_OVERDUE,
 )
 from src.note_manager import NoteManager
-from src.fragment_manager import FragmentManager, TYPE_CLIPBOARD_TEXT
+from src.fragment_manager import FragmentManager
 from src.clipboard_monitor import ClipboardMonitor
 from src.docx_manager import DocxManager
 from src.temp_asset_manager import TempAssetManager, REJECT_TOO_LARGE
 from src.config import ConfigManager
 from src.nav_manager import NavManager
 from src.main_window import MainWindow
+from src.ball_dragdrop import (
+    parse_file_group_descriptor, save_file_contents, save_mime_image,
+    save_mime_image_by_format, is_private_url_host, detect_image_ext,
+    download_url,
+)
 from src.theme import get_menu_qss, get_colors, resolve_theme_name, \
-    apply_app_font, current_ui_scale
+    apply_app_font, current_ui_scale, scale_px
 from src.controls import ScreenToast
 from src import icon_render
 from src import motion
 from src.icons import strip_leading_emoji, has_icon as icon_exists
 from src import task_reminder_popup
-from src.constants import sanitize_filename, DEFAULT_THEME
+from src.constants import DEFAULT_THEME
 from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
     STATE_IDLE, STATE_RUNNING, STATE_PAUSED,
 )
-from src.ai_server import AI_SERVER
 
 
-# ====================================================================
-# 启动时数据完整性检查：扫描所有 JSON 文件，损坏的记录到日志
-# ====================================================================
-def _check_data_integrity(data_dir: str, logger):
-    """
-    启动时扫描 float_data/ 目录下所有 JSON 文件，检测损坏。
-    损坏文件记录到日志，不弹窗（各管理器会自动初始化空数据）。
-    """
-    json_files = [
-        "config.json", "schedule.json", "notes.json",
-        "fragments.json", "docx_meta.json", "nav.json",
-        "temp_assets.json",
-    ]
-    corrupted = []
-    for fname in json_files:
-        fpath = os.path.join(data_dir, fname)
-        if not os.path.exists(fpath):
-            continue  # 缺失文件是正常的（首次运行）
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, (dict, list)):
-                raise ValueError(f"Invalid structure: expected dict/list, got {type(data).__name__}")
-            logger.debug(f"JSON 完整性检查通过: {fname}")
-        except json.JSONDecodeError as e:
-            corrupted.append((fname, f"JSON 解析失败: {e}"))
-            logger.warning(f"JSON 文件损坏: {fname} - {e}")
-        except Exception as e:
-            corrupted.append((fname, str(e)))
-            logger.warning(f"JSON 文件异常: {fname} - {e}")
-
-    if corrupted:
-        # 损坏文件较多时弹窗提示用户
-        if len(corrupted) >= 2:
-            details = "\n".join(f"  • {f}: {r}" for f, r in corrupted)
-            QMessageBox.warning(
-                None, "数据完整性检查",
-                f"检测到 {len(corrupted)} 个数据文件损坏，已自动重置为空数据：\n\n"
-                f"{details}\n\n"
-                f"详情请查看日志：float_data/app.log"
-            )
-        logger.warning(f"启动检查完成：{len(corrupted)} 个文件损坏已重置")
-    else:
-        logger.info("启动检查完成：所有 JSON 文件完整")
 
 
 # 全局异常钩子的唯一实现是 src/logger.py 的 install_excepthook()（在 main() 中安装）。
@@ -147,6 +109,8 @@ def badge_font_px(ui_scale=None) -> int:
 
     基准 11px（UI 重构 03），按「界面缩放」档位换算、下限 9px——
     球体是手绘控件，QSS 够不着，P1-3 之前这一处字号独立于缩放档位。
+    换算统一走 :func:`src.theme.scale_px`（与 QSS 模板同一收敛口径，
+    2026-10-05 B2 收口），球体绘制侧不许再自写 round。
     """
     if ui_scale is None:
         ui_scale = current_ui_scale()
@@ -154,7 +118,7 @@ def badge_font_px(ui_scale=None) -> int:
         scale = int(ui_scale)
     except (TypeError, ValueError):
         scale = 100
-    return max(9, round(11 * scale / 100))
+    return max(9, scale_px(11, scale))
 
 
 # ====================================================================
@@ -1422,227 +1386,42 @@ class FloatingBall(QWidget):
 
         event.acceptProposedAction()
 
+    # ---------------- 拖放落盘 / URL 下载（T04 外迁 src/ball_dragdrop.py）----------------
+    # 行为零变化：本类方法只做参数转发，落盘与安全闸逻辑集中在 ball_dragdrop
+    DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024   # 单次下载上限 20MB
+
     def _parse_file_group_descriptor(self, mime_data) -> str:
-        """
-        从 FileGroupDescriptorW 解析文件名。
-        返回第一个文件的文件名，失败返回空字符串。
-        """
-        fmt = "application/x-qt-windows-mime;value=\"FileGroupDescriptorW\""
-        if not mime_data.hasFormat(fmt):
-            return ""
-        try:
-            raw = bytes(mime_data.data(fmt))
-            if len(raw) < 4:
-                return ""
-            # DWORD cItems（文件数量）
-            c_items = struct.unpack_from("<I", raw, 0)[0]
-            if c_items < 1:
-                return ""
-            # 每个 FILEDESCRIPTORW 结构从偏移 4 开始
-            # cFileName 在结构内偏移 112 处，长度 520 字节（260 WCHAR）
-            offset = 4 + 112
-            name_bytes = raw[offset:offset + 520]
-            # 找第一个 null 终止符
-            end = name_bytes.find(b"\x00\x00")
-            if end > 0:
-                name_bytes = name_bytes[:end]
-            return name_bytes.decode("utf-16-le", errors="replace").strip()
-        except Exception:
-            return ""
+        """薄委托 → ball_dragdrop.parse_file_group_descriptor"""
+        return parse_file_group_descriptor(mime_data)
 
     def _save_file_contents(self, file_data, file_name: str) -> str:
-        """
-        将 FileContents 的二进制数据保存到 temp_assets/。
-        file_name 来自 FileGroupDescriptorW，可能为空。
-        """
-        if file_data.isEmpty():
-            return ""
-        try:
-            tmp_dir = self._get_temp_assets_dir()
-            os.makedirs(tmp_dir, exist_ok=True)
-            # 确定文件名和扩展名
-            if file_name:
-                # 清理文件名中的非法字符（集中规则，见 constants.sanitize_filename）
-                file_name = sanitize_filename(file_name)
-                ext = os.path.splitext(file_name)[1].lower()
-            else:
-                ext = ".bin"
-                file_name = "browser_file"
-
-            # 如果扩展名不在已知图片格式中，尝试从数据头判断
-            if ext not in [".png", ".jpg", ".jpeg", ".gif", ".bmp",
-                           ".webp", ".svg", ".tiff", ".ico", ".pdf",
-                           ".doc", ".docx", ".txt", ".bin"]:
-                ext = ".bin"
-
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join(tmp_dir, f"{file_name}_{ts}{ext}")
-
-            with open(path, "wb") as f:
-                f.write(file_data.data())
-            print(f"[DEBUG] FileContents saved: {len(file_data)} bytes -> {path}")
-            return path
-        except Exception as e:
-            print(f"[DEBUG] FileContents save failed: {e}")
-            return ""
+        """薄委托 → ball_dragdrop.save_file_contents（临时目录由宿主供给）"""
+        return save_file_contents(file_data, file_name,
+                                  self._get_temp_assets_dir())
 
     def _save_mime_image(self, mime_data) -> str:
-        """从 MIME 图片数据保存为临时文件，返回路径"""
-        from PyQt6.QtGui import QImage
-        from datetime import datetime
-        img = QImage(mime_data.imageData())
-        if img.isNull():
-            return ""
-        tmp_dir = self._get_temp_assets_dir()
-        os.makedirs(tmp_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(tmp_dir, f"browser_img_{ts}.png")
-        img.save(path, "PNG")
-        return path
+        """薄委托 → ball_dragdrop.save_mime_image"""
+        return save_mime_image(mime_data, self._get_temp_assets_dir())
 
     def _save_mime_image_by_format(self, mime_data, fmt: str, ext: str) -> str:
-        """从指定 MIME 格式保存为临时文件，返回路径"""
-        from datetime import datetime
-        data = mime_data.data(fmt)
-        if data.isEmpty():
-            return ""
-        tmp_dir = self._get_temp_assets_dir()
-        os.makedirs(tmp_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(tmp_dir, f"browser_img_{ts}{ext}")
-        with open(path, "wb") as f:
-            f.write(data.data())
-        return path
-
-    # ---------------- URL 下载（安全加固版） ----------------
-    DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024   # 单次下载上限 20MB
+        """薄委托 → ball_dragdrop.save_mime_image_by_format"""
+        return save_mime_image_by_format(mime_data, fmt, ext,
+                                         self._get_temp_assets_dir())
 
     @staticmethod
     def _is_private_url_host(host: str) -> bool:
-        """拦截本地/内网地址（SSRF 防护）：解析失败一律拒绝"""
-        import ipaddress
-        import socket
-        if not host:
-            return True
-        h = host.strip("[]").lower()
-        if h == "localhost" or h.endswith(".local") or h.endswith(".internal"):
-            return True
-        try:
-            infos = socket.getaddrinfo(h, None)
-        except (socket.gaierror, OSError):
-            return True
-        for info in infos:
-            ip = info[4][0]
-            try:
-                addr = ipaddress.ip_address(ip)
-            except ValueError:
-                return True
-            if (addr.is_private or addr.is_loopback or addr.is_link_local
-                    or addr.is_reserved or addr.is_multicast):
-                return True
-        return False
+        """薄委托 → ball_dragdrop.is_private_url_host（SSRF 防护）"""
+        return is_private_url_host(host)
 
     @staticmethod
     def _detect_image_ext(raw: bytes) -> str:
-        """按文件头（magic bytes）识别真实图片类型；非图片返回空串"""
-        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-            return ".png"
-        if raw.startswith(b"\xff\xd8\xff"):
-            return ".jpg"
-        if raw.startswith((b"GIF87a", b"GIF89a")):
-            return ".gif"
-        if raw.startswith(b"BM"):
-            return ".bmp"
-        if raw.startswith(b"\x00\x00\x01\x00"):
-            return ".ico"
-        if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
-            return ".webp"
-        return ""
+        """薄委托 → ball_dragdrop.detect_image_ext（magic bytes）"""
+        return detect_image_ext(raw)
 
     def _download_url(self, url: str) -> str:
-        """下载 HTTP(S) 图片 URL 到临时文件，返回路径；被拦截或失败返回空串
-
-        安全闸门：① 仅 http/https ② 拒绝本地/内网地址 ③ 20MB 上限 ④ magic bytes 校验
-        """
-        from datetime import datetime
-        from urllib.parse import urlparse
-        from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-        from PyQt6.QtCore import QEventLoop, QTimer, QUrl
-
-        try:
-            # 闸门 1：协议白名单
-            u = urlparse(url)
-            if u.scheme.lower() not in ("http", "https"):
-                self._show_toast("⚠️ 仅支持 http/https 图片链接")
-                return ""
-            # 闸门 2：拒绝本地/内网地址
-            if self._is_private_url_host(u.hostname or ""):
-                self._show_toast("⚠️ 已拦截本地/内网地址")
-                return ""
-
-            tmp_dir = self._get_temp_assets_dir()
-            os.makedirs(tmp_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            manager = QNetworkAccessManager()
-            request = QNetworkRequest()
-            request.setUrl(QUrl(url))
-            request.setRawHeader(b"User-Agent",
-                b"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-            request.setRawHeader(b"Accept",
-                b"image/webp,image/apng,image/*,*/*;q=0.8")
-            request.setRawHeader(b"Referer", url.encode())
-
-            reply = manager.get(request)
-            loop = QEventLoop()
-            reply.finished.connect(loop.quit)
-
-            # 闸门 3：下载进度超限即中止
-            def _on_progress(received, total):
-                if (received > self.DOWNLOAD_MAX_BYTES
-                        or (total > 0 and total > self.DOWNLOAD_MAX_BYTES)):
-                    reply.abort()
-            reply.downloadProgress.connect(_on_progress)
-
-            # 15 秒超时（超时中止 → finished 触发 → loop 退出）
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(reply.abort)
-            timer.start(15000)
-
-            loop.exec()
-            timer.stop()
-
-            try:
-                if reply.error() != QNetworkReply.NetworkError.NoError:
-                    print(f"[DEBUG] Download failed/aborted: {reply.errorString()}")
-                    return ""
-                raw = bytes(reply.readAll())
-            finally:
-                reply.deleteLater()
-
-            # 闸门 3 复核：落盘前再查一次总大小
-            if len(raw) > self.DOWNLOAD_MAX_BYTES:
-                print("[DEBUG] Download exceeded size limit")
-                self._show_toast("⚠️ 图片超过 20MB，已取消")
-                return ""
-
-            # 闸门 4：按真实文件头识别类型；非图片一律拒绝（并按真实类型定扩展名）
-            ext = self._detect_image_ext(raw)
-            if not ext:
-                print("[DEBUG] Downloaded content is not an image")
-                self._show_toast("⚠️ 下载内容不是图片，已取消")
-                return ""
-
-            path = os.path.join(tmp_dir, f"url_img_{ts}{ext}")
-            with open(path, "wb") as f:
-                f.write(raw)
-            print(f"[DEBUG] Downloaded: {len(raw)} bytes -> {path}")
-            return path
-        except Exception as e:
-            print(f"[DEBUG] Download exception: {e}")
-            return ""
+        """薄委托 → ball_dragdrop.download_url（四道安全闸 + toast 反馈）"""
+        return download_url(url, self._get_temp_assets_dir(),
+                            self.DOWNLOAD_MAX_BYTES, toast=self._show_toast)
 
     # ---------------- 缩放 / 投影动画 ----------------
     def _dur(self, ms: int) -> int:
@@ -2447,7 +2226,8 @@ class FloatingBall(QWidget):
 # 说明：`_get_base_dir` / `_find_icon_file` 两个薄包装已删除（成熟化 4.3）
 # —— 它们只是 src/app_paths.get_base_dir / find_icon_file 的转发，
 # 现直接使用 app_paths 公开函数；`_shutdown_once`（幂等退出收尾）与
-# `_check_data_integrity`（启动数据检查）属装配编排，随 wiring.py 拆分一并迁移。
+# `_check_data_integrity`（启动数据检查）已随 T05 裁剪迁至
+# src/app_paths.check_data_integrity（app_paths 本就承载启动期环境探测）。
 
 def _shutdown_once(state, steps) -> bool:
     """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
@@ -2525,7 +2305,7 @@ def main():
 
     # ---- 初始化日志系统（自动创建 float_data/app.log）----
     from src.logger import (init_logger, install_excepthook, get_logger,
-                            mark_session_start, mark_session_end)
+                            mark_session_start)
     logger = init_logger(data_base, level=logging.INFO)
     install_excepthook()  # 替换全局异常钩子为带日志记录的版本
     mark_session_start()   # [会话] 启动 vX.Y.Z（与 aboutToQuit 的正常退出标记成对）
@@ -2581,7 +2361,21 @@ def main():
     _mark("检查数据完整性")
 
     # ---- 启动时数据完整性检查 ----
-    _check_data_integrity(data_dir, logger)
+    # 启动数据完整性检查（T05：扫描段→app_paths；弹窗留入口层，src 禁原生 QMessageBox）
+    _corrupted = check_data_integrity(data_dir, logger)
+    if _corrupted:
+        # 损坏文件较多时弹窗提示用户
+        if len(_corrupted) >= 2:
+            details = "\n".join(f"  • {f}: {r}" for f, r in _corrupted)
+            QMessageBox.warning(
+                None, "数据完整性检查",
+                f"检测到 {len(_corrupted)} 个数据文件损坏，已自动重置为空数据：\n\n"
+                f"{details}\n\n"
+                f"详情请查看日志：float_data/app.log"
+            )
+        logger.warning(f"启动检查完成：{len(_corrupted)} 个文件损坏已重置")
+    else:
+        logger.info("启动检查完成：所有 JSON 文件完整")
 
     # ---- docx 管理器 ----
     _mark("加载知识库")
@@ -2681,43 +2475,15 @@ def main():
     fs_watcher = FullscreenWatcher(
         exclude_hwnds=lambda: (int(ball.winId()), int(main_window.winId())))
 
-    def _apply_fullscreen_watch():
-        """按配置启停全屏检测（设置页开关变更时重新应用）"""
-        if config_manager.get("hide_on_fullscreen", True):
-            if not fs_watcher.is_running():
-                fs_watcher.start()
-        else:
-            if fs_watcher.is_running():
-                fs_watcher.stop()
-            ball.set_fullscreen_hidden(False)
-
-    def _on_fullscreen_changed(is_fs: bool):
-        """前台全屏应用出现/退出 → 悬浮球自动让位/恢复
-
-        例外：番茄钟计时中（含暂停）不让位——球上进度环在显示
-        倒计时，藏起来就看不到剩余时间了（用户约定 2026-09-27）。
-        """
-        if is_fs and ball.pomodoro_busy():
-            get_logger().info("全屏检测：番茄钟计时中，悬浮球保持可见不让位")
-            return
-        ball.set_fullscreen_hidden(is_fs)
-        get_logger().info(f"全屏检测：{'进入全屏，悬浮球让位' if is_fs else '退出全屏，悬浮球恢复'}")
-
-    fs_watcher.fullscreen_changed.connect(_on_fullscreen_changed)
-    _apply_fullscreen_watch()
-
-    def _sync_fullscreen_for_pomodoro(_state: str):
-        """番茄钟开始/结束 → 与全屏让位状态对齐。
-
-        计时开始时若正处于全屏，取消让位把球亮出来；
-        计时结束/停止时若仍处于全屏，补做让位。
-        """
-        if not fs_watcher.is_running() or not fs_watcher.is_fullscreen():
-            return
-        ball.set_fullscreen_hidden(not ball.pomodoro_busy())
-
-    # 番茄钟状态变更 → 与全屏让位状态对齐（公开中继信号，勿戳 ball._pomodoro 私有成员）
-    ball.pomodoro_state_changed.connect(_sync_fullscreen_for_pomodoro)
+    # ---- D2/T05 装配层（src/wiring.py）：编排类/函数一次性导入 ----
+    from src.wiring import (
+        FullscreenCoordinator, QuitCoordinator, HeartbeatWatch, PluginWiring,
+        schedule_silent_update_check, wire_pomodoro_notifications,
+        wire_cross_window_signals, wire_scheme_follow, maybe_show_onboarding,
+    )
+    # 全屏检测编排（B8）：连线 + 按配置启停 + 番茄钟对齐 → FullscreenCoordinator
+    fullscreen_coordinator = FullscreenCoordinator(
+        fs_watcher, config_manager, ball).wire()
 
     # ---- 托盘点击/气泡接线（D1-lite：实现在 src/tray.py）----
     # —— 原内联 _on_tray_activated 已随托盘本体拆出，行为不变：单击切换
@@ -2748,66 +2514,22 @@ def main():
     ball.card_window.set_fragment_manager(fragment_manager)
 
     # ---- 退出显式收尾（1.4）：热键注销 / AI 本地服务 / 剪贴板监听 ----
-    # 各组件在下方集成段才创建（晚绑定），首次调用必然发生在事件循环期
-    _shutdown_state = {"done": False}
-
-    def _shutdown_resources():
-        """幂等收尾：热键管理器注销 + AI_SERVER.stop + 剪贴板监听停止"""
-        _shutdown_once(_shutdown_state, [
-            # global_hotkey.py：程序退出前务必 unregister_all()，否则
-            # 组合键残留占用到进程结束
-            ("截图热键注销", lambda: shot_hotkey_mgr.unregister_all()),
-            ("插件热键注销", lambda: plugin_hotkey_mgr.unregister_all()),
-            # AI 本地服务（llama-server）：退出时主动停止，不再只靠 JobObject 兜底
-            ("AI 本地服务停止", lambda: AI_SERVER.stop()),
-            # 剪贴板监听断开（stop 自身幂等：未启动时直接返回）
-            ("剪贴板监听停止", lambda: clipboard_monitor.stop()),
-        ])
-
-    # 安全退出函数：重置卡片状态为默认首页，再退出程序
-    def _safe_quit():
-        _shutdown_resources()
-        # 关闭截图覆盖层与全部钉图（V4 截图钉屏；晚绑定：集成代码在其后定义）
-        try:
-            screenshot_pin.close_all()
-        except Exception:
-            pass
-        # 桌面便签：几何立即落盘后收掉全部窗口（笔记数据保留）
-        try:
-            sticky_manager.save_now()
-            sticky_manager.close_all()
-        except Exception:
-            pass
-        # 重置卡片窗口状态为默认首页
-        ball.card_window.reset_to_home()
-        main_window.allow_close = True
-        QApplication.quit()
-
-    # 注（1.3）：不再注册「全局 Esc → 退出程序」快捷键——此前任何窗口按
-    # Esc 都会杀掉整个进程，与桌面软件惯例相反。Esc 语义逐表面收口：
-    # 卡片 / 截图框选 / 钉图 / 便签各自关闭或取消，主窗口 Esc 无动作。
+    # T05 D2 外迁：退出/托盘/收尾编排收进 wiring.QuitCoordinator。各组件在
+    # 下方集成段才创建（register_resources 晚注入引用槽），首次调用必然
+    # 发生在事件循环期；幂等引擎 _shutdown_once 原位保留（模块级函数）。
+    quit_coordinator = QuitCoordinator(
+        ball=ball, main_window=main_window, card_window=ball.card_window,
+        sticky_manager=sticky_manager, config_manager=config_manager,
+        shutdown_once=_shutdown_once,
+    )
 
     # ---- 托盘右键菜单（F1；D1-lite：构建在 src/tray.py）----
     # 显示/隐藏主窗口、显示/隐藏悬浮球、📌 便签子菜单、退出程序。
     # 闭包依赖经公开回调注入（TrayController 不持有业务对象之外的全局态）。
-    def _toggle_main_window():
-        if main_window.isVisible():
-            main_window.hide()
-        else:
-            main_window.show()
-            main_window.raise_()
-            main_window.activateWindow()
-
-    def _toggle_ball_visibility():
-        visible = not ball.isVisible()
-        ball.setVisible(visible)
-        config_manager.set("ball_visible", visible)
-        config_manager.save()
-
     tray.build_menu(
-        toggle_main_window=_toggle_main_window,
-        toggle_ball_visibility=_toggle_ball_visibility,
-        quit_app=_safe_quit,
+        toggle_main_window=quit_coordinator.toggle_main_window,
+        toggle_ball_visibility=quit_coordinator.toggle_ball_visibility,
+        quit_app=quit_coordinator.safe_quit,
         sticky_manager=sticky_manager,
     )
 
@@ -2885,43 +2607,12 @@ def main():
     # 立场不变：不自动下载、失败静默、不携带任何本机数据。延迟 15 秒
     # 错开启动高峰；频率判定走 update_checker 的纯逻辑（should_check_now
     # / mark_checked），托盘只在真的发现新版本时打扰一次。
-    def _silent_update_check():
-        from src import update_checker
-        from src.app_version import APP_VERSION
-        from src.plugin_net import make_async_getter
-        if not update_checker.should_check_now(config_manager):
-            return
-        # 发起即记账（成功失败都算当天已查），写盘在这里负责
-        update_checker.mark_checked(config_manager)
-        config_manager.save()
-
-        def _on_silent_result(result: dict):
-            if not result.get("ok"):
-                return                  # 离线 / 限流：静默，不扰民
-            tag = update_checker.extract_tag(result.get("body") or "")
-            if not tag or not update_checker.is_newer(tag):
-                return                  # 无新版：不动 latest_known_version
-            config_manager.set("latest_known_version", tag)
-            config_manager.save()
-            tray.show_message(
-                f"发现新版本 {tag}",
-                f"当前 v{APP_VERSION}——到 设置 → 关于 查看更新内容",
-                QSystemTrayIcon.MessageIcon.Information, 8000)
-            get_logger().info(
-                f"[更新] 静默检查发现新版本 {tag}（当前 v{APP_VERSION}）")
-
-        getter = make_async_getter()
-        if not getter(update_checker.RELEASES_API_URL,
-                      update_checker.check_headers(),
-                      update_checker.CHECK_TIMEOUT_S, _on_silent_result):
-            pass  # 桥拒绝时也会回调一次 ok=False 的结果，静默即可
-
-    QTimer.singleShot(15000, _silent_update_check)
+    schedule_silent_update_check(config_manager, tray)
 
     # ---- 全局热键基础设施（下方截图钉屏 / 插件热键各自建管理器）----
     _mark("注册热键")
     from src.global_hotkey import GlobalHotkeyManager
-    from src.hotkey_binding import ConfigHotkeyBinding, reapply_hotkey_bindings
+    from src.hotkey_binding import ConfigHotkeyBinding
 
     # ---- 截图钉屏（Ctrl+Alt+S → 框选 → 置顶参考浮窗，V4）----
     # 用独立 GlobalHotkeyManager：插件热键重注册会 unregister_all()，
@@ -2949,20 +2640,8 @@ def main():
                             icon="screenshot")
 
     # ---- 番茄钟（球体进度环 + 右键菜单 + 任务绑定，V4）----
-    def _on_pomodoro_phase_finished(phase, title):
-        """相位计满 → 托盘气泡（非模态）+ 主窗口任务页刷新（番茄计数变了）"""
-        if phase == PHASE_FOCUS:
-            body = f"专注完成「{title}」，休息一下！" if title else "专注完成，休息一下！"
-            tray.show_message(
-                "🍅 番茄钟", body,
-                QSystemTrayIcon.MessageIcon.Information, 6000)
-            main_window.refresh_tasks()
-        get_logger().info(f"[番茄钟] 相位完成: phase={phase}, task={title or '自由专注'}")
-
-    ball.pomodoro_phase_finished.connect(_on_pomodoro_phase_finished)
-    main_window.pomodoro_changed.connect(ball.apply_pomodoro_config)
-    # 任务页右键「专注此任务」→ 球体开始绑定式专注
-    main_window.task_focus_requested.connect(ball.start_focus)
+    # T05 D2 外迁：相位完成通知 + 配置/专注双向接线 → wiring
+    wire_pomodoro_notifications(ball, main_window, tray)
 
     # ---- 悬浮球插件系统（外置专精功能：<base_dir>/plugins/ 下的插件包）----
     # 边界：球本体 / 卡片 6 模式 / 拖放分流 / 六大内置功能一律不插件化，
@@ -3011,337 +2690,15 @@ def main():
         },
     )
 
-    def _kb_blocked():
-        """知识库写入前的安全闸：检测到外部改动就拒绝写。
-
-        知识库是用户可直接用 Word/WPS 打开编辑的 docx。外部改过之后内存
-        模型已过期，而 ``DocxManager.save()`` 是**整篇回写**——此时落盘会把
-        用户在 Word 里的改动整篇覆盖掉。宁可拒绝并要求先重新加载。
-
-        write 与 manage 两组 provider 共用（故定义在外层）。
-        """
-        if docx_manager.check_external_modification():
-            get_logger().warning(
-                "[插件] 知识库检测到外部修改，已拒绝写入"
-                "（请先在知识库页点「🔄 重新加载」）")
-            return True
-        return False
-
-    def _kb_paragraph(num):
-        """知识库编号（1 起）→ ParagraphInfo；非法或越界返回 None"""
-        if not isinstance(num, int) or isinstance(num, bool) or num < 1:
-            return None
-        items = docx_manager.get_paragraphs()
-        if num > len(items):
-            return None
-        return items[num - 1]
-
-    def _make_write_providers():
-        """插件写入口的宿主实现（2026-09-27 受限写能力）。
-
-        四个 provider 各自包一层「写库 + 刷新 UI」，插件拿不到管理器本体：
-          - 只增不改删：这里**刻意不提供** update / delete
-          - 碎片 source 由 PluginWriter 补 ``插件:<id>``，落库可追溯
-          - 写成功立即刷新对应面板与悬浮球徽标，与卡片数据变更走同一链路
-          - 知识库额外过 ``_kb_blocked()`` 安全闸
-        """
-        def _add_fragment(content, source):
-            fid = fragment_manager.add_fragment(
-                TYPE_CLIPBOARD_TEXT, content, source)
-            main_window.refresh_fragments()
-            if fid:
-                # 轻提示反馈（2026-10-05）：插件 AI 动作写入此前静默
-                main_window.show_toast("已加入碎片")
-            return fid
-
-        def _add_task(title, note, deadline):
-            tid = task_manager.add_task(title, note, deadline)
-            main_window.refresh_tasks()
-            ball.refresh_badge()          # 任务数变了，球体徽标同步
-            if tid:
-                shown = title if len(title) <= 16 else title[:15] + "…"
-                main_window.show_toast(f"已添加任务：{shown}")
-            return tid
-
-        def _add_note(title, content):
-            nid = note_manager.add_note(content, title)
-            main_window.refresh_notes()
-            if nid:
-                main_window.show_toast("已存为笔记")
-            return nid
-
-        def _add_knowledge(content):
-            """追加一段知识，返回编号（从 1 开始，与面板一致）；失败 0"""
-            if _kb_blocked():
-                return 0
-            idx = docx_manager.append_paragraph(content)
-            if idx < 0:
-                return 0
-            if not docx_manager.save():
-                # 落盘失败 → 丢弃内存改动，避免面板显示磁盘上没有的段落
-                docx_manager.reload()
-                return 0
-            main_window.refresh_knowledge()
-            return idx + 1
-
-        return {"fragment": _add_fragment, "task": _add_task,
-                "note": _add_note, "knowledge": _add_knowledge}
-
-    def _make_manage_providers():
-        """插件管理入口的宿主实现（2026-09-28 数据管理能力）。
-
-        改 / 删都包一层「改库 + 刷新 UI」；删除前抓整条快照进撤销栈，
-        插件拿到的是**撤销令牌**（>0 = 成功），可经 ``undo_delete`` 恢复。
-
-        撤销走"重新插入"路径（宿主 add_* 是唯一入口，不去碰内部 id 分配），
-        恢复后编号可能是新的，但内容与关键状态（完成态 / 专注次数）原样还原。
-        知识库段落例外：按删除前的 0 基位置 ``insert_paragraph_before`` 放回
-        原位（结构化文档里位置本身就是信息）。
-        安全三层：能力声明（manage）→ 插件侧分级确认（改删需用户点确认）
-        → 这里的内容护栏 + 撤销栈 + 每次操作进审计日志。
-        """
-        undo_stack = []          # [{"token","kind","payload","used"}]
-        undo_seq = [1]           # 单调递增的令牌序号
-
-        def _push_undo(kind, payload):
-            token = undo_seq[0]
-            undo_seq[0] += 1
-            undo_stack.append({"token": token, "kind": kind,
-                               "payload": payload, "used": False})
-            if len(undo_stack) > 50:      # 容量上限：只留最近 50 次删除
-                undo_stack.pop(0)
-            return token
-
-        def _take_undo(token):
-            """取出未用过的令牌记录并标记已用（一令牌只能用一次）"""
-            for rec in undo_stack:
-                if rec["token"] == token and not rec["used"]:
-                    rec["used"] = True
-                    return rec
-            return None
-
-        # ---------- 任务 ----------
-        def _update_task(tid, title, note, deadline):
-            task = task_manager.get_task(tid)
-            if task is None:
-                return False
-            cur = task.to_dict()          # 部分更新：None = 保留原值
-            ok = task_manager.update_task(
-                tid,
-                cur["title"] if title is None else title,
-                cur["note"] if note is None else note,
-                cur["deadline"] if deadline is None else deadline)
-            if ok:
-                main_window.refresh_tasks()
-            return bool(ok)
-
-        def _set_task_done(tid, done):
-            ok = task_manager.set_done(tid, done)
-            if ok:
-                main_window.refresh_tasks()
-                ball.refresh_badge()
-            return bool(ok)
-
-        def _delete_task(tid):
-            task = task_manager.get_task(tid)
-            if task is None:
-                return 0
-            payload = task.to_dict()
-            if not task_manager.delete_task(tid):
-                return 0
-            main_window.refresh_tasks()
-            ball.refresh_badge()
-            return _push_undo("task", payload)
-
-        # ---------- 碎片 ----------
-        def _update_fragment(fid, content, source):
-            ok = fragment_manager.update_fragment(fid, content=content,
-                                                 source=source)
-            if ok:
-                main_window.refresh_fragments()
-            return bool(ok)
-
-        def _delete_fragment(fid):
-            frag = fragment_manager.get_fragment(fid)
-            if frag is None:
-                return 0
-            payload = frag.to_dict()
-            if not fragment_manager.delete_fragment(fid):
-                return 0
-            main_window.refresh_fragments()
-            return _push_undo("fragment", payload)
-
-        # ---------- 笔记 ----------
-        def _update_note(nid, title, content):
-            cur = note_manager.get_note(nid)
-            if cur is None:
-                return False
-            ok = note_manager.update_note(
-                nid, cur.content if content is None else content, title=title)
-            if ok:
-                main_window.refresh_notes()
-            return bool(ok)
-
-        def _delete_note(nid):
-            cur = note_manager.get_note(nid)
-            if cur is None:
-                return 0
-            payload = cur.to_dict()
-            if not note_manager.delete_note(nid):
-                return 0
-            main_window.refresh_notes()
-            return _push_undo("note", payload)
-
-        # ---------- 知识库（位置型标识：必须校验内容指纹） ----------
-        # 编号会随删除前移，docx 又能被外部编辑，所以「编号 N」可能是过期
-        # 引用。这里比对调用方回传的段落指纹，对不上就拒改拒删——宁可失败
-        # 也不改错段落。
-        def _update_knowledge(num, content, expect_hash):
-            if _kb_blocked():
-                return False
-            cur = _kb_paragraph(num)
-            if cur is None or cur.hash != expect_hash:
-                get_logger().warning(
-                    f"[插件] 知识库第 {num} 段指纹不匹配，已拒绝修改"
-                    "（内容可能已变化）")
-                return False
-            if not docx_manager.update_paragraph_text(num - 1, content):
-                return False
-            if not docx_manager.save():
-                docx_manager.reload()
-                return False
-            main_window.refresh_knowledge()
-            return True
-
-        def _delete_knowledge(num, expect_hash):
-            if _kb_blocked():
-                return 0
-            cur = _kb_paragraph(num)
-            if cur is None or cur.hash != expect_hash:
-                get_logger().warning(
-                    f"[插件] 知识库第 {num} 段指纹不匹配，已拒绝删除"
-                    "（内容可能已变化）")
-                return 0
-            # pos 记**删除前**的 0 基位置：撤销时照它放回原位
-            payload = {"text": cur.text, "pos": num - 1}
-            if not docx_manager.delete_paragraph(num - 1):
-                return 0
-            if not docx_manager.save():
-                docx_manager.reload()
-                return 0
-            main_window.refresh_knowledge()
-            return _push_undo("knowledge", payload)
-
-        # ---------- 撤销 ----------
-        def _undo_delete(token):
-            rec = _take_undo(token)
-            if rec is None:
-                return False
-            kind, p = rec["kind"], rec["payload"]
-            if kind == "knowledge":
-                if _kb_blocked():
-                    return False
-                text = p.get("text") or ""
-                pos = int(p.get("pos") or 0)
-                items = docx_manager.get_paragraphs()
-                if pos < 0 or pos > len(items):
-                    pos = len(items)          # 越界（别处又改过）→ 追加到末尾
-                if pos < len(items):
-                    new_idx = docx_manager.insert_paragraph_before(pos, text)
-                else:
-                    new_idx = docx_manager.append_paragraph(text)
-                if new_idx < 0:
-                    return False
-                if not docx_manager.save():
-                    docx_manager.reload()
-                    return False
-                main_window.refresh_knowledge()
-                return True
-            if kind == "task":
-                new_id = task_manager.add_task(
-                    p.get("title") or "", p.get("note") or "",
-                    p.get("deadline") or "")
-                if not new_id:
-                    return False
-                if p.get("done"):
-                    task_manager.set_done(new_id, True)
-                for _ in range(int(p.get("focus_sessions") or 0)):
-                    task_manager.add_focus_session(new_id, 1)
-                main_window.refresh_tasks()
-                ball.refresh_badge()
-            elif kind == "fragment":
-                new_id = fragment_manager.add_fragment(
-                    p.get("type") or TYPE_CLIPBOARD_TEXT,
-                    p.get("content") or "", p.get("source") or "撤销恢复")
-                if not new_id:
-                    return False
-                main_window.refresh_fragments()
-            else:                             # note
-                new_id = note_manager.add_note(p.get("content") or "",
-                                               p.get("title") or "")
-                if not new_id:
-                    return False
-                main_window.refresh_notes()
-            return True
-
-        return {
-            "update_task": _update_task, "set_task_done": _set_task_done,
-            "delete_task": _delete_task,
-            "update_fragment": _update_fragment,
-            "delete_fragment": _delete_fragment,
-            "update_note": _update_note, "delete_note": _delete_note,
-            "update_knowledge": _update_knowledge,
-            "delete_knowledge": _delete_knowledge,
-            "undo_delete": _undo_delete,
-        }
-
-    def _make_ai_providers():
-        """AI 总配置 provider（2026-09-29 设置页「🧠 AI 总配置」）。
-
-        插件单一真相源：设置页配好云端 / 本地 + 下拉框勾选接入插件后，
-        声明 ``capabilities=["ai"]`` 且被勾选的插件经 ``ctx.ai`` 实时读取。
-        **params 每次调用都实时读配置**——设置页改完即生效，插件无需
-        重建页面或重启程序；is_attached 按插件 id 查 ``ai_plugins`` 列表。
-        未接入的插件照旧用各自私有配置（向后兼容），互不影响。
-        """
-        def _is_attached(plugin_id):
-            attached = config_manager.get("ai_plugins", []) or []
-            return str(plugin_id or "") in attached
-
-        def _params():
-            try:
-                port = int(config_manager.get("ai_local_port", 8095) or 8095)
-            except (TypeError, ValueError):
-                port = 8095
-            return {
-                "mode": str(config_manager.get("ai_backend_mode", "cloud")
-                            or "cloud"),
-                "base_url": str(config_manager.get("ai_cloud_base_url", "")
-                                or "").strip(),
-                "api_key": str(config_manager.get("ai_cloud_api_key", "") or ""),
-                "model": str(config_manager.get("ai_cloud_model", "")
-                             or "").strip(),
-                "local_port": port,
-                "local_ready": AI_SERVER.status == "ready",
-                "local_status": AI_SERVER.status,
-                "local_detail": AI_SERVER.detail,
-            }
-
-        def _add_listener(fn):
-            return AI_SERVER.add_listener(fn)
-
-        def _remove_listener(fn):
-            return AI_SERVER.remove_listener(fn)
-
-        def _stop_local():
-            AI_SERVER.stop()
-            return True
-
-        return {
-            "is_attached": _is_attached, "params": _params,
-            "add_listener": _add_listener, "remove_listener": _remove_listener,
-            "stop_local": _stop_local,
-        }
+    # ---- 插件桥（T04 D2 外迁）：kb 安全闸 + write/manage/ai provider 工厂 ----
+    # 受限能力门面：撤销栈为桥实例唯一可变状态（原函数局部升实例属性，
+    # 启动期仅构造一次，生命周期等价）。宿主对象显式注入，无全局单例。
+    from src.plugin_bridge import PluginHostBridge
+    bridge = PluginHostBridge(
+        fragment_manager=fragment_manager, task_manager=task_manager,
+        note_manager=note_manager, docx_manager=docx_manager,
+        config_manager=config_manager, ui=main_window, ball=ball,
+    )
 
     plugin_ctx = PluginContext(
         logger=get_logger(),
@@ -3361,15 +2718,15 @@ def main():
         # 受限写入口（2026-09-27）：只有声明 capabilities=["write"] 的插件
         # 才能经 ctx.write 新增碎片/任务/笔记。只增不改删，内容有长度护栏，
         # 写成功后刷新对应面板（与卡片数据变更走同一条链路）。
-        write_providers=_make_write_providers(),
+        write_providers=bridge.write_providers(),
         # 数据管理入口（2026-09-28）：只有声明 capabilities=["manage"] 的插件
         # 才能经 ctx.manage 改/删既有任务、碎片、笔记。删除返回撤销令牌，
         # undo_delete 可恢复；每次操作进审计日志（app.log 的 [插件管理]）。
-        manage_providers=_make_manage_providers(),
+        manage_providers=bridge.manage_providers(),
         # AI 总配置（2026-09-29）：只有声明 capabilities=["ai"] 且在设置页
         # 下拉框被勾选接入的插件，才能经 ctx.ai 实时读取总配置（params 每
         # 次调用实时读，设置页改完即生效）；本地服务状态由 AI_SERVER 广播。
-        ai_providers=_make_ai_providers(),
+        ai_providers=bridge.ai_providers(),
     )
     plugin_loader = PluginLoader(plugin_registry, plugin_ctx, logger=get_logger())
 
@@ -3381,283 +2738,39 @@ def main():
     # 插件中心页面数据通道：主窗口经只读属性访问 loaded_plugins()
     main_window.set_plugin_loader(plugin_loader)
 
-    def _apply_plugin_hotkeys():
-        """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位。
+    # 晚绑定收尾资源：截图/插件热键管理器与截图钉屏在此前集成段创建完毕
+    quit_coordinator.register_resources(
+        shot_hotkey_mgr, plugin_hotkey_mgr, screenshot_pin, clipboard_monitor)
 
-        D4 样板收敛：注销 + 注册 + 失败告警走 reapply_hotkey_bindings，
-        这里只负责按注册表筛出绑定表（冲突让位 / 停用跳过）。
-        """
-        core_norm = {
-            str(config_manager.get("screenshot_hotkey", "Ctrl+Alt+S")).strip().lower().replace(" ", ""),
-        }
-        bindings = []
-        for act in plugin_registry.all_actions():
-            hotkey = act.declared_hotkey()
-            if not hotkey or not act.enabled():
-                continue
-            if hotkey in core_norm:
-                get_logger().warning(
-                    f"[插件] 热键与核心功能冲突，插件让位：{act.hotkey}（{act.id}）")
-                continue
-            bindings.append((
-                act.hotkey,
-                lambda aid=act.id: plugin_registry.trigger(aid, plugin_ctx),
-                f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）",
-            ))
-        reapply_hotkey_bindings(plugin_hotkey_mgr, bindings)
-
-    def _apply_plugins(_enabled=None):
-        """插件总闸：开 → 加载/登记；关 → 摘动作 + 摘页面（模块仍驻留）"""
-        if config_manager.get("plugins_enabled", True):
-            plugin_loader.load_all()
-            _apply_disabled_plugins()
-            _register_plugin_pages()
-        else:
-            _unregister_all_plugin_pages()
-            plugin_loader.deactivate()
-        ball.refresh_plugin_menu()
-        _apply_plugin_hotkeys()
-
-    def _apply_disabled_plugins():
-        """按配置回置「被单独停用」的插件状态（2026-09-27）。
-
-        插件中心的启停开关此前只改内存（重启即复原，用户对「停用」的预期落空），
-        现在开关写入 config 的 ``plugins_disabled``，这里在登记完成后统一回置。
-        未知 id 静默跳过——配置里残留已删除插件的 id 是正常情况。
-        """
-        for pid in (config_manager.get("plugins_disabled", None) or []):
-            if not isinstance(pid, str) or not pid:
-                continue
-            n = plugin_loader.set_plugin_enabled(pid, False)
-            if not n:
-                get_logger().info(
-                    f"[插件] 配置里记录了停用 {pid}，但该插件未加载（已忽略）")
-
-    def _register_plugin_pages():
-        """页面插件：manifest.page → 主窗口导航页（2026-09-27）。
-
-        create_page 抛异常只跳过该插件，绝不拖垮加载（与动作同级容错）。
-        register_plugin_page 幂等，插件中心「重新扫描」重入安全。
-        被**单独停用**的插件（plugins_disabled）跳过——动作已被回置摘除，
-        页面若照常注册就会出现「停用了页面还挂在导航栏」（2026-09-27 修复）。
-        """
-        disabled = {p for p in (
-            config_manager.get("plugins_disabled", None) or [])
-            if isinstance(p, str) and p}
-        for lp in plugin_loader.loaded_plugins():
-            if lp.plugin_id in disabled:
-                get_logger().info(f"[插件] 页面跳过（插件被停用）：{lp.plugin_id}")
-                continue
-            page_spec = lp.manifest.get("page")
-            if not page_spec:
-                continue
-            page_key = f"plugin:{lp.plugin_id}"
-            try:
-                widget = lp.plugin.create_page(lp.ctx)
-                if widget is None:
-                    get_logger().warning(
-                        f"[插件] 声明了 page 但 create_page 返回空，跳过：{lp.plugin_id}")
-                    continue
-                main_window.register_plugin_page(page_key, page_spec["title"], widget)
-                lp.page_key = page_key     # 插件热键动作经 parent_window 切页用
-                get_logger().info(f"[插件] 页面已注入主窗口：{page_key}")
-            except Exception as exc:       # noqa: BLE001 - 页面失败不拖垮插件系统
-                get_logger().warning(
-                    f"[插件] 页面注入失败，跳过：{lp.plugin_id}（{exc!r}）",
-                    exc_info=True)
-
-    def _unregister_all_plugin_pages():
-        """总闸关闭 → 把全部插件页从主窗口摘掉（2026-09-27）。
-
-        此前总闸关只 deactivate 摘动作/热键，页面与导航键残留在主窗口。
-        page_key 记录在 LoadedPlugin 上（注册时写入），逐个注销后清空；
-        独立 try 容错——页面注销失败不阻断总闸关闭流程。
-        """
-        unreg = getattr(main_window, "unregister_plugin_page", None)
-        if not callable(unreg):
-            return
-        for lp in plugin_loader.loaded_plugins():
-            key = getattr(lp, "page_key", None)
-            if not key:
-                continue
-            try:
-                unreg(key)
-            except Exception:              # noqa: BLE001 - 单页失败不阻断
-                get_logger().warning(f"[插件] 页面注销失败：{key}", exc_info=True)
-            try:
-                lp.page_key = None
-            except Exception:              # noqa: BLE001
-                pass
-
-    def _refresh_core_hotkey_reservation():
-        """核心热键变更 → 刷新保留集并重绑插件热键（插件始终让位）"""
-        plugin_registry.reserve_hotkeys((
-            config_manager.get("screenshot_hotkey", "Ctrl+Alt+S"),
-        ))
-        _apply_plugin_hotkeys()
-
-    main_window.plugins_changed.connect(_apply_plugins)
-    main_window.screenshot_changed.connect(_refresh_core_hotkey_reservation)
-    _apply_plugins()
-
-    # 1. 小卡片退出请求 → 安全退出程序
-    ball.card_window.request_quit.connect(_safe_quit)
-
-    # 1.1 悬浮球右键退出 → 安全退出程序
-    ball.request_quit.connect(_safe_quit)
-
-    # 2. 小卡片数据变更 → 大窗口刷新对应面板（若可见）
-    def _on_card_data_changed(kind):
-        if kind == "task":
-            main_window.refresh_tasks()
-            ball.refresh_badge()      # 任务增删/完成后同步球体徽标（A4）
-        elif kind == "note":
-            main_window.refresh_notes()
-        elif kind == "asset":
-            # 素材变更要刷素材页（原实现误刷碎片页，导致大窗口素材列表不更新）
-            main_window.refresh_temp_assets()
-        elif kind == "fragment":
-            main_window.refresh_fragments()
-    ball.card_window.data_changed.connect(_on_card_data_changed)
-
-    # 3. 大窗口主题切换 → 悬浮球 + 小卡片应用主题
-    main_window.theme_changed.connect(ball.apply_theme)
-    # 3b. 主题切换 → 桌面便签全部换肤
-    main_window.theme_changed.connect(sticky_manager.apply_theme)
-
-    # 3b+. 壁纸参数改动（图 / 适配 / 模糊 / 遮罩 / 不透明度）→ 小卡片跟进
-    # 背景。主窗在 refresh_wallpaper 里自己刷 GlassPanel，不走
-    # theme_changed 全量换肤（那会把卡片整套 QSS / 图标重刷一遍，
-    # 设置页步进器每档 ± 都白付一次）。
-    def _on_wallpaper_changed():
-        ball.card_window.apply_background_from_config(config_manager)
-    main_window.wallpaper_changed.connect(_on_wallpaper_changed)
-
-    # 3c. 系统深浅色变化 → 「跟随系统」模式整链路换肤（3.1）
-    # 只复用既有换主题路径：主窗口 _apply_theme 重取配色（get_colors 内部
-    # 经 resolve_theme_name 现读系统 scheme），theme_changed 再把具体主题
-    # 名广播给球 / 卡片 / 便签 / 截图钉屏；显式 light/dark 模式忽略。
-    def _on_system_scheme_changed(_scheme):
-        if config_manager.get("theme", DEFAULT_THEME) != "follow":
-            return
-        resolved = resolve_theme_name("follow")
-        if main_window.current_theme == "follow":
-            main_window.reapply_theme()
-        main_window.theme_changed.emit(resolved)
-        get_logger().info(f"[主题] 系统深浅色变化，跟随系统 → {resolved}")
-
-    from PyQt6.QtGui import QGuiApplication as _QGuiApp
-    _scheme_hints = _QGuiApp.instance().styleHints() if _QGuiApp.instance() else None
-    if _scheme_hints is not None and hasattr(_scheme_hints, "colorSchemeChanged"):
-        _scheme_hints.colorSchemeChanged.connect(_on_system_scheme_changed)
-
-    # 4. 剪贴板新增碎片 → 大窗口刷新碎片页面（若可见）+ 球体脉冲反馈
-    def _on_fragment_added(_content=None):
-        main_window.refresh_fragments()
-        ball.pulse()                  # 成功反馈（A4）
-    clipboard_monitor.fragment_added.connect(_on_fragment_added)
-
-    # 4b. 剪贴板图片入库（Y2）→ 刷新素材页面 + 球体脉冲 + 轻提示
-    def _on_clipboard_image(_asset_id=None):
-        main_window.refresh_temp_assets()
-        ball.card_window.notify_assets_changed()
-        main_window.show_toast("🖼 剪贴板图片已存入素材池（素材页可查看）")
-        ball.pulse()
-    if getattr(clipboard_monitor, "image_captured", None) is not None:
-        clipboard_monitor.image_captured.connect(_on_clipboard_image)
-
-    # 5. 大窗口数据变更 → 小卡片刷新
-    def _on_main_data_changed(kind):
-        if kind == "task":
-            ball.refresh_badge()      # 大窗口任务变更 → 球体徽标同步（A4）
-            if ball.card_window.isVisible():
-                ball.card_window.refresh_page("task")
-        elif kind == "knowledge":
-            # 知识库编辑后重新加载卡片并同步到小卡片
-            new_cards = docx_manager.get_cards()
-            ball.update_cards(new_cards)
-        elif kind == "nav" and ball.card_window.isVisible():
-            # 网址导航编辑后刷新小卡片导航页
-            ball.card_window.refresh_page("nav")
-        elif kind == "asset":
-            # 临时素材变更后刷新小卡片素材页（可见立即重建，隐藏则置脏）
-            ball.card_window.notify_assets_changed()
-        elif kind == "fragment" and ball.card_window.isVisible():
-            # 碎片变更后刷新小卡片碎片页
-            ball.card_window.refresh_page("fragment")
-        elif kind in ("note", "task"):
-            # 笔记/任务被删除后，对应桌面便签自动关闭（孤儿窗口不留）
-            sticky_manager.validate_open_windows()
-    main_window.data_changed.connect(_on_main_data_changed)
-
-    # 5b. 任务便签里改了备注/完成态 → 走主窗口 data_changed 刷新任务页
-    #（data_changed("task") 又会触发上面 validate_open_windows，无副作用）
-    sticky_manager.task_data_changed.connect(
-        lambda: main_window.data_changed.emit("task"))
-
-    # 6. 主窗口悬浮球开关 → 显示/隐藏悬浮球
-    main_window.ball_visibility_changed.connect(
-        lambda visible: ball.setVisible(visible)
+    # ---- 插件装配编排（T05 D2 外迁）→ wiring.PluginWiring ----
+    plugin_wiring = PluginWiring(
+        loader=plugin_loader, registry=plugin_registry, ctx=plugin_ctx,
+        hotkey_mgr=plugin_hotkey_mgr, config_manager=config_manager,
+        main_window=main_window, ball=ball,
     )
+    plugin_wiring.wire()
+    plugin_wiring.apply_plugins()
 
-    # 7. 主窗口小卡片保持显示开关 → 实时应用并刷新卡片关闭按钮可见性
-    def _on_card_always_show_changed(always_show: bool):
-        # 配置已由 main_window 保存；这里刷新关闭按钮与内容净空（两者必须一起变，
-        # 否则按钮出现了、内容却没让位，又会压住首行）
-        if ball.card_window.isVisible():
-            ball.card_window.refresh_always_show_layout()
-    main_window.card_always_show_changed.connect(_on_card_always_show_changed)
+    # 1. 小卡片退出请求 / 悬浮球右键退出 → 安全退出程序
+    ball.card_window.request_quit.connect(quit_coordinator.safe_quit)
+    ball.request_quit.connect(quit_coordinator.safe_quit)
 
-    # 8. 主窗口临时素材上限变更 → 更新管理器并清理过期素材
-    def _on_asset_limits_changed(max_count: int, max_days: int, max_file_mb: int):
-        temp_asset_manager.update_limits(
-            max_assets=max_count, max_days=max_days, max_file_mb=max_file_mb)
-        # 清理后刷新大小窗口的素材页
-        main_window.refresh_temp_assets()
-        ball.card_window.notify_assets_changed()
-        get_logger().info(
-            f"临时素材上限已更新: max_count={max_count}, max_days={max_days}, "
-            f"max_file_mb={max_file_mb}")
-    main_window.asset_limits_changed.connect(_on_asset_limits_changed)
-
-    # 8.5 主窗口动画速度档位变更 → 实时应用到悬浮球（统一缩放动画时长）
-    main_window.anim_speed_changed.connect(ball.set_anim_speed)
-
-    # 8.6 主窗口空闲吸边隐藏秒数变更 → 实时应用到悬浮球
-    main_window.auto_hide_seconds_changed.connect(ball.set_auto_hide_seconds)
-
-    # 8.6b 主窗口自动隐藏总开关变更 → 实时应用到悬浮球（关闭时停表并把半隐藏的球滑回屏内）
-    main_window.auto_hide_enabled_changed.connect(ball.set_auto_hide_enabled)
-
-    # 8.7 主窗口悬浮球大小变更 → 实时应用到悬浮球（保持球心不动，位置即落盘）
-    main_window.ball_size_changed.connect(ball.apply_ball_size)
-
-    # 8.7b 主窗口小卡片图标大小变更 → 实时应用到小卡片软件导航页
-    main_window.mini_icon_size_changed.connect(
-        ball.card_window.apply_icon_size)
-
+    # ==================================================================
+    # 信号槽桥梁：大小窗口数据双向同步（T05 D2 外迁 → wiring）
+    # ==================================================================
+    wire_cross_window_signals(
+        ball, main_window, config_manager, docx_manager,
+        temp_asset_manager, clipboard_monitor, sticky_manager)
+    wire_scheme_follow(main_window, config_manager)
     # 8.8 主窗口全屏让位开关变更 → 启停全屏检测
     main_window.hide_on_fullscreen_changed.connect(
-        lambda _enabled: _apply_fullscreen_watch())
+        lambda _enabled: fullscreen_coordinator.apply())
 
-    # ---- UI 心跳看门狗：事件循环阻塞 >800ms 时记录（诊断卡顿/未响应）----
     _mark("最后准备")
+    # ---- UI 心跳看门狗：事件循环阻塞 >800ms 时记录（诊断卡顿/未响应）----
     # QTimer 在主线程事件循环里调度；循环被长任务阻塞时下一跳会迟到，
     # 相邻两跳的间隔 = 实际阻塞时长。平时零输出，只在真卡顿时留痕。
-    _hb_state = {"last": time.monotonic()}
-
-    def _ui_heartbeat():
-        now = time.monotonic()
-        gap = (now - _hb_state["last"]) * 1000
-        _hb_state["last"] = now
-        if gap > 800:
-            get_logger().warning(
-                f"[UI心跳] 事件循环阻塞 {gap:.0f}ms（本条在阻塞结束后补记）")
-
-    _hb_timer = QTimer()
-    _hb_timer.setInterval(250)
-    _hb_timer.timeout.connect(_ui_heartbeat)
-    _hb_timer.start()
+    _heartbeat = HeartbeatWatch()   # 实例持有 QTimer 引用防 GC
 
     # ---- 三段接力启动编排（2026-10-03 方案 D）----
     # ① 第 11 档打点：闪屏充能满格并苏醒（弹跳 + 光晕）；
@@ -3692,28 +2805,7 @@ def main():
     # ---- 3.4 首启引导：首次使用时弹出三步欢迎向导（设置页「🚀 启动与
     # 系统 → 🔄 重看引导」可重看，同一 dialog）----
     # 延迟 800ms：不抢启动闪屏淡出的风头，主窗口先完整露脸。
-    from src import onboarding
-    _onboarding_ref = {"dlg": None}
-
-    def _show_onboarding():
-        # 防重入：已开着（设置页路径）就置前，不再叠一个
-        existing = _onboarding_ref["dlg"]
-        if existing is not None and existing.isVisible():
-            existing.raise_()
-            existing.activateWindow()
-            return
-        dlg = onboarding.WelcomeDialog(host=main_window, parent=main_window)
-        _onboarding_ref["dlg"] = dlg
-        dlg.exec()
-        # 关闭即落盘：完成 / Esc / 跳过 / 标题栏 × 任何路径都置 True，
-        # 之后不再骚扰（设置页「重看引导」路径在 settings_panel 里
-        # 经 finished 信号走同一个 mark_done，闭环同源）
-        onboarding.mark_done(config_manager)
-        dlg.deleteLater()
-        _onboarding_ref["dlg"] = None
-
-    if onboarding.should_show(config_manager):
-        QTimer.singleShot(800, _show_onboarding)
+    maybe_show_onboarding(config_manager, main_window)
 
     # ---- 唤醒信号：第二个实例启动时通过命名事件唤醒本实例 ----
     # 使用后台线程阻塞等待命名事件（事件驱动），替代 300ms 持续轮询，
@@ -3756,46 +2848,8 @@ def main():
     _wakeup_thread = threading.Thread(target=_wakeup_worker, daemon=True)
     _wakeup_thread.start()
 
-    # ---- 退出诊断日志 ----
-    def _on_about_to_quit():
-        # 正常退出标记：必须排在所有退出日志之前（见 mark_session_end），
-        # 与启动标记圈出本次会话的日志区间，供人工排障
-        mark_session_end()
-        get_logger().info("程序准备退出（aboutToQuit 信号触发）")
-        # 显式收尾（1.4，幂等）：若 _safe_quit 已收尾过则直接跳过
-        try:
-            _shutdown_resources()
-        except Exception:
-            pass
-        # 通知唤醒后台线程停止（避免退出后仍阻塞等待）
-        try:
-            _wakeup_stop["flag"] = True
-        except Exception:
-            pass
-        # 强制落盘所有未决碎片变更（去抖窗口内可能仍有待写数据）
-        try:
-            if fragment_manager is not None:
-                fragment_manager.flush()
-        except Exception:
-            pass
-        # 强制落盘未决的笔记编辑（防抖窗口内可能仍有待写数据）
-        try:
-            main_window.flush_pending_notes()
-        except Exception:
-            pass
-        # 立即落盘悬浮球位置（C4）：兜底 600ms 防抖窗口内尚未写入的位置
-        try:
-            ball.save_position_now()
-        except Exception:
-            pass
-        # 立即落盘主窗口几何：同样是兜底防抖窗口（窗口在托盘态时不可见）
-        try:
-            _save_geom = getattr(main_window, "save_geometry_now", None)
-            if _save_geom is not None:
-                _save_geom()
-        except Exception:
-            pass
-    app.aboutToQuit.connect(_on_about_to_quit)
+    # ---- 退出诊断日志（T05 D2 外迁 → QuitCoordinator.bind_about_to_quit）----
+    quit_coordinator.bind_about_to_quit(app, fragment_manager, _wakeup_stop)
 
     # ---- 进入事件循环 ----
     sys.exit(app.exec())

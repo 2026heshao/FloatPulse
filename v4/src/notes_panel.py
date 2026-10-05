@@ -415,7 +415,7 @@ class NotesPanel(QWidget):
         note_id = item.data(Qt.ItemDataRole.UserRole)
         target = self._note_manager.get_note(note_id)
         menu = QMenu(self)
-        menu.setStyleSheet(self._host._container.styleSheet())
+        menu.setStyleSheet(self._host.container.styleSheet())
         act_rename = menu.addAction("编辑标题...")
         # 临时笔记标题固定，不提供跟随开关
         act_title_auto = None

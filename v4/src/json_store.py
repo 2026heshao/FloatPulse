@@ -71,10 +71,31 @@ def _migrate_config_1_to_2(data: dict) -> dict:
     return data
 
 
+# config v2 → v3 的迁移参数：屏幕轻提示时长的新键默认值（毫秒）。
+# ★ 不能 import config 取值：config 反向依赖本模块，取值会成环。
+#   故此处写常量，并由 tests/test_toast_duration.py 用
+#   「迁移后取值 == DEFAULT_CONFIG['toast_duration_ms']」把两者钉死，
+#   防止日后改默认却忘改迁移（护栏必须能红灯）。
+_CONFIG_V2_DEFAULT_TOAST_MS = 2800
+
+
+def _migrate_config_2_to_3(data: dict) -> dict:
+    """config v2 → v3：新增 toast_duration_ms 键（2026-10-05）。
+
+    ★ 全新键，无旧值可改——按 fragments 0→1 的 setdefault 先例补默认，
+      **绝不覆写**文件里已存在的值（幂等：重跑不变）。缺失键本身也能在
+      ConfigManager._load 的「缺失项保留默认值」兜底，本迁移的意义是让
+      版本号照常推进时新键在数据层显式成形，与护栏 pin 对齐。
+    """
+    data.setdefault("toast_duration_ms", _CONFIG_V2_DEFAULT_TOAST_MS)
+    return data
+
+
 # 各数据 store 的当前 schema 版本（键 = 各文件顶层记录数组键名，config 除外）。
 # 结构变更时把对应项 +1，并在 MIGRATIONS 注册逐级迁移函数。
 STORE_VERSIONS = {
-    "config":    2,     # config.json（schema_version 字段；v2 = 分组阈值默认 120→900）
+    "config":    3,     # config.json（schema_version 字段；v3 = 新增
+                        # toast_duration_ms 键；v2 = 分组阈值默认 120→900）
     "fragments": 1,     # fragments.json
     "notes":     1,     # notes.json
     "tasks":     1,     # schedule.json
@@ -88,7 +109,8 @@ STORE_VERSIONS = {
 # 迁移函数签名 fn(data) -> data，必须是幂等纯函数；某一级未注册 →
 # 版本号照常推进、数据原样跳过（适用于新增字段且读取端已有兜底的场景）。
 MIGRATIONS = {
-    "config":    {1: _migrate_config_1_to_2},
+    "config":    {1: _migrate_config_1_to_2,
+                  2: _migrate_config_2_to_3},
     "fragments": {0: _migrate_fragments_0_to_1},
     "notes":     {},
     "tasks":     {},

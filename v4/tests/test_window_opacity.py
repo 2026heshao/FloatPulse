@@ -197,10 +197,10 @@ class TestMainWindowOpacity:
 def panel(qapp):
     calls = {"applied": []}
     host = types.SimpleNamespace(
-        _config=_FakeConfig({"window_opacity": 70}),
+        config=_FakeConfig({"window_opacity": 70}),
         current_theme="dark",
         _theme="dark",
-        _apply_window_opacity=lambda: calls["applied"].append(True),
+        apply_window_opacity=lambda: calls["applied"].append(True),
     )
     return SettingsPanel(host), calls
 
@@ -238,7 +238,7 @@ class TestSettingsOpacityRow:
     def test_host_without_method_does_not_crash(self, qapp):
         """host 缺 _apply_window_opacity 时静默跳过（防御测试替身/旧宿主）"""
         host = types.SimpleNamespace(
-            _config=_FakeConfig({"window_opacity": 70}),
+            config=_FakeConfig({"window_opacity": 70}),
             current_theme="dark")
         p = SettingsPanel(host)
         p._set_window_opacity.setValue(90)

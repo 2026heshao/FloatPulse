@@ -332,7 +332,7 @@ class SmoothButton(QPushButton):
         """
         host = getattr(self, "_host", None)
         if host is not None:
-            t = getattr(host, "_theme", None)
+            t = getattr(host, "current_theme", None)
             if t in ("light", "dark"):
                 return t
         w = self.parentWidget()
@@ -1169,5 +1169,5 @@ class PageTitle(QWidget):
     def apply_theme(self, theme=None):
         """按主题重取图标颜色。宿主没有 ``theme_changed`` 信号时由调用方显式调
         （例如 ``AppLauncherPage._apply_style()`` 已经在换主题时被宿主调用）。"""
-        theme = theme or getattr(self._host, "_theme", None) or DEFAULT_THEME
+        theme = theme or getattr(self._host, "current_theme", None) or DEFAULT_THEME
         self.icon.set_color(get_colors(theme)["text"])

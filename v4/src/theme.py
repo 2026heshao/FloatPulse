@@ -1997,12 +1997,18 @@ QMenu::separator {
 # 刻意的低风险取舍：ui_scale 只缩放**字号**（QApplication 全局字号 + QSS
 # 里全部 font-size，含写死的 px 与 $fs_* 令牌——2026-10-04 P1-3 补齐），
 # 不缩放 QSS 里写死的 px **布局**（间距/圆角/控件尺寸）——全量 px token
-# 化改动面太大；85–150% 全档观感稳定（设置页文案同口径）。
+# 化改动面太大；85–130% 全档观感稳定（设置页文案同口径）。
 BASE_FONT_PT = 10
 
 # 界面缩放合法档位（百分比）：config._CONFIG_RANGES 的范围校验之外，
 # 设置页下拉框与 apply_app_font 的调用方都以此为准（收敛取值来源）。
-UI_SCALE_VALUES = (85, 100, 115, 130, 150)
+# ★ 2026-10-05 上限收窄 150 → 130（B2 走查返工）：活字方案「缩字号不缩
+#   布局」，150% 档设置页步进器行「- 数值 +」的加号被挤出卡片右缘
+#   （离屏截图实锤，tools/verify_ui_scale_walkthrough.py 可复现），
+#   130% 及以下全档无溢出。只收窄档位清单与 RANGE、不动默认值 100——
+#   不走版本化迁移；已存 150 的老配置按既有「越界回落默认」策略回到
+#   100（config 加载端范围校验），不静默钳到 130。
+UI_SCALE_VALUES = (85, 100, 115, 130)
 
 # 当前生效的缩放档位（模块级单点）：apply_app_font 是唯一写入方，QSS
 # 生成端（get_main_window_qss / get_card_window_qss / get_menu_qss）与
@@ -2028,6 +2034,19 @@ def current_ui_scale() -> int:
 _FONT_SIZE_PX_RE = re.compile(r"(font-size\s*:\s*)(\d+)px")
 
 
+def scale_px(n, s: int) -> int:
+    """字号 px 值按档位缩放的**唯一**换算点（纯函数，round 收敛）。
+
+    - ``n``：模板里的写死 px 字号；``s``：档位百分比（100 = 原样）；
+    - round 是 Python 的 half-to-even（16.5→16、22.5→22、19.5→20），
+      与 QSS 既有缩放结果逐字节一致（P1-3 基线）；
+    - 下限 1px（QSS 不接受 0px 字号）；脏输入（非数值）原样抛
+      TypeError —— 调用方都是渲染热路径上的模板替换，模板值由本模块
+      自己管辖，不该在这里静默吞错。
+    """
+    return max(1, round(int(n) * int(s) / 100))
+
+
 def scale_px_fonts(qss: str, ui_scale: int = None) -> str:
     """把成品 QSS / 内联样式里**所有** ``font-size: Npx`` 按档位缩放（纯函数）。
 
@@ -2035,6 +2054,8 @@ def scale_px_fonts(qss: str, ui_scale: int = None) -> str:
     - 只动 font-size，``padding: 0 13px`` / ``border-radius: 3px`` 等
       布局 px 一律不碰（活字方案的边界：缩字号不缩布局）；
     - 写死 px 与 $fs_* 令牌在替换后同形，一次正则全覆盖；
+    - 换算统一走 :func:`scale_px`（唯一换算点，QSS 模板与 knowledge_ball
+      等自绘字号同源，不许各写各的 round）；
     - ui_scale 非法（非数值）原样返回，绝不抛异常（QSS 生成是渲染热路径）。
     """
     if ui_scale is None:
@@ -2046,8 +2067,7 @@ def scale_px_fonts(qss: str, ui_scale: int = None) -> str:
     if scale == 100 or not qss:
         return qss
     return _FONT_SIZE_PX_RE.sub(
-        lambda m: "%s%dpx" % (m.group(1),
-                              max(1, round(int(m.group(2)) * scale / 100))),
+        lambda m: "%s%dpx" % (m.group(1), scale_px(m.group(2), scale)),
         qss)
 
 
