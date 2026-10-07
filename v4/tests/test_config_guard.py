@@ -171,5 +171,113 @@ class TestConfigSaveRotate(unittest.TestCase):
             self.fail("save() 在写盘失败时不应抛异常: %s" % exc)
 
 
+class TestToastSettingsTrio(unittest.TestCase):
+    """轻提示 7 键三件套一致性（2026-10-06 R13）+ 越界 config 冒烟（R11）
+
+    「设置→全局工具→轻提示」卡的 7 个配置键：
+      toast_enabled / toast_position / toast_bottom_offset / toast_duration /
+      toast_max_visible / toast_animation / toast_sound
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="fp_cfg_toast_")
+        self.path = os.path.join(self.dir, "config.json")
+        data_backups.reset_rotation_state()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write_text(self, text):
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    TOAST_KEYS = ("toast_enabled", "toast_position", "toast_bottom_offset",
+                  "toast_duration", "toast_max_visible", "toast_animation",
+                  "toast_sound")
+
+    def test_trio_coverage(self):
+        """三件套齐全：7 键都有默认值与类型；int 进 RANGES、枚举进白名单；
+        三个 bool 一律不进 RANGES（bool 无数值范围）"""
+        from src.config import (_CONFIG_RANGES, _CONFIG_TYPES,
+                                _CONFIG_VALUE_WHITELISTS)
+        from src.constants import TOAST_DURATIONS, TOAST_POSITIONS
+        for key in self.TOAST_KEYS:
+            self.assertIn(key, DEFAULT_CONFIG)
+            self.assertIn(key, _CONFIG_TYPES)
+        # bool 不进 RANGES
+        for key in ("toast_enabled", "toast_animation", "toast_sound"):
+            self.assertIs(_CONFIG_TYPES[key], bool)
+            self.assertNotIn(key, _CONFIG_RANGES)
+        # int 进 RANGES（与设置页 Stepper 范围一致）
+        self.assertIs(_CONFIG_TYPES["toast_bottom_offset"], int)
+        self.assertEqual(_CONFIG_RANGES["toast_bottom_offset"], (24, 120))
+        self.assertIs(_CONFIG_TYPES["toast_max_visible"], int)
+        self.assertEqual(_CONFIG_RANGES["toast_max_visible"], (1, 5))
+        # 枚举进白名单（与 settings_panel 分段控件候选同源）
+        self.assertIs(_CONFIG_TYPES["toast_position"], str)
+        self.assertEqual(_CONFIG_VALUE_WHITELISTS["toast_position"],
+                         TOAST_POSITIONS)
+        self.assertIs(_CONFIG_TYPES["toast_duration"], str)
+        self.assertEqual(_CONFIG_VALUE_WHITELISTS["toast_duration"],
+                         TOAST_DURATIONS)
+
+    def test_retired_toast_duration_ms_gone(self):
+        """旧键 toast_duration_ms 已退役（2026-10-06 由 7 键设置卡取代）"""
+        from src.config import _CONFIG_RANGES, _CONFIG_TYPES
+        self.assertNotIn("toast_duration_ms", DEFAULT_CONFIG)
+        self.assertNotIn("toast_duration_ms", _CONFIG_TYPES)
+        self.assertNotIn("toast_duration_ms", _CONFIG_RANGES)
+
+    def test_defaults_match_design(self):
+        """默认值 = 轻提示视觉稿定案值（零配置即终稿，设计原则 1）"""
+        self.assertIs(DEFAULT_CONFIG["toast_enabled"], True)
+        self.assertEqual(DEFAULT_CONFIG["toast_position"], "center")
+        self.assertEqual(DEFAULT_CONFIG["toast_bottom_offset"], 56)
+        self.assertEqual(DEFAULT_CONFIG["toast_duration"], "standard")
+        self.assertEqual(DEFAULT_CONFIG["toast_max_visible"], 3)
+        self.assertIs(DEFAULT_CONFIG["toast_animation"], True)
+        self.assertIs(DEFAULT_CONFIG["toast_sound"], False)
+
+    def test_set_rejects_illegal_values(self):
+        """set 同口径校验：错型 / 越界 / 非白名单值一律拒写"""
+        cm = ConfigManager(self.path)
+        self.assertIs(cm.set("toast_enabled", 1), False)          # int 非 bool
+        self.assertIs(cm.set("toast_animation", "yes"), False)
+        self.assertIs(cm.set("toast_bottom_offset", 23), False)   # 低于下限
+        self.assertIs(cm.set("toast_bottom_offset", 121), False)  # 高于上限
+        self.assertIs(cm.set("toast_max_visible", 0), False)
+        self.assertIs(cm.set("toast_position", "left"), False)    # 非白名单
+        self.assertIs(cm.set("toast_duration", "forever"), False)
+        self.assertIs(cm.set("toast_bottom_offset", 88), True)
+        self.assertIs(cm.set("toast_duration", "brief"), True)
+
+    def test_out_of_range_file_falls_back_in_range(self):
+        """R11 冒烟：越界 config 文件加载不报错、不落盘非法值——
+        越界/错型键按 config._load 口径回退默认值（合法区间内）"""
+        self._write_text(json.dumps({
+            "toast_bottom_offset": 9999,
+            "toast_max_visible": -1,
+            "toast_position": "banana",
+            "toast_duration": 42,
+            "toast_enabled": "yes",
+        }))
+        cm = ConfigManager(self.path)
+        self.assertIsNone(cm.load_reset_reason)          # 不整档判损坏
+        self.assertEqual(cm.get("toast_bottom_offset"), 56)
+        self.assertEqual(cm.get("toast_max_visible"), 3)
+        self.assertEqual(cm.get("toast_position"), "center")
+        self.assertEqual(cm.get("toast_duration"), "standard")
+        self.assertIs(cm.get("toast_enabled"), True)
+        # save() 后非法值脱落，落盘的全是合法值
+        cm.save()
+        with open(self.path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["toast_bottom_offset"], 56)
+        self.assertEqual(data["toast_max_visible"], 3)
+        self.assertEqual(data["toast_position"], "center")
+        self.assertEqual(data["toast_duration"], "standard")
+        self.assertIs(data["toast_enabled"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

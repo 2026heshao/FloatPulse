@@ -50,7 +50,10 @@ PASS = 0
 EXPECTED_CARD_TITLES = [
     # 2026-10-03 主题扩展：「主题配色」「背景图」两张卡加在外观分类页里
     "外观与主题", "主题配色", "背景图", "悬浮球", "剪贴板与碎片", "临时素材",
-    "全局工具", "番茄钟", "启动与系统", "导出", "AI 总配置",
+    # 2026-10-06：「命令面板」「应用快捷键」「轻提示」三张卡加在全局工具
+    # 分类页里（轻提示卡 7 行取代外观页原「提示条时长」单行）
+    "全局工具", "命令面板", "应用快捷键", "轻提示",
+    "番茄钟", "启动与系统", "导出", "AI 总配置",
     "软件更新",   # 关于分类页内的子卡（手动检查更新），排在「关于」卡上方
     "关于",
 ]
@@ -98,20 +101,25 @@ def section_title(box):
 
 
 class _FakeMsgBox:
-    """QMessageBox 替身：自动确认，避免离屏脚本被模态框卡死"""
+    """QMessageBox / GlassMessageBox 替身：自动确认，避免离屏脚本被模态框卡死
+
+    2026-10-06 修：设置页「恢复默认设置」已改走 GlassMessageBox（自带
+    exec 模态循环，离屏必卡死），仅替换 settings_panel.QMessageBox 拦不住；
+    两个名字都替换（GlassMessageBox.question 返回 bool，其余签名同构）。
+    """
     StandardButton = QMessageBox.StandardButton
 
     @staticmethod
     def question(*_a, **_k):
-        return QMessageBox.StandardButton.Yes
+        return True      # GlassMessageBox.question 返回 bool
 
     @staticmethod
     def information(*_a, **_k):
-        return QMessageBox.StandardButton.Ok
+        return None
 
     @staticmethod
     def warning(*_a, **_k):
-        return QMessageBox.StandardButton.Ok
+        return None
 
 
 def main():
@@ -204,6 +212,7 @@ def main():
     # ---------------- F. 恢复默认设置 ----------------
     import src.settings_panel as sp_mod
     sp_mod.QMessageBox = _FakeMsgBox
+    sp_mod.GlassMessageBox = _FakeMsgBox
     sp._on_reset_settings()
     pump(app, 200)
     assert config.get("auto_hide_enabled") is True, "F. 恢复默认后开关未回默认"

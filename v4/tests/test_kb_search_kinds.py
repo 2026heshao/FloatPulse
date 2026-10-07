@@ -202,7 +202,7 @@ class TestSearchPageUI:
                 notes=lambda: [], tasks=lambda: [],
                 knowledge=lambda: [], assets=lambda: []),
             parent_window=lambda: host,
-            show_toast=lambda msg, ms=0: setattr(page, "_last_toast", msg),
+            show_toast=lambda msg, ms=0, **kwargs: setattr(page, "_last_toast", msg),
             logger=types.SimpleNamespace(
                 warning=lambda *a, **k: None, info=lambda *a, **k: None))
 
@@ -227,7 +227,7 @@ class TestSearchPageUI:
                 notes=lambda: [], tasks=lambda: [],
                 knowledge=lambda: [], assets=lambda: []),
             parent_window=lambda: host,
-            show_toast=lambda msg, ms=0: None,
+            show_toast=lambda msg, ms=0, **kwargs: None,
             logger=types.SimpleNamespace(
                 warning=lambda *a, **k: None, info=lambda *a, **k: None))
 

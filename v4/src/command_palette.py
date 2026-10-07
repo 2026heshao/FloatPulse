@@ -23,8 +23,11 @@
     _私有成员**；
   · 视觉走 GlassDialog 家族（GlassPanel 玻璃壳 + paintEvent 手绘柔影）；
     图标一律 icon_render 自绘（禁 emoji）；
-  · **不新增数据存储、不新增配置键**：触发键固定 ``/``，可配热键为远期项
-    （见 CHANGELOG 草稿）；
+  · 触发键与直达键可配（2026-10-06 设置页「命令面板」卡）：触发键三选一
+    （config.command_palette_trigger，白名单 = constants.TRIGGER_KEYS）、
+    命令直达键（config.command_hotkeys，cid → 组合键串）与自定义动作
+    （config.custom_actions，url/folder/text 三类，上限 20 条）均落
+    config 三件套，读侧一律过本模块的 sanitize_* 纯函数形态校验；
   · 编辑态防误触：``focus_in_text_editor`` 在入口处过滤（QLineEdit /
     QTextEdit / QPlainTextEdit —— QTextBrowser 是 QTextEdit 子类一并
     覆盖）。QLineEdit / QTextEdit 等可编辑控件本身会接受 Qt 的
@@ -45,7 +48,9 @@ from PyQt6.QtWidgets import (
 )
 
 from src import icon_render
+from src.constants import TRIGGER_KEYS
 from src.glass import GlassPanel, draw_soft_shadow
+from src.controls import SmoothInput
 from src.theme import DEFAULT_THEME, get_colors, get_main_window_qss
 
 # ====================================================================
@@ -58,9 +63,26 @@ CATEGORY_PLUGIN = "插件"
 CATEGORY_ACTION = "动作"
 CATEGORY_SETTINGS = "设置"
 CATEGORY_HELP = "帮助"
+CATEGORY_CUSTOM = "自定义"
+
+# 触发键候选再导出（settings_panel / 测试统一从这里取，constants 只是
+# 数据存放点 —— 消费口径以本模块 normalize_trigger 为准）
+TRIGGER_KEYS = TRIGGER_KEYS
 
 # 结果列表上限（注册表 ~25 条，命中截断只影响极端模糊查询的列表长度）
 MAX_RESULTS = 20
+
+# 自定义动作：合法类型与条数上限（config.custom_actions 读侧清洗口径）
+CUSTOM_ACTION_TYPES = ("url", "folder", "text")
+MAX_CUSTOM_ACTIONS = 20
+
+# 自定义动作 type → src.icons 图标名（三个名字均已在 icons.py 登记：
+# url→nav 链接形、folder→文件夹、text→clipboard 剪贴板）
+_CUSTOM_ACTION_ICONS = {"url": "nav", "folder": "folder", "text": "clipboard"}
+
+# 直达键组合键形态校验的修饰键白名单（大小写不敏感；不含 Ctrl+K 这种
+# 应用内快捷键 —— 直达键必须是全局热键，至少带一个修饰键）
+_COMBO_MODIFIERS = frozenset({"ctrl", "alt", "shift", "win", "meta"})
 
 
 @dataclass(frozen=True)
@@ -141,7 +163,7 @@ def action_commands() -> list:
     """宿主动作命令（全部经 MainWindow 公开 API 执行，见 execute_entry）。"""
     return [
         CommandEntry(
-            cid="action.export", title="导出到 Obsidian",
+            cid="action.export", title="导出全部到 Obsidian",
             icon="export", category=CATEGORY_ACTION,
             target=("action", "export"),
             keywords=("daochu", "export", "markdown", "vault")),
@@ -156,6 +178,12 @@ def action_commands() -> list:
             target=("action", "new_task"),
             keywords=("新任务", "待办", "xinjian", "renwu", "new", "task",
                       "todo", "daiban", "daibanshi")),
+        CommandEntry(
+            cid="action.new_note", title="新建笔记",
+            icon="plus", category=CATEGORY_ACTION,
+            target=("action", "new_note"),
+            keywords=("记笔记", "xinjian", "biji", "new", "note",
+                      "jibi", "jb")),
         CommandEntry(
             cid="help.hotkeys", title="查看全局快捷键说明",
             icon="command", category=CATEGORY_HELP,
@@ -182,14 +210,128 @@ def settings_category_commands() -> list:
     ]
 
 
-def build_registry(nav_titles, fixed_titles, nav_index) -> list:
-    """完整命令注册表：页面（含插件）→ 动作 → 设置分类。
+def build_registry(nav_titles, fixed_titles, nav_index,
+                   custom_actions=None) -> list:
+    """完整命令注册表：页面（含插件）→ 动作 → 设置分类 → 自定义动作。
 
-    顺序即空查询时的展示序（页面最常跳，排最前）。
+    顺序即空查询时的展示序（页面最常跳，排最前）。``custom_actions``
+    为非空列表时，把清洗后的自定义动作命令追加在 settings 命令之后
+    （与设置页「命令面板」卡的展示顺序一致）。
     """
-    return (page_commands(nav_titles, fixed_titles, nav_index)
-            + action_commands()
-            + settings_category_commands())
+    entries = (page_commands(nav_titles, fixed_titles, nav_index)
+               + action_commands()
+               + settings_category_commands())
+    if custom_actions:
+        entries = entries + custom_action_entries(custom_actions)
+    return entries
+
+
+# ---------------- 自定义动作 / 直达键清洗（纯函数，可单测） ----------------
+def is_valid_combo(text) -> bool:
+    """组合键串形态校验（轻量纯校验，替代重依赖的 global_hotkey.parse_hotkey
+    —— 后者 ctypes.windll 仅 Windows 可用，离屏 / 跨平台测试不可依赖）。
+
+    规则：按 "+" 拆分；修饰键段 ∈ {Ctrl, Alt, Shift, Win, Meta}
+    （大小写不敏感）且至少一个；末段为单字符（字母/数字）或 F1-F24。
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    tokens = [t.strip() for t in text.split("+") if t.strip()]
+    if len(tokens) < 2:
+        return False                      # 必须至少带一个修饰键
+    mods = [t.lower() for t in tokens[:-1]]
+    if any(m not in _COMBO_MODIFIERS for m in mods):
+        return False
+    last = tokens[-1].lower()
+    if len(last) == 1 and (last.isalpha() or last.isdigit()):
+        return True
+    if (len(last) >= 2 and last[0] == "f" and last[1:].isdigit()
+            and 1 <= int(last[1:]) <= 24):
+        return True
+    return False
+
+
+def sanitize_custom_actions(raw) -> list:
+    """清洗 config.custom_actions：非法条目逐条丢弃，返回干净的 list[dict]。
+
+    丢弃条件（逐条独立判定）：非 dict / type 不在 CUSTOM_ACTION_TYPES /
+    title 或 value 非法（非 str 或去空白后为空）/ hotkey 非法串置 ""。
+    id 缺失、非正整数或与既有 id 重复 → 重新分配（从现有 max+1 起递增找空位）。
+    上限 MAX_CUSTOM_ACTIONS（20）条，超出丢弃。
+    """
+    if not isinstance(raw, list):
+        return []
+    cleaned = []
+    seen_ids = set()
+    next_id = 1
+    for item in raw:
+        if len(cleaned) >= MAX_CUSTOM_ACTIONS:
+            break
+        if not isinstance(item, dict):
+            continue
+        atype = item.get("type")
+        title = item.get("title")
+        value = item.get("value")
+        if atype not in CUSTOM_ACTION_TYPES:
+            continue
+        if not isinstance(title, str) or not title.strip():
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        hotkey = item.get("hotkey", "")
+        if not is_valid_combo(hotkey):
+            hotkey = ""
+        aid = item.get("id")
+        if not isinstance(aid, int) or isinstance(aid, bool) or aid < 1 \
+                or aid in seen_ids:
+            aid = next_id               # 缺失/重复 → 从现有 max+1 起重排
+        while aid in seen_ids:
+            aid += 1
+        seen_ids.add(aid)
+        next_id = max(next_id, aid + 1)
+        cleaned.append({"id": aid, "type": atype, "title": title,
+                        "value": value, "hotkey": hotkey})
+    return cleaned
+
+
+def sanitize_hotkeys_map(raw) -> dict:
+    """清洗 config.command_hotkeys（cid → 组合键串映射）。
+
+    键须为非空 str，值须过 :func:`is_valid_combo` 形态校验（至少一个
+    修饰键 + 单字符 / F1-F24 末段）；无效整对丢弃，非 dict 回 {}。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cleaned = {}
+    for cid, combo in raw.items():
+        if not isinstance(cid, str) or not cid:
+            continue
+        if not is_valid_combo(combo):
+            continue
+        cleaned[cid] = combo
+    return cleaned
+
+
+def custom_action_entries(actions) -> list:
+    """清洗后的自定义动作列表 → CommandEntry 列表。
+
+    cid = ``custom.<id>``；图标按 type 映射（url→nav / folder→folder /
+    text→clipboard）；keywords 带上 type 便于按「网址」「文件夹」类词检索。
+    输入先过 :func:`sanitize_custom_actions`（幂等，垃圾数据进不来）。
+    """
+    entries = []
+    for a in sanitize_custom_actions(actions):
+        entries.append(CommandEntry(
+            cid=f"custom.{a['id']}", title=a["title"],
+            icon=_CUSTOM_ACTION_ICONS[a["type"]],
+            category=CATEGORY_CUSTOM, target=("custom", str(a["id"])),
+            keywords=(a["type"],)))
+    return entries
+
+
+def normalize_trigger(raw):
+    """触发键归一：raw 在 TRIGGER_KEYS 内原样返回，否则回落 "/"。"""
+    return raw if raw in TRIGGER_KEYS else "/"
 
 
 # ---------------- 模糊匹配（纯函数，可单测） ----------------
@@ -291,8 +433,8 @@ def execute_entry(entry, host) -> bool:
     公开面清单（A1 收口后核实）：
       show_page(idx) / show_settings_page(cat) / show_plugin_page(key)
       / show_help_category(key) / export_to_obsidian() /
-      apply_external_theme(name) / focus_new_task() / current_theme /
-      HELP_PAGE_INDEX / NAV_PAGE_INDEX。
+      apply_external_theme(name) / focus_new_task() / focus_new_note() /
+      current_theme / HELP_PAGE_INDEX / NAV_PAGE_INDEX。
     """
     if entry is None or len(entry.target) != 2:
         return False
@@ -317,6 +459,9 @@ def execute_entry(entry, host) -> bool:
         return True
     if kind == "action":
         return _run_action(key, host)
+    if kind == "custom":
+        # 自定义动作：宿主公开 API（main_window.execute_custom_action）
+        return bool(host.execute_custom_action(key))
     return False
 
 
@@ -331,6 +476,9 @@ def _run_action(name: str, host) -> bool:
         return True
     if name == "new_task":
         host.focus_new_task()
+        return True
+    if name == "new_note":
+        host.focus_new_note()
         return True
     return False
 
@@ -374,7 +522,8 @@ _PALETTE_QSS = """
 class CommandPalette(QDialog):
     """全局命令面板：顶部搜索框 + 结果列表，↑↓ 选择 / 回车执行 / Esc 关闭。
 
-    窗口形态 = Qt.Popup（点外面自动关）+ 无边框 + 半透明（圆角真生效），
+    窗口形态 = Qt.Popup（点外面自动关）+ 无边框 + 半透明（圆角真生效）
+    + 常置顶（压过小卡片/钉屏等置顶工具窗），
     玻璃壳复用 GlassPanel，配色/QSS 跟随宿主当前主题。
     """
 
@@ -388,7 +537,9 @@ class CommandPalette(QDialog):
         super().__init__(parent)
         self._host = host
         self._entries = []
-        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(
+            Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(self.WIDTH, self.HEIGHT)
 
@@ -414,7 +565,7 @@ class CommandPalette(QDialog):
         self._search_icon = QLabel()
         self._search_icon.setFixedSize(18, 18)
         search_row.addWidget(self._search_icon)
-        self._input = QLineEdit()
+        self._input = SmoothInput()
         self._input.setObjectName("paletteInput")
         self._input.setPlaceholderText("跳转页面或执行动作（↑↓ 选择，回车执行）")
         self._input.setClearButtonEnabled(True)
@@ -445,12 +596,27 @@ class CommandPalette(QDialog):
         self._empty.hide()
         root.addWidget(self._empty, 1)
 
-        # 注册表：面板本体懒构建（首次按 / 才创建），注册表随之只建一次
+        # 注册表初始构建（面板本体懒构建，首次按触发键才创建）；
+        # 弹出时 open_at 会先 reload_registry 按宿主配置现算一遍
+        # （自定义动作 / 直达键变更无需主动广播），这里只做首次预热。
+        self.reload_registry()
+
+    # ---------------- 数据刷新 ----------------
+    def reload_registry(self):
+        """按宿主导航三张表 + config.custom_actions 重建命令注册表。
+
+        公开方法：设置页改动自定义动作后无需主动广播——open_at 每次弹出
+        前调一次（build_registry 是纯 Python，量级 ~25 条，微秒级）。
+        """
         host = self._host
+        cfg = getattr(host, "config", None)
+        custom = (cfg.get("custom_actions", []) or []) if cfg is not None \
+            else None
         self._entries = build_registry(
             getattr(host, "NAV_PAGE_TITLES", {}) or {},
             getattr(host, "NAV_PAGE_TITLES_FIXED", {}) or {},
-            getattr(host, "NAV_PAGE_INDEX", {}) or {})
+            getattr(host, "NAV_PAGE_INDEX", {}) or {},
+            custom_actions=custom)
 
     # ---------------- 主题 ----------------
     def apply_theme(self):
@@ -469,7 +635,6 @@ class CommandPalette(QDialog):
         # 行图标是位图，QSS 刷不到 —— 重建列表换新配色
         self._on_query_changed(self._input.text())
 
-    # ---------------- 数据刷新 ----------------
     def _on_query_changed(self, text: str):
         """按当前 query 重建结果列表（条目量级 ~25，重建零压力）。"""
         hits = filter_commands(self._entries, text)[:MAX_RESULTS]
@@ -484,7 +649,7 @@ class CommandPalette(QDialog):
             self._list.setCurrentRow(0)
 
     def _add_row(self, entry: CommandEntry, colors: dict):
-        """一行结果：自绘图标 + 标题 + 右侧分类灰字。"""
+        """一行结果：自绘图标 + 标题 + 右侧键位徽标（可选）+ 分类灰字。"""
         item = QListWidgetItem(self._list)
         item.setData(Qt.ItemDataRole.UserRole, entry)
         row = QWidget()
@@ -502,9 +667,24 @@ class CommandPalette(QDialog):
         h.addWidget(icon_lbl)
         h.addWidget(title)
         h.addStretch()
+        # 直达键徽标：该命令绑了全局直达键时在分类灰字前展示键位串
+        # （小字同 paletteRowCat 样式）。config 每次重建行时现读，
+        # 设置页改动后无需任何缓存失效逻辑。
+        combo = self._host_hotkeys().get(entry.cid)
+        if combo:
+            badge = QLabel(str(combo))
+            badge.setObjectName("paletteRowCat")
+            h.addWidget(badge)
         h.addWidget(cat)
         item.setSizeHint(QSize(0, self.ROW_HEIGHT))
         self._list.setItemWidget(item, row)
+
+    def _host_hotkeys(self) -> dict:
+        """宿主 config 的 command_hotkeys（过形态校验）；无宿主配置回 {}。"""
+        cfg = getattr(self._host, "config", None)
+        if cfg is None:
+            return {}
+        return sanitize_hotkeys_map(cfg.get("command_hotkeys", {}) or {})
 
     # ---------------- 键盘 / 交互 ----------------
     def eventFilter(self, obj, event):
@@ -556,7 +736,8 @@ class CommandPalette(QDialog):
 
     # ---------------- 打开 / 关闭 ----------------
     def open_at(self):
-        """清空上次的查询 → 定位到宿主窗口上部居中 → 弹出并聚焦搜索框。"""
+        """刷新注册表（自定义动作/直达键现算）→ 清空查询 → 定位弹出。"""
+        self.reload_registry()
         self._input.clear()
         self._on_query_changed("")
         host = self._host

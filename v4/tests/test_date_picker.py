@@ -78,7 +78,21 @@ def popup(qapp):
     qapp.processEvents()
     yield p
     p.close()
-    p.deleteLater()
+    _hard_delete(qapp, p)
+
+
+def _hard_delete(qapp, widget):
+    """确定性拆除：deleteLater + **强制派发 DeferredDelete**。
+
+    processEvents 不派发 DeferredDelete（MEMORY 已档），叠加 V7 起
+    CalendarPopup 挂 hover 动画子对象后，「大量弹层 + DateField」组合
+    在会话收尾段触发 0xC0000409 fail-fast（A/B 实测 HEAD 版 0 / V7 版
+    127，两半分组各自绿、全量才崩的累积型）。这里显式清场，把 C++
+    对象的销毁从「解释器收尾段的不确定时序」提前到 fixture 拆除点。
+    """
+    widget.deleteLater()
+    from PyQt6.QtCore import QEvent
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.processEvents()
 
 
@@ -92,8 +106,7 @@ def field(qapp):
     if f.popup is not None:
         f.popup.close()
     f.close()
-    f.deleteLater()
-    qapp.processEvents()
+    _hard_delete(qapp, f)
 
 
 def _click(widget, pos):

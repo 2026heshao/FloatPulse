@@ -76,7 +76,7 @@ class _FakeHost(QObject):
     def note_manager(self):
         return self._note_manager
 
-    def show_toast(self, text, ms=2800):
+    def show_toast(self, text, ms=2800, **kwargs):
         self.toasts.append(text)
 
 
@@ -93,7 +93,8 @@ def toast_recorder(monkeypatch):
 
     calls = []
 
-    def _fake(text, theme="", ms=2600):
+    def _fake(text, theme="", ms=2600, **kwargs):
+        # 2026-10-06 轻提示重设计后调用点可传 kind 等新参，替身透传吸收
         calls.append((text, theme))
 
     monkeypatch.setattr(ScreenToast, "show_msg", _fake)

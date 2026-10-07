@@ -39,8 +39,6 @@ import shlex
 from PyQt6.QtWidgets import (
     QWidget,
     QDialog,
-    QCheckBox,
-    QLineEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -66,7 +64,7 @@ from src.constants import DEFAULT_THEME
 from src import win_icons
 from src.controls import (
     tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle,
-    ScreenToast,
+    ScreenToast, SmoothInput, SmoothCheckBox,
 )
 
 
@@ -442,6 +440,16 @@ class AppCardWidget(QFrame):
       不冒泡到主窗口的全局右键兜底菜单
     - 路径失效（exe 文件不存在）时整张卡片置灰
     - hover 背景高亮（通过 QSS #appCard:hover 实现）
+
+    2026-10-08（清单 A2/B2/C2，交互状态批第二批）：
+    - **键盘可达**：StrongFocus + keyPressEvent（Enter/Space → clicked，
+      与 mousePressEvent 同一信号通道）——本页唯一动作就是"点卡片启动
+      软件"，此前键盘 100% 不可达；Tab 顺序按卡片创建顺序自然遍历。
+    - **焦点态**：QSS `#appCard:focus`（$focus_ring，基态 1px transparent
+      边框已备好，只换 border-color 不撑盒模型）。
+    - **按下态**：Qt QSS 的 :pressed 对 QFrame 无效，走属性驱动
+      （mousePress/Release 置 ``pressed`` 属性 + repolish，QSS
+      `[pressed="true"]` 加深一档背景；禁 margin 位移，theme.py:577 红线）。
     """
 
     # 左键点击信号：参数为卡片在 app_list 中的索引
@@ -463,6 +471,7 @@ class AppCardWidget(QFrame):
         self.setObjectName("appCard")
         self.setFixedSize(card_size, card_size + self._NAME_AREA_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._build_ui()
         self._load_icon()
@@ -512,11 +521,44 @@ class AppCardWidget(QFrame):
             self.setGraphicsEffect(effect)
             self.setToolTip(f"路径失效：{exe_path or '（空）'}")
 
+    # ---------------- 键盘与按下态（A2/C2）----------------
+    def keyPressEvent(self, event):  # noqa: N802 (Qt 命名)
+        """Enter / Space → clicked（与鼠标点击同一信号通道）。"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter,
+                           Qt.Key.Key_Space):
+            self.clicked.emit(self._index)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _set_pressed(self, on: bool) -> None:
+        """属性驱动的按下态：QSS ``[pressed="true"]`` 加深一档背景。
+
+        QFrame 不支持 QSS ``:pressed``，只能 mousePress/Release 手动置
+        属性并 repolish。置位/还原都不改几何，不碰 margin（红线）。
+        """
+        self.setProperty("pressed", "true" if on else "false")
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+
     def mousePressEvent(self, event):
-        """左键点击：发射 clicked 信号。"""
+        """左键点击：置按下态并发射 clicked 信号。"""
         if event.button() == Qt.MouseButton.LeftButton:
+            self._set_pressed(True)
             self.clicked.emit(self._index)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_pressed(False)
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        """按住拖出卡片时收掉按下态（避免残留高亮）。"""
+        if self.property("pressed") == "true":
+            self._set_pressed(False)
+        super().leaveEvent(event)
 
     def contextMenuEvent(self, event):
         """右键菜单：启动/编辑/定位/复制路径/移除。
@@ -617,7 +659,7 @@ class AppLauncherPage(QWidget):
         toolbar.addStretch()
 
         # 自动回到主页面复选框（状态持久化到 config.json）
-        self._back_home_cb = QCheckBox("启动软件后自动回到主页面")
+        self._back_home_cb = SmoothCheckBox("启动软件后自动回到主页面")
         self._back_home_cb.setChecked(self._auto_back_home)
         self._back_home_cb.stateChanged.connect(self._on_back_home_toggled)
         toolbar.addWidget(self._back_home_cb)
@@ -695,6 +737,16 @@ class AppLauncherPage(QWidget):
         QFrame#appCard:hover {{
             background-color: {colors['list_item_hover']};
             border: 1px solid {colors['primary_border']};
+        }}
+        QFrame#appCard:focus {{
+            /* A2/B2（2026-10-08）：键盘可达后的焦点可见性——基态 1px
+               transparent 边框只换 border-color，不撑盒模型 */
+            border: 1px solid {colors['focus_ring']};
+        }}
+        QFrame#appCard[pressed="true"] {{
+            /* C2：QFrame 不吃 :pressed，属性驱动（见 _set_pressed）；
+               背景加深一档复用 appLaunchBtn:pressed 同款色阶 */
+            background-color: {colors['list_item_selected']};
         }}
         QLabel#appName {{
             color: {colors['text']};
@@ -940,7 +992,7 @@ class AppLauncherPage(QWidget):
         path = (app.get("exe_path") or "").strip()
         if path:
             QApplication.clipboard().setText(path)
-            ScreenToast.show_msg("已复制路径", self._theme)
+            ScreenToast.show_msg("已复制路径", self._theme, kind="success")
 
     def _remove_app(self, index: int):
         """移除条目（二次确认；只从列表删除，不动电脑上的软件本体）。"""
@@ -1216,12 +1268,12 @@ class AppEditDialog(QDialog):
         form.setSpacing(10)
 
         # 软件名称
-        self._name_edit = QLineEdit()
+        self._name_edit = SmoothInput()
         self._name_edit.setPlaceholderText("请输入软件名称")
         form.addRow("软件名称:", self._name_edit)
 
         # exe 程序路径（输入框 + 浏览按钮）
-        self._exe_edit = QLineEdit()
+        self._exe_edit = SmoothInput()
         self._exe_edit.setPlaceholderText("选择可执行文件（*.exe）")
         self._exe_btn = SmoothButton("浏览")
         self._exe_btn.setObjectName("secondaryBtn")
@@ -1233,7 +1285,7 @@ class AppEditDialog(QDialog):
         form.addRow("程序路径:", exe_row)
 
         # 图标路径（输入框 + 浏览按钮，可选）
-        self._icon_edit = QLineEdit()
+        self._icon_edit = SmoothInput()
         self._icon_edit.setPlaceholderText("可选，图标文件（*.ico / *.png）")
         self._icon_btn = SmoothButton("浏览")
         self._icon_btn.setObjectName("secondaryBtn")
@@ -1245,7 +1297,7 @@ class AppEditDialog(QDialog):
         form.addRow("图标路径:", icon_row)
 
         # 备注
-        self._remark_edit = QLineEdit()
+        self._remark_edit = SmoothInput()
         self._remark_edit.setPlaceholderText("备注说明（可选）")
         form.addRow("备注:", self._remark_edit)
 

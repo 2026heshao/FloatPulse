@@ -10,14 +10,17 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
+    QListWidget, QListWidgetItem, QMenu, QTextEdit,
 )
 from PyQt6.QtCore import Qt, QTimer
 
 from src.constants import PARAGRAPH_PREVIEW_LEN
+from src import smooth_scrollbar
 from src.glass_dialog import GlassDialog
 from src.glass_message_box import GlassMessageBox
-from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
+from src.controls import (tune_list_scrolling, SmoothButton, EmptyState,
+                          IconButton, PageTitle, attach_page_search_shortcut,
+                          SmoothInput)
 
 # 搜索去抖毫秒数（与碎片页 SEARCH_DEBOUNCE_MS 同值；两面板各自本地定义，避免跨面板耦合）
 SEARCH_DEBOUNCE_MS = 250
@@ -75,7 +78,7 @@ class KnowledgePanel(QWidget):
         v.addLayout(toolbar)
 
         # ---- 搜索框 ----
-        self._kb_search = QLineEdit()
+        self._kb_search = SmoothInput()
         self._kb_search.setPlaceholderText("搜索段落内容...")
         # 搜索输入只做本地过滤（外部修改检测走 recheck=True 路径，避免每敲一字算一次 docx 哈希）
         # 输入去抖：停顿 SEARCH_DEBOUNCE_MS 才真正刷新，敲字过程不重建列表
@@ -86,12 +89,17 @@ class KnowledgePanel(QWidget):
             lambda: self.refresh(preserve_view=False, recheck=False))
         self._kb_search.textChanged.connect(self._on_search_changed)
         v.addWidget(self._kb_search)
+        # Ctrl+F：页级聚焦搜索框（清单 A4，2026-10-08 收口——写法与
+        # 笔记页统一，页内作用域不占全局命名空间）
+        attach_page_search_shortcut(self, self._kb_search)
 
         # ---- 段落列表（多选） ----
         self._kb_list = QListWidget()
         tune_list_scrolling(self._kb_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._kb_list.setObjectName("kbList")
-        # 长列表（300+ 段）：垂直滚动条常驻，滑块样式见 theme.py 的 #kbList 规则
+        # 长列表（300+ 段）：垂直滚动条常驻；V2（2026-10-07）换自绘状态机
+        # ——闲置 6px 半透明 → 悬停/滚动中 8px 加深 → 静止 600ms 回落
+        smooth_scrollbar.install_on(self._kb_list)
         self._kb_list.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self._kb_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -366,7 +374,7 @@ class KnowledgePanel(QWidget):
         if not text:
             return
         fid = self._fragment_manager.add_knowledge_segment(text, source=f"知识库#{index+1}")
-        self._host.show_toast(f"已加入碎片池（id={fid}）")
+        self._host.show_toast(f"已加入碎片池（id={fid}）", kind="success")
 
     def _on_add_to_fragments(self):
         """批量加入选中段落到碎片池"""
@@ -412,7 +420,7 @@ class KnowledgePanel(QWidget):
                     self.refresh()
                     self._host.data_changed.emit("knowledge")
                     self._host.show_toast(
-                        f"已追加为新段落（编号 {new_idx+1}）")
+                        f"已追加为新段落（编号 {new_idx+1}）", kind="success")
                 else:
                     GlassMessageBox.warning(self, "保存失败", "docx 保存失败，请检查文件权限。")
             else:

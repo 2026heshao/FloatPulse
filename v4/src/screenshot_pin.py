@@ -649,7 +649,7 @@ class PinWindow(QWidget):
         QGuiApplication.clipboard().setPixmap(self._composited())
         get_logger().info("[截图] 钉图已复制到剪贴板")
         # 轻提示反馈（2026-10-05）：此前仅写日志，用户无感知
-        ScreenToast.show_msg("钉图已复制", self._theme)
+        ScreenToast.show_msg("钉图已复制", self._theme, kind="success")
 
     def _save_as_png(self):
         from datetime import datetime

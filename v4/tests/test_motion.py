@@ -55,7 +55,19 @@ class TestTokens:
             "spark_fly", "progress_tween", "wake_pop", "wake_halo",
             "splash_out", "splash_hold", "enter_fade", "enter_rise",
             "ball_delay", "ball_pop",
+            # 轻提示气泡（2026-10-06 重设计，src/toast.py；toast_move =
+            # 存活气泡平移补间，R9 与堆叠补位共用）
+            "toast_in", "toast_out", "toast_stagger", "toast_move",
+            # 按钮交互反馈系统化升级（2026-10-07 规格文档 §6，controls.py）
+            "press_out", "focus_ring",
         }
+
+    def test_button_feedback_token_values(self):
+        """按钮交互反馈批新增 token 定稿值（规格文档 §6 表）：改值 =
+        动效设计变更，必须过规格评审。"""
+        assert motion.MOTION["press_out"] == 150, "松手回弹应比 fast(120) 略长"
+        assert motion.MOTION["focus_ring"] == 100
+        assert motion.MOTION["press_out"] > motion.MOTION["fast"]
 
     def test_motion_values_are_non_negative_ints(self):
         for key, value in motion.MOTION.items():

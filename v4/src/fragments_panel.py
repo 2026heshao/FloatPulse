@@ -25,27 +25,31 @@ from PyQt6.QtWidgets import (
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QFrame, QTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication,
-    QCheckBox, QRadioButton, QButtonGroup,
+    QRadioButton, QButtonGroup,
 )
-from PyQt6.QtCore import Qt, QSize, QTimer, QRect
-from PyQt6.QtGui import QColor, QFontMetrics, QBrush
+from PyQt6.QtCore import Qt, QSize, QTimer, QRect, QRectF
+from PyQt6.QtGui import QColor, QFontMetrics, QBrush, QPainterPath
 
 from src.fragment_manager import TYPE_LABELS
+from src.constants import RADIUS_CTL
 from src.fragment_classifier import (
     CAT_TEXT, CAT_LINK, CAT_CODE, CAT_PATH, CAT_COMMAND,
     CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TOKENS,
 )
 from src import secret_guard
+from src import row_hover
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.glass_message_box import GlassMessageBox
 from src.list_windowing import ListWindowing, attach_scroll_loader
 from src.merge_preview_dialog import MergePreviewDialog
-from src.theme import FALLBACK_ACCENT, get_colors
+from src.theme import FALLBACK_ACCENT, get_colors, get_menu_qss
 from src.controls import (tune_list_scrolling, SmoothButton, EmptyState,
-                          IconButton, PageTitle, Stepper)
+                          IconButton, PageTitle, Stepper, SmoothCheckBox, attach_page_search_shortcut,
+                          fade_in_once)
 from src import day_recall
 from src import inbox_triage
+from src import motion
 from src.constants import (
     DATETIME_DATE_LEN,
     DATETIME_TIME_START,
@@ -84,6 +88,11 @@ COLOR_TOKEN_ROLE = Qt.ItemDataRole.UserRole + 3
 # 这里保留私有别名，让本模块既有引用零改动。
 _CATEGORY_TOKENS = CATEGORY_TOKENS
 
+# 行 hover 端点 alpha（U4）：与 theme.py QSS ``QListWidget::item:hover``
+# 的 $primary_a08 同源 —— 20 = int(0.08 * 255)，与 glass._to_color 对
+# rgba a<=1 的解析口径一致。插值按进度缩放该端点，非新视觉档位。
+_HOVER_FILL_ALPHA = 20
+
 
 # ====================================================================
 class _MatchHighlightDelegate(QStyledItemDelegate):
@@ -101,6 +110,12 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         self._hl_bg = QColor(111, 255, 233, 80)
         self._hl_fg = QColor("#0B2B29")
         self._cat_colors = {}          # category -> QColor 类别色条
+        self._primary = QColor(FALLBACK_ACCENT)
+        # U4（2026-10-07 规格 G5）：行级 hover 进度缓存 —— 碎片行 hover
+        # 底色从 QSS :hover 一帧瞬变改为 120ms 插值。日期组行不参与
+        # （组头语义，无 TIME_ROLE 数据），仍走 QSS 原生 hover。
+        self._hover = row_hover.RowHoverController(
+            hoverable=lambda idx: idx.data(TIME_ROLE) is not None)
 
     def set_theme(self, colors: dict):
         """按主题刷新文字色 / 时间色 / 高亮底色 / 类别色条 / 组间分割线
@@ -110,6 +125,9 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         """
         self._base_color = QColor(colors.get("text", "#E4E8EE"))
         self._time_color = QColor(colors.get("text_placeholder", "#98A2AE"))
+        self._primary = QColor(colors.get("primary", FALLBACK_ACCENT))
+        if not self._primary.isValid():
+            self._primary = QColor(FALLBACK_ACCENT)
         bg = QColor(colors.get("primary", FALLBACK_ACCENT))
         if not bg.isValid():
             bg = QColor(FALLBACK_ACCENT)
@@ -142,6 +160,16 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
         widget = opt.widget
         style = widget.style() if widget is not None else QApplication.style()
 
+        # ---- U4：行 hover 底色插值（QSS :hover 一帧瞬变的替代）----
+        # amt>0 时把 State_MouseOver 从样式状态摘掉（否则 QSS hover 底与
+        # 插值叠色打架），改按进度叠一层 8% 主色（端点 = $primary_a08，
+        # 圆角同 QSS ::item 的 $r_ctl）；amt<=ε 不动 opt —— rest 渲染与
+        # 旧版逐字节一致。选中优先级高于 hover（hover_amount 内置）。
+        hover_amt = row_hover.hover_amount(self._hover, option, index)
+        strip_hover = hover_amt > row_hover.ALPHA_EPS
+        if strip_hover:
+            opt.state &= ~QStyle.StateFlag.State_MouseOver
+
         # 只画背景/选中态：文本由本方法分段绘制
         opt.text = ""
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
@@ -157,6 +185,17 @@ class _MatchHighlightDelegate(QStyledItemDelegate):
                           text_rect.width(), opt.rect.height())
         if text_rect.width() <= 2:
             return
+
+        if strip_hover:
+            # 与 QSS :hover 端点同值的 8% 主色淡染，叠在样式底之上、
+            # 类别条/文字之下 —— 端点合成结果与 QSS hover 同值。
+            fill = QColor(self._primary)
+            fill.setAlpha(int(round(_HOVER_FILL_ALPHA * hover_amt)))
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(opt.rect), RADIUS_CTL, RADIUS_CTL)
+            painter.save()
+            painter.fillPath(path, fill)
+            painter.restore()
 
         # ---- 左侧类别色条：按内容语义类别着色（分组行无类别不画）----
         cat = index.data(CAT_ROLE)
@@ -451,6 +490,13 @@ class _DayRecallView(QWidget):
         self._day_list.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection)
         self._day_list.itemDoubleClicked.connect(self._on_day_item_activated)
+        # E2（2026-10-08）：右键菜单——此前全仓 7 个列表里唯一静默无反应的
+        # 一个。菜单项按行数据能力给：跳转原记录（与双击同通道）+ 复制
+        # 条目文本；行数据不支持的动作（如素材删除）不硬凑。
+        self._day_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._day_list.customContextMenuRequested.connect(
+            self._on_day_context_menu)
         v.addWidget(self._day_list, 1)
 
         # 空态引导（覆盖层，跟随列表尺寸）
@@ -590,11 +636,40 @@ class _DayRecallView(QWidget):
             self._panel._show_detail(ref_id)
         elif source in (day_recall.SOURCE_TASK,
                         day_recall.SOURCE_TASK_DONE) and ref_id is not None:
-            self._host.show_toast("任务已在「日程任务」页，可按标题查找")
+            self._host.show_toast("任务已在「日程任务」页，可按标题查找", kind="info")
         elif source == day_recall.SOURCE_ASSET:
-            self._host.show_toast("素材在「临时素材」页")
+            self._host.show_toast("素材在「临时素材」页", kind="info")
         elif source == day_recall.SOURCE_POMODORO:
-            self._host.show_toast("专注记录来自番茄钟")
+            self._host.show_toast("专注记录来自番茄钟", kind="info")
+
+    def _on_day_context_menu(self, pos):
+        """E2（2026-10-08）：按天回溯列表右键菜单。
+
+        菜单项与行数据能力严格对齐：
+        - 「查看详情」= 双击的同通道委托（碎片跳详情，其余给指引提示）；
+        - 「复制条目文本」= 行展示文案（剪贴板 + 轻提示）。
+        空白处 / 无条目时不弹菜单。
+        """
+        item = self._day_list.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self._day_list)
+        menu.setStyleSheet(get_menu_qss(
+            getattr(self._host, "current_theme", None) or "light"))
+        act_detail = menu.addAction("查看详情")
+        act_copy = menu.addAction("复制条目文本")
+        chosen = menu.exec(self._day_list.mapToGlobal(pos))
+        menu.deleteLater()
+        if chosen == act_detail:
+            self._on_day_item_activated(item)
+        elif chosen == act_copy:
+            QApplication.clipboard().setText(item.text())
+            host_toast = getattr(self._host, "show_toast", None)
+            if callable(host_toast):
+                try:
+                    host_toast("已复制条目文本", kind="success")
+                except Exception:            # noqa: BLE001 - 展示层兜底
+                    pass
 
     def _on_save_note(self):
         """把当天全部条目组装成文本，走现有笔记通道存为一条笔记。"""
@@ -608,7 +683,7 @@ class _DayRecallView(QWidget):
         if note_id:
             self._host.refresh_page("notes")
             self._host.data_changed.emit("note")
-            self._host.show_toast("已存为笔记")
+            self._host.show_toast("已存为笔记", kind="success")
 
     def apply_theme(self):
         """跟主题刷新条目文字色与空态图标。"""
@@ -691,6 +766,9 @@ class FragmentsPanel(QWidget):
         self._frag_search.setClearButtonEnabled(True)
         self._frag_search.textChanged.connect(self._on_search_text_changed)
         toolbar.addWidget(self._frag_search, 1)
+        # Ctrl+F：页级聚焦搜索框（清单 A4，2026-10-08 收口——写法与
+        # 笔记页统一，页内作用域不占全局命名空间）
+        attach_page_search_shortcut(self, self._frag_search)
 
         # ---- 视图切换：列表 / 按天（day-recall）----
         # 默认「列表」= 现有行为，切到「按天」才走新分支（护栏 §1）。
@@ -865,7 +943,15 @@ class FragmentsPanel(QWidget):
 
     # ---- 预览开关 ----
     def _on_preview_toggled(self, checked: bool):
+        """显隐预览面板（D1，2026-10-08）：可见性同步落位（数据流/断言
+        契约不变），显示方向补一段淡入；隐藏保持瞬时。reduce_motion /
+        档位归零 / 面板不可见（构造期恢复配置的路径）→ 瞬时切换。"""
         self._preview.setVisible(bool(checked))
+        if checked and self.isVisible():
+            speed = motion.sanitize_speed(
+                getattr(self._host, "anim_speed", 1.0))
+            fade_in_once(self._preview,
+                         motion.eased_ms("fast", speed))
         config = self._host.config
         if bool(checked) != config.get("fragment_preview_visible", True):
             config.set("fragment_preview_visible", bool(checked))
@@ -1203,7 +1289,7 @@ class FragmentsPanel(QWidget):
         act_to_kb = menu.addAction("加入知识库")
         act_to_nav = menu.addAction("添加至网址导航")
         act_to_sticky = menu.addAction("钉为便签")
-        act_export = menu.addAction("导出到 Obsidian")
+        act_export = menu.addAction("导出全部到 Obsidian")
         menu.addSeparator()
         # 手动归类子菜单（自动分类判错时的纠正入口）
         cat_menu = menu.addMenu("归类为")
@@ -1256,7 +1342,7 @@ class FragmentsPanel(QWidget):
         """
         if self._fragment_manager.set_category(fid, cat):
             self.refresh(preserve_view=True)
-            self._host.show_toast(f"已归类为「{CATEGORY_LABELS.get(cat, cat)}」")
+            self._host.show_toast(f"已归类为「{CATEGORY_LABELS.get(cat, cat)}」", kind="success")
             return True
         return False
 
@@ -1264,7 +1350,7 @@ class FragmentsPanel(QWidget):
     def _copy_content(self, frag):
         """复制单条碎片内容到剪贴板"""
         self._clipboard_monitor.put_text(frag.content)
-        self._host.show_toast("已复制碎片内容")
+        self._host.show_toast("已复制碎片内容", kind="success")
 
     def _edit_fragment(self, fragment_id):
         """编辑碎片内容（保存后刷新列表与预览，保留浏览位置）"""
@@ -1299,7 +1385,7 @@ class FragmentsPanel(QWidget):
             return
         note = self._note_manager.get_note(title)
         self._host.show_toast(
-            f"已转存为新笔记：{note.title if note else ''}")
+            f"已转存为新笔记：{note.title if note else ''}", kind="success")
 
     def _to_sticky(self, fragment_id: int):
         """碎片 → 直接钉成桌面便签（锚定碎片本身，内容写回碎片）。
@@ -1313,12 +1399,13 @@ class FragmentsPanel(QWidget):
             return
         ok, reason = manager.open_fragment(fragment_id)
         if ok:
-            self._host.show_toast("已钉为桌面便签")
+            self._host.show_toast("已钉为桌面便签", kind="success")
         elif reason == "limit":
             self._host.show_toast(
-                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些",
+                kind="warning")
         elif reason == "missing":
-            self._host.show_toast("碎片已不存在")
+            self._host.show_toast("碎片已不存在", kind="warning")
         else:
             GlassMessageBox.information(self, "提示", "便签功能尚未就绪。")
 
@@ -1337,8 +1424,9 @@ class FragmentsPanel(QWidget):
             if self._docx_manager.save():
                 self._host.refresh_page("knowledge")
                 self._host.data_changed.emit("knowledge")
-                self._host.show_toast(
-                    f"已加入知识库：碎片已追加为新段落（编号 {new_idx+1}）")
+                self._host.show_toast("已加入知识库",
+                    msg=f"碎片已追加为新段落（编号 {new_idx+1}）",
+                    kind="success")
             else:
                 GlassMessageBox.warning(self, "保存失败", "docx 保存失败。")
         else:
@@ -1366,7 +1454,7 @@ class FragmentsPanel(QWidget):
         self._nav_manager.add_site(gid, title, url)
         self._host.refresh_page("nav")
         self._host.data_changed.emit("nav")
-        self._host.show_toast(f"已添加到网址导航：{title}")
+        self._host.show_toast(f"已添加到网址导航：{title}", kind="success")
 
     def _on_double_click(self, item):
         fid = item.data(Qt.ItemDataRole.UserRole)
@@ -1481,7 +1569,7 @@ class FragmentsPanel(QWidget):
         fragments = self._fragment_manager.get_fragments_by_ids(ids)
         text = "\n\n".join(f.content for f in fragments)
         self._clipboard_monitor.put_text(text)
-        self._host.show_toast(f"已复制 {len(fragments)} 条碎片")
+        self._host.show_toast(f"已复制 {len(fragments)} 条碎片", kind="success")
 
     # ==================================================================
     # 凭证哨兵回溯（clipboard-guard）
@@ -1505,7 +1593,8 @@ class FragmentsPanel(QWidget):
     def _on_secret_guarded(self, _info):
         """命中事件 → 只更新入口按钮（不弹窗、不打断）。"""
         self._refresh_guard_entry()
-        self._host.show_toast("检测到疑似凭证，已按遮蔽处理；可点「凭证」入口查看")
+        self._host.show_toast("检测到疑似凭证，已按遮蔽处理；可点「凭证」入口查看",
+                           kind="warning")
 
     def _refresh_guard_entry(self):
         """刷新凭证入口按钮的可见性与计数文案。"""
@@ -1530,7 +1619,7 @@ class FragmentsPanel(QWidget):
             return
         pending = mon.guard_pending()
         if not pending:
-            self._host.show_toast("没有待处理的凭证命中")
+            self._host.show_toast("没有待处理的凭证命中", kind="info")
             return
 
         dlg = GlassDialog(self._host, title="凭证哨兵",
@@ -1544,7 +1633,7 @@ class FragmentsPanel(QWidget):
         body.addWidget(hint)
 
         # 「本次记住」：勾选后本次处置同时作为本进程默认（不写持久配置）
-        remember = QCheckBox("本次记住（仅本进程，不写配置）")
+        remember = SmoothCheckBox("本次记住（仅本进程，不写配置）")
         remember.setChecked(False)
         body.addWidget(remember)
 

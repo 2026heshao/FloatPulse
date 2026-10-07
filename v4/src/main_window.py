@@ -38,17 +38,17 @@
 import os
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
     QStackedWidget, QButtonGroup,
     QFrame, QMenu, QApplication, QFileDialog,
     QScrollArea, QTextBrowser,
 )
 from PyQt6.QtCore import (
-    Qt, QPoint, pyqtSignal, QTimer, QRect, QRectF, QEvent,
+    Qt, QPoint, pyqtSignal, QTimer, QRect, QRectF, QEvent, QUrl,
     QPropertyAnimation, QEasingCurve,
 )
 from PyQt6.QtGui import (QColor, QFont, QPainter, QAction, QIcon, QShortcut,
-                         QKeySequence)
+                         QKeySequence, QDesktopServices)
 
 from src.theme import get_main_window_qss, get_colors, next_theme_on_toggle
 from src.constants import DEFAULT_THEME
@@ -56,15 +56,16 @@ from src import motion
 from src import controls
 from src.app_version import APP_VERSION
 from src.config import (
-    DEFAULT_CONFIG,
     LAST_PAGE_INDEX_MAX,
 )
 from src.nav_layout import (
     group_of,
 )
 from src.glass import GlassPanel
+from src.global_hotkey import GlobalHotkeyManager
 from src import appearance
-from src.controls import IconButton, PageTitle, ScreenToast
+from src.controls import IconButton, PageTitle, SmoothButton, fade_in_once
+from src.toast import ToastCenter
 from src.app_paths import find_icon_file, get_screen_geometry
 from src.fragments_panel import FragmentsPanel
 from src.tasks_panel import TasksPanel
@@ -165,6 +166,7 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
     screenshot_changed = pyqtSignal()            # 截图钉屏设置（开关/热键）变更
     plugins_changed = pyqtSignal(bool)           # 悬浮球外置插件总闸变更
     pomodoro_changed = pyqtSignal()              # 番茄钟设置（开关/时长/自动休息）变更
+    command_palette_changed = pyqtSignal()       # 命令面板设置（开关/触发键/直达键/自定义动作）变更
     task_focus_requested = pyqtSignal(int, str)  # 任务页请求对某任务开始专注（task_id, title）
     hidden_to_tray = pyqtSignal()                # 主窗口被收进托盘时发射（3.3：宿主提示一次）
 
@@ -178,6 +180,9 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self._fragment_manager = fragment_manager
         self._docx_manager = docx_manager
         self._config = config_manager
+        # 轻提示设置项数据源（2026-10-06「轻提示」卡 7 键）：ToastCenter
+        # 逐次弹出时读取，改设置即时生效；未注入走 DEFAULT_CONFIG 兜底
+        ToastCenter.attach_config(config_manager)
         # 减弱动效总闸（#14）：启动即按配置置位，motion.duration 单点生效
         motion.set_reduce_motion(bool(config_manager.get("reduce_motion", False)))
         # 按钮丝滑过渡（清单 S2）：启动按档位置位；设置页变更走广播接线
@@ -258,8 +263,21 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         # 初始化
         self._init_window()
         self._init_ui()
+        # ---- 命令直达键全局热键管理器（2026-10-06 设置页「命令面板」卡）----
+        # 独立实例防与其他绑定互踢（截图钉屏 / 插件热键同款口径）；native
+        # 过滤器在此安装（__init__ 必然运行于 QApplication 之后）。退出收尾
+        # 由 wiring.QuitCoordinator.shutdown_resources 调本窗公开的
+        # unregister_command_hotkeys() 走同一收尾路径。
+        self._command_hotkey_mgr = GlobalHotkeyManager()
+        _app = QApplication.instance()
+        if _app is not None and _app.eventDispatcher() is not None:
+            _app.eventDispatcher().installNativeEventFilter(
+                self._command_hotkey_mgr)
         self._init_shortcuts()
         self._init_context_menu()
+        # 命令面板设置变更（设置页广播）→ 收面板 + 重建触发键 + 重注册直达键
+        self.command_palette_changed.connect(
+            self._apply_command_palette_settings)
         self._apply_theme()
         # 安装子控件事件过滤器：防止缩放指针残留在子控件上
         self._install_cursor_filter()
@@ -271,28 +289,28 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self._switch_page(self._initial_page_index())
 
     # ==================================================================
-    # 轻提示条（Toast）
+    # 轻提示气泡（Toast，src/toast.py）
     # ==================================================================
-    def show_toast(self, text: str, ms: int = 0):
-        """操作反馈提示：屏幕顶部居中的独立顶层浮窗。
+    def show_toast(self, text: str, ms: int = 0, kind: str = "",
+                   msg: str = "", action=None, ghost=None):
+        """操作反馈提示：屏幕底部居中的轻提示气泡（src/toast.ToastCenter）。
 
         2026-09-24 改造：此前是主窗口内的子控件（底部状态条），主窗口
-        最小化/收进托盘时提示就看不见了。统一改为 ScreenToast —— 屏幕
-        级顶层窗口，无论窗口状态如何都直接显示在屏幕最上方。
+        最小化/收进托盘时提示就看不见了。统一改为屏幕级顶层浮窗。
 
-        2026-10-05（B4）：时长做成设置项 toast_duration_ms——``ms`` 传
-        0（默认哨兵）时读配置；调用方显式传 ms（如导出完成的 4200/3200
-        长文案）不被覆盖。悬浮球 1500ms 短提示走 knowledge_ball 自己的
-        _show_toast，不经此处。
+        2026-10-06（轻提示重设计，设计稿 轻提示气泡-高仿真）：新增
+        ``kind`` / ``msg`` / ``action`` / ``ghost`` —— 语义变体
+        （success/info/warning/danger/accent/neutral/loading）、副标题
+        与动作钮 ``(文字, 回调)``。``ms`` 传 0（默认哨兵）时由
+        ToastCenter 按设置项「停留时长」基准档 + 语义倍率定驻留（B4 的
+        toast_duration_ms 单键已被 7 键「轻提示」卡取代）；调用方显式
+        传 ms（如导出完成的 4200/3200 长文案）不被覆盖。悬浮球 1500ms
+        短提示走 knowledge_ball 自己的 _show_toast，不经此处。
+        面板侧 ``host.show_toast(text, ms)`` 双参契约不变。
         """
-        if ms <= 0:
-            cfg = self.config
-            if cfg is not None:
-                ms = int(cfg.get("toast_duration_ms",
-                                 DEFAULT_CONFIG.get("toast_duration_ms", 2800)))
-            else:
-                ms = DEFAULT_CONFIG.get("toast_duration_ms", 2800)
-        ScreenToast.show_msg(text, self.current_theme, ms)
+        ToastCenter.push(kind=kind or "neutral", title=text, msg=msg,
+                         ms=ms, action=action, ghost=ghost,
+                         theme=self.current_theme)
 
     # ---- 桌面便签管理器（knowledge_ball.main() 晚绑定注入；未注入为 None）----
     # 面板通过本 @property 读取（铁律：host 只读属性必须 property，
@@ -361,6 +379,15 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self.show_page(NAV_PAGE_INDEX["tasks"])
         self._page_tasks.focus_new_task()
 
+    def focus_new_note(self):
+        """「新建笔记」公开委托（命令面板 action.new_note 落点）。
+
+        切到笔记管理页并复用面板既有「新建笔记」交互（清空编辑区 +
+        聚焦，输入后自动保存），不新造交互模式。
+        """
+        self.show_page(NAV_PAGE_INDEX["notes"])
+        self._page_notes.focus_new_note()
+
     # ==================================================================
     # 导出到 Obsidian（唯一实现；设置页按钮与三个面板右键菜单共用）
     # ==================================================================
@@ -407,16 +434,18 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
                 _ident, reason = result.errors[0]
                 self.show_toast(
                     f"导出完成：共 {len(result.files_written)} 个文件，"
-                    f"失败 {len(result.errors)} 条（{reason}）", 4200)
+                    f"失败 {len(result.errors)} 条（{reason}）", 4200,
+                    kind="warning")
             else:
                 self.show_toast(
                     f"已导出到 Obsidian：共 {len(result.files_written)} 个文件",
-                    3200)
+                    3200, kind="success")
         return result
 
     def _on_fragments_trimmed(self, count: int):
         """碎片池超限自动淘汰时通报用户（此前是静默删除，用户不知道数据少了）"""
-        self.show_toast(f"碎片池已达上限，自动清理了 {count} 条最早的碎片")
+        self.show_toast(f"碎片池已达上限，自动清理了 {count} 条最早的碎片",
+                        kind="warning")
 
     # ==================================================================
     # 快捷键初始化
@@ -459,19 +488,27 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
             shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
             shortcut.activated.connect(lambda n=i: self._switch_to_nav_slot(n))
 
-        # `/`: 全局命令面板（页面导航 + 宿主动作）。与 Ctrl+K 刻意划清
-        # 分工：Ctrl+K 搜数据内容（kb-search 插件页），`/` 搜动作与导航
-        # （实现见 src/command_palette.py，本文件只挂键 + 懒构建入口）。
+        # 命令面板触发键（2026-10-06 起配置驱动："/" / ";" / "`" 三选一，
+        # 见设置页「命令面板」卡；默认 "/" 与历史行为一致）。与 Ctrl+K
+        # 刻意划清分工：Ctrl+K 搜数据内容（kb-search 插件页），面板搜动作
+        # 与导航（实现见 src/command_palette.py，本文件只挂键 + 懒构建入口）。
         # ★ 编辑态防误触：QLineEdit/QTextEdit 等可编辑控件会先收到 Qt 的
-        #   ShortcutOverride 并接受，`/` 快捷键根本不触发；只读
-        #   QTextBrowser 之类不吃 override 的控件由
-        #   command_palette.focus_in_text_editor 在入口处二次过滤。
-        palette_shortcut = QShortcut(QKeySequence("/"), self)
-        palette_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        palette_shortcut.activated.connect(self._open_command_palette)
+        #   ShortcutOverride 并接受，触发键根本不触发；只读 QTextBrowser
+        #   之类不吃 override 的控件由 command_palette.focus_in_text_editor
+        #   在入口处二次过滤。
+        from src import command_palette
+        trigger = command_palette.normalize_trigger(
+            self._config.get("command_palette_trigger", "/"))
+        self._palette_shortcut = QShortcut(QKeySequence(trigger), self)
+        self._palette_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._palette_shortcut.activated.connect(self._open_command_palette)
+
+        # 启动时按 config 注册命令直达键（默认空表零注册零开销；
+        # 设置页变更走 command_palette_changed → _apply_command_palette_settings）
+        self._reapply_command_hotkeys()
 
     # ==================================================================
-    # 全局命令面板（`/`）
+    # 全局命令面板（触发键可配，默认 "/"）
     # ==================================================================
     def _open_command_palette(self):
         """打开全局命令面板（懒构建，首开 <80ms——参考 10 页懒加载先例）。
@@ -480,13 +517,141 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         主窗启动路径不该为它提前背上这份 import。
         """
         from src import command_palette
-        if command_palette.focus_in_text_editor(QApplication.focusWidget()):
-            return          # 焦点在文本控件内：按 / 是输入字符，不弹面板
+        if not self._config.get("command_palette_enabled", True):
+            self.show_toast("命令面板已停用：请在 设置 → 全局工具 中开启",
+                            kind="warning")
+            return
+        # 编辑态过滤只在本应用持有活动窗口时才有意义：全局唤醒键在**别的
+        # 应用**界面按下时，QApplication.focusWidget() 仍会返回本应用隐藏 /
+        # 失焦前最后聚焦的文本控件（Qt 不因失活清空 focus widget），照旧
+        # 过滤会把唤醒键吞掉。主窗隐藏（Ctrl+W）时 activeWindow() 为 None，
+        # 跳过过滤直接弹面板——open_at 无主窗 visible 依赖（QDialog/Popup
+        # 是独立顶层窗），隐藏态弹出不受影响。
+        if (QApplication.activeWindow() is not None
+                and command_palette.focus_in_text_editor(
+                    QApplication.focusWidget())):
+            return          # 焦点在文本控件内：按触发键是输入字符，不弹面板
         palette = getattr(self, "_command_palette", None)
         if palette is None:
             palette = command_palette.CommandPalette(self, self)
             self._command_palette = palette
         palette.open_at()
+
+    # ==================================================================
+    # 命令面板设置应用（设置页「命令面板」卡广播 command_palette_changed）
+    # ==================================================================
+    def _apply_command_palette_settings(self):
+        """命令面板设置变更的统一落点：收面板 + 重建触发键 + 重注册直达键。
+
+        开关关闭时触发键仍在（按下只提示去设置开启），直达键全部注销。
+        """
+        palette = getattr(self, "_command_palette", None)
+        if palette is not None and palette.isVisible():
+            palette.close()
+        # 旧触发键快捷键下线，按配置重建（触发键三选一，ApplicationShortcut
+        # 上下文与连接目标不变）
+        old = getattr(self, "_palette_shortcut", None)
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
+        from src import command_palette
+        trigger = command_palette.normalize_trigger(
+            self._config.get("command_palette_trigger", "/"))
+        self._palette_shortcut = QShortcut(QKeySequence(trigger), self)
+        self._palette_shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._palette_shortcut.activated.connect(self._open_command_palette)
+        self._reapply_command_hotkeys()
+
+    def _reapply_command_hotkeys(self):
+        """命令直达键 + 全局唤醒键重注册：注销全部 → 读 config 过滤 → 逐条注册。
+
+        总开关关闭时保持注销态直接返回（直达键与全局唤醒键随面板开关联动）。
+        注册失败只告警 + toast，不中断后续键。
+        """
+        self._command_hotkey_mgr.unregister_all()
+        if not self._config.get("command_palette_enabled", True):
+            return
+        from src import command_palette
+        combos = command_palette.sanitize_hotkeys_map(
+            self._config.get("command_hotkeys", {}) or {})
+        for cid, combo in combos.items():
+            ok = self._command_hotkey_mgr.register(
+                combo, lambda c=cid: self._execute_command_by_cid(c))
+            if not ok:
+                self._log_warn(f"[命令面板] 直达键注册失败：{combo}（{cid}）")
+                self.show_toast(
+                    f"直达键 {combo} 注册失败（可能被其他程序占用）",
+                    kind="warning")
+        # 全局唤醒键（2026-10-06）：任意应用界面（含主窗隐藏 / 失焦）按下
+        # 即呼出命令面板——触发键是 QShortcut 只在应用聚焦时有效，本键走
+        # RegisterHotKey 补盲区。空串 = 未启用；与直达键 / 自定义动作 /
+        # 截图热键的互斥查重在设置侧已拦（command_palette_settings），注册
+        # 侧不做第二套查重，仍失败（如被其他程序占用）沿用既有告警口径。
+        wake = str(self._config.get("command_palette_global_hotkey", "")
+                   or "").strip()
+        if not wake:
+            return
+        if not self._command_hotkey_mgr.register(
+                wake, self._open_command_palette):
+            self._log_warn(f"[命令面板] 全局唤醒键注册失败：{wake}")
+            self.show_toast(
+                f"全局唤醒键 {wake} 注册失败（可能被其他程序占用）",
+                kind="warning")
+
+    def _execute_command_by_cid(self, cid: str):
+        """直达键触发：按 cid 在（惰性缓存的）注册表里查命令并执行。
+
+        查不到 cid 静默返回（配置残留已删命令是正常情况）；custom.* 走
+        execute_custom_action，其余走 execute_entry 的宿主公开 API 分派。
+        """
+        if not cid:
+            return
+        from src import command_palette
+        registry = getattr(self, "_cmd_registry", None)
+        if registry is None:
+            registry = command_palette.build_registry(
+                self.NAV_PAGE_TITLES, self.NAV_PAGE_TITLES_FIXED,
+                self.NAV_PAGE_INDEX,
+                custom_actions=self._config.get("custom_actions", []) or None)
+            self._cmd_registry = registry
+        entry = next((e for e in registry if e.cid == cid), None)
+        if entry is None:
+            return
+        if entry.target[0] == "custom":
+            self.execute_custom_action(entry.target[1])
+            return
+        command_palette.execute_entry(entry, self)
+
+    def execute_custom_action(self, action_id) -> bool:
+        """执行一条自定义动作（命令面板 / 直达键共用；宿主公开 API）。
+
+        - url / folder → QDesktopServices.openUrl（folder 走本地文件 URL）
+        - text → 复制到剪贴板 + toast
+        - 找不到该 id → False（配置残留静默降级）
+        """
+        from src import command_palette
+        actions = command_palette.sanitize_custom_actions(
+            self._config.get("custom_actions", []) or [])
+        action = next(
+            (a for a in actions if str(a["id"]) == str(action_id)), None)
+        if action is None:
+            return False
+        atype, value, title = action["type"], action["value"], action["title"]
+        if atype == "text":
+            QApplication.clipboard().setText(value)
+            self.show_toast(f"已复制「{title}」", kind="success")
+            return True
+        url = QUrl.fromLocalFile(value) if atype == "folder" else QUrl(value)
+        if not QDesktopServices.openUrl(url):
+            return False
+        self.show_toast(f"已打开「{title}」", kind="info")
+        return True
+
+    def unregister_command_hotkeys(self):
+        """命令直达键全局热键注销（退出收尾用，wiring.QuitCoordinator 调用）。"""
+        mgr = getattr(self, "_command_hotkey_mgr", None)
+        if mgr is not None:
+            mgr.unregister_all()
 
     # ==================================================================
     # 站内搜索（Ctrl+K）
@@ -514,7 +679,8 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         except Exception as exc:                      # noqa: BLE001
             self._log_warn(f"[搜索] 打开插件页失败：{exc!r}")
         try:
-            self.show_toast("站内搜索插件未启用：请到「插件中心」启用后重试")
+            self.show_toast("站内搜索插件未启用：请到「插件中心」启用后重试",
+                            kind="warning")
         except Exception:                             # noqa: BLE001
             pass
 
@@ -1482,6 +1648,13 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self._remember_last_page(index)
         # 刷新对应面板
         self._refresh_page(index)
+        # V6（2026-10-07 交互视觉清单）：页内容 180ms 淡入 —— setCurrentIndex
+        # 语义/数据流零变化（可见性先落位），fade_in_once 只补「到位过程」；
+        # 侧栏与标题栏骨架在 stack 之外，不参与淡入。启动期主窗尚不可见、
+        # reduce_motion / 档位归零时 fade_in_once 内部直接跳过（瞬时切换）。
+        page = self._stack.currentWidget()
+        if page is not None:
+            fade_in_once(page, motion.eased_ms("base", self.anim_speed))
 
     def _remember_last_page(self, index: int):
         """记录当前页面索引到配置（D3：记住上次页面功能）。
@@ -2272,7 +2445,8 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
     def _build_help_toc_rail(self) -> QWidget:
         """说明页左目录（TOC）：6 组纯文字目录，替代 17 枚按钮（2026-10-03）。
 
-        目录项是 checkable QPushButton（objectName=helpTocItem，纯 QSS：
+        目录项是 checkable SmoothButton（objectName=helpTocItem，2026-10-08
+        清单 C1 从裸 QPushButton 收编；纯 QSS：
         常态 text_secondary 纯文字无图标无底色块、hover primary_a08 淡染、
         选中 accent_soft 底 + 主色加粗 + 左缘 3px 竖条——与 settingsNavBtn
         按钮形态明确区分）。目录自身可滚，小窗高度不再裁切。
@@ -2325,7 +2499,10 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
             rh.addStretch(1)
             rv.addWidget(row)
             for key in keys:
-                btn = QPushButton(labels[key])
+                # 2026-10-08（清单 C1）：裸 QPushButton → SmoothButton，
+                # 收编绘制级按下反馈（overlay 端点见 controls 的
+                # helpTocItem 条目：QSS hover 底不变，按下叠 primary 淡染）
+                btn = SmoothButton(labels[key])
                 btn.setObjectName("helpTocItem")
                 btn.setCheckable(True)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2456,16 +2633,52 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         _decorate_help_html 从 17 章合并原文重新装饰——原文是唯一真相
         源，避免上次注入的行内样式叠进本次输出。重渲染会重置滚动位置：
         按滚动比例恢复（读在哪一章附近，换主题后还在哪一章附近）。
+
+        恢复时机（2026-10-08 清单 F1）：QTextBrowser 文档重排可能**晚一拍**
+        ——setHtml 后立即读 sb.maximum() 在异步布局路径下拿到的是旧文档的
+        值，比例恢复必有偏差。两层恢复：
+          1. setHtml 后立即按当前 maximum 尽力恢复一次（同步布局路径，
+             此前行为，保证跳变最小）；
+          2. 再挂 ``rangeChanged`` 一次性补钉 —— 若布局晚一拍、真 maximum
+             是事后才到的，落位那一刻按换主题前的比例再校正（写法参照
+             ai-assistant 插件的贴底跟随补钉）；singleShot(0) 兜底断开，
+             覆盖「补钉始终未触发」的路径。
         """
         browser = getattr(self, "_help_browser", None)
         if browser is None:
             return
         colors = get_colors(self._theme)
         sb = browser.verticalScrollBar()
-        ratio = (sb.value() / sb.maximum()) if sb.maximum() > 0 else 0.0
+        old_max = sb.maximum()
+        ratio = (sb.value() / old_max) if old_max > 0 else 0.0
         browser.setHtml(self._decorate_help_html(self._help_full_html(),
                                                  colors))
-        sb.setValue(int(ratio * sb.maximum()))
+
+        state = {"done": False}
+
+        def _restore_ratio(_lo: int, _hi: int) -> None:
+            state["done"] = True
+            try:
+                sb.rangeChanged.disconnect(_restore_ratio)
+            except TypeError:
+                pass
+            if _hi > 0:
+                sb.setValue(int(ratio * _hi))
+
+        def _restore_fallback() -> None:
+            if state["done"]:
+                return
+            try:
+                sb.rangeChanged.disconnect(_restore_ratio)
+            except TypeError:
+                pass
+
+        # ① 同步尽力恢复（maximum 已是新文档时即正确）
+        if sb.maximum() > 0:
+            sb.setValue(int(ratio * sb.maximum()))
+        # ② 异步布局补钉：真 maximum 事后到达时按比例校正
+        sb.rangeChanged.connect(_restore_ratio)
+        QTimer.singleShot(0, _restore_fallback)
         self._help_chapter_geo = None   # 新文档宽高未定 → 下次定位重扫
         self._help_scrollspy()
 

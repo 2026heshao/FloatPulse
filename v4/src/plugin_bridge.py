@@ -131,7 +131,7 @@ class PluginHostBridge:
             self._ui.refresh_fragments()
             if fid:
                 # 轻提示反馈（2026-10-05）：插件 AI 动作写入此前静默
-                self._ui.show_toast("已加入碎片")
+                self._ui.show_toast("已加入碎片", kind="success")
             return fid
 
         def _add_task(title, note, deadline):
@@ -140,14 +140,14 @@ class PluginHostBridge:
             self._ball.refresh_badge()          # 任务数变了，球体徽标同步
             if tid:
                 shown = title if len(title) <= 16 else title[:15] + "…"
-                self._ui.show_toast(f"已添加任务：{shown}")
+                self._ui.show_toast(f"已添加任务：{shown}", kind="success")
             return tid
 
         def _add_note(title, content):
             nid = self._note_manager.add_note(content, title)
             self._ui.refresh_notes()
             if nid:
-                self._ui.show_toast("已存为笔记")
+                self._ui.show_toast("已存为笔记", kind="success")
             return nid
 
         def _add_knowledge(content):

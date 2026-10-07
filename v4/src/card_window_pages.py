@@ -33,7 +33,7 @@ from PyQt6.QtGui import (QDesktopServices, QDrag, QImageReader,
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QMenu, QToolButton,
-    QListWidget, QListWidgetItem, QLineEdit, QDateEdit,
+    QListWidget, QListWidgetItem, QDateEdit,
     QDialog, QFormLayout, QTextEdit, QScrollArea,
     QFrame, QSizePolicy, QGridLayout,
 )
@@ -44,10 +44,12 @@ from src.task_manager import (
     group_title, KIND_ROW, KIND_HEADER, GROUP_OVERDUE, STATE_OVERDUE, STATE_NONE,
 )
 from src.task_delegate import (
-    TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
+    TaskItemDelegate, TaskListWidget,
+    KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
 from src.controls import (
     tune_list_scrolling, SmoothButton, EmptyState,
+    SmoothInput,
 )
 from src.theme import get_menu_qss, get_colors
 from src.icon_render import icon as render_icon
@@ -82,7 +84,18 @@ def _domain_of_url(url: str) -> str:
 # 素材项组件：支持拖拽出去（拖拽时携带文件路径）
 # ====================================================================
 class _AssetItemWidget(QWidget):
-    """单个素材项，显示缩略图/图标 + 文件名，支持拖拽取出"""
+    """单个素材项，显示缩略图/图标 + 文件名，支持拖拽取出
+
+    2026-10-08（清单 A2/B2/C2/E4 第二批）：
+    - objectName ``assetItem``：QSS 三态（hover / :focus / [pressed]）
+      挂在 theme.py 卡片窗模板，机制对照 fragItemRow（WA_StyledBackground
+      + WA_Hover）——此前素材格连 hover 都没有；
+    - 键盘可达：StrongFocus + Enter/Space → 打开（与双击同一通道，
+      _on_double_click）；失效文件不响应；
+    - 按下态：QFrame 式属性驱动（``pressed`` 属性 + repolish），
+      拖拽判定位移阈值（manhattanLength ≥ 10）不受影响；
+    - 失效文件名颜色改走主题 token（text_disabled），不再写死 #999。
+    """
 
     DOUBLE_CLICK_THRESHOLD = 300  # 双击判定时间（毫秒）
 
@@ -96,9 +109,16 @@ class _AssetItemWidget(QWidget):
         self._last_click_time = 0
         self._is_valid = os.path.exists(asset.stored_path) if asset else False
 
+        self.setObjectName("assetItem")
         self.setFixedSize(72, 84)
+        # QSS 的 background-color / border 要生效，自定义 QWidget 必须
+        # 显式打开样式背景；hover 态（:hover）需要 WA_Hover 驱动重绘
+        # （写法对照 card_window.fragItemRow，2026-10-08 E4）
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor if self._is_valid
                        else Qt.CursorShape.ForbiddenCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setToolTip(self._build_tooltip())
 
         v = QVBoxLayout(self)
@@ -124,7 +144,11 @@ class _AssetItemWidget(QWidget):
         v.addWidget(self._name_label)
 
         if not self._is_valid:
-            self._name_label.setStyleSheet("color: #999;")
+            # E4：失效文件名颜色走主题 token（此前写死 #999，深色主题
+            # 下突兀）；主题切换走重建路径（_apply_style），取色即所见
+            self._name_label.setStyleSheet(
+                "color: %s;" % get_colors(self._theme).get("text_disabled",
+                                                           "#999999"))
 
     def _build_tooltip(self):
         if not self._asset:
@@ -196,7 +220,27 @@ class _AssetItemWidget(QWidget):
         self._icon_label.setPixmap(
             render_icon(icon_name, 36, color).pixmap(36, 36))
 
+    # ---- 键盘与按下态（A2/C2）----
+    def keyPressEvent(self, event):  # noqa: N802 (Qt 命名)
+        """Enter / Space → 打开文件（与双击同一通道）；失效文件不响应。"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter,
+                           Qt.Key.Key_Space):
+            if self._is_valid:
+                self._on_double_click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _set_pressed(self, on: bool) -> None:
+        """属性驱动的按下态（QWidget 不吃 QSS :pressed）。"""
+        self.setProperty("pressed", "true" if on else "false")
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_pressed(True)
         if event.button() == Qt.MouseButton.LeftButton and self._is_valid:
             self._drag_start = event.pos()
         # 双击检测
@@ -235,10 +279,20 @@ class _AssetItemWidget(QWidget):
                 drag.setHotSpot(QPoint(40, 40))
         drag.exec(Qt.DropAction.CopyAction)
         self._drag_start = None
+        # 拖拽 exec 吞掉 release：就地收掉按下态，避免高亮残留
+        self._set_pressed(False)
 
     def mouseReleaseEvent(self, event):
         self._drag_start = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._set_pressed(False)
         super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        """按住拖出素材格时收掉按下态（避免残留高亮）。"""
+        if self.property("pressed") == "true":
+            self._set_pressed(False)
+        super().leaveEvent(event)
 
     def _on_double_click(self):
         """双击用系统默认程序打开"""
@@ -315,7 +369,7 @@ class TaskNotePagesMixin:
         input_bar = QHBoxLayout()
         input_bar.setSpacing(6)
 
-        self._task_title_input = QLineEdit()
+        self._task_title_input = SmoothInput()
         self._task_title_input.setObjectName("taskInput")
         self._task_title_input.setPlaceholderText("输入任务标题，回车添加...")
         self._task_title_input.returnPressed.connect(self._on_add_task)
@@ -337,9 +391,14 @@ class TaskNotePagesMixin:
         input_bar.addWidget(self._task_add_btn)
         v.addLayout(input_bar)
 
-        self._task_list = QListWidget()
+        # 2026-10-08（清单 A3）：TaskListWidget —— Space/Enter 勾选、
+        # Shift+F10/Menu 弹右键菜单（与主窗任务页共用同一实现）
+        self._task_list = TaskListWidget()
         tune_list_scrolling(self._task_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._task_list.setObjectName("taskList")
+        # E1（2026-10-08）：与主窗任务页同款多选（批量操作语义对齐）
+        self._task_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
         self._task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._task_list.customContextMenuRequested.connect(self._on_task_context_menu)
         # 自定义行渲染委托（与主窗口任务页共用同一实现）
@@ -348,6 +407,12 @@ class TaskNotePagesMixin:
         self._task_delegate.toggle_requested.connect(self._on_task_toggle_requested)
         self._task_list.setItemDelegate(self._task_delegate)
         v.addWidget(self._task_list, 1)
+
+        # E1：空态引导与主窗同款（A3 通用化）——覆盖层叠在列表上，列表本体
+        # 不动（itemAt/count 断言零影响）；由 _refresh_task_list 按数据有无显隐
+        self._task_empty = EmptyState(
+            "tasks", "还没有任务", "在上方输入待办回车添加")
+        self._task_empty.attach_to(self._task_list)
 
         hint = QLabel("点击勾选框完成 | 右键任务：编辑 / 删除")
         hint.setObjectName("hintLabel")
@@ -400,6 +465,9 @@ class TaskNotePagesMixin:
         """按分组重建卡片任务列表（与主窗口同口径、同渲染）。"""
         self._task_list.clear()
         if not self._task_manager:
+            # E1：无管理器（异常路径）同样视为空列表 → 空态可见
+            self._task_empty.setVisible(True)
+            self._task_empty.setGeometry(self._task_list.rect())
             return
         self._task_delegate.set_colors(get_colors(self._theme))
         self._task_delegate.clear_progress_except(self._task_anim_task_id)
@@ -429,6 +497,13 @@ class TaskNotePagesMixin:
                 item.setData(ROLE_STATE, state)
                 item.setData(ROLE_DONE, bool(t.done))
                 self._task_list.addItem(item)
+
+        # E1：空态显隐与主窗 tasks_panel 同口径（覆盖层贴合列表几何）
+        empty = self._task_list.count() == 0
+        self._task_empty.setVisible(empty)
+        if empty:
+            self._task_empty.setGeometry(self._task_list.rect())
+            self._task_empty.raise_()
 
     # ---- 卡片任务：行内勾选 + 动画 + 撤销 ----
     def _task_anim_speed(self) -> float:
@@ -540,8 +615,8 @@ class TaskNotePagesMixin:
         form.setContentsMargins(20, 20, 20, 16)
         form.setSpacing(10)
 
-        title_edit = QLineEdit(task.title)
-        note_edit = QLineEdit(task.note)
+        title_edit = SmoothInput(task.title)
+        note_edit = SmoothInput(task.note)
         note_edit.setPlaceholderText("备注（可选）")
         deadline_edit = QDateEdit()
         deadline_edit.setCalendarPopup(True)
@@ -664,6 +739,15 @@ class NavAppAssetPagesMixin:
 
         return page
 
+    def _make_nav_empty(self) -> EmptyState:
+        """网址页空态（E3，2026-10-08）：与素材页同口径的 EmptyState，
+        替代原裸 QLabel——同一卡片内三页空态形态统一。图标 ``nav`` 自绘，
+        无动作钮（新增动作只在主窗，鼠标全透明不挡滚动）。"""
+        empty = EmptyState("nav", "暂无网址", "请在主窗口网址导航中添加",
+                           icon_size=36, object_name="navPageEmpty")
+        empty.apply_theme(self._theme)
+        return empty
+
     def _refresh_nav_page(self):
         """刷新网址导航页面显示（不分分组，平铺所有站点）
         双列宽卡片：主标题 + 域名副标题（2026-09-25 用户拍板方案C）。
@@ -676,18 +760,12 @@ class NavAppAssetPagesMixin:
                 item.widget().deleteLater()
 
         if not self._nav_manager:
-            empty = QLabel("暂无网址，请在主窗口添加")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._nav_content_layout.addWidget(empty)
+            self._nav_content_layout.addWidget(self._make_nav_empty())
             return
 
         sites = self._nav_manager.get_all_sites_flat()
         if not sites:
-            empty = QLabel("暂无网址，请在主窗口添加")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._nav_content_layout.addWidget(empty)
+            self._nav_content_layout.addWidget(self._make_nav_empty())
             return
 
         # 可用宽度推导：容器440 - 侧栏48 - 内容区margin16×2 - 页面margin4×2
@@ -804,6 +882,15 @@ class NavAppAssetPagesMixin:
 
         return page
 
+    def _make_app_empty(self) -> EmptyState:
+        """软件页空态（E3，2026-10-08）：与素材页同口径的 EmptyState，
+        替代原裸 QLabel——同一卡片内三页空态形态统一。图标 ``apps`` 自绘，
+        无动作钮（新增/编辑只在主窗，鼠标全透明不挡滚动）。"""
+        empty = EmptyState("apps", "暂无软件", "请在主窗口软件导航中添加",
+                           icon_size=36, object_name="appPageEmpty")
+        empty.apply_theme(self._theme)
+        return empty
+
     def _refresh_app_page(self):
         """刷新软件导航小卡片页面：重读 config apps 并重建网格。"""
         # 清空旧网格内容
@@ -820,10 +907,7 @@ class NavAppAssetPagesMixin:
                 apps = raw
 
         if not apps:
-            empty = QLabel("暂无软件，请在主窗口软件导航中添加")
-            empty.setObjectName("hintLabel")
-            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._app_grid.addWidget(empty, 0, 0)
+            self._app_grid.addWidget(self._make_app_empty(), 0, 0)
             return
 
         # 图标/名称工具来自 widget_app_launcher（与主窗口卡片同一套）

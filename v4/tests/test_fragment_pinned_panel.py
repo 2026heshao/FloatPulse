@@ -86,7 +86,7 @@ class _FakeHost(QObject):
     def refresh_page(self, _name):
         pass
 
-    def show_toast(self, msg):
+    def show_toast(self, msg, **kwargs):
         self.toasts.append(msg)
 
 

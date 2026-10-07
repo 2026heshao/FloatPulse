@@ -17,18 +17,19 @@
 
 import os
 import shutil
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
+    QAbstractItemView, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QMenu, QFileDialog,
     QStackedWidget, QStyledItemDelegate, QStyle, QToolButton, QLineEdit,
 )
 from PyQt6.QtCore import (
     QEasingCurve, QObject, QRunnable, QRectF, QSize, Qt, QThreadPool,
-    QVariantAnimation, pyqtSignal,
+    QTimer, QVariantAnimation, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QImageReader, QPainter, QPainterPath, QPen, QPixmap,
+    QFont, QFontMetrics, QImageReader, QPainter, QPainterPath, QPen, QPixmap,
 )
 from src.constants import DATETIME_MIN_LEN
 from src.theme import DEFAULT_THEME, get_colors
@@ -37,6 +38,7 @@ from src.controls import EmptyState, IconButton, PageTitle
 from src.glass_message_box import GlassMessageBox
 from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
 from src import motion
+from src import row_hover
 # 会话分组纯逻辑（零 PyQt6）：按 added_time 间隔聚类，渲染时派生、不落库
 from src import asset_group
 # 会话堆旁路标注（命名 / 移出）：float_data/asset_groups.json，零 PyQt6
@@ -59,6 +61,68 @@ EXT_ICON = {
 # 缩略图缓存哨兵:_PENDING=后台生成中(画占位图),False=确认不可预览。
 # 与 QPixmap 同存一个 dict,用 object() 保证不会和任何合法值撞车。
 _PENDING = object()
+
+# ---- 分组态行首对齐占位格（方案 A v3，2026-10-06）----
+# 渲染序列里的**行首对齐填充**条目（仅分组态存在；refresh 时落
+# UserRole+2 ("fill", None) 标记、NoItemFlags 不可选不可聚焦、不设
+# tooltip、不进 _pile_of/_pile_size/序号表 —— 堆语义只数真实素材）：
+# 把堆首推到第 0 列，堆标头成为段标题（方案 A v2 的 pile_spacer 已随
+# 容器气泡一并移除 —— 它是专为容器铺满整行服务的）。
+SPACER_FILL = "fill"
+FILL_SPACER = (SPACER_FILL, None)
+
+
+def plan_header_segments(custom, count, time_txt, date_txt, avail,
+                         bfm, nfm, dfm, date_gap=8.0):
+    """三段式堆标头排版决策（纯函数：宽度测量与省略都经传入 metrics）。
+
+    elide 优先级（2026-10-06 返工规格，修「2 张 · …」时间被整段省略）：
+      1. 右端日期最先让位 —— 左文本 + 8px 间距 + 日期放不下 → 日期干脆
+         不画（先量必现部分宽度，剩余空间才轮到日期）；
+      2. 「N 张 · HH:MM」（张数与时间）是必现文本，永不省略；
+      3. 还不够 → 对自定义堆名做中间省略；默认名（无自定义）的
+         「N 张 · HH:MM」允许整体中间省略，但保底显示「N 张」。
+
+    返回 ``(draw_date, seg1, seg2)``；seg1 用加粗字体绘制。
+    """
+    if custom:
+        seg1 = custom
+        seg2 = (" · %d 张 · %s" % (count, time_txt) if time_txt
+                else " · %d 张" % count)
+    else:
+        seg1 = "%d 张" % count
+        seg2 = " · %s" % time_txt if time_txt else ""
+    w1 = bfm.horizontalAdvance(seg1)
+    w2 = nfm.horizontalAdvance(seg2) if seg2 else 0.0
+    wd = dfm.horizontalAdvance(date_txt) if date_txt else 0.0
+    # 日期只「让位」不「挤文本」：左文本（含间距）放得下才画日期
+    draw_date = bool(date_txt) and (w1 + w2 + date_gap + wd) <= avail
+    text_avail = max(0.0, avail - (wd + date_gap)) if draw_date else avail
+    if w1 + w2 <= text_avail:
+        return draw_date, seg1, seg2
+    if custom:
+        # 自定义堆名让位（中间省略），「N 张 · HH:MM」保完整
+        room = text_avail - w2
+        if room > 0.0:
+            seg1 = bfm.elidedText(seg1, Qt.TextElideMode.ElideMiddle,
+                                  int(room))
+        else:
+            seg1 = ""
+            if w2 > text_avail:
+                # 物理极限：尾段独占也放不下 → 尾段降级中省（宁截断不溢出）
+                seg2 = nfm.elidedText(seg2, Qt.TextElideMode.ElideMiddle,
+                                      int(text_avail))
+    else:
+        # 默认名：seg1「N 张」保底永不省略；「 · HH:MM」整体让位
+        room = text_avail - w1
+        if room > 0.0:
+            seg2 = nfm.elidedText(seg2, Qt.TextElideMode.ElideMiddle,
+                                  int(room))
+            if seg2 == "…":
+                seg2 = ""
+        else:
+            seg2 = ""
+    return draw_date, seg1, seg2
 
 
 def _decode_image_thumb(path: str, out_w: int, out_h: int):
@@ -132,9 +196,18 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         self._thumbs = thumb_cache   # id -> QPixmap | False | _PENDING
         self._loader = loader        # 未命中回调(面板的异步派发);None=旧同步路径
         self._fade_values = {}       # asset_id -> 0.0~1.0(淡入进度,面板维护)
-        self._header_texts = {}      # asset_id -> 会话堆标题(仅 ≥2 张的堆;平铺=空)
-        self._member_ordinals = {}   # asset_id -> "#2" 堆内序号(非堆首;平铺=空)
+        self._header_texts = {}      # asset_id -> 堆标头结构 dict（仅 ≥2 张的堆
+                                     # 与用户新建堆；平铺态为空表）。结构：
+                                     # {"count": N, "time": "HH:MM"|"",
+                                     #  "name": 自定义堆名|"", "date": "MM-DD"|""}
+        self._member_ordinals = {}   # asset_id -> "2 / 6" 堆内序号(非堆首;平铺=空)
         self._group_mode = False     # 分组态才垫高 HEADER_H(见 HEADER_H 注释)
+        # U4（2026-10-07 规格 G5）：格级 hover 进度缓存 —— hover 卡（淡主
+        # 色底 + 1px 主色环）从 State_MouseOver 一帧瞬变改为 120ms 插值。
+        # 占位格（filler，UserRole 为空）不参与 hover。
+        self._hover = row_hover.RowHoverController(
+            hoverable=lambda idx: idx.data(Qt.ItemDataRole.UserRole)
+            is not None)
         config = getattr(host, "config", None)
         init_w = (int(config.get("asset_thumb_size", self.DEFAULT_THUMB_W))
                   if config is not None else self.DEFAULT_THUMB_W)
@@ -208,15 +281,26 @@ class _AssetThumbDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index):
         asset = index.data(Qt.ItemDataRole.UserRole)
         if asset is None:
+            # ---- 占位格（filler 行首对齐填充；仅分组态）----
+            # 方案 A v3 起无容器气泡：filler 不画任何内容。占位格
+            # NoItemFlags 不可选不可聚焦（交互防护见
+            # _on_context_menu/_on_double_click）。
             return
         colors = self._colors()
         rect = QRectF(option.rect).adjusted(6, 6, -6, -6)
         # 注意：PyQt6 6.7 的 style state 成员是 QStyle.StateFlag.*（不是 QStyle.State.*）
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
-        hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        # U4：hover 底/环按行级 hp 进度插值（端点色不变，瞬变→渐变）；
+        # hp<=ε 走原 rest 分支 —— 平铺态与旧版逐字节一致（红线）。
+        hover_amt = row_hover.hover_amount(self._hover, option, index)
+        hover = hover_amt > row_hover.ALPHA_EPS
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # （方案 A v3：堆卡片容器已移除——v2 全宽容器卡在真实数据下观感
+        # 过重（2 张堆右侧大片空白形成大白色胶囊），分组态恢复裸格 +
+        # 三段式标头做段标题；三段式标头 / "2 / 6" 序号全部保留。）
 
         # ---- 会话堆标题条（仅分组态；平铺态 _group_mode=False → 整段跳过）----
         # ★ 分组态下**每一格都垫高 HEADER_H**（含没有标题的单张堆），标题只
@@ -226,8 +310,8 @@ class _AssetThumbDelegate(QStyledItemDelegate):
             bar = QRectF(rect.left(), rect.top(), rect.width(), self.HEADER_H)
             # 缩进到缩略图左缘，与下方格子对齐（比整格左缘更内敛）
             bar = bar.adjusted(self.PAD, 0, -self.PAD, 0)
-            header_text = self._header_texts.get(asset.asset_id)
-            if header_text:
+            info = self._header_texts.get(asset.asset_id)
+            if info:
                 bar_h = float(self.HEADER_BAR_H)
                 top = bar.top() + (self.HEADER_H - bar_h) / 2.0
                 accent = _to_color(colors["primary"])
@@ -235,14 +319,49 @@ class _AssetThumbDelegate(QStyledItemDelegate):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(accent)
                 painter.drawRoundedRect(tick, 1.5, 1.5)
-                f = painter.font()
-                f.setBold(True)
-                painter.setFont(f)
-                painter.setPen(_to_color(colors["text_secondary"]))
-                painter.drawText(
-                    QRectF(tick.right() + 8, top, bar.width() - 14, bar_h),
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                    header_text)
+                # ---- 三段式标头（方案 A v2）----
+                # elide 优先级走纯函数 plan_header_segments（可单测）：
+                # 日期最先让位（放不下干脆不画）→ 张数/时间永不省略 →
+                # 自定义堆名中间省略（默认名保底「N 张」）。
+                count = int(info.get("count", 0))
+                custom = str(info.get("name") or "").strip()
+                time_txt = str(info.get("time") or "")
+                date_txt = str(info.get("date") or "")
+                bold_f = QFont(option.font)
+                bold_f.setBold(True)
+                norm_f = QFont(option.font)
+                date_f = QFont(option.font)
+                date_f.setPointSize(max(8, date_f.pointSize() - 1))
+                bfm = QFontMetrics(bold_f)
+                nfm = QFontMetrics(norm_f)
+                dfm = QFontMetrics(date_f)
+                text_left = tick.right() + 8.0
+                avail = max(0.0, bar.right() - text_left)
+                draw_date, seg1, seg2 = plan_header_segments(
+                    custom, count, time_txt, date_txt, avail, bfm, nfm, dfm)
+                if draw_date:
+                    wd = dfm.horizontalAdvance(date_txt)
+                    painter.setFont(date_f)
+                    painter.setPen(_to_color(colors["text_secondary"]))
+                    painter.drawText(
+                        QRectF(bar.right() - wd, top, wd, bar_h),
+                        Qt.AlignmentFlag.AlignVCenter
+                        | Qt.AlignmentFlag.AlignRight, date_txt)
+                w1 = bfm.horizontalAdvance(seg1)
+                painter.setFont(bold_f)
+                painter.setPen(_to_color(
+                    colors["primary"] if custom else colors["text"]))
+                painter.drawText(QRectF(text_left, top, max(1.0, w1), bar_h),
+                                 Qt.AlignmentFlag.AlignVCenter
+                                 | Qt.AlignmentFlag.AlignLeft, seg1)
+                if seg2:
+                    painter.setFont(norm_f)
+                    painter.setPen(_to_color(colors["text_secondary"]))
+                    painter.drawText(
+                        QRectF(text_left + w1, top,
+                               max(1.0, avail - w1), bar_h),
+                        Qt.AlignmentFlag.AlignVCenter
+                        | Qt.AlignmentFlag.AlignLeft, seg2)
                 painter.setFont(option.font)
             live_rect = QRectF(rect.left(), rect.top() + self.HEADER_H,
                                rect.width(), rect.height() - self.HEADER_H)
@@ -253,14 +372,23 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         #   QColor("rgba(...)") 会得到**无效色**，画出来是纯黑 —— hover 变
         #   "黑块卡"的根因（notes_panel/controls 同款坑早已用 _to_color 收口，
         #   本文件在 UI 重构 05 改 delegate 时漏了这层）。
+        # ★ 方案 A v3：分组态成员格常态恢复裸格（与平铺常态逐像素一致；
+        #   v2 的"成员格常态不画小卡"随容器气泡一并撤销），选中/悬停
+        #   反馈保持现状。
         if selected:
             painter.setPen(QPen(_to_color(colors["primary"]), 1.4))
             painter.setBrush(_to_color(colors["primary_a12"]))
         elif hover:
             # 悬停 = 淡主色底 + 1px 主色细环，与主窗输入框 hover（$primary_a30
             # 环）同一语言；只铺底色的话白底缩略图几乎看不出悬停反馈。
-            painter.setPen(QPen(_to_color(colors["primary_a30"]), 1))
-            painter.setBrush(_to_color(colors["primary_a08"]))
+            # U4：端点色不变，仅按 hover_amt 对端点 alpha 线性插值 ——
+            # amt=1 时与旧端点逐字节一致（alpha 缩放不会改 rgb 通道）。
+            edge = _to_color(colors["primary_a30"])
+            edge.setAlpha(int(round(edge.alpha() * hover_amt)))
+            fill = _to_color(colors["primary_a08"])
+            fill.setAlpha(int(round(fill.alpha() * hover_amt)))
+            painter.setPen(QPen(edge, 1))
+            painter.setBrush(fill)
         else:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -317,14 +445,22 @@ class _AssetThumbDelegate(QStyledItemDelegate):
         # ---- 文件名 / 堆内序号 ----
         # 分组态里同一堆的**非首格**不再重复渲染同一个文件名：连拍截图的
         # 文件名高度雷同（`剪贴板图片_*.png`），一堆里重复 7 次是纯噪音。
-        # 改显 "#2" "#3" 序号 —— 既去噪，又保留连拍先后顺序这一有用信息。
+        # 改显 "2 / 6" 堆内序号（方案 A：text_disabled 淡化 + 比文件名小
+        # 1pt），既去噪，又保留连拍先后顺序与堆大小信息。
         painter.setFont(option.font)
         fm = painter.fontMetrics()
-        painter.setPen(_to_color(colors["text"]))
-        name = fm.elidedText(self._member_ordinals.get(asset.asset_id)
-                             or asset.original_name,
+        ordinal = self._member_ordinals.get(asset.asset_id) or ""
+        display = ordinal or asset.original_name
+        name = fm.elidedText(display,
                              Qt.TextElideMode.ElideMiddle,
                              int(rect.width() - self.PAD * 2))
+        if ordinal:
+            ord_f = painter.font()
+            ord_f.setPointSize(max(8, ord_f.pointSize() - 1))
+            painter.setFont(ord_f)
+            painter.setPen(_to_color(colors["text_disabled"]))
+        else:
+            painter.setPen(_to_color(colors["text"]))
         name_y = trect.bottom() + 6 + fm.ascent()
         painter.drawText(QRectF(rect.left() + self.PAD, trect.bottom() + 4,
                                 rect.width() - self.PAD * 2, 20),
@@ -382,6 +518,9 @@ class AssetsPanel(QWidget):
         self._pile_size = {}
         self._merged_anchor_ids = set()
         self._detached_ids = set()
+        # ---- 分组态行首对齐（方案 A v2）----
+        self._last_cols = None       # refresh 实际使用的列数（resize 比较基准）
+        self._cols_debounce = None   # 列数变化 → 防抖 150ms 重建分组序列
         self._thumb_cache = {}
         # ---- 异步缩略图管线(丝滑化):paint 永不解码 ----
         self._pending = set()        # 在途 asset_id(防重复派发)
@@ -389,6 +528,7 @@ class AssetsPanel(QWidget):
         self._valid_ids = set()
         self._items_by_id = {}
         self._fade_anims = {}
+        self._fade_owners = {}    # 动画包装 -> asset_id（sender 反查淡入归属）
         self._signals = _ThumbSignals(self)
         self._signals.ready.connect(self._on_thumb_ready)
         self._pool = QThreadPool(self)
@@ -460,6 +600,12 @@ class AssetsPanel(QWidget):
         self._asset_list.setMovement(QListWidget.Movement.Static)
         self._asset_list.setUniformItemSizes(True)
         self._asset_list.setMouseTracking(True)
+        # 滚轮像素级滚动（2026-10-06 手感返工，分组/平铺两态统一生效——
+        # 这是滚动手感、不是分组专属）。ScrollPerPixel 是前提（PerItem
+        # 下每刻度滚一整行）；每刻度实际像素由视口滚轮拦截统一控制，
+        # 见 _on_wheel_event / _WHEEL_STEP_PX。
+        self._asset_list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._asset_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self._asset_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._asset_list.customContextMenuRequested.connect(self._on_context_menu)
@@ -554,21 +700,31 @@ class AssetsPanel(QWidget):
         anim.setEndValue(1.0)
         anim.setDuration(ms)
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        anim.valueChanged.connect(
-            lambda v, aid=asset_id: self._on_fade_tick(aid, v))
-        anim.finished.connect(
-            lambda aid=asset_id: self._on_fade_done(aid))
+        # 绑定方法连接（接收者上下文，禁无接收者闭包 —— 10-07 铁律）；
+        # asset_id 经 sender 反查（_fade_owners 以动画包装为键）。
+        anim.valueChanged.connect(self._on_fade_tick)
+        anim.finished.connect(self._on_fade_done)
+        self._fade_owners[anim] = asset_id
         self._thumb_delegate._fade_values[asset_id] = 0.0
         self._fade_anims[asset_id] = anim
         anim.start()
 
-    def _on_fade_tick(self, asset_id: int, value):
+    def _on_fade_tick(self, value):
+        asset_id = self._fade_owners.get(self.sender())
+        if asset_id is None:
+            return
         self._thumb_delegate._fade_values[asset_id] = float(value)
         self._update_cell(asset_id)
 
-    def _on_fade_done(self, asset_id: int):
+    def _on_fade_done(self):
+        anim = self.sender()
+        asset_id = self._fade_owners.pop(anim, None)
+        if asset_id is None:
+            return
         self._thumb_delegate._fade_values.pop(asset_id, None)
-        self._fade_anims.pop(asset_id, None)
+        if self._fade_anims.get(asset_id) is anim:
+            self._fade_anims.pop(asset_id, None)
+        anim.deleteLater()
         self._update_cell(asset_id)
 
     def _update_cell(self, asset_id: int):
@@ -580,12 +736,21 @@ class AssetsPanel(QWidget):
         if rect.isValid():
             self._asset_list.viewport().update(rect)
 
+    # 滚轮每刻度滚动像素（2026-10-06 手感返工；CELL_H=148 → 约 4 刻度/格）
+    _WHEEL_STEP_PX = 36
+
     # ---- 缩略图尺寸（设置项联动）----
     def _sync_scroll_step(self):
-        """纵向滚动步长 = 约 1/3 行（Qt 默认按一整行走，跨度太大不便细看）"""
+        """纵向滚动条键盘步长（拖动/键盘微调用；约 1/4 行）。
+
+        ★ 注意：滚轮每刻度的实际像素**不走这里**——QListView 会在
+        updateGeometries 里把 scrollbar singleStep 覆盖回行高，且每刻度
+        = singleStep × wheelScrollLines(3)（离屏实测 444px ≈ 3 整行）。
+        滚轮由视口拦截统一控制：见 _on_wheel_event / _WHEEL_STEP_PX。
+        """
         sb = self._asset_list.verticalScrollBar()
         if sb is not None:
-            sb.setSingleStep(max(32, self._thumb_delegate.CELL_H // 3))
+            sb.setSingleStep(max(24, self._thumb_delegate.CELL_H // 4))
 
     def apply_thumb_size(self, size: int):
         """设置页改动缩略图尺寸：更新单元尺寸 + 清缓存（旧图是按旧尺寸裁的）+ 重排"""
@@ -639,18 +804,28 @@ class AssetsPanel(QWidget):
         self._thumb_delegate._header_texts = self._group_headers
         self._thumb_delegate._member_ordinals = self._group_ordinals
         self._sync_scroll_step()
-        for a in sequence:
+        for entry in sequence:
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, a)            # Asset 对象（delegate 用）
-            item.setData(Qt.ItemDataRole.UserRole + 1, a.asset_id)
-            item.setToolTip(
-                f"原文件名: {a.original_name}\n"
-                f"类型: {'图片' if a.is_image else '文件'}\n"
-                f"大小: {a.size_display()}\n"
-                f"添加时间: {a.added_time}\n"
-                f"存储路径: {a.stored_path}")
+            if isinstance(entry, tuple):
+                # 占位格（仅分组态；方案 A v2 行首对齐）：NoItemFlags
+                # 不可选不可聚焦，UserRole+2 承载标记；不设 tooltip、
+                # 不进 _items_by_id（堆/素材语义只认真实条目）。
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+                item.setData(Qt.ItemDataRole.UserRole + 2, entry)
+            else:
+                item.setData(Qt.ItemDataRole.UserRole, entry)   # Asset 对象（delegate 用）
+                item.setData(Qt.ItemDataRole.UserRole + 1, entry.asset_id)
+                item.setToolTip(
+                    f"原文件名: {entry.original_name}\n"
+                    f"类型: {'图片' if entry.is_image else '文件'}\n"
+                    f"大小: {entry.size_display()}\n"
+                    f"添加时间: {entry.added_time}\n"
+                    f"存储路径: {entry.stored_path}")
+                self._items_by_id[entry.asset_id] = item
             self._asset_list.addItem(item)
-            self._items_by_id[a.asset_id] = item
+        # 记下本序列实际使用的列数（resize 防抖的比较基准；与
+        # _build_sequence 同公式同刻取值，保证两者一致）。
+        self._last_cols = self._grid_cols()
 
         count = self._temp_asset_manager.count()
         max_assets = self._temp_asset_manager._max_assets
@@ -660,19 +835,26 @@ class AssetsPanel(QWidget):
 
     # ---- 会话分组视图（渲染时派生，不落库）----
     def _build_sequence(self, assets):
-        """返回 ``(渲染顺序, {asset_id: 堆标题}, {asset_id: 堆内序号})``。
+        """返回 ``(渲染顺序, {asset_id: 堆标头结构}, {asset_id: 堆内序号})``。
 
-        分组关闭 → 原样返回（与改动前逐项一致，两张表都为空）。
+        分组关闭 → 原样返回（与改动前逐项一致，两张表都为空，无占位格）。
         分组开启 → 按 ``asset_group.cluster_assets`` 时间聚类，再套旁路
         标注（``asset_groups_store``：移出的素材拆成独立单元；并入的
         素材强制挂到目标堆尾），堆内按时间升序铺开，**≥2 张的堆或用户
-        「新建堆」才挂标题**：单张素材本来就不是一次"会话"，给它画
-        标题条纯属噪音 —— 真实数据 18 张里 11 张是单张，这正是
-        2026-10-03 用户截图里"到处都是标题条 / 比平铺更乱"的来源
-        （新建堆例外：用户显式建的堆若不挂标题，界面上不可见，后续
-        无从往里并）。堆名优先取用户自定义（asset_groups.json），无则
-        默认 ``N 张 · HH:MM``。非堆首格挂 ``"#2"``/``"#3"`` 序号，避免
-        堆内重复渲染雷同文件名。
+        「新建堆」才挂标头**：单张素材本来就不是一次"会话"，给它画
+        标题条纯属噪音。标头为**结构化 dict**（方案 A 三段式标头）：
+        ``{"count": N, "time": "HH:MM", "name": 自定义堆名|"",
+        "date": "MM-DD"|""}`` —— delegate 据此画「堆名/张数加粗 + 时间
+        淡化 + 右端日期」。堆名优先取用户自定义（asset_groups.json），
+        无则默认名兜底（``name=""``，张数/时间字段照填）。非堆首格挂
+        ``"2 / 6"`` 堆内序号（分母 = 堆内成员数），避免堆内重复渲染
+        雷同文件名。
+
+        ★ 方案 A v3（2026-10-06）：分组态保留**行首对齐**（filler 占位把
+        堆首推到第 0 列，堆标头成为段标题）；v2 的堆尾 pile_spacer 已随
+        容器气泡一并移除（它专为容器铺满整行服务）。单张素材自然流动
+        占列、不强制对齐。占位格是 ``("fill", None)`` 标记元组，不进
+        ``_pile_of``/``_pile_size``/序号表（堆语义只数真实素材）。
         """
         # 先清堆归属速查（平铺态也必须清干净，不能残留分组态的表）
         self._pile_of = {}
@@ -699,23 +881,57 @@ class AssetsPanel(QWidget):
         headers = {}
         ordinals = {}
         sequence = []
-        for i, group in enumerate(groups):
-            sequence.extend(group)
+        # ---- 行首对齐块状排布（方案 A v2）----
+        # cols 与 delegate paint 的行/列推算同源（视口宽 // CELL_W）；
+        # 单张自然占列、col 跨行取模；堆卡强制从第 0 列起铺。
+        cols = self._grid_cols()
+        col = 0
+        for group in groups:
             head_id = group[0].asset_id if group else None
+            is_pile = head_id is not None and (
+                len(group) >= 2 or head_id in self._merged_anchor_ids)
+            if is_pile:
+                if col:                       # 堆首前补 filler → 对齐行首
+                    sequence.extend([FILL_SPACER] * (cols - col))
+                    col = 0
+                sequence.extend(group)
+                col = (col + len(group)) % cols
+            else:                             # 单张：自然流动占列
+                sequence.extend(group)
+                col = (col + len(group)) % cols
             if head_id is not None:
-                self._pile_size[head_id] = len(group)
-            if head_id is not None and (
-                    len(group) >= 2 or head_id in self._merged_anchor_ids):
+                self._pile_size[head_id] = len(group)   # 只数真实素材
+            if is_pile:
                 self._pile_heads.append(head_id)
                 custom = names.get(str(head_id), "")
-                headers[head_id] = asset_group.group_label(
-                    group, i, custom_name=custom)
+                head = group[0]
+                dt = asset_group.parse_added_time(
+                    getattr(head, "added_time", ""))
+                time_txt = ("%02d:%02d" % (dt.hour, dt.minute)
+                            if dt is not None else "")
+                # 右端日期：堆首 added_time 前 10 位 → MM-DD，解析失败省略
+                date_txt = ""
+                try:
+                    d = datetime.strptime(
+                        (getattr(head, "added_time", "") or "")[:10],
+                        "%Y-%m-%d")
+                    date_txt = "%02d-%02d" % (d.month, d.day)
+                except ValueError:
+                    date_txt = ""
+                headers[head_id] = {"count": len(group), "time": time_txt,
+                                    "name": (custom or "").strip(),
+                                    "date": date_txt}
                 for a in group:
                     self._pile_of[a.asset_id] = head_id
             for j, a in enumerate(group):
                 if j:
-                    ordinals[a.asset_id] = "#%d" % (j + 1)
+                    ordinals[a.asset_id] = "%d / %d" % (j + 1, len(group))
         return sequence, headers, ordinals
+
+    def _grid_cols(self) -> int:
+        """当前视口容纳的列数（与 delegate paint 的行/列推算同源公式）。"""
+        d = self._thumb_delegate
+        return max(1, self._asset_list.viewport().width() // d.CELL_W)
 
     def _is_grouping(self) -> bool:
         btn = getattr(self, "_group_btn", None)
@@ -850,12 +1066,19 @@ class AssetsPanel(QWidget):
         aid = int(asset_id)
         current = self._pile_of.get(aid)
         targets = []
-        for head, label in self._thumb_delegate._header_texts.items():
+        # 标头是结构化 dict（方案 A）：自定义名（N 张）或默认 N 张 · HH:MM
+        # —— 目标按钮文案语义与改动前逐字一致。
+        for head, info in self._thumb_delegate._header_texts.items():
             if head == current:
                 continue
             custom = self._pile_display_name(head)
-            n = self._pile_size.get(head, 0)
-            text = "%s（%d 张）" % (custom, n) if custom else label
+            n = int(info.get("count", 0))
+            if custom:
+                text = "%s（%d 张）" % (custom, n)
+            else:
+                time_txt = str(info.get("time") or "")
+                text = "%d 张 · %s" % (n, time_txt) if time_txt \
+                    else "%d 张" % n
             targets.append((head, text))
         return targets
 
@@ -980,7 +1203,71 @@ class AssetsPanel(QWidget):
         if obj is getattr(self._asset_list, "viewport", lambda: None)():
             if event.type() in (event.Type.Resize, event.Type.Show):
                 self._position_group_view_btn()
+            if event.type() == event.Type.Resize:
+                self._on_viewport_cols_changed()
+            if event.type() == event.Type.Wheel:
+                return self._on_wheel_event(event)
         return super().eventFilter(obj, event)
+
+    def _on_wheel_event(self, event) -> bool:
+        """视口滚轮拦截：每个标准刻度（angleDelta 120）滚固定像素。
+
+        ★ 根因与修法（2026-10-06 手感返工，离屏实测校准）：
+        QListView 的滚轮位移 = scrollbar singleStep × wheelScrollLines(3)，
+        且 updateGeometries 会把 singleStep 覆盖回行高（148）——每刻度
+        实滚 ≈ 444px ≈ 3 整行（PerItem 旧行为实测 87px/刻度也不可控），
+        singleStep 单方面调小会在下次布局被覆盖，追不完。故在视口拦下
+        Wheel 自滚固定 _WHEEL_STEP_PX 像素（36px ≈ 1/4 格，Chrome 式
+        细滚手感）。分组/平铺两态统一生效。
+
+        不拦的情形（交回 Qt 默认语义）：
+          - pixelDelta 非空（触摸板）—— 系统原生平滑滚动更好；
+          - Ctrl/Alt/Shift 修饰 —— Ctrl 缩放、Alt 翻页、Shift 转水平
+            均为 Qt 既有语义，列表不新增自己的解释；
+          - 纯水平滚轮（y=0）。
+        返回 True = 已消化（事件不再传播）。
+        """
+        if event.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                | Qt.KeyboardModifier.AltModifier
+                                | Qt.KeyboardModifier.ShiftModifier):
+            return False
+        if not event.pixelDelta().isNull():
+            return False
+        dy = event.angleDelta().y()
+        if dy == 0:
+            return False
+        sb = self._asset_list.verticalScrollBar()
+        if sb is None:
+            return False
+        ticks = dy / 120.0                       # 标准刻度数（可带小数）
+        sb.setValue(int(round(sb.value() - ticks * self._WHEEL_STEP_PX)))
+        return True
+
+    def _on_viewport_cols_changed(self):
+        """视口宽度改变列数 → 防抖 150ms 重建分组序列（平铺态不重建）。
+
+        spacer 数量与列数绑定：列数变了旧占位就失真，须按新列数重排。
+        防抖窗口内保留旧 spacer（最多短暂错位，不崩）；refresh 重建
+        列表会丢选择，素材 ≤50 条可接受。列数没变（如仅高度变化）不动。
+        """
+        if not self._is_grouping():
+            return
+        cols = self._grid_cols()
+        if cols == self._last_cols:
+            return
+        self._last_cols = cols
+        if self._cols_debounce is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(150)
+            timer.timeout.connect(self._refresh_if_grouping)
+            self._cols_debounce = timer
+        self._cols_debounce.start()
+
+    def _refresh_if_grouping(self):
+        """防抖到点：仍处分组态才重建（窗口期内可能已切回平铺）。"""
+        if self._is_grouping():
+            self.refresh()
 
     # ---- 右键菜单 ----
     def _on_context_menu(self, pos):
@@ -988,6 +1275,8 @@ class AssetsPanel(QWidget):
         if not item:
             return
         aid = item.data(Qt.ItemDataRole.UserRole + 1)
+        if aid is None:
+            return     # 占位格（spacer）：无素材语义，不弹菜单（方案 A v2）
         selected_ids = [i.data(Qt.ItemDataRole.UserRole + 1)
                         for i in self._asset_list.selectedItems()]
         n = len(selected_ids) if aid in selected_ids else 1
@@ -1060,8 +1349,11 @@ class AssetsPanel(QWidget):
         return False
 
     def _on_double_click(self, item):
-        """双击素材 → 用系统默认程序打开"""
-        self._open(item.data(Qt.ItemDataRole.UserRole + 1))
+        """双击素材 → 用系统默认程序打开（占位格无素材语义，忽略）"""
+        aid = item.data(Qt.ItemDataRole.UserRole + 1)
+        if aid is None:
+            return     # 占位格（spacer）：不可交互（方案 A v2）
+        self._open(aid)
 
     def _save_as(self, asset_id: int):
         """另存为：用 QFileDialog 选目标位置，复制一份过去"""
@@ -1075,7 +1367,7 @@ class AssetsPanel(QWidget):
             return
         try:
             shutil.copy2(asset.stored_path, target)
-            self._host.show_toast(f"已另存为：{target}")
+            self._host.show_toast(f"已另存为：{target}", kind="success")
         except OSError as e:
             GlassMessageBox.warning(self, "另存失败", f"另存失败：{e}")
 
@@ -1104,4 +1396,5 @@ class AssetsPanel(QWidget):
             cleared = self._temp_asset_manager.clear_all()
             self.refresh()
             self._host.data_changed.emit("asset")
-            self._host.show_toast(f"已清理 {cleared} 个临时素材")
+            self._host.show_toast(f"已清理 {cleared} 个临时素材",
+                                  kind="warning")

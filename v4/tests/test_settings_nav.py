@@ -13,6 +13,7 @@
   5. 「恢复默认设置」在页底常驻栏（不在分类 stack 内）
 """
 
+import gc
 import os
 import sys
 import types
@@ -52,6 +53,41 @@ class TestSettingsCategories:
 # ====================================================================
 # SettingsPanel：导航构建与切换（离屏 QApplication）
 # ====================================================================
+# 页面存活桩（2026-10-07）：面板 C++ 树**不能**让 GC 在会话中段析构
+# （同 test_ai_assistant_export 实锤：运行中动画被 GC 兜底析构会打乱
+# QUnifiedTimer 簿记 → 同会话后续所有 QAbstractAnimation 冻结）。
+# 不整页同步 delete（复杂子树上 fail-fast），持引用到进程退出。
+_KEEP_ALIVE = []
+
+
+def _quiesce(widget, app):
+    """面板「受控墓地」拆除（2026-10-07 顺序冻结修复）。
+
+    settings_nav → interaction_visual_v 顺序曾必现 6 项动画冻结：
+    面板生命周期里自产的一次性 overlay（Stepper 滑层 / fade_in_once
+    控制器，`_done` 里 deleteLater 自尽）留下成批「Python 包装器还在、
+    C++ 已删」的动画垃圾；这些垃圾若拖到下一个测试文件的分配触发 GC
+    时才被兜底析构，会打乱 QUnifiedTimer 簿记。修法 = 拆除时在**本
+    文件的受控点**把事情做绝：
+      1. stop 面板下全部动画/定时器（防运行中析构）；
+      2. 反复冲刷 DeferredDelete（自尽 overlay 的删除当场落地，不悬
+         到会话末）；
+      3. gc.collect() 把动画包装器的引用环一并掐死（不留到下一个
+         文件被随机时点的 GC 收割）。
+    """
+    from PyQt6.QtCore import QAbstractAnimation, QEvent, QTimer
+    from PyQt6.QtWidgets import QApplication
+    for anim in widget.findChildren(QAbstractAnimation):
+        anim.stop()
+    for t in widget.findChildren(QTimer):
+        t.stop()
+    widget.close()
+    for _ in range(3):
+        QApplication.sendPostedEvents(widget, QEvent.Type.DeferredDelete)
+        app.processEvents()
+    gc.collect()
+
+
 @pytest.fixture(scope="module")
 def qapp():
     from PyQt6.QtWidgets import QApplication
@@ -78,7 +114,10 @@ class _FakeConfig:
 @pytest.fixture(scope="module")
 def panel(qapp):
     host = types.SimpleNamespace(config=_FakeConfig(), current_theme="dark")
-    return SettingsPanel(host)
+    w = SettingsPanel(host)
+    yield w
+    _quiesce(w, qapp)
+    _KEEP_ALIVE.append(w)
 
 
 class TestSettingsNavPanel:
@@ -115,6 +154,34 @@ class TestSettingsNavPanel:
         panel.show_category("about")
         checked = [k for k, b in panel._cat_btns.items() if b.isChecked()]
         assert checked == ["about"]
+
+
+# ====================================================================
+# V5 指示滑块·懒加载主题同步回归（2026-10-07 用户报障）
+# ====================================================================
+class TestNavIndicatorThemeOnBuild:
+    """懒加载构建后指示滑块必须立即跟随当前主题。
+
+    主窗 ``_apply_theme`` 只刷已构建页（懒加载跳过未构建页）；
+    ``SettingsPanel.__init__`` 末尾补的 ``apply_theme()`` 缺失时，
+    ``_SettingsNavIndicator`` 停在构造默认 ``get_colors("dark")`` 上——
+    自定义强调色下选中底=暗红块（用户报障截图），默认强调色下=暗绿块，
+    直到用户手动切一次主题才被纠正。
+    """
+
+    def test_indicator_follows_theme_at_build(self, qapp):
+        from src.theme import get_colors
+        host = types.SimpleNamespace(config=_FakeConfig(),
+                                     current_theme="light")
+        p = SettingsPanel(host)
+        try:
+            assert p._nav_indicator._colors == get_colors("light"), (
+                "构建后指示滑块配色未跟随当前主题（懒加载漏主题同步，"
+                "选中底会停在 dark 主题端点色上）")
+        finally:
+            # 同 panel fixture：受控墓地拆除，防 GC 中段析构带动画的面板
+            _quiesce(p, qapp)
+            _KEEP_ALIVE.append(p)
 
 
 # ====================================================================

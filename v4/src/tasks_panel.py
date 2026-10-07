@@ -24,8 +24,8 @@ from datetime import date as _date
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QMenu, QDialog,
-    QFormLayout, QDateEdit,
+    QListWidget, QListWidgetItem, QMenu, QDialog,
+    QFormLayout, QDateEdit, QProgressBar,
 )
 from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
@@ -37,9 +37,11 @@ from src.task_manager import (
     KIND_ROW, KIND_HEADER, GROUP_OVERDUE, STATE_OVERDUE, STATE_NONE,
 )
 from src.task_delegate import (
-    TaskItemDelegate, KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
+    TaskItemDelegate, TaskListWidget,
+    KIND_ROLE, ROLE_TITLE, ROLE_REL, ROLE_STATE, ROLE_DONE,
 )
-from src.controls import tune_list_scrolling, SmoothButton, EmptyState, IconButton, PageTitle
+from src.controls import (tune_list_scrolling, SmoothButton, EmptyState,
+                          IconButton, PageTitle, SmoothInput)
 from src.constants import CHECK_ANIM_MS
 from src.date_picker import DateField
 from src import motion
@@ -91,23 +93,46 @@ class TasksPanel(QWidget):
     def _build_ui(self):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(10)
+        v.setSpacing(8)
 
-        # ---- 顶部标题 + 计数 ----
+        # ---- 顶部标题 + 统计徽章 + 批量操作（2026-10-06 紧凑改版）----
+        # 原先批量三钮常驻底栏、孤悬窗口底部（列表少项时中间 ~350px 死留白），
+        # 现整行上收为标题行右侧的低权重按钮，底栏整行释放给列表。
         header = QHBoxLayout()
+        header.setSpacing(8)
         title = PageTitle("tasks", "日程任务", self._host)
         header.addWidget(title)
+
+        # 逾期统计徽章：只在逾期 >0 时出现（danger 红底，规则见 theme.py）
+        self._stat_overdue_label = QLabel("")
+        self._stat_overdue_label.setObjectName("statChipOverdue")
+        self._stat_overdue_label.hide()
+        header.addWidget(self._stat_overdue_label)
+
         header.addStretch()
-        self._task_count_label = QLabel("共 0 条")
-        self._task_count_label.setObjectName("hintLabel")
-        header.addWidget(self._task_count_label)
+
+        toggle_btn = SmoothButton("批量完成")
+        toggle_btn.setObjectName("secondaryBtn")
+        toggle_btn.clicked.connect(self._on_batch_toggle)
+        header.addWidget(toggle_btn)
+
+        del_btn = IconButton("trash", text="批量删除", icon_size=14,
+                             object_name="dangerBtn")
+        del_btn.clicked.connect(self._on_batch_delete)
+        header.addWidget(del_btn)
+
+        clear_done_btn = SmoothButton("清除已完成")
+        clear_done_btn.setObjectName("secondaryBtn")
+        clear_done_btn.clicked.connect(self._on_clear_done)
+        header.addWidget(clear_done_btn)
+
         v.addLayout(header)
 
         # ---- 输入区 ----
         input_bar = QHBoxLayout()
         input_bar.setSpacing(8)
 
-        self._task_title_input = QLineEdit()
+        self._task_title_input = SmoothInput()
         self._task_title_input.setPlaceholderText("输入任务标题，回车添加...")
         self._task_title_input.returnPressed.connect(self._on_add)
         input_bar.addWidget(self._task_title_input, 1)
@@ -133,8 +158,33 @@ class TasksPanel(QWidget):
         input_bar.addWidget(add_btn)
         v.addLayout(input_bar)
 
+        # ---- 完成进度条（2026-10-06 紧凑改版新增）----
+        # 4px 细条 + 右侧等宽计数：任务少时用一条有效信息层承接中部空区，
+        # 任务多时给出整页完成度的恒常反馈。文字口径沿用 _task_count_label
+        # （属性名保留，tools/verify_list_perf.py C2 引用它）。
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
+        progress_hint = QLabel("完成进度")
+        progress_hint.setObjectName("hintLabel")
+        progress_row.addWidget(progress_hint)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setObjectName("taskProgressBar")
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        progress_row.addWidget(self._progress_bar, 1)
+
+        self._task_count_label = QLabel("共 0 条")
+        self._task_count_label.setObjectName("hintLabel")
+        progress_row.addWidget(self._task_count_label)
+        v.addLayout(progress_row)
+
         # ---- 任务列表（多选 + 自定义行委托） ----
-        self._task_list = QListWidget()
+        # 2026-10-08（清单 A3）：QListWidget → TaskListWidget —— 补键盘
+        # 路径（Space/Enter 勾选、Shift+F10/Menu 弹右键菜单），与小卡片
+        # 任务页共用同一实现
+        self._task_list = TaskListWidget()
         tune_list_scrolling(self._task_list)  # 丝滑化清单 L3：像素级滚动 + 统一步长
         self._task_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self._task_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -158,28 +208,8 @@ class TasksPanel(QWidget):
             "在上方输入待办回车添加，到期会在悬浮球提醒你")
         self._task_empty.attach_to(self._task_list)
 
-        # ---- 底部批量操作 ----
-        bottom = QHBoxLayout()
-        bottom.setSpacing(8)
-
-        toggle_btn = SmoothButton("批量完成")
-        toggle_btn.setObjectName("secondaryBtn")
-        toggle_btn.clicked.connect(self._on_batch_toggle)
-        bottom.addWidget(toggle_btn)
-
-        del_btn = IconButton("trash", text="批量删除", icon_size=14,
-                             object_name="dangerBtn")
-        del_btn.clicked.connect(self._on_batch_delete)
-        bottom.addWidget(del_btn)
-
-        bottom.addStretch()
-
-        clear_done_btn = SmoothButton("清除已完成")
-        clear_done_btn.setObjectName("secondaryBtn")
-        clear_done_btn.clicked.connect(self._on_clear_done)
-        bottom.addWidget(clear_done_btn)
-
-        v.addLayout(bottom)
+        # （2026-10-06 紧凑改版）原「批量完成/批量删除/清除已完成」底栏整行
+        # 移除：三个按钮已上收至标题行右侧，见 _build_ui 顶部 header 段。
 
     def _init_animation(self):
         """初始化面板级单个勾选动画与延时重建定时器。"""
@@ -211,7 +241,10 @@ class TasksPanel(QWidget):
         # 展开行描述符（纯 Python，不建 Qt 对象）：
         # ("header", group_key, n) 组标题行 / ("task", task, state, rel) 任务行
         rows = []
+        overdue_n = 0
         for group_key, tasks in self._task_manager.get_tasks_grouped(today):
+            if group_key == GROUP_OVERDUE:
+                overdue_n = len(tasks)
             rows.append(("header", group_key, len(tasks)))
             for t in tasks:
                 state, _delta = task_state(t.deadline, today)
@@ -227,8 +260,19 @@ class TasksPanel(QWidget):
         finally:
             self._building = False
 
-        total = len(self._task_manager.get_all_tasks())
-        self._task_count_label.setText(f"共 {total} 条")
+        all_tasks = self._task_manager.get_all_tasks()
+        total = len(all_tasks)
+        done_n = sum(1 for t in all_tasks if t.done)
+        # 逾期徽章：只在逾期 >0 时出现，避免常态噪音
+        if overdue_n > 0:
+            self._stat_overdue_label.setText(f"逾期 {overdue_n}")
+            self._stat_overdue_label.show()
+        else:
+            self._stat_overdue_label.hide()
+        # 进度条 + 计数（口径沿用 _task_count_label，verify_list_perf C2 引用）
+        self._progress_bar.setValue(
+            round(done_n * 100 / total) if total else 0)
+        self._task_count_label.setText(f"已完成 {done_n}/{total} 条")
         # 空态引导跟随（A3）：列表一件不剩时显示
         self._task_empty.setVisible(self._task_list.count() == 0)
         if self._task_empty.isVisible():
@@ -372,7 +416,7 @@ class TasksPanel(QWidget):
         self._host.data_changed.emit("task")
         # 轻提示反馈（2026-10-05）：添加任务此前静默，长标题截断展示
         shown = title if len(title) <= 16 else title[:15] + "…"
-        self._host.show_toast(f"已添加任务：{shown}")
+        self._host.show_toast(f"已添加任务：{shown}", kind="success")
 
     def _on_context_menu(self, pos):
         item = self._task_list.itemAt(pos)
@@ -396,7 +440,7 @@ class TasksPanel(QWidget):
         # 任务便签：把任务（截止日徽章+备注）钉成桌面常驻浮窗
         act_sticky = menu.addAction("钉为便签")
         act_edit = menu.addAction("编辑...")
-        act_export = menu.addAction("导出到 Obsidian")
+        act_export = menu.addAction("导出全部到 Obsidian")
         menu.addSeparator()
         act_delete = menu.addAction("删除")
         action = menu.exec(self._task_list.mapToGlobal(pos))
@@ -438,9 +482,10 @@ class TasksPanel(QWidget):
         ok, reason = manager.open_task(task_id)
         if not ok and reason == "limit":
             self._host.show_toast(
-                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些",
+                kind="warning")
         elif not ok and reason == "missing":
-            self._host.show_toast("任务不存在或已被删除")
+            self._host.show_toast("任务不存在或已被删除", kind="warning")
 
     def _edit_dialog(self, task):
         """编辑任务对话框（截止日期用日历选择器）"""
@@ -453,8 +498,8 @@ class TasksPanel(QWidget):
         form.setContentsMargins(20, 20, 20, 16)
         form.setSpacing(10)
 
-        title_edit = QLineEdit(task.title)
-        note_edit = QLineEdit(task.note)
+        title_edit = SmoothInput(task.title)
+        note_edit = SmoothInput(task.note)
         note_edit.setPlaceholderText("备注（可选）")
         deadline_edit = QDateEdit()
         deadline_edit.setCalendarPopup(True)

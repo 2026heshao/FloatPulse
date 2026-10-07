@@ -62,7 +62,7 @@ class _Ctx:
         self.logger = _Log()
         self.data_dir = data_dir
 
-    def show_toast(self, text, ms=2800):
+    def show_toast(self, text, ms=2800, **kwargs):
         pass
 
     def parent_window(self):

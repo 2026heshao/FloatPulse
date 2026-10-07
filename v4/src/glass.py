@@ -27,9 +27,10 @@ from PyQt6.QtGui import (
     QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPixmap,
     QPolygonF,
 )
-from PyQt6.QtWidgets import QPushButton, QWidget
+from PyQt6.QtWidgets import QWidget
 
 from src.constants import DEFAULT_THEME
+from src.controls import SmoothButton
 from src import wallpaper as _wallpaper
 
 
@@ -581,11 +582,19 @@ class NavArrow(QWidget):
         painter.end()
 
 
-class NavGroupHeader(QPushButton):
+class NavGroupHeader(SmoothButton):
     """侧栏分组标题按钮：左侧自绘箭头 + 标题文案（点击切换该组展开/折叠）。
 
     箭头是**子控件**而非文本里的字符，所以标题文案里不再带 ▼/▶；
     文本左侧的留白由 QSS 的 ``padding-left`` 提供（见 theme.py）。
+
+    2026-10-08（清单 A1/C1）：基类从 QPushButton 改为 SmoothButton ——
+    按下零反馈收编为绘制级下沉/叠色（overlay 端点见 controls 的
+    ``navGroupHeader`` 条目；子控件（箭头）在场时无位移只有叠色，与
+    navSiteCard 同口径）；焦点策略 NoFocus → StrongFocus —— 组一旦
+    折叠，组内按钮被整体隐藏，此前键盘用户连那几页都去不了。展开/折叠
+    唯一入口仍是 ``clicked``（main_window_nav），StrongFocus 后 Tab 到位
+    按 Space/Enter 会自动触发 clicked，无需额外键盘代码。
     """
 
     ARROW_X = 10          # 箭头左边缘（与 QSS padding-left 对齐）
@@ -593,7 +602,7 @@ class NavGroupHeader(QPushButton):
     def __init__(self, title: str, parent=None):
         super().__init__(title, parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.arrow = NavArrow(self)
         self._expanded = False
         self._expanded_angle = 90.0

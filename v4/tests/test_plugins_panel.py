@@ -969,7 +969,7 @@ class _ToastHost:
     def config(self):
         return self._config
 
-    def show_toast(self, text, ms=2800):
+    def show_toast(self, text, ms=2800, **kwargs):
         self.toasts.append(text)
 
     def _rebuild_context_menu(self):

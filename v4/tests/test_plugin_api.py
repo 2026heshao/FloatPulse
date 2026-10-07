@@ -66,7 +66,7 @@ def env(tmp_path):
     ctx = PluginContext(
         logger=logger,
         config={"theme": "dark", "clipboard_max_items": 200},
-        show_toast=lambda text, ms=2800: None,
+        show_toast=lambda text, ms=2800, **kwargs: None,
         open_main_window=lambda: None,
         open_card_mode=lambda mode: True,
     )

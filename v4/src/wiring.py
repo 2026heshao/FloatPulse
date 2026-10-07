@@ -38,6 +38,7 @@ from src.hotkey_binding import reapply_hotkey_bindings
 from src.logger import get_logger, mark_session_end
 from src.pomodoro import PHASE_FOCUS
 from src.theme import DEFAULT_THEME, resolve_theme_name
+from src.toast import ToastCenter
 
 
 # ======================================================================
@@ -146,11 +147,20 @@ class QuitCoordinator:
             # 组合键残留占用到进程结束
             ("截图热键注销", lambda: self._shot_hotkey_mgr.unregister_all()),
             ("插件热键注销", lambda: self._plugin_hotkey_mgr.unregister_all()),
+            # 命令直达键（2026-10-06）：管理器在 MainWindow.__init__ 创建，
+            # 经宿主公开方法注销（getattr 守卫——旧宿主无此方法时跳过）
+            ("命令直达键注销", self._unregister_command_hotkeys),
             # AI 本地服务（llama-server）：退出时主动停止，不再只靠 JobObject 兜底
             ("AI 本地服务停止", lambda: AI_SERVER.stop()),
             # 剪贴板监听断开（stop 自身幂等：未启动时直接返回）
             ("剪贴板监听停止", lambda: self._clipboard_monitor.stop()),
         ])
+
+    def _unregister_command_hotkeys(self) -> None:
+        """注销主窗命令直达键（宿主公开 API；缺方法时静默跳过）"""
+        unreg = getattr(self._main_window, "unregister_command_hotkeys", None)
+        if callable(unreg):
+            unreg()
 
     def safe_quit(self) -> None:
         """安全退出函数：重置卡片状态为默认首页，再退出程序"""
@@ -502,6 +512,9 @@ def wire_cross_window_signals(ball: Any, main_window: Any,
     main_window.theme_changed.connect(ball.apply_theme)
     # 3b. 主题切换 → 桌面便签全部换肤
     main_window.theme_changed.connect(sticky_manager.apply_theme)
+    # 3c. 主题切换 → 存活中的轻提示气泡原地换肤（ToastCenter 类级广播，
+    #     新气泡由 show_toast 传 current_theme，双保险）
+    main_window.theme_changed.connect(ToastCenter.set_theme)
 
     # 3b+. 壁纸参数改动（图 / 适配 / 模糊 / 遮罩 / 不透明度）→ 小卡片跟进
     # 背景。主窗在 refresh_wallpaper 里自己刷 GlassPanel，不走
@@ -518,10 +531,13 @@ def wire_cross_window_signals(ball: Any, main_window: Any,
     clipboard_monitor.fragment_added.connect(_on_fragment_added)
 
     # 4b. 剪贴板图片入库（Y2）→ 刷新素材页面 + 球体脉冲 + 轻提示
+    # 文案纪律（轻提示设计稿铁律④）：气泡内禁 emoji——图标由图标管线
+    # 按语义绘制；长后缀拆进 msg 副标题，标题保持一行可读。
     def _on_clipboard_image(_asset_id=None):
         main_window.refresh_temp_assets()
         ball.card_window.notify_assets_changed()
-        main_window.show_toast("🖼 剪贴板图片已存入素材池（素材页可查看）")
+        main_window.show_toast("剪贴板图片已存入素材池",
+                               msg="素材页可查看", kind="success")
         ball.pulse()
     if getattr(clipboard_monitor, "image_captured", None) is not None:
         clipboard_monitor.image_captured.connect(_on_clipboard_image)

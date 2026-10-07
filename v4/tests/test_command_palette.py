@@ -116,11 +116,12 @@ class TestRegistryCompleteness:
         assert ("plugin", "plugin:demo-x") not in [e.target for e in entries2]
 
     def test_registry_size_sane(self):
-        """量级钉子：8 页 + settings/help + 4 动作（export/theme/new_task/
-        help.hotkeys）+ 10 设置分类 = 24+（C2 新增 action.new_task 后 +1）"""
+        """量级钉子：8 页 + settings/help + 5 动作（export/theme/new_task/
+        new_note/help.hotkeys）+ 10 设置分类 = 25+（批次 N1 新增
+        action.new_note 后 24→25）"""
         entries = cp.build_registry(
             NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
-        assert len(entries) >= 24
+        assert len(entries) >= 25
 
 
 # ====================================================================
@@ -252,6 +253,9 @@ class _StubHost:
     def focus_new_task(self):
         self.calls.append(("focus_new_task",))
 
+    def focus_new_note(self):
+        self.calls.append(("focus_new_note",))
+
 
 @pytest.fixture()
 def stub_host():
@@ -365,6 +369,54 @@ class TestPaletteBehavior:
             category=cp.CATEGORY_ACTION, target=("action", "nope"))
         assert cp.execute_entry(fake, stub_host) is False
 
+    def test_new_note_entry_registered(self):
+        """批次 N1：action.new_note 已入注册表，target/图标/关键词齐备"""
+        entries = cp.build_registry(
+            NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
+        hits = [e for e in entries if e.cid == "action.new_note"]
+        assert len(hits) == 1
+        e = hits[0]
+        assert e.target == ("action", "new_note")
+        assert e.category == cp.CATEGORY_ACTION
+        assert e.icon == "plus"
+        assert e.title == "新建笔记"
+        # 触发词覆盖「记笔记 / biji / note / 拼音缩写」同义路径
+        assert "记笔记" in e.keywords and "biji" in e.keywords
+        assert "note" in e.keywords and "jb" in e.keywords
+
+    def test_new_note_keyword_hits(self):
+        """「记笔记」「jb」「新建笔记」（关键词/拼音缩写/标题命中）都排到
+        action.new_note；裸 "note" 是 page.notes 关键词 "notes" 的子串
+        （页面命中合法），只断言 new_note 出现在结果里"""
+        entries = cp.build_registry(
+            NAV_PAGE_TITLES, NAV_PAGE_TITLES_FIXED, NAV_PAGE_INDEX)
+        for q in ("记笔记", "jb", "新建笔记"):
+            hits = cp.filter_commands(entries, q)
+            assert hits and hits[0].cid == "action.new_note", q
+        hits = cp.filter_commands(entries, "note")
+        assert any(e.cid == "action.new_note" for e in hits)
+
+    def test_execute_new_note(self, palette, stub_host):
+        palette.open_at()
+        palette._input.setText("新建笔记")
+        QTest.keyClick(palette._input, Qt.Key.Key_Return)
+        assert ("focus_new_note",) in stub_host.calls
+        assert not palette.isVisible()
+
+    def test_execute_new_note_direct_dispatch(self, stub_host):
+        """execute_entry 分派面（不经 GUI）：new_note 落到公开委托"""
+        entry = next(e for e in cp.action_commands()
+                     if e.cid == "action.new_note")
+        assert cp.execute_entry(entry, stub_host) is True
+        assert ("focus_new_note",) in stub_host.calls
+
+    def test_export_title_says_full_scope(self):
+        """批次 N2：导出命令 title 统一为「导出全部到 Obsidian」（消除
+        「只导当前笔记」的语义歧义）"""
+        entry = next(e for e in cp.action_commands()
+                     if e.cid == "action.export")
+        assert entry.title == "导出全部到 Obsidian"
+
     def test_execute_help_hotkeys(self, palette, stub_host):
         palette.open_at()
         palette._input.setText("快捷键说明")
@@ -425,11 +477,14 @@ class TestBoundaries:
             assert not bad, f"命令面板不得引用 kb-search：{bad}"
 
     def test_main_window_wiring(self):
-        """main_window 的 `/` 快捷键接线 AST 钉死：注册 + 连到
-        _open_command_palette + 方法里真有懒构建与编辑态过滤"""
+        """main_window 的触发键接线 AST 钉死（2026-10-06 起触发键配置驱动，
+        不再断言 'QKeySequence("/")' 字面量 —— "/" 只是默认值，用户可改）：
+        注册 + 连到 _open_command_palette + 方法里真有懒构建与编辑态过滤 +
+        设置应用 / 直达键 / 自定义动作三方法在位 + 变更信号已 connect。"""
+        from src.constants import TRIGGER_KEYS
+        from src import config as config_mod
         src = _read(MAIN_WINDOW_PATH)
-        assert 'QKeySequence("/")' in src
-        assert "palette_shortcut.activated.connect(" \
+        assert "self._palette_shortcut.activated.connect(" \
                "self._open_command_palette)" in src
         tree = ast.parse(src)
         main_cls = next(n for n in ast.walk(tree)
@@ -437,7 +492,21 @@ class TestBoundaries:
                         and n.name == "MainWindow")
         names = {n.name for n in main_cls.body
                  if isinstance(n, ast.FunctionDef)}
-        assert "_open_command_palette" in names
+        assert {"_open_command_palette", "_apply_command_palette_settings",
+                "_reapply_command_hotkeys", "execute_custom_action",
+                "unregister_command_hotkeys"} <= names
+        # 全局唤醒键（2026-10-06）：注册逻辑钉在 _reapply_command_hotkeys
+        # 内（真读 command_palette_global_hotkey，空串跳过）且回调连到
+        # _open_command_palette——快捷键存在但连错槽的哑弹在这里红灯
+        reapply = next(n for n in main_cls.body
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "_reapply_command_hotkeys")
+        dumped_reapply = ast.dump(reapply)
+        assert "command_palette_global_hotkey" in dumped_reapply
+        assert "_open_command_palette" in dumped_reapply
+        # command_palette_changed 信号存在（类体 pyqtSignal 声明）且已 connect
+        assert "command_palette_changed" in src
+        assert "self.command_palette_changed.connect(" in src
         node = next(n for n in main_cls.body
                     if isinstance(n, ast.FunctionDef)
                     and n.name == "_open_command_palette")
@@ -445,6 +514,11 @@ class TestBoundaries:
         assert "focus_in_text_editor" in dumped
         assert "CommandPalette" in dumped
         assert "from src import command_palette" in src
+        # 触发键候选："/" 在列，Ctrl+K 不许混入（站内搜索的键，硬边界）
+        assert "/" in TRIGGER_KEYS and "Ctrl+K" not in TRIGGER_KEYS
+        # config 白名单与 constants 同源（同一对象，不是复制品）
+        assert config_mod._CONFIG_VALUE_WHITELISTS[
+            "command_palette_trigger"] is TRIGGER_KEYS
 
     def test_help_page_documents_palette(self):
         """帮助页「全局快捷键」表补了 [[/]] 条目（文案钉在源码）"""

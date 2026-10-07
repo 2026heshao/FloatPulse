@@ -16,17 +16,20 @@ import os
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QMenu, QDialog, QFormLayout,
+    QMenu, QDialog, QFormLayout,
     QScrollArea, QFrame, QGraphicsDropShadowEffect,
 )
 from PyQt6.QtCore import (
-    Qt, QUrl, QPoint, QPropertyAnimation, QEasingCurve, QAbstractAnimation,
+    Qt, QUrl, QPoint, QPointF, QPropertyAnimation, QEasingCurve,
+    QAbstractAnimation, QVariantAnimation,
 )
-from PyQt6.QtGui import QDesktopServices, QColor
+from PyQt6.QtGui import QDesktopServices, QColor, QPainter, QPen
+from src.theme import get_colors
+from src import motion
 
 from src.glass_message_box import GlassMessageBox
 from src.glass_dialog import make_dialog_buttons
-from src.controls import SmoothButton, EmptyState, PageTitle
+from src.controls import SmoothButton, EmptyState, PageTitle, SmoothInput
 
 # ---- 行布局几何 ----
 ROW_H = 44          # 单行高度
@@ -50,6 +53,12 @@ class _NavRow(QFrame):
 
     鼠标事件转发给 _NavList 统一处理拖拽；「打开」按钮自己消费
     按下事件，不会触发拖拽。
+
+    2026-10-08（清单 A2/C2 第二批）：StrongFocus + keyPressEvent
+    （Enter/Space → open_requested，即「打开」按钮的同一通道）——
+    行的页级动作就是打开网址，此前键盘 100% 不可达；按下态走属性驱动
+    （QFrame 不吃 QSS :pressed），QSS 见 theme.py 的
+    ``QFrame#navRow[pressed="true"]``。
     """
 
     def __init__(self, list_widget, site):
@@ -58,6 +67,7 @@ class _NavRow(QFrame):
         self.nav_id = site.nav_id
         self.url = site.url
         self.setObjectName("navRow")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         h = QHBoxLayout(self)
         h.setContentsMargins(12, 0, 10, 0)
@@ -80,9 +90,25 @@ class _NavRow(QFrame):
         h.addWidget(url, 3)
         h.addWidget(open_btn, 0)
 
+    # ---- 键盘与按下态（A2/C2）----
+    def keyPressEvent(self, event):  # noqa: N802 (Qt 命名)
+        """Enter / Space → 打开本行网址（与「打开」按钮同通道）。"""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter,
+                           Qt.Key.Key_Space):
+            self._list.open_requested(self.url)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _set_pressed(self, on: bool) -> None:
+        """属性驱动的按下态（QFrame 不吃 QSS :pressed）。"""
+        self.setProperty("pressed", "true" if on else "false")
+        _repolish(self)
+
     # ---- 鼠标事件 → 交给列表统一驱动拖拽 ----
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            self._set_pressed(True)
             self._list.begin_press(self, event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
@@ -92,11 +118,29 @@ class _NavRow(QFrame):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        self._set_pressed(False)
         self._list.end_press(self, event.globalPosition().toPoint())
         super().mouseReleaseEvent(event)
 
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        """按住拖出行时收掉按下态（拖拽态另有 [dragging] 语义接管）。"""
+        if self.property("pressed") == "true":
+            self._set_pressed(False)
+        super().leaveEvent(event)
+
     def contextMenuEvent(self, event):
         self._list.context_requested(self, event.globalPos())
+
+
+def _nav_theme_of(widget):
+    """父链爬 ``_theme``（SmoothButton 同款口径的本地轻量版）。"""
+    w = widget.parentWidget()
+    while w is not None:
+        t = getattr(w, "_theme", None)
+        if t in ("light", "dark"):
+            return t
+        w = w.parentWidget()
+    return None
 
 
 class _NavList(QWidget):
@@ -133,6 +177,10 @@ class _NavList(QWidget):
         self._dragging = False
         self._drag_row = None
         self._grab_dy = 0          # 拖拽起点光标相对行的纵向偏移
+        # V11（2026-10-07 交互视觉清单）：拖拽落点指示线（2px 主色 +
+        # 端点圆），落定后 150ms 淡出。alpha 1 = 拖拽中常显。
+        self._indicator_alpha = 0.0
+        self._indicator_fade = None
 
     # ------------------------------------------------------------------
     # 行管理
@@ -187,6 +235,44 @@ class _NavList(QWidget):
         return LIST_MARGIN + index * STEP
 
     # ------------------------------------------------------------------
+    # V11：拖拽落点指示线（2px 主色 + 端点圆，落定 150ms 淡出）
+    # ------------------------------------------------------------------
+    def _on_indicator_fade(self, value):
+        self._indicator_alpha = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        """拖拽期间在「落点槽位」上边界画插入指示线。
+
+        线画在行间隙里（slot_y 上方 ROW_GAP/2 处），被行本体遮挡的
+        部分天然不可见 —— 端点圆也落在间隙内。alpha 由拖拽态（常显）
+        与落定淡出共享；非拖拽且 alpha≈0 时零绘制（rest 渲染零变化）。
+        """
+        alpha = 1.0 if self._dragging else self._indicator_alpha
+        if alpha <= 0.01:
+            return
+        if self._drag_row is not None and self._drag_row in self._rows:
+            idx = self._rows.index(self._drag_row)
+        else:
+            return
+        colors = get_colors(_nav_theme_of(self))
+        line = QColor(str(colors.get("primary", "#0F6E56")))
+        line.setAlphaF(max(0.0, min(1.0, alpha)))
+        w = max(self.width(), 120)
+        x0, x1 = LIST_MARGIN, w - LIST_MARGIN
+        y = self._slot_y(idx) - ROW_GAP / 2.0   # 行间隙中线
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(line, 2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(line)
+        painter.drawLine(int(x0), int(y), int(x1), int(y))
+        for cx in (x0, x1):
+            painter.drawEllipse(QPointF(cx, y), 3.0, 3.0)
+        painter.end()
+
+    # ------------------------------------------------------------------
     # 拖拽（实时让位）
     # ------------------------------------------------------------------
     def begin_press(self, row, gpos):
@@ -212,6 +298,8 @@ class _NavList(QWidget):
         if idx != self._rows.index(row):
             self._reorder_live(row, idx)
 
+        # V11：落点随行移动，容器级重绘刷新指示线
+        self.update()
         self._autoscroll(gpos)
 
     def _start_drag(self, row, gpos):
@@ -231,6 +319,12 @@ class _NavList(QWidget):
         shadow.setColor(QColor(0, 0, 0, 120))
         row.setGraphicsEffect(shadow)
         row.grabMouse()   # 移出行范围后事件仍派发给该行
+        # V11：拖拽开始 → 指示线淡入常显（原地起拖即有落点参照）
+        if self._indicator_fade is not None:
+            self._indicator_fade.stop()
+            self._indicator_fade = None
+        self._indicator_alpha = 1.0
+        self.update()
 
     def _reorder_live(self, row, target_idx):
         cur = self._rows.index(row)
@@ -277,6 +371,20 @@ class _NavList(QWidget):
         anim.setStartValue(QPoint(row.x(), row.y()))
         anim.setEndValue(QPoint(LIST_MARGIN, self._slot_y(self._rows.index(row))))
         anim.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+        # V11：落定 → 指示线 150ms 淡出（motion fast 档；reduce_motion
+        # 时 ms=0 → 直接置 0 跳过）
+        fade_ms = motion.eased_ms("fast", 1.0)
+        fade = QVariantAnimation(self)
+        fade.setStartValue(1.0)
+        fade.setEndValue(0.0)
+        fade.setDuration(max(1, fade_ms) if fade_ms > 0 else 1)
+        fade.valueChanged.connect(self._on_indicator_fade)
+        if fade_ms <= 0:
+            self._indicator_alpha = 0.0
+            self.update()
+        else:
+            self._indicator_fade = fade
+            fade.start()
 
     def _abort_drag(self):
         """外部强制重建行时（如 refresh），把拖拽状态复位"""
@@ -347,9 +455,9 @@ class NavPanel(QWidget):
         add_row = QHBoxLayout()
         add_row.setSpacing(6)
 
-        self._nav_title_input = QLineEdit()
+        self._nav_title_input = SmoothInput()
         self._nav_title_input.setPlaceholderText("站点名称...")
-        self._nav_url_input = QLineEdit()
+        self._nav_url_input = SmoothInput()
         self._nav_url_input.setPlaceholderText("URL（如 baidu.com，自动补全 https://）")
 
         nav_add_btn = SmoothButton("添加站点")
@@ -406,7 +514,7 @@ class NavPanel(QWidget):
         self._nav_url_input.clear()
         self.refresh()
         self._host.data_changed.emit("nav")
-        self._host.show_toast(f"已添加站点：{title}")
+        self._host.show_toast(f"已添加站点：{title}", kind="success")
 
     def _show_row_menu(self, nav_id, gpos):
         if not self._nav_manager:
@@ -444,8 +552,8 @@ class NavPanel(QWidget):
         form.setContentsMargins(20, 20, 20, 16)
         form.setSpacing(10)
 
-        title_edit = QLineEdit(site.title)
-        url_edit = QLineEdit(site.url)
+        title_edit = SmoothInput(site.title)
+        url_edit = SmoothInput(site.url)
 
         form.addRow("标题:", title_edit)
         form.addRow("URL:", url_edit)

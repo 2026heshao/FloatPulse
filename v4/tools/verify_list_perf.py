@@ -57,6 +57,9 @@ class _FakeHost(QObject):
     def __init__(self):
         super().__init__()
         self._config = _FakeConfig()
+        # 2026-10-06 修复存量失修：fragments_panel 现经 host.config 读
+        # 预览显隐配置，替身宿主补一个只回默认值的 config 口
+        self.config = self._config
         self._task_manager = None
         self._fragment_manager = None
         self._note_manager = None
@@ -166,8 +169,8 @@ first_count_t = panel_t._task_list.count()
 check("C1 500 条任务首屏行数 = FIRST_CHUNK 上限",
       first_count_t == min(FIRST_CHUNK, total_rows_t),
       f"首屏 {first_count_t} 行 / 全量 {total_rows_t} 行")
-check("C2 任务计数标签口径不变（共 500 条）",
-      panel_t._task_count_label.text() == "共 500 条",
+check("C2 任务计数标签口径不变（已完成 0/500 条，2026-10-06 紧凑改版）",
+      panel_t._task_count_label.text() == "已完成 0/500 条",
       panel_t._task_count_label.text())
 print(f"  [PERF] 500 条任务 refresh 总耗时 {task_ms:.1f} ms"
       f"（首屏建 {first_count_t} 行 / 全量 {total_rows_t} 行）", flush=True)

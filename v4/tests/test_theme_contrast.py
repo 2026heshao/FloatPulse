@@ -21,9 +21,14 @@
           语义上就该发灰的 disabled 态
 """
 
+import os
 import re
+import sys
 
 import pytest
+
+# 自举：本文件必须可单跑（不依赖其它测试文件先插 sys.path 的吸血顺序）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.theme import THEMES, get_card_window_qss, get_main_window_qss, get_menu_qss
 

@@ -66,10 +66,7 @@ from src.single_instance import SingleInstance
 from src.card_window import CardWindow, card_modes
 from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
 import startup_checks  # 启动数据完整性入口壳（C1 下沉，弹窗留入口层）
-from src.task_manager import (
-    TaskManager, task_state, bucket_unfinished,
-    STATE_TODAY, STATE_OVERDUE,
-)
+from src.task_manager import TaskManager, bucket_unfinished
 from src.note_manager import NoteManager
 from src.fragment_manager import FragmentManager
 from src.clipboard_monitor import ClipboardMonitor
@@ -2187,21 +2184,17 @@ class FloatingBall(QWidget):
                 self.show()
 
     def refresh_badge(self):
-        """刷新球体徽标（A4）：显示"今日到期 + 已逾期未完成"任务数。
+        """刷新球体徽标（A4）：显示全部未完成任务数（★2026-10-07 改口径）。
 
-        口径与任务页 / 小卡片 / 托盘提醒**完全一致**（统一走 task_state）：
-        脏日期解析失败 → 视为无日期，不计入、不标红。
+        此前为「今日到期 + 已逾期」，无截止日的习惯类任务永远不计入
+        （用户报「5 条未完成只显示 1」）→ 改为未完成全量计数；
+        提醒弹窗的三桶口径（bucket_unfinished / task_state）不变。
         """
         count = 0
         if self._task_manager is not None:
             try:
-                from datetime import datetime
-                today = datetime.now().strftime("%Y-%m-%d")
                 for t in self._task_manager.get_all_tasks():
-                    if t.done:
-                        continue
-                    state, _delta = task_state(t.deadline, today)
-                    if state in (STATE_TODAY, STATE_OVERDUE):
+                    if not t.done:
                         count += 1
             except Exception:
                 count = 0
@@ -2534,8 +2527,8 @@ def main():
         ★2026-10-02 换呈现层：原生托盘气泡（系统 toast，样式不可控）→
         自绘弹窗 task_reminder_popup（用户点名重设计）；触发时机、
         task_reminder_enabled 开关与三桶口径全部不变，分桶仍由纯函数
-        bucket_unfinished 固化；球体徽标（refresh_badge）保持「逾期 +
-        今日到期」原口径不变。
+        bucket_unfinished 固化；球体徽标（refresh_badge）★2026-10-07
+        改为「全部未完成任务数」，与提醒三桶口径脱钩。
 
         三桶（顺序即弹窗内展示顺序）：
           · 已逾期   —— STATE_OVERDUE
@@ -2545,7 +2538,7 @@ def main():
         任务状态仍统一走 task_state（脏日期解析失败 → 无日期，不标红、
         不进逾期桶）。
         """
-        ball.refresh_badge()   # 顺带刷新球体徽标（跨天后"今日到期"口径会变）
+        ball.refresh_badge()   # 顺带刷新球体徽标（未完成数变了即同步）
         if not config_manager.get("task_reminder_enabled", True):
             return
         from datetime import datetime

@@ -16,22 +16,27 @@ import os
 import time
 
 from PyQt6.QtWidgets import (
-    QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame, QStackedWidget,
     QLineEdit, QComboBox,
-    QMenu, QCheckBox, QWidgetAction, QButtonGroup,
+    QMenu, QWidgetAction, QButtonGroup,
     QFileDialog,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QUrl, QSize
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QUrl, QSize, QEasingCurve, QPropertyAnimation,
+    QEvent,
+)
 # ★ QAction 在 QtGui 而不是 QtWidgets：本文件第 70 行用它给下拉框做占位项，
 #   此前漏了这行导入 → MainWindow 构造走到设置页就 NameError，
 #   程序直接起不来（2026-09-29 11:07 修）。
 # ★ QDesktopServices：「打开日志」按钮用系统文件管理器开数据目录。
-from PyQt6.QtGui import QAction, QDesktopServices
+# ★ QPainter / QColor：分类导航选中指示滑块（V5）自绘用。
+from PyQt6.QtGui import QAction, QDesktopServices, QPainter, QColor
 
 
 from src.controls import (SmoothButton, IconButton, IconLabel, PageTitle,
-                          Stepper, ToggleSwitch)
+                          Stepper, ToggleSwitch, SmoothInput,
+                          SmoothCheckBox, fade_in_once)
 from src.glass_dialog import make_separator
 from src.glass_message_box import GlassMessageBox
 from src.plugin_net import make_async_getter, make_async_poster
@@ -51,7 +56,19 @@ from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
 from src import autostart
 # 小卡片图标尺寸的范围常量：设置页步进器与小卡片本身共用一份定义，
 # 避免两处各写一个数字、日后改一处忘另一处（config._CONFIG_RANGES 同源）。
-from src.constants import (MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT)
+from src.constants import (MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT,
+                           TRIGGER_KEYS, TOAST_POSITIONS, TOAST_DURATIONS,
+                           RADIUS_PANEL)
+# 命令面板「命令直达键 / 自定义动作」两块子面板（2026-10-06 外迁独立模块，
+# 避免 settings_panel 膨胀失控）；全局唤醒键行复用 HotkeyCaptureEdit 捕捉
+# 输入框与 _is_valid_wake_combo / _norm_combo 校验口径（同源不抄两份）
+from src.command_palette_settings import (
+    CommandKeysGrid, CustomActionsPanel, HotkeyCaptureEdit,
+    _is_valid_wake_combo, _norm_combo,
+)
+# 轻提示设置项的即时生效入口（2026-10-06「轻提示」卡；位置 / 底缘 / 上限
+# 变更经 ToastCenter.on_setting_changed 平移存活气泡）
+from src.toast import ToastCenter
 
 
 # 设置页内部分类导航：顺序即左栏展示顺序，(key, 图标名, 名称)。
@@ -83,13 +100,17 @@ THEME_BTN_ICON_SIZE = 15
 ABOUT_ICON_SIZE = 15
 
 
-class PluginsPickButton(QPushButton):
+class PluginsPickButton(SmoothButton):
     """「接入插件」多选选择器：按钮 + 下拉菜单内嵌勾选框。
 
     用户要求：下拉选择、可多选。用 QMenu + QCheckBox（原生控件自己
     处理点击）而不是 QComboBox 勾选条目——后者要吞弹层鼠标事件才能
     不收起，真实环境下点击路径不稳定（实测勾选失效）；QWidgetAction
     里的复选框点击不收起菜单，连续多选天然可靠。
+
+    2026-10-08（清单 C1）：基类 QPushButton → SmoothButton，收编绘制级
+    按下反馈（未命名按钮走 controls._SMOOTH_OVERLAYS 的 None 键兜底，
+    与其他未命名 SmoothButton 同口径）。
 
     信号 ``changed(list[str])``：勾选集合变化时发出（元素为插件 id）。
     按钮文案聚合已勾选插件名，空时显示占位提示。
@@ -99,6 +120,10 @@ class PluginsPickButton(QPushButton):
 
     def __init__(self, parent=None):
         super().__init__("（未勾选任何插件）", parent)
+        # 2026-10-08（第二批焦点环收口）：命名后焦点环走 theme.py 的
+        # `QPushButton#pluginsPickBtn:focus`（$on_primary，$primary 实底
+        # 纪律），不再落到通用兜底（浅色主题白环隐形）
+        self.setObjectName("pluginsPickBtn")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._menu = QMenu(self)
         self._boxes = {}          # plugin_id -> QCheckBox
@@ -112,7 +137,7 @@ class PluginsPickButton(QPushButton):
         self._boxes = {}
         sel = set(selected or [])
         for pid, name in candidates or []:
-            box = QCheckBox(name if pid == name else f"{name}（{pid}）",
+            box = SmoothCheckBox(name if pid == name else f"{name}（{pid}）",
                             self._menu)
             box.setChecked(pid in sel)
             box.toggled.connect(
@@ -143,6 +168,75 @@ class PluginsPickButton(QPushButton):
         self.setText("、".join(names) if names else "（未勾选任何插件）")
 
 
+class _SettingsNavIndicator(QWidget):
+    """设置页分类导航的选中指示滑块（交互视觉清单 V5，2026-10-07）。
+
+    现状痛点：``#settingsNavBtn:checked`` 的底色由 QSS 表达，QSS 引擎没有
+    transition —— 点击另一分类时选中底色一帧瞬变。本控件把「选中行底」
+    从 QSS 拿过来画：一个圆角块（端点色与原 QSS 同为 ``$accent_soft``）
+    在分类按钮下方滑动跟随，120ms OutCubic（motion ``fast`` 档）。
+
+    契约：
+    - 只动 ``pos``，不碰任何按钮的 geometry / sizeHint / QSS 契约，
+      ``test_settings_nav`` 断言零变化；``SETTINGS_CATEGORIES`` 不动；
+    - 选中行底归本控件后，theme.py ``#settingsNavBtn:checked`` 删除
+      ``background-color``（文字色 / 字重仍归 QSS，即时切换）；
+    - 鼠标事件全透明（WA_TransparentForMouseEvents），导航点击不受影响；
+    - reduce_motion / 档位归零 → 直接落位（瞬时切换语义，与全仓一致）。
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._colors = get_colors("dark")
+        self._anim = QPropertyAnimation(self, b"pos", self)
+        self._anim.setEasingCurve(
+            getattr(QEasingCurve.Type, motion.EASE["out"]))
+        # 导航栏宽度固定 140，行高统一 —— 只滑 y，宽高直接落位
+        self._target_height = 0
+
+    def set_theme(self, theme: str):
+        """换主题重取端点色（apply_theme 链调用）。"""
+        self._colors = get_colors(theme if theme in ("light", "dark") else "dark")
+        self.update()
+
+    def snap_to(self, rect):
+        """无动画落位（构建定位 / 主题切换 / 父控件 resize 用）。"""
+        self._anim.stop()
+        self.setGeometry(rect)
+
+    def glide_to(self, rect, animate: bool, speed: float = 1.0):
+        """滑向目标行。``animate=False`` 或动效被闸（reduce_motion / 档位
+        归零 / 首次定位 rect 无效）时直接落位。"""
+        if not rect.isValid() or rect.width() <= 0:
+            return
+        self._target_height = rect.height()
+        target = rect.topLeft()
+        if self.geometry().size() != rect.size():
+            self.resize(rect.size())
+        ms = motion.eased_ms("fast", speed) if animate else 0
+        if ms <= 0:
+            self.snap_to(rect)
+            return
+        if self.pos() == target:
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self.pos())
+        self._anim.setEndValue(target)
+        self._anim.setDuration(ms)
+        self._anim.start()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(str(self._colors.get("accent_soft", "#E1F5EE"))))
+        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1),
+                          RADIUS_PANEL, RADIUS_PANEL)
+        p.end()
+
+
 class SettingsPanel(QWidget):
     """设置面板"""
 
@@ -152,6 +246,12 @@ class SettingsPanel(QWidget):
         self._config = host.config
         self._row_sep = {}          # 行 widget → 其下方分隔线（显隐联动用）
         self._build_ui()
+        # 懒加载（2026-10-07）：主窗 _apply_theme 只刷**已构建**页，本页
+        # 预热构建完成后没人调 apply_theme —— 指示滑块会停在构造默认
+        # get_colors("dark") 上（自定义强调色下选中底=暗红块，默认强调色
+        # 下=暗绿块），直到用户手动切一次主题才被纠正。只补这一件事：
+        # 其余控件（开关/主题按钮/状态行）各有自己的构建期取色路径。
+        self._nav_indicator.set_theme(self._host.current_theme)
 
     # ---------------- 小工具 ----------------
     @staticmethod
@@ -356,21 +456,11 @@ class SettingsPanel(QWidget):
             suffix="px", step=4)
         self._set_mini_icon_size.valueChanged.connect(
             self._on_mini_icon_size_changed)
+        # 末行收尾：原「提示条时长」行已随 2026-10-06 轻提示设置项重设计
+        # 迁往「全局工具」页「轻提示」卡（toast_duration_ms 键同批退役）
         add_row(gv, "小卡片图标大小", "悬浮球旁小卡片里软件图标的边长，"
                 "每档 4px；不影响主窗口软件导航页",
-                self._set_mini_icon_size)
-
-        # 提示条时长（2026-10-05 B4）：屏幕轻提示（ScreenToast）展示毫秒数。
-        # main_window.show_toast 未显式传 ms 时读 toast_duration_ms，改动
-        # 下次提示即生效（读取发生在每次弹出时，无需广播/刷新）。
-        self._set_toast_duration = Stepper(
-            1000, 6000, int(self._config.get("toast_duration_ms", 2800)),
-            suffix="ms", step=100)
-        self._set_toast_duration.valueChanged.connect(
-            self._on_toast_duration_changed)
-        add_row(gv, "提示条时长", "屏幕顶部操作反馈提示的停留时间，"
-                "每档 100ms；悬浮球短提示不受影响",
-                self._set_toast_duration, last=True)
+                self._set_mini_icon_size, last=True)
 
         # ================= 1.5 主题配色（2026-10-03 主题扩展）=================
         # 单独成卡而不是挤进「外观与主题」：那张卡已有 6 行（主题 / 缩放 /
@@ -406,7 +496,7 @@ class SettingsPanel(QWidget):
         custom_h = QHBoxLayout()
         custom_h.setContentsMargins(0, 0, 0, 0)
         custom_h.setSpacing(8)
-        self._set_accent_custom = QLineEdit(
+        self._set_accent_custom = SmoothInput(
             self._config.get("accent_custom", ""))
         self._set_accent_custom.setPlaceholderText("#RRGGBB")
         self._set_accent_custom.setMaxLength(7)
@@ -568,7 +658,7 @@ class SettingsPanel(QWidget):
         add_row(gv, "剪贴板历史上限", "达到上限后自动清理最早的碎片",
                 self._set_clipboard_max)
 
-        self._set_clipboard_filter = QLineEdit()
+        self._set_clipboard_filter = SmoothInput()
         apps = self._config.get("clipboard_filter_apps", []) or []
         self._set_clipboard_filter.setText(", ".join(str(a) for a in apps))
         self._set_clipboard_filter.setPlaceholderText("如：WeChat, Weixin, chrome")
@@ -626,13 +716,261 @@ class SettingsPanel(QWidget):
         add_row(gv, "截图钉屏", "按热键框选屏幕区域，钉成置顶参考浮窗",
                 self._set_screenshot)
 
-        self._set_screenshot_hotkey = QLineEdit()
+        self._set_screenshot_hotkey = SmoothInput()
         self._set_screenshot_hotkey.setText(self._config.get("screenshot_hotkey", "Ctrl+Alt+S"))
         self._set_screenshot_hotkey.setPlaceholderText("如：Ctrl+Alt+S")
         self._set_screenshot_hotkey.setMinimumWidth(190)
         self._set_screenshot_hotkey.editingFinished.connect(self._on_screenshot_hotkey_changed)
         add_row(gv, "截图热键", "格式 Ctrl+Alt+S，需含修饰键；被占用时会提示",
                 self._set_screenshot_hotkey, last=True)
+
+        # ================= 5b. 命令面板（2026-10-06，tools 分类页）=================
+        # 五行：总开关 / 触发键三选一 / 全局唤醒键 / 命令直达键（+子面板网格）/
+        # 自定义动作（+子面板表单）。子面板不占 _add_row（无 settingTitle，
+        # verify_settings_groups 的分隔线校验不受影响）。
+        gv = group(cv, "命令面板")
+
+        # 行 1：总开关
+        self._set_cmd_palette = self._toggle("command_palette_enabled", True)
+        self._set_cmd_palette.toggled.connect(self._on_cmd_palette_changed)
+        # 开关行不进置灰联动集合（开关本身永不禁用）
+        add_row(gv, "命令面板",
+                "按触发键弹出命令条：搜动作与导航（跳页 / 切主题 / 导出等）",
+                self._set_cmd_palette)
+
+        # 行 2：触发键三选一分段（checkable secondaryBtn 承担选中态，不新增
+        # QSS token —— 任务书既定取舍）
+        self._cmd_trigger_seg = QWidget()
+        seg_h = QHBoxLayout(self._cmd_trigger_seg)
+        seg_h.setContentsMargins(0, 0, 0, 0)
+        seg_h.setSpacing(0)
+        self._trigger_group = QButtonGroup(self._cmd_trigger_seg)
+        self._trigger_group.setExclusive(True)
+        self._trigger_btns = {}
+        cur_trigger = str(self._config.get("command_palette_trigger", "/"))
+        for key in TRIGGER_KEYS:
+            btn = SmoothButton(key)
+            btn.setObjectName("secondaryBtn")
+            btn.setCheckable(True)
+            btn.setChecked(key == cur_trigger)
+            btn.clicked.connect(
+                lambda _chk=False, k=key: self._on_cmd_trigger_changed(k))
+            self._trigger_group.addButton(btn)
+            self._trigger_btns[key] = btn
+            seg_h.addWidget(btn)
+        row_cmd_trigger = add_row(gv, "触发键",
+                "呼出命令面板的按键（三选一，即时生效；仅主窗聚焦时有效，"
+                "任意界面呼出请用全局唤醒键）",
+                self._cmd_trigger_seg)
+
+        # 行 2b：全局唤醒键（2026-10-06）：HotkeyCaptureEdit 捕捉改绑 +
+        # trash IconButton 一键清除（清除 = 置空串 = 未启用）。与触发键
+        # 分工：触发键是应用内 QShortcut（主窗失焦即失效），唤醒键走
+        # RegisterHotKey 全局热键，任意应用界面按下即呼出。
+        self._cmd_wake_edit = HotkeyCaptureEdit()
+        self._cmd_wake_edit.set_combo(str(
+            self._config.get("command_palette_global_hotkey", "") or ""))
+        self._cmd_wake_edit.captured.connect(self._on_cmd_wake_changed)
+        self._cmd_wake_clear = IconButton("trash", size=22, icon_size=12,
+                                          object_name="iconBtn",
+                                          host=self._host,
+                                          tooltip="清除全局唤醒键（留空=关闭）")
+        self._cmd_wake_clear.clicked.connect(self._on_cmd_wake_clear)
+        self._cmd_wake_holder = QWidget()
+        wake_h = QHBoxLayout(self._cmd_wake_holder)
+        wake_h.setContentsMargins(0, 0, 0, 0)
+        wake_h.setSpacing(8)
+        wake_h.addWidget(self._cmd_wake_edit)
+        wake_h.addWidget(self._cmd_wake_clear)
+        wake_h.addStretch()
+        row_cmd_wake = add_row(gv, "全局唤醒键",
+                "在任意应用界面按下即可呼出命令面板（需含修饰键；留空=关闭）",
+                self._cmd_wake_holder)
+
+        # 行 3：命令直达键 +「全部清除」+ 下方直达键网格子面板
+        self._cmd_keys_clear = SmoothButton("全部清除")
+        self._cmd_keys_clear.setObjectName("secondaryBtn")
+        self._cmd_keys_clear.clicked.connect(self._on_cmd_keys_clear)
+        row_cmd_keys = add_row(gv, "命令直达键",
+                "给任意命令绑全局组合键，任何界面一键直达（需含修饰键）",
+                self._cmd_keys_clear)
+        self._cmd_keys_grid = CommandKeysGrid(self._host)
+        self._cmd_keys_grid.changed.connect(self._on_cmd_palette_data_changed)
+        gv.addWidget(self._cmd_keys_grid)
+        gv.addSpacing(8)
+
+        # 行 4：自定义动作 +「新建动作」+ 下方表单子面板
+        self._custom_actions_panel = CustomActionsPanel(self._host)
+        self._custom_actions_panel.changed.connect(
+            self._on_cmd_palette_data_changed)
+        self._cmd_action_add = IconButton("plus", text="新建动作", icon_size=14,
+                                          object_name="secondaryBtn",
+                                          host=self._host)
+        self._cmd_action_add.clicked.connect(
+            self._custom_actions_panel.start_new)
+        row_cmd_custom = add_row(gv, "自定义动作",
+                "网址 / 文件夹 / 常用文本一键打开或复制，可绑直达键，上限 20 条",
+                self._cmd_action_add, last=True)
+        gv.addWidget(self._custom_actions_panel)
+
+        # 脚注：与 Ctrl+K 的分工说明
+        self._cmd_palette_note = QLabel(
+            "与 Ctrl+K 的分工：Ctrl+K 搜内容（碎片 / 笔记 / 任务全文），"
+            "命令面板搜动作与导航（跳页 / 切主题 / 导出等），二者互不占用。")
+        self._cmd_palette_note.setObjectName("settingDesc")
+        self._cmd_palette_note.setWordWrap(True)
+        gv.addWidget(self._cmd_palette_note)
+        gv.addSpacing(4)
+
+        # 开关置灰联动集合（Qt 自动灰化子控件；开关本身不禁用）
+        self._cmd_palette_widgets = [
+            row_cmd_trigger, self._cmd_trigger_seg,
+            row_cmd_wake, self._cmd_wake_holder,
+            self._cmd_wake_edit, self._cmd_wake_clear,
+            row_cmd_keys, self._cmd_keys_clear, self._cmd_keys_grid,
+            row_cmd_custom, self._cmd_action_add,
+            self._custom_actions_panel, self._cmd_palette_note,
+        ]
+        self._sync_cmd_palette_enabled()
+
+        # ================= 5c. 应用快捷键（2026-10-06，tools 分类页）=================
+        gv = group(cv, "应用快捷键")
+
+        # 行 1：插件动作热键 → 跳插件中心
+        self._plugin_hotkey_btn = SmoothButton("去插件中心管理")
+        self._plugin_hotkey_btn.setObjectName("secondaryBtn")
+        self._plugin_hotkey_btn.clicked.connect(self._on_open_plugins_center)
+        add_row(gv, "插件动作热键",
+                "插件在清单里声明的全局热键，改键 / 增删到插件中心操作",
+                self._plugin_hotkey_btn)
+
+        # 行 2：内置快捷键（纯说明行，右侧占位空控件）+ 下方键位一览
+        add_row(gv, "内置快捷键",
+                "窗口级固定键，不做改键——防止改出与全局热键、输入法的冲突",
+                QLabel(""), last=True)
+        self._builtin_hotkey_chips = QLabel(
+            "Ctrl+K 站内搜索 · / 命令面板 · Ctrl+T 切换主题 · F1 使用说明 · "
+            "Ctrl+W / Ctrl+H 隐藏主窗 · Esc 关闭小卡片 / 退出截图 · "
+            "Ctrl+1~9 小卡片翻页")
+        self._builtin_hotkey_chips.setObjectName("settingDesc")
+        self._builtin_hotkey_chips.setWordWrap(True)
+        gv.addWidget(self._builtin_hotkey_chips)
+        gv.addSpacing(4)
+
+        # ================= 5d. 轻提示（2026-10-06，tools 分类页）=================
+        # 七行（设计文档《轻提示气泡 · 设置项设计-2026-10-06》§2/§4）：
+        # 开关 / 位置分段 / 底缘 Stepper / 时长分段 / 同屏上限 Stepper /
+        # 动画开关 / 提示音开关。默认值 = 视觉稿定案值（零配置即终稿）；
+        # 取代 2026-10-05 B4 在「外观与主题」卡的单行「提示条时长」。
+        gv = group(cv, "轻提示")
+
+        # 行 1：启用轻提示（总开关；关闭 → 其余行置灰，toast 请求静默丢弃）
+        self._set_toast_enabled = self._toggle("toast_enabled", True)
+        self._set_toast_enabled.toggled.connect(
+            self._on_toast_enabled_changed)
+        add_row(gv, "启用轻提示",
+                "操作反馈在屏幕下方以轻气泡提示；关闭后请求静默丢弃，"
+                "重新开启不补发停用期间的提示",
+                self._set_toast_enabled)
+
+        # 行 2：显示位置分段（checkable secondaryBtn 承担选中态，与命令
+        # 面板触发键同款，不新增 QSS token）
+        self._toast_pos_seg = QWidget()
+        seg_h = QHBoxLayout(self._toast_pos_seg)
+        seg_h.setContentsMargins(0, 0, 0, 0)
+        seg_h.setSpacing(0)
+        self._toast_pos_group = QButtonGroup(self._toast_pos_seg)
+        self._toast_pos_group.setExclusive(True)
+        self._toast_pos_btns = {}
+        cur_pos = str(self._config.get("toast_position", "center"))
+        # 候选与 config 白名单 / constants 同源（TOAST_POSITIONS），标签另配
+        for key in TOAST_POSITIONS:
+            label = {"center": "中下方居中", "corner": "右下角"}[key]
+            btn = SmoothButton(label)
+            btn.setObjectName("secondaryBtn")
+            btn.setCheckable(True)
+            btn.setChecked(key == cur_pos)
+            btn.clicked.connect(
+                lambda _chk=False, k=key: self._on_toast_position_changed(k))
+            self._toast_pos_group.addButton(btn)
+            self._toast_pos_btns[key] = btn
+            seg_h.addWidget(btn)
+        row_toast_pos = add_row(gv, "显示位置",
+                "气泡停在屏幕中下方或右下角（中下方被 Dock 类工具遮挡时换位）",
+                self._toast_pos_seg)
+
+        # 行 3：距屏幕底缘（Stepper 24-120 每档 8；数值类禁 QSlider 铁律）
+        self._set_toast_bottom = Stepper(
+            24, 120, int(self._config.get("toast_bottom_offset", 56)),
+            suffix="px", step=8)
+        self._set_toast_bottom.valueChanged.connect(
+            self._on_toast_bottom_changed)
+        row_toast_bottom = add_row(gv, "距屏幕底缘",
+                "气泡底缘与屏幕底缘的距离，每档 8px；过小时自动抬到任务栏之上",
+                self._set_toast_bottom)
+
+        # 行 4：停留时长分段（基准档；错误类 / 带动作钮按固定倍率自动延长，
+        # 倍率不暴露；变更只影响之后新触发的气泡，存活中不中途改表）
+        self._toast_dur_seg = QWidget()
+        dur_h = QHBoxLayout(self._toast_dur_seg)
+        dur_h.setContentsMargins(0, 0, 0, 0)
+        dur_h.setSpacing(0)
+        self._toast_dur_group = QButtonGroup(self._toast_dur_seg)
+        self._toast_dur_group.setExclusive(True)
+        self._toast_dur_btns = {}
+        cur_dur = str(self._config.get("toast_duration", "standard"))
+        # 候选与 config 白名单 / constants 同源（TOAST_DURATIONS），标签另配
+        for key in TOAST_DURATIONS:
+            label = {"brief": "短", "standard": "标准", "relaxed": "长"}[key]
+            btn = SmoothButton(label)
+            btn.setObjectName("secondaryBtn")
+            btn.setCheckable(True)
+            btn.setChecked(key == cur_dur)
+            btn.clicked.connect(
+                lambda _chk=False, k=key: self._on_toast_duration_changed(k))
+            self._toast_dur_group.addButton(btn)
+            self._toast_dur_btns[key] = btn
+            dur_h.addWidget(btn)
+        row_toast_dur = add_row(gv, "停留时长",
+                "基准停留时长（短 2 秒 / 标准 3.2 秒 / 长 5 秒）；错误类与"
+                "带动作钮的提示按比例自动延长",
+                self._toast_dur_seg)
+
+        # 行 5：同屏最多显示（Stepper 1-5；溢出收拢「+N」胶囊）
+        self._set_toast_max = Stepper(
+            1, 5, int(self._config.get("toast_max_visible", 3)),
+            suffix="条", step=1)
+        self._set_toast_max.valueChanged.connect(self._on_toast_max_changed)
+        row_toast_max = add_row(gv, "同屏最多显示",
+                "超出上限的最早一条收拢为「+N」胶囊，腾出空位后依序恢复",
+                self._set_toast_max)
+
+        # 行 6：入场动画（R6：关闭只跳过进出补间，悬停暂停 / 倒计时条保留——
+        # 可用性底线，刻意不给关闭入口）
+        self._set_toast_animation = self._toggle("toast_animation", True)
+        self._set_toast_animation.toggled.connect(
+            self._on_toast_animation_changed)
+        row_toast_anim = add_row(gv, "入场动画",
+                "关闭后气泡直接出现 / 消失（悬停暂停与倒计时条保留）",
+                self._set_toast_animation)
+
+        # 行 7：警告/错误提示音（默认关：伴随型工具出声需要用户主动要）
+        self._set_toast_sound = self._toggle("toast_sound", False)
+        self._set_toast_sound.toggled.connect(self._on_toast_sound_changed)
+        row_toast_sound = add_row(gv, "警告/错误提示音",
+                "警告与错误类气泡出现时播放一声系统提示音；成功 / 信息类静默",
+                self._set_toast_sound, last=True)
+
+        # 开关置灰联动集合（Qt 自动灰化子控件；开关本身不禁用）
+        self._toast_widgets = [
+            row_toast_pos, self._toast_pos_seg,
+            row_toast_bottom, self._set_toast_bottom,
+            row_toast_dur, self._toast_dur_seg,
+            row_toast_max, self._set_toast_max,
+            row_toast_anim, self._set_toast_animation,
+            row_toast_sound, self._set_toast_sound,
+        ]
+        self._sync_toast_rows_enabled()
 
         # ================= 6. 番茄钟 =================
         # 2026-10-02 从「全局工具」独立成独立分类：番茄钟自带 4 项参数，
@@ -728,7 +1066,7 @@ class SettingsPanel(QWidget):
         add_row(gv, "导出位置", "Obsidian vault 根目录；内容写入其下的 FloatPulse 文件夹",
                 vault_ctl)
 
-        self._set_export_btn = SmoothButton("导出到 Obsidian")
+        self._set_export_btn = SmoothButton("导出全部到 Obsidian")
         self._set_export_btn.setObjectName("secondaryBtn")
         self._set_export_btn.setFixedHeight(30)
         self._set_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -773,21 +1111,21 @@ class SettingsPanel(QWidget):
             mode_ctl)
 
         # ---- 云端字段（OpenAI 兼容 /chat/completions；仅云端模式显示）----
-        self._ai_url = QLineEdit(str(self._config.get("ai_cloud_base_url", "")
+        self._ai_url = SmoothInput(str(self._config.get("ai_cloud_base_url", "")
                                      or ""))
         self._ai_url.setPlaceholderText("https://api.deepseek.com/v1")
         self._ai_url.setFixedWidth(240)
         self._ai_row_url = add_row(
             gv, "云端地址", "OpenAI 兼容接口；回环地址（Ollama 等）可免 key",
             self._ai_url)
-        self._ai_key = QLineEdit(str(self._config.get("ai_cloud_api_key", "")
+        self._ai_key = SmoothInput(str(self._config.get("ai_cloud_api_key", "")
                                      or ""))
         self._ai_key.setPlaceholderText("API key（回环地址可留空）")
         self._ai_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._ai_key.setFixedWidth(240)
         self._ai_row_key = add_row(gv, "云端 Key", "云端服务的 API key；只存本机配置文件",
                                    self._ai_key)
-        self._ai_model = QLineEdit(str(self._config.get("ai_cloud_model", "")
+        self._ai_model = SmoothInput(str(self._config.get("ai_cloud_model", "")
                                        or ""))
         self._ai_model.setPlaceholderText("模型名，如 deepseek-chat")
         self._ai_model.setFixedWidth(240)
@@ -799,7 +1137,7 @@ class SettingsPanel(QWidget):
         exe_row = QHBoxLayout(exe_ctl)
         exe_row.setContentsMargins(0, 0, 0, 0)
         exe_row.setSpacing(8)
-        self._ai_exe = QLineEdit(str(self._config.get("ai_local_server_exe",
+        self._ai_exe = SmoothInput(str(self._config.get("ai_local_server_exe",
                                                       "") or ""))
         self._ai_exe.setPlaceholderText("llama-server.exe 路径")
         self._ai_exe.setFixedWidth(160)
@@ -818,7 +1156,7 @@ class SettingsPanel(QWidget):
         gguf_row = QHBoxLayout(gguf_ctl)
         gguf_row.setContentsMargins(0, 0, 0, 0)
         gguf_row.setSpacing(8)
-        self._ai_gguf = QLineEdit(str(self._config.get("ai_local_gguf", "")
+        self._ai_gguf = SmoothInput(str(self._config.get("ai_local_gguf", "")
                                       or ""))
         self._ai_gguf.setPlaceholderText("模型文件（.gguf）")
         self._ai_gguf.setFixedWidth(160)
@@ -832,7 +1170,7 @@ class SettingsPanel(QWidget):
         gguf_row.addWidget(gguf_btn)
         self._ai_row_gguf = add_row(gv, "本地模型", ".gguf 模型文件路径", gguf_ctl)
 
-        self._ai_port = QLineEdit(str(self._config.get("ai_local_port", 8095)
+        self._ai_port = SmoothInput(str(self._config.get("ai_local_port", 8095)
                                       or 8095))
         self._ai_port.setFixedWidth(72)
         self._ai_row_port = add_row(
@@ -1061,6 +1399,12 @@ class SettingsPanel(QWidget):
         self._cat_index = {}
         self._cat_group = QButtonGroup(self)
         self._cat_group.setExclusive(True)
+        # V5：选中指示滑块先于按钮创建（Qt 子控件按创建顺序叠放，先建的在
+        # 底层）—— 滑块垫在按钮下面，hover 叠色仍由按钮自己的 overlay 画。
+        self._nav_indicator = _SettingsNavIndicator(rail)
+        self._nav_indicator.hide()   # 首个几何到达（布局激活）后再显形
+        rail.installEventFilter(self)
+        self._nav_rail = rail
         for idx, (key, icon, label) in enumerate(SETTINGS_CATEGORIES):
             # 自绘图标 + 文字（UI 重构 04）：图标由 QIcon 位图承载，选中态
             # 转主色走 On 位图（checkable），与 QSS 的 $accent_soft 选中底配套；
@@ -1079,6 +1423,46 @@ class SettingsPanel(QWidget):
         rv.addStretch()
         rail.setFixedWidth(140)
         return rail
+
+    def _nav_indicator_rect(self, key: str):
+        """分类 key 对应按钮在导航栏内的几何（滑块跟随目标）。"""
+        btn = self._cat_btns.get(key)
+        if btn is None:
+            return None
+        rect = btn.geometry()
+        if rect.width() <= 0:
+            return None
+        return rect
+
+    def _sync_nav_indicator(self, key: str, animate: bool):
+        """把指示滑块落/滑到 key 分类所在行（V5）。"""
+        ind = getattr(self, "_nav_indicator", None)
+        if ind is None:
+            return
+        rect = self._nav_indicator_rect(key)
+        if rect is None:
+            ind.hide()
+            return
+        ind.show()
+        # 不 raise_()：滑块必须垫在按钮**下方**（按钮 QSS 常态透明底，
+        # 选中行底从下面透出；按钮自身在上，hover 叠色/文字不受遮挡）——
+        # 创建顺序已保证这一点，任何情况下不得提到按钮之上。
+        speed = motion.sanitize_speed(
+            getattr(self._host, "anim_speed", 1.0))
+        ind.glide_to(rect, animate=animate, speed=speed)
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt 命名)
+        """导航栏 resize（首次显形布局激活 / 页面宽度变化）→ 滑块无动画
+        跟到当前选中行：行几何变了，带动画反而会滑出旧位置。"""
+        if (obj is getattr(self, "_nav_rail", None)
+                and event.type() == QEvent.Type.Resize):
+            btn = self._cat_group.checkedButton() if hasattr(
+                self, "_cat_group") else None
+            for key, b in getattr(self, "_cat_btns", {}).items():
+                if b is btn:
+                    self._sync_nav_indicator(key, animate=False)
+                    break
+        return super().eventFilter(obj, event)
 
     def _new_category_page(self, key: str) -> QVBoxLayout:
         """为分类 key 建一个滚动页（挂入 stack），返回其内容竖直布局。
@@ -1102,12 +1486,25 @@ class SettingsPanel(QWidget):
         return v
 
     def show_category(self, key: str):
-        """切到指定分类；未知 key 静默忽略（导航点击与外部深链共用此入口）"""
+        """切到指定分类；未知 key 静默忽略（导航点击与外部深链共用此入口）。
+
+        D1（2026-10-08）：分类切换补一段**单侧淡入**——新页立即成为当前页
+        （setCurrentIndex 语义/断言零变化），表现层叠加一次透明度过渡；
+        交叉淡入/滑动手势属过度工程化，明确不做。reduce_motion / 档位
+        归零 / 面板不可见（构造期首次定位）→ 瞬时切换。
+        """
         btn = self._cat_btns.get(key)
         if btn is None:
             return
         btn.setChecked(True)   # QButtonGroup 互斥，自动取消上一个选中
+        # V5：选中指示滑块 120ms 滑动跟随（QSS :checked 底色已移交本控件）
+        self._sync_nav_indicator(key, animate=True)
         self._cat_stack.setCurrentIndex(self._cat_index[key])
+        page = self._cat_stack.currentWidget()
+        if page is not None and self.isVisible():
+            fade_in_once(page, motion.eased_ms(
+                "fast", motion.sanitize_speed(
+                    getattr(self._host, "anim_speed", 1.0))))
         # 自动快照状态随现场变（保存数据即产生新快照），切到「关于」时
         # 重读一次保证不过期；其它分类无现场数据，不需要这个钩子
         if key == "about":
@@ -1177,6 +1574,9 @@ class SettingsPanel(QWidget):
         theme = self._host.current_theme
         for sw in getattr(self, "_toggles", []):
             sw.set_theme(theme)
+        ind = getattr(self, "_nav_indicator", None)
+        if ind is not None:
+            ind.set_theme(theme)   # V5：指示滑块端点色跟随主题
         if hasattr(self, "_set_theme_light"):
             # 三态：显式 light/dark 亮对应钮；"follow"（跟随系统）亮第三钮
             self._set_theme_light.setChecked(theme == "light")
@@ -1398,6 +1798,22 @@ class SettingsPanel(QWidget):
             self._set_screenshot.blockSignals(False)
         if hasattr(self, '_set_screenshot_hotkey'):
             self._set_screenshot_hotkey.setText(self._config.get("screenshot_hotkey", "Ctrl+Alt+S"))
+        if hasattr(self, '_set_cmd_palette'):
+            # 命令面板卡：开关同步（屏蔽信号防误广播）→ 触发键分段重置
+            # （点击信号不因 setChecked 触发，无需屏蔽）→ 子面板重填 → 置灰联动
+            self._set_cmd_palette.blockSignals(True)
+            self._set_cmd_palette.setChecked(
+                bool(self._config.get("command_palette_enabled", True)))
+            self._set_cmd_palette.blockSignals(False)
+            cur_trigger = str(self._config.get("command_palette_trigger", "/"))
+            for key, btn in self._trigger_btns.items():
+                btn.setChecked(key == cur_trigger)
+            # 全局唤醒键捕捉框：set_combo 只 setText 不发 captured，无需屏蔽
+            self._cmd_wake_edit.set_combo(str(
+                self._config.get("command_palette_global_hotkey", "") or ""))
+            self._cmd_keys_grid.refresh()
+            self._custom_actions_panel.refresh()
+            self._sync_cmd_palette_enabled()
         if hasattr(self, '_set_pomodoro'):
             self._set_pomodoro.blockSignals(True)
             self._set_pomodoro.setChecked(self._config.get("pomodoro_enabled", True))
@@ -1445,11 +1861,35 @@ class SettingsPanel(QWidget):
             self._set_reduce_motion.setChecked(
                 bool(self._config.get("reduce_motion", False)))
             self._set_reduce_motion.blockSignals(False)
-        if hasattr(self, '_set_toast_duration'):
-            self._set_toast_duration.blockSignals(True)
-            self._set_toast_duration.setValue(
-                int(self._config.get("toast_duration_ms", 2800)))
-            self._set_toast_duration.blockSignals(False)
+        if hasattr(self, '_set_toast_enabled'):
+            # 轻提示卡（2026-10-06）：行控件批量刷新前屏蔽信号防误写盘
+            self._set_toast_enabled.blockSignals(True)
+            self._set_toast_enabled.setChecked(
+                bool(self._config.get("toast_enabled", True)))
+            self._set_toast_enabled.blockSignals(False)
+            cur_pos = str(self._config.get("toast_position", "center"))
+            for key, btn in self._toast_pos_btns.items():
+                btn.setChecked(key == cur_pos)
+            self._set_toast_bottom.blockSignals(True)
+            self._set_toast_bottom.setValue(
+                int(self._config.get("toast_bottom_offset", 56)))
+            self._set_toast_bottom.blockSignals(False)
+            cur_dur = str(self._config.get("toast_duration", "standard"))
+            for key, btn in self._toast_dur_btns.items():
+                btn.setChecked(key == cur_dur)
+            self._set_toast_max.blockSignals(True)
+            self._set_toast_max.setValue(
+                int(self._config.get("toast_max_visible", 3)))
+            self._set_toast_max.blockSignals(False)
+            self._set_toast_animation.blockSignals(True)
+            self._set_toast_animation.setChecked(
+                bool(self._config.get("toast_animation", True)))
+            self._set_toast_animation.blockSignals(False)
+            self._set_toast_sound.blockSignals(True)
+            self._set_toast_sound.setChecked(
+                bool(self._config.get("toast_sound", False)))
+            self._set_toast_sound.blockSignals(False)
+            self._sync_toast_rows_enabled()
         motion.set_reduce_motion(
             bool(self._config.get("reduce_motion", False)))
         if hasattr(self, '_set_ball_size'):
@@ -1702,6 +2142,86 @@ class SettingsPanel(QWidget):
         self._config.save()
         self._host.screenshot_changed.emit()
 
+    # ---- 命令面板（2026-10-06「命令面板」卡）----
+    def _on_cmd_palette_changed(self, checked: bool):
+        """命令面板总开关：即时持久化 + 广播主窗重挂触发键/直达键 + 置灰联动"""
+        enabled = bool(checked)
+        if enabled != self._config.get("command_palette_enabled", True):
+            self._config.set("command_palette_enabled", enabled)
+            self._config.save()
+        self._host.command_palette_changed.emit()
+        self._sync_cmd_palette_enabled()
+        self._host.show_toast("命令面板已开启" if enabled else "命令面板已关闭",
+                              kind="info")
+
+    def _on_cmd_trigger_changed(self, key: str):
+        """触发键三选一：同键不重复写；否则落盘 + 广播（即时生效）"""
+        if key == self._config.get("command_palette_trigger", "/"):
+            return
+        self._config.set("command_palette_trigger", key)
+        self._config.save()
+        self._host.command_palette_changed.emit()
+        self._host.show_toast(f"触发键已改为 {key}，即时生效", kind="success")
+
+    def _on_cmd_wake_changed(self, combo: str):
+        """全局唤醒键捕获完成：形态校验 → 查重 → 落盘 + 广播主窗重注册。
+
+        查重口径与 CommandKeysGrid._find_conflict 一致（其他命令直达键 /
+        自定义动作 / 截图热键；include_wake=False——自己不与自己查重）。
+        冲突拒绝 / 形态非法时捕捉框还原既有值（HotkeyCaptureEdit.set_combo）。
+        """
+        if not _is_valid_wake_combo(combo):
+            self._cmd_wake_edit.set_combo(str(
+                self._config.get("command_palette_global_hotkey", "") or ""))
+            return
+        norm = _norm_combo(combo)
+        holder = self._cmd_keys_grid._find_conflict(
+            "", norm, include_wake=False)                 # noqa: SLF001
+        if holder is not None:
+            self._host.show_toast(f"与『{holder}』冲突，已拒绝",
+                                  kind="warning")
+            self._cmd_wake_edit.set_combo(str(
+                self._config.get("command_palette_global_hotkey", "") or ""))
+            return
+        self._config.set("command_palette_global_hotkey", combo)
+        self._config.save()
+        self._host.command_palette_changed.emit()
+        self._host.show_toast(f"全局唤醒键已设为 {combo}", kind="success")
+
+    def _on_cmd_wake_clear(self):
+        """清除全局唤醒键：置空串（= 未启用）→ 落盘 + 广播 + toast。"""
+        if str(self._config.get("command_palette_global_hotkey", "") or ""):
+            self._config.set("command_palette_global_hotkey", "")
+            self._config.save()
+            self._host.command_palette_changed.emit()
+        self._cmd_wake_edit.set_combo("")
+        self._host.show_toast("全局唤醒键已清除", kind="success")
+
+    def _on_cmd_palette_data_changed(self):
+        """直达键网格 / 自定义动作面板改动：config 已由面板落盘，
+        这里只负责广播主窗重注册直达键"""
+        self._host.command_palette_changed.emit()
+
+    def _on_cmd_keys_clear(self):
+        """「全部清除」：清空 command_hotkeys → 落盘 + 刷新网格 + 广播"""
+        if self._config.get("command_hotkeys", {}) or {}:
+            self._config.set("command_hotkeys", {})
+            self._config.save()
+        self._cmd_keys_grid.refresh()
+        self._host.command_palette_changed.emit()
+        self._host.show_toast("已清除全部命令直达键", kind="success")
+
+    def _sync_cmd_palette_enabled(self):
+        """开关关闭 → 触发键 / 直达键 / 自定义动作 / 脚注统一置灰
+        （Qt 自动灰化子控件；开关本身不禁用，随时可重新打开）"""
+        enabled = bool(self._set_cmd_palette.isChecked())
+        for widget in self._cmd_palette_widgets:
+            widget.setEnabled(enabled)
+
+    def _on_open_plugins_center(self):
+        """「去插件中心管理」：跳转插件中心页（插件动作热键的改键入口）"""
+        self._host.show_page(self._host.NAV_PAGE_INDEX["plugins"])
+
     def _on_pomodoro_changed(self, _checked=None):
         """番茄钟开关/自动休息：即时持久化并广播（悬浮球应用配置）"""
         self._config.set("pomodoro_enabled",
@@ -1720,7 +2240,7 @@ class SettingsPanel(QWidget):
         self._config.save()
         self._host.pomodoro_changed.emit()
 
-    # ---- 导出到 Obsidian ----
+    # ---- 导出到 Obsidian（按钮文案「导出全部到 Obsidian」：实为全量导出）----
     def _vault_path_text(self) -> str:
         """导出目录的展示文案：为空显示「未选择」，过长省略中段。"""
         vault = str(self._config.get("obsidian_vault_path", "") or "")
@@ -1733,7 +2253,7 @@ class SettingsPanel(QWidget):
     def _on_choose_vault_dir(self):
         """选择 Obsidian vault 目录；用户取消则不改动任何状态。
 
-        仅记住路径，不触发导出——导出由「导出到 Obsidian」按钮或各面板
+        仅记住路径，不触发导出——导出由「导出全部到 Obsidian」按钮或各面板
         右键菜单发起（避免选完目录就意外开始写盘）。
         """
         cur = str(self._config.get("obsidian_vault_path", "") or "")
@@ -2093,10 +2613,11 @@ class SettingsPanel(QWidget):
         self._host.plugins_changed.emit(
             self._config.get("plugins_enabled", True))  # 插件总闸同理
         self._host.pomodoro_changed.emit()       # 番茄钟开关/时长同理
+        self._host.command_palette_changed.emit()  # 触发键/直达键/自定义动作同理
 
         # 3. 刷新面板控件（含自启勾选框——注册表未被本次重置触及）
         self.refresh()
-        self._host.show_toast("所有设置已恢复为默认值")
+        self._host.show_toast("所有设置已恢复为默认值", kind="success")
 
     def _on_card_size_changed(self, value: int):
         """卡片尺寸步进：即时持久化并刷新导航页卡片"""
@@ -2142,12 +2663,65 @@ class SettingsPanel(QWidget):
         if callable(apply_op):
             apply_op()
 
-    def _on_toast_duration_changed(self, value: int):
-        """提示条时长步进：即时持久化（下次 toast 弹出时读取即生效）"""
-        value = int(value)
-        if value != int(self._config.get("toast_duration_ms", 2800)):
-            self._config.set("toast_duration_ms", value)
+    def _on_toast_enabled_changed(self, checked: bool):
+        """轻提示总开关：即时持久化 + 其余行置灰联动
+        （丢弃 / 补发语义由 ToastCenter 在弹出时执行，R1/R10）"""
+        checked = bool(checked)
+        if checked != bool(self._config.get("toast_enabled", True)):
+            self._config.set("toast_enabled", checked)
             self._config.save()
+        self._sync_toast_rows_enabled()
+
+    def _on_toast_position_changed(self, key: str):
+        """显示位置分段：即时持久化 + 存活气泡平移到新位（R9）"""
+        if key != str(self._config.get("toast_position", "center")):
+            self._config.set("toast_position", key)
+            self._config.save()
+            ToastCenter.on_setting_changed("toast_position")
+
+    def _on_toast_bottom_changed(self, value: int):
+        """距屏幕底缘步进：即时持久化 + 存活气泡平移（R9）"""
+        value = int(value)
+        if value != int(self._config.get("toast_bottom_offset", 56)):
+            self._config.set("toast_bottom_offset", value)
+            self._config.save()
+            ToastCenter.on_setting_changed("toast_bottom_offset")
+
+    def _on_toast_duration_changed(self, key: str):
+        """停留时长分段：即时持久化（R5：只影响之后新触发的气泡，
+        存活中的气泡不中途改表——ToastCenter 出队时才读取）"""
+        if key != str(self._config.get("toast_duration", "standard")):
+            self._config.set("toast_duration", key)
+            self._config.save()
+
+    def _on_toast_max_changed(self, value: int):
+        """同屏上限步进：即时持久化 + 超出即时收拢 / 不足即时放行（R4）"""
+        value = int(value)
+        if value != int(self._config.get("toast_max_visible", 3)):
+            self._config.set("toast_max_visible", value)
+            self._config.save()
+            ToastCenter.on_setting_changed("toast_max_visible")
+
+    def _on_toast_animation_changed(self, checked: bool):
+        """入场动画开关：即时持久化（R6：ToastCenter 逐次弹出时读取）"""
+        checked = bool(checked)
+        if checked != bool(self._config.get("toast_animation", True)):
+            self._config.set("toast_animation", checked)
+            self._config.save()
+
+    def _on_toast_sound_changed(self, checked: bool):
+        """提示音开关：即时持久化（R7：ToastCenter 逐次弹出时读取）"""
+        checked = bool(checked)
+        if checked != bool(self._config.get("toast_sound", False)):
+            self._config.set("toast_sound", checked)
+            self._config.save()
+
+    def _sync_toast_rows_enabled(self):
+        """总开关关闭 → 位置 / 底缘 / 时长 / 上限 / 动画 / 提示音统一置灰
+        （Qt 自动灰化子控件；开关本身不禁用，随时可重新打开）"""
+        enabled = self._set_toast_enabled.isChecked()
+        for widget in self._toast_widgets:
+            widget.setEnabled(enabled)
 
     def _on_reduce_motion_changed(self, checked: bool):
         """减弱动效开关：即时持久化 + 翻转 motion 总闸（界面下一帧即瞬显）"""

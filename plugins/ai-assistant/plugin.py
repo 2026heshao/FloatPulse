@@ -1199,6 +1199,9 @@ class AiChatPage(QWidget):
         self._pending_display = ""  # 在途请求的界面文案（气泡/会话存档用）
         self._fake_retried = False  # 本轮已做过「谎报完成」自动重试（每轮一次）
         self._busy = False
+        # 在途请求代数（2026-10-06 中断按钮配套）：发起 / 中断 / 清空各
+        # +1；回调携带发起时的代数，迟到的回复因代数过期被静默丢弃
+        self._req_id = 0
         # 会话持久化（A1）：多会话存档 + 重启恢复。self._session 永远指向
         # _store["sessions"] 里的一条（聊天页至少有一个会话，删到最后一条
         # = 清空内容而非删除）。
@@ -2144,15 +2147,45 @@ class AiChatPage(QWidget):
             card.setParent(None)   # 立即摘出视觉树（removeWidget 只动布局不动父级）
             card.deleteLater()
 
+    # ---------------- 中断在途回答（2026-10-06 用户要求） ----------------
+
+    def _abandon_inflight(self):
+        """作废在途请求并复位输入区（代数 +1 → 迟到回复被静默丢弃）。
+
+        桥上没有撤回已发出 HTTP 请求的通道（插件侧无权终止宿主后台
+        线程），这里做的是「逻辑中断」：真实请求在后台自然结束后，结果
+        因代数过期被丢弃——不渲染、不进历史、不落会话存档。本轮视为
+        未发生（用户消息不落档，与失败轮次同策略）。
+        """
+        self._req_id += 1
+        self._pending_user = ""
+        self._pending_display = ""
+        self._fake_retried = False
+        self._hide_thinking()
+        self._set_busy(False)
+
+    def _interrupt(self):
+        """「停止」：中断在途回答，立刻收回输入权（提示气泡说明结果）。"""
+        if not self._busy:
+            return
+        self._abandon_inflight()
+        self._status.setText("已中断本次回答")
+        self.add_bubble("提示", "已中断本次回答。")
+
     # ---------------- 发送 ----------------
     def _on_send_clicked(self):
         if self._busy:
-            self._status.setText("正在处理上一条…")
-            return
-        text = self._input.toPlainText().strip()
-        if not text:
-            self._status.setText("先输入内容再发送")
-            return
+            # 忙时发送键是「停止」：点击/回车即中断在途回答；框里已输入
+            # 下一问时顺手发出去（中断 + 追问一次完成，省一次回车）
+            text = self._input.toPlainText().strip()
+            self._interrupt()
+            if not text:
+                return
+        else:
+            text = self._input.toPlainText().strip()
+            if not text:
+                self._status.setText("先输入内容再发送")
+                return
         self._input.clear()
         # 轻量智能路由（v1.16.0）：自由文本按关键词命中自动附带数据块；
         # 无命中保持 None，行为与路由上线前完全一致
@@ -2285,14 +2318,19 @@ class AiChatPage(QWidget):
         self._show_thinking()
         self._pending_user = user_content
         self._pending_display = display_text
+        self._req_id += 1                     # 新一轮在途：换新代数
+        token = self._req_id
         ok = self._ctx.http_post_json_async(
-            url, headers, body, timeout=120.0, on_done=self._on_reply)
+            url, headers, body, timeout=120.0,
+            on_done=lambda res, t=token: self._on_reply(res, t))
         if not ok:
             # 桥拒绝时也会回调一次 ok=False 的结果，这里只兜底恢复状态
             self._hide_thinking()
             self._set_busy(False)
 
-    def _on_reply(self, result: dict):
+    def _on_reply(self, result: dict, token: int):
+        if token != self._req_id:
+            return    # 过期回复（已被中断 / 清空 / 更新轮次取代）：静默丢弃
         self._hide_thinking()
         self._set_busy(False)
         reply, err = parse_reply(result)
@@ -2335,9 +2373,11 @@ class AiChatPage(QWidget):
             url, headers, rbody = build_request(
                 params, messages, temperature=self._temperature)
             if url is not None:
+                self._req_id += 1          # 重试是新一轮在途：换新代数
+                token = self._req_id
                 if self._ctx.http_post_json_async(
                         url, headers, rbody, timeout=120.0,
-                        on_done=self._on_reply):
+                        on_done=lambda res, t=token: self._on_reply(res, t)):
                     return
             self._hide_thinking()
             self._set_busy(False)
@@ -2494,7 +2534,12 @@ class AiChatPage(QWidget):
     # ---------------- 杂项 ----------------
     def _set_busy(self, busy: bool, text: str = ""):
         self._busy = busy
-        self._send_btn.setEnabled(not busy)
+        # 发送⇄停止一体键（2026-10-06 用户要求中断按钮）：忙时发送键变
+        # 「停止」且保持可点，点击即中断——中断入口就在用户手边，不必
+        # 在界面上另找地方；回复到达 / 中断后复原为「发送」
+        self._send_btn.setText("停止" if busy else "发送")
+        self._send_btn.setToolTip("中断本次回答" if busy else "")
+        self._send_btn.setEnabled(True)
         self._status.setText(text)
 
     def _clear_chat(self):
@@ -2505,7 +2550,9 @@ class AiChatPage(QWidget):
         self._session["messages"] = []
         self._session["updated_at"] = _session_now()
         save_sessions(self._ctx, self._store)
-        self._hide_thinking()                   # 在途气泡也得一起拆
+        # 在途请求一并作废（代数 +1）：迟到回复此前会渲染进已清空的
+        # 消息流、还往历史里塞一条空用户轮——现在统一按中断处理
+        self._abandon_inflight()
         while self._stream.count() > 1:          # 留着末尾 stretch
             item = self._stream.takeAt(0)
             w = item.widget()

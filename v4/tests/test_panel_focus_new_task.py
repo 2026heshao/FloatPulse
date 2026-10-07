@@ -62,7 +62,7 @@ class _FakeHost(QObject):
     def task_manager(self):
         return self._task_manager
 
-    def show_toast(self, text, ms=2800):
+    def show_toast(self, text, ms=2800, **kwargs):
         self.toasts.append(text)
 
 

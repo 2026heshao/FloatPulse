@@ -17,8 +17,12 @@
 """
 
 import os
+import sys
 
 import pytest
+
+# 自举：本文件必须可单跑（不依赖其它测试文件先插 sys.path 的吸血顺序）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import accent
 from src import appearance

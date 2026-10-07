@@ -469,30 +469,10 @@ QScrollArea#navScroll > QWidget > QWidget {
 /* 滚动条按需出现，宽度压到 6px：168px 宽的侧栏里，标准宽度
    （~15px）会把条目文字挤到换行，而条目一换行就变高 → 更需要滚动，
    形成"出现→变高→还在溢出"的抖动循环。 */
-QScrollArea#navScroll QScrollBar:vertical {
-    background: transparent;
-    width: 6px;
-    margin: 0;
-    border: none;
-}
-QScrollArea#navScroll QScrollBar::handle:vertical {
-    background: $hair;
-    border-radius: $r_chip;
-    min-height: 24px;
-}
-QScrollArea#navScroll QScrollBar::handle:vertical:hover {
-    background: $text_placeholder;
-}
-QScrollArea#navScroll QScrollBar::add-line:vertical,
-QScrollArea#navScroll QScrollBar::sub-line:vertical {
-    height: 0;
-    border: none;
-    background: none;
-}
-QScrollArea#navScroll QScrollBar::add-page:vertical,
-QScrollArea#navScroll QScrollBar::sub-page:vertical {
-    background: none;
-}
+/* V2（2026-10-07 交互视觉清单）：navScroll 的滚动条专属 QSS 已退役 ——
+   滚动条换 src/smooth_scrollbar.SmoothScrollBar 自绘状态机（闲置 6px
+   $line 60% → 悬停/滚动中 8px $line_2 → 静止 600ms 回落），该控件完全
+   接管自身 paintEvent，QSS 对其实例不再生效。 */
 
 /* ---- 内容区 ---- */
 QWidget#contentArea {
@@ -511,6 +491,29 @@ QLabel#countChip {
     padding: 3px 9px;
     font-size: 11px;
     font-weight: 600;
+}
+/* 任务页逾期统计（2026-10-06 紧凑改版；同日修订：用户拍板不套气泡——
+   纯 danger 红字，无底色无边框） */
+QLabel#statChipOverdue {
+    color: $danger;
+    background-color: transparent;
+    border: none;
+    padding: 0;
+    font-size: 11px;
+    font-weight: 600;
+}
+/* 任务页完成进度条（2026-10-06 紧凑改版）：4px 细条无文字，
+   轨道用 hair 分隔线色，chunk 跟随 $primary（强调色联动） */
+QProgressBar#taskProgressBar {
+    background-color: $hair;
+    border: none;
+    border-radius: 2px;
+    min-height: 4px;
+    max-height: 4px;
+}
+QProgressBar#taskProgressBar::chunk {
+    background-color: $primary;
+    border-radius: 2px;
 }
 QLabel {
     color: $text;
@@ -621,7 +624,10 @@ QPushButton#modeBtn {
     font-size: 12px;
 }
 QPushButton#modeBtn:checked {
-    background-color: $primary;
+    /* 选中底色过渡归 SmoothButton overlay（U3 同批口径，2026-10-07）：
+       端点 $primary 实底登记在 controls._SMOOTH_CHECKED，120ms 插值取代
+       一帧跳变 —— 与 pluginSegBtn 同一套机制。文字/描边变化仍归 QSS
+       （即时）。 */
     color: $on_primary;
     border: 1px solid $primary;
 }
@@ -748,9 +754,10 @@ QPushButton#settingsNavBtn:hover {
     color: $text;
 }
 QPushButton#settingsNavBtn:checked {
-    /* 选中行底走 $accent_soft（UI 重构 04：左导航「图标 + 文字」两列），
-       文字取主色；不再用 primary_a18 半透明染，避免与卡片底叠色发灰。 */
-    background-color: $accent_soft;
+    /* 选中行底不再由 QSS 画：V5（2026-10-07 交互视觉清单）起由
+       settings_panel._SettingsNavIndicator 圆角滑块垫在按钮下层滑动跟随
+       （端点色同为 $accent_soft，120ms OutCubic），QSS 一帧瞬变退役。
+       文字取主色、字重仍归 QSS 即时切换。 */
     color: $primary;
     border: 1px solid transparent;
     font-weight: 600;
@@ -1049,8 +1056,12 @@ QPushButton#pluginSegBtn:hover {
     background-color: $surface_2;
 }
 QPushButton#pluginSegBtn:checked {
+    /* 选中底色过渡归 SmoothButton overlay（U3，2026-10-07）：端点
+       $surface_3 实底登记在 controls._SMOOTH_CHECKED，120ms 插值取代
+       一帧跳变 —— 与 S2 的 hover/press 同一套机制。文字/描边变化仍归
+       QSS（即时）；选中+悬停时 overlay 盖在 :hover 的 $surface_2 上，
+       淡出时自然回 hover 底。 */
     color: $text;
-    background-color: $surface_3;
     border-color: $line;
     font-weight: 600;
 }
@@ -1273,6 +1284,17 @@ QDateEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {
     color: $text_disabled;
 }
+/* V1（2026-10-07 交互视觉清单）：SmoothInput 实例的边框**全权**归
+   controls.SmoothInput 绘制层插值（120ms hover + 100ms 焦点 + 内侧
+   3px 光圈）；基态 1px transparent 纯占位，border-box 几何与 1px 实
+   边框一致（sizeHint 零变化）。本规则放在上面各交互态规则之后 ——
+   QSS 同特异性按文档序取胜，属性选择器只命中设置了 smoothFrame 属性
+   的 SmoothInput；HotkeyCaptureEdit / 便签输入框等原生 QLineEdit 的
+   交互态边框（:hover 提亮 / :focus 环）不受影响。禁用态边框由
+   SmoothInput 照常画常态色（QSS 的 :disabled 只管文字色）。 */
+QLineEdit[smoothFrame="true"] {
+    border: 1px solid transparent;
+}
 
 /* ---- 截止日期输入框 ----
    2026-10-02：弹层换成自绘日历（见 src/date_picker.py），此处只补两件事：
@@ -1419,6 +1441,17 @@ QFrame#navRow {
 QFrame#navRow:hover {
     background-color: $primary_a08;
 }
+QFrame#navRow:focus {
+    /* A2/B2（2026-10-08）：行可键盘聚焦后的焦点环——基态已有 1px
+       $panel_edge 边框，只换 border-color 不撑盒模型 */
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+QFrame#navRow[pressed="true"] {
+    /* C2：QFrame 不吃 :pressed，属性驱动（nav_panel._NavRow._set_pressed）；
+       背景加深一档（a08 → a18），拖拽态（下条）优先级更高、不受干扰 */
+    background-color: $primary_a18;
+}
 QFrame#navRow[dragging="true"] {
     background-color: $card_bg_solid;
     border: 1px solid $primary;
@@ -1457,6 +1490,19 @@ QCheckBox::indicator:checked {
     border: 1px solid $primary;
 }
 
+/* ---- 全局 Tooltip（V8，2026-10-07 交互视觉清单）----
+   此前全仓无 QToolTip 定义，提示气泡是系统原生灰底，与纸感主题割裂。
+   一段 QSS 拿 80% 效果（设计稿 §5 口径）：$surface 实底 + $line 描边 +
+   r_ctl 圆角 + 12px 字；自绘气泡（错峰淡入）属加分项，暂不做。 */
+QToolTip {
+    background-color: $surface;
+    color: $text;
+    border: 1px solid $line;
+    border-radius: $r_ctl;
+    padding: 5px 9px;
+    font-size: 12px;
+}
+
 /* ---- 滚动条：纵向滑块常驻显形（用户要求所有页面可见），悬停加深；横向保持隐形 ---- */
 QScrollBar:vertical {
     background: transparent;
@@ -1489,20 +1535,10 @@ QScrollBar::handle:horizontal:hover { background: $primary_a30; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 
-/* ---- 知识库长列表 ---- */
-QListWidget#kbList QScrollBar:vertical {
-    width: 12px;
-    margin: 2px;
-}
-QListWidget#kbList QScrollBar::handle:vertical {
-    background: $primary_a18;
-    border-radius: $r_chip;
-    min-height: 30px;
-    margin: 0 2px;
-}
-QListWidget#kbList QScrollBar::handle:vertical:hover {
-    background: $primary_a30;
-}
+/* ---- 知识库长列表 ----
+   V2（2026-10-07 交互视觉清单）：#kbList 滚动条专属 QSS 已退役，随
+   navScroll 一并换 src/smooth_scrollbar.SmoothScrollBar 自绘状态机
+   （统一「闲置 6px → 悬停/滚动 8px → 600ms 回落」口径）。 */
 
 /* ---- 菜单 ---- */
 QMenu {
@@ -1599,9 +1635,11 @@ QScrollArea > QWidget > QWidget {
      · 危险底   → $danger（对白玻璃底约 4.2:1）
    为什么不用 outline：Qt QSS 的 outline 只对 item view 可靠，且不参与盒模型，
    各控件表现不一；统一用 1px 边框最可控。
-   注意：QPushButton#stepBtn（Controls.Stepper 的 ± 钮）与
-   QPushButton#navGroupHeader（NavGroupHeader）都是显式 NoFocus，不在这里
-   出现死规则；步进器只有可键入的 QLineEdit#stepValue 需要焦点环。
+   注意：QPushButton#stepBtn（Controls.Stepper 的 ± 钮）仍是显式 NoFocus，
+   不在这里出现死规则；步进器只有可键入的 QLineEdit#stepValue 需要焦点环。
+   QPushButton#navGroupHeader（NavGroupHeader）2026-10-08 起已改 StrongFocus
+   （清单 A1：折叠组内的页面此前键盘完全不可达），其 :focus 规则（$focus_ring）
+   已在下方登记，不再是死规则。
    ==================================================================== */
 QPushButton:focus {
     /* 基础按钮/primaryBtn 是主色实底，深墨环才看得见 */
@@ -1625,6 +1663,34 @@ QPushButton#dangerBtn:focus {
     border: 1px solid $danger;
     outline: none;
 }
+QPushButton#pluginsPickBtn:focus {
+    /* 交互状态批第二批（2026-10-08）：「接入插件」多选选择器命名收口
+       ——它是 $primary 实底（吃全局 QPushButton 基态，基态已有 1px
+       transparent 边框），环色按纪律二用 $on_primary（与主色 ≥4.5:1）；
+       overlay 端点走 _SMOOTH_OVERLAYS 的未命名兜底（primary_hover/
+       primary_pressed），与本底语义一致 */
+    border: 1px solid $on_primary;
+    outline: none;
+}
+/* ---- 交互状态批（2026-10-08，清单 B1/A1）----
+   以下四枚按钮基态是透明/浅底，此前的通用兜底 QPushButton:focus（环色
+   $on_primary = 浅色主题下的白）会命中它们 → 焦点环压在白底上完全
+   隐形。按取色纪律一（透明/浅底 → $focus_ring）单独登记。
+   基态均已声明 1px 边框：pluginSegBtn / navGroupHeader 是 1px transparent，
+   pluginErrorToggle 是 1px $line —— 焦点态只换 border-color，不撑盒模型；
+   pluginMoreBtn 基态无描边（border:none 的 20px 图标钮），焦点环 1px
+   仅在聚焦瞬间出现，聚焦时 +1px 的重排可忽略（20px 小钮、低频路径）。 */
+QPushButton#pluginSegBtn:focus,
+QPushButton#pluginErrorToggle:focus,
+QPushButton#pluginMoreBtn:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+QPushButton#navGroupHeader:focus {
+    /* A1：分组标题改 StrongFocus 后的键盘路径可见性——透明底走 $focus_ring */
+    border: 1px solid $focus_ring;
+    outline: none;
+}
 /* 列表基态是 outline:none（原生焦点框被关掉了），不补这一条键盘用户
    在列表里完全看不到自己在哪 */
 QListWidget:focus {
@@ -1638,6 +1704,16 @@ QListWidget:focus {
    复选框也带着焦点环，等于把「焦点态」变成「常态」。 */
 QCheckBox::indicator:focus {
     border: 1px solid $focus_ring;
+}
+/* V9（2026-10-07 交互视觉清单）：SmoothCheckBox 实例的原生指示器外观
+   关闭（border/background 透明化），指示器由控件自绘（hover 边框插值 /
+   选中 pop + 对勾描画，与 V3 任务勾选同一语言）。本规则放在
+   ``::indicator`` 组之后按序覆盖，只命中设置 smoothCheck 属性的实例；
+   指示器矩形 16px / r_chip 圆角与文字色、spacing 仍由上面的通用规则
+   提供。未替换站点（其余 QCheckBox）不受影响。 */
+QCheckBox[smoothCheck="true"]::indicator {
+    border: none;
+    background: transparent;
 }
 """)
 _QSS_MAIN_WINDOW = _QSS_MAIN_WINDOW  # 保持名称稳定，便于外部引用
@@ -1703,7 +1779,10 @@ QPushButton#modeBtn {
     font-size: 12px;
 }
 QPushButton#modeBtn:checked {
-    background-color: $primary;
+    /* 选中底色过渡归 SmoothButton overlay（U3 同批口径，2026-10-07）：
+       端点 $primary 实底登记在 controls._SMOOTH_CHECKED，120ms 插值取代
+       一帧跳变 —— 与 pluginSegBtn 同一套机制。文字/描边变化仍归 QSS
+       （即时）。 */
     color: $on_primary;
     border: 1px solid $primary;
 }
@@ -1746,7 +1825,8 @@ QLineEdit#taskInput {
     color: $text;
 }
 QLineEdit#taskInput:focus {
-    border: 1px solid $focus_ring;
+    /* 边框色归 SmoothInput（V1，2026-10-07）：taskInput 实例已替换为
+       SmoothInput，焦点边框 + 光圈由其绘制层插值，QSS 只留 outline 抑制 */
     outline: none;
 }
 QDateEdit#taskDate {
@@ -1899,6 +1979,25 @@ QPushButton#fragDelBtn:hover {
 QLabel#assetName {
     color: $text_secondary;
     font-size: 11px;
+}
+QWidget#assetItem {
+    /* E4/B2/C2（2026-10-08）：素材格此前无 hover/焦点态/按下态，三态
+       一次补齐。对照 fragItemRow 同款机制（WA_StyledBackground +
+       WA_Hover + QSS 三态），hover/pressed 沿用 a08/a18 语系；
+       基态 1px transparent 边框给焦点环换色用，不撑盒模型 */
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: $r_panel;
+}
+QWidget#assetItem:hover {
+    background-color: $primary_a08;
+}
+QWidget#assetItem:focus {
+    border: 1px solid $focus_ring;
+    outline: none;
+}
+QWidget#assetItem[pressed="true"] {
+    background-color: $primary_a18;
 }
 
 /* ---- 软件导航 ---- */

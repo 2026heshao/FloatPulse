@@ -12,6 +12,9 @@
   - 分组漏图 → test_grouped_sequence_covers_every_asset / test_toggle_roundtrip
   - 单张堆被画标题 → test_single_asset_groups_have_no_header（2026-10-03 观感返工）
   - 标题条挤占正文 → test_group_mode_reserves_header_height_without_breaking_uniform_cells
+  - 序号格式退化 "#2" → test_group_ordinal_format_is_member_over_total（2026-10-06 方案 A）
+  - 标头结构丢字段 → test_header_struct_prefers_custom_name_with_default_fallback
+  - 容器绘制崩溃 → test_group_mode_container_paint_smoke（2026-10-06 方案 A）
 """
 
 import os
@@ -207,14 +210,18 @@ def _list_ids(panel):
 
 
 def test_flat_and_grouped_modes_have_identical_item_sets(env):
-    """★ 硬护栏：关闭分组 = 平铺；开启分组后条目集合必须相等（只是顺序不同）。"""
+    """★ 硬护栏：关闭分组 = 平铺；开启分组后条目集合必须相等（只是顺序不同）。
+
+    方案 A v2 起分组序列含行首对齐占位格（spacer，UserRole+1 为 None）：
+    比较前先滤掉 spacer，只比真实素材（spacer 单独在 §10 断言）。
+    """
     mgr, ids = env
     panel = _make_panel(mgr)
     assert not panel._is_grouping()          # 默认关闭 = 等价改动前行为
     flat = _list_ids(panel)
     assert set(flat) == set(ids) and len(flat) == len(ids)
     panel.set_grouping(True)                 # 切到分组 → 重渲染
-    grouped = _list_ids(panel)
+    grouped = [i for i in _list_ids(panel) if i is not None]   # 滤 spacer
     assert sorted(grouped) == sorted(flat), "分组模式漏图或多图！"
     assert len(grouped) == mgr.count()
     # group headers 只在分组模式存在
@@ -245,7 +252,9 @@ def test_grouping_actually_collapses_bursts(tmp_path):
     panel.set_grouping(True)
     headers = panel._thumb_delegate._header_texts
     assert len(headers) == 1, headers
-    assert list(headers.values())[0] == "5 张 · 09:00"
+    info = list(headers.values())[0]
+    assert info["count"] == 5 and info["time"] == "09:00", info
+    assert info["name"] == "" and info["date"] == "10-03", info
 
 
 # ====================================================================
@@ -318,10 +327,11 @@ def test_single_asset_groups_have_no_header(tmp_path):
 
 
 def test_group_members_render_ordinal_instead_of_repeated_filename(tmp_path):
-    """★ 观感返工护栏：堆内**非首格**改显 "#2" 序号，不再重复雷同文件名。
+    """★ 观感返工护栏：堆内**非首格**改显 "2 / 3" 序号（2026-10-06 方案 A
+    由 "#2" 升级为「位次 / 堆大小」），不再重复雷同文件名。
 
     反向验证：把 ``if j:`` 去掉（每格都挂序号）→ 首格断言变红；
-    把 ``ordinals`` 整表清空 → 非首格断言变红。
+    把 ``ordinals`` 整表清空 → 非首格断言变红；格式退化回 "#%d" → 红。
     """
     _app()
     from src.temp_asset_manager import TempAssetManager, AssetInfo
@@ -332,7 +342,7 @@ def test_group_members_render_ordinal_instead_of_repeated_filename(tmp_path):
     panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
     d = panel._thumb_delegate
     assert len(d._header_texts) == 1, "三张同刻应聚成 1 堆"
-    assert d._member_ordinals == {2: "#2", 3: "#3"}, d._member_ordinals
+    assert d._member_ordinals == {2: "2 / 3", 3: "3 / 3"}, d._member_ordinals
     assert 1 not in d._member_ordinals, "堆首格保留真实文件名，不挂序号"
     # 平铺态两张表都清空（不能把分组态残留带回去）
     panel.set_grouping(False)
@@ -717,14 +727,16 @@ def test_rename_pile_updates_header_and_sidecar_file(tmp_path):
 
     panel._apply_pile_rename(head_id, " 登录页排障现场 ")
     header = panel._thumb_delegate._header_texts[head_id]
-    assert header == "登录页排障现场", header
+    assert header["name"] == "登录页排障现场", header
+    assert header["count"] == 4 and header["time"] == "09:00", header
     data = _json.loads(open(groups_path, encoding="utf-8").read())
     assert data["asset_groups"]["names"] == {str(head_id): "登录页排障现场"}
 
     # 清空 = 恢复默认名（删键，不留空串）
     panel._apply_pile_rename(head_id, "")
-    assert panel._thumb_delegate._header_texts[head_id] == \
-        "%d 张 · 09:00" % 4
+    header2 = panel._thumb_delegate._header_texts[head_id]
+    assert header2["name"] == "", header2
+    assert header2["count"] == 4 and header2["time"] == "09:00", header2
     data = _json.loads(open(groups_path, encoding="utf-8").read())
     assert data["asset_groups"]["names"] == {}
 
@@ -756,13 +768,14 @@ def test_detach_member_renders_standalone_and_restores(tmp_path):
     assert aid not in panel._pile_of, "移出后仍算堆成员"
     assert aid not in d._member_ordinals, "独立素材不挂堆内序号"
     assert len(d._header_texts) == 1                 # 剩 3 张仍是 1 堆
-    assert d._header_texts[panel._pile_heads[0]] == "3 张 · 09:00"
-    # 渲染条目依旧齐全（只拆堆，不丢图）
-    assert panel._asset_list.count() == 4
+    assert d._header_texts[panel._pile_heads[0]]["count"] == 3
+    assert d._header_texts[panel._pile_heads[0]]["time"] == "09:00"
+    # 渲染条目依旧齐全（只拆堆，不丢图；spacer 不计入真实素材数）
+    assert len([i for i in _list_ids(panel) if i is not None]) == 4
     # 取消移出 → 回到原堆
     panel._detach_asset(aid, detach=False)
     assert panel._pile_of.get(aid) == panel._pile_heads[0]
-    assert d._member_ordinals.get(aid) in ("#3", "#4")
+    assert d._member_ordinals.get(aid) == "3 / 4"
 
 
 def test_detached_state_survives_refresh_and_flat_mode(tmp_path):
@@ -777,7 +790,7 @@ def test_detached_state_survives_refresh_and_flat_mode(tmp_path):
     panel.refresh()
     assert aid not in panel._pile_of
     assert panel._thumb_delegate._header_texts[
-        panel._pile_heads[0]] == "现场"              # 堆首未动，堆名保留
+        panel._pile_heads[0]]["name"] == "现场"      # 堆首未动，堆名保留
     panel.set_grouping(False)
     assert panel._thumb_delegate._header_texts == {}
     assert panel._asset_list.count() == 4
@@ -795,7 +808,9 @@ def test_detaching_the_head_hands_the_name_to_the_new_head(tmp_path):
     new_head = panel._pile_heads[0]
     assert new_head != old_head
     assert old_head not in panel._pile_of
-    assert panel._thumb_delegate._header_texts[new_head] == "3 张 · 09:00"
+    info = panel._thumb_delegate._header_texts[new_head]
+    assert info["count"] == 3 and info["time"] == "09:00"
+    assert info["name"] == "", "旧堆名是孤儿标注，不应用到新堆"
 
 
 def test_orphan_annotations_pruned_on_refresh(tmp_path):
@@ -861,10 +876,13 @@ def test_merge_member_joins_target_pile_and_sidecar(tmp_path):
     panel._merge_asset(2, head_b)               # 连拍第 2 张并入晚片堆
     d = panel._thumb_delegate
     assert panel._pile_of.get(2) == head_b, "并入后归属必须是目标堆"
-    assert d._header_texts[head_b] == "3 张 · 10:00", d._header_texts
-    assert d._header_texts[head_a] == "4 张 · 09:00"
-    assert d._member_ordinals.get(2) in ("#2", "#3"), "并入者挂堆内序号"
-    assert panel._asset_list.count() == 7, "并入只搬家不丢图"
+    assert d._header_texts[head_b]["count"] == 3, d._header_texts
+    assert d._header_texts[head_b]["time"] == "10:00"
+    assert d._header_texts[head_a]["count"] == 4
+    assert d._header_texts[head_a]["time"] == "09:00"
+    assert d._member_ordinals.get(2) == "3 / 3", "并入者挂堆内序号（堆尾）"
+    assert len([i for i in _list_ids(panel) if i is not None]) == 7, \
+        "并入只搬家不丢图（spacer 不计入真实素材数）"
     data = _json.loads(open(panel._groups_path, encoding="utf-8").read())
     assert data["asset_groups"][gs.MERGED_KEY] == {"2": str(head_b)}
     assert _digest() == before, "并入动了 temp_assets.json（红线）"
@@ -876,15 +894,16 @@ def test_merge_into_new_pile_self_anchor_with_header(tmp_path):
     panel._merge_asset(5, None)                 # 连拍第 5 张自锚新建堆
     d = panel._thumb_delegate
     assert 5 in panel._pile_heads and panel._pile_of.get(5) == 5
-    assert d._header_texts.get(5) == "1 张 · 09:00", d._header_texts
+    assert d._header_texts.get(5)["count"] == 1, d._header_texts
+    assert d._header_texts.get(5)["time"] == "09:00"
     # 再把第 1 张并入该堆：锚点仍是 5（时间更早也不抢首格）
     panel._merge_asset(1, 5)
     assert panel._pile_of.get(1) == 5
-    assert d._header_texts.get(5) == "2 张 · 09:00"
-    assert d._member_ordinals.get(1) == "#2"
+    assert d._header_texts.get(5)["count"] == 2
+    assert d._member_ordinals.get(1) == "2 / 2"
     ids = _list_ids(panel)
     assert ids.index(5) < ids.index(1), "新建堆锚点必须排首格"
-    assert panel._asset_list.count() == 7
+    assert len([i for i in ids if i is not None]) == 7
 
 
 def test_merge_targets_exclude_current_pile(tmp_path):
@@ -942,3 +961,433 @@ def test_merge_annotation_pruned_when_asset_or_target_deleted(tmp_path):
     panel.refresh()
     assert panel._group_store[gs.MERGED_KEY] == {}, \
         "目标堆首没了，并入标注成孤儿，须一并清理"
+
+
+# ====================================================================
+# 9. 方案 A「堆卡片容器」视觉升级（2026-10-06）
+#    序号 "2 / 6" / 结构化标头 / 容器绘制冒烟
+# ====================================================================
+def test_group_ordinal_format_is_member_over_total(tmp_path):
+    """★ 序号格式 = "2 / 6"（分子 = 堆内位次，分母 = 堆内成员数）。
+
+    反向验证：把 ``"%d / %d" % (j + 1, len(group))`` 改回 ``"#%d"`` 或
+    把分母写成固定值 → 本用例立刻红。
+    """
+    _app()
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "x.png"))
+    mgr._assets = [AssetInfo(i + 1, "剪贴板图片_%d.png" % i, img, True, 10,
+                             _t(i)) for i in range(6)]
+    panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
+    d = panel._thumb_delegate
+    assert d._member_ordinals == {2: "2 / 6", 3: "3 / 6", 4: "4 / 6",
+                                  5: "5 / 6", 6: "6 / 6"}, d._member_ordinals
+    head_id = panel._pile_heads[0]
+    assert d._header_texts[head_id]["count"] == 6, "分母来源 = 堆标头 count"
+    # 平铺态照旧清空（序号格式升级不影响平铺等价性）
+    panel.set_grouping(False)
+    assert d._member_ordinals == {} and d._header_texts == {}
+
+
+def test_header_struct_prefers_custom_name_with_default_fallback(tmp_path):
+    """★ 标头结构化数据（方案 A 三段式）：自定义名优先，清空回默认名兜底。
+
+    结构 = {"count": N, "time": "HH:MM", "name": 自定义堆名|"",
+    "date": "MM-DD"}。反向验证：丢任一字段 / 自定义名优先级写反 → 红。
+    """
+    mgr, panel = _burst_env(tmp_path, n=4)
+    head_id = panel._pile_heads[0]
+    info = panel._thumb_delegate._header_texts[head_id]
+    assert info == {"count": 4, "time": "09:00", "name": "", "date": "10-03"}, \
+        info
+    panel._apply_pile_rename(head_id, "排障现场")
+    info = panel._thumb_delegate._header_texts[head_id]
+    assert info["name"] == "排障现场", "自定义名必须占 name 字段"
+    assert info["count"] == 4 and info["time"] == "09:00" \
+        and info["date"] == "10-03", "其余字段保留"
+    panel._apply_pile_rename(head_id, "")
+    assert panel._thumb_delegate._header_texts[head_id]["name"] == "", \
+        "清空 = 默认名兜底（name 空串，count/time 照填）"
+
+
+def test_group_mode_container_paint_smoke(tmp_path):
+    """★ 无容器绘制冒烟（方案 A v3）：v2 的全宽容器卡在真实数据下观感
+    过重，分组态已移除容器——本用例钉住「容器绘制入口已删」（若有人把
+    _container_sides/_draw_container 加回而未重审 v3 规格 → 红），并对
+    堆首/堆中/堆尾/单张各真走 ``delegate.paint`` 一次不崩（QPixmap 承载）。
+    """
+    _app()
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtGui import QPainter, QPixmap
+    from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "x.png"))
+    # 4 张同刻连拍（1 堆）+ 1 张晚一小时（单张）
+    mgr._assets = [AssetInfo(i + 1, "剪贴板图片_%d.png" % i, img, True, 10,
+                             _t(i)) for i in range(4)] + \
+                  [AssetInfo(5, "单张.png", img, True, 10, _t(3600))]
+    mgr._next_id = 6
+    panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
+    d = panel._thumb_delegate
+    lst = panel._asset_list
+    lst.viewport().resize(4 * d.CELL_W, 2 * d.CELL_H)
+    # 容器绘制入口必须已删（v3：分组态不再画容器气泡）
+    assert not hasattr(d, "_container_sides"), \
+        "v3 已移除容器绘制，_container_sides 不应复活"
+    assert not hasattr(d, "_draw_container"), \
+        "v3 已移除容器绘制，_draw_container 不应复活"
+    assert not hasattr(d, "CONTAINER_RADIUS"), \
+        "v3 已移除容器常量，CONTAINER_RADIUS 不应复活"
+
+    def _opt(row):
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect((row % 4) * d.CELL_W, (row // 4) * d.CELL_H,
+                         d.CELL_W, d.CELL_H)
+        opt.state = QStyle.StateFlag.State_Enabled
+        opt.font = lst.font()
+        opt.widget = lst
+        return opt
+
+    pix = QPixmap(4 * d.CELL_W, 2 * d.CELL_H)
+    pix.fill()
+    painter = QPainter(pix)
+    try:
+        for row in range(lst.count()):
+            # 崩溃即失败（标头 / 序号 / 缩略图占位全链路）
+            d.paint(painter, _opt(row), lst.model().index(row, 0))
+    finally:
+        painter.end()
+    # 标头仍画在堆首格：第 0 格顶部带主色像素（v3 保留三段式标头）
+    from src.theme import get_colors
+    from src.glass import _to_color
+    accent = _to_color(get_colors("light")["primary"])
+    hits = sum(
+        1 for y in range(2, 22) for x in range(2, 20)
+        if abs((px := pix.toImage().pixelColor(x, y)).red() - accent.red()) < 60
+        and abs(px.green() - accent.green()) < 60
+        and abs(px.blue() - accent.blue()) < 60)
+    assert hits > 0, "分组态堆首格应仍有主色刻度（标头保留）"
+
+
+# ====================================================================
+# 10. 方案 A v2 返工（2026-10-06 用户真实数据对比设计稿）
+#    行首对齐块状排布（spacer 机制）/ 标头 elide 优先级 / 交互防护
+# ====================================================================
+class _FixedCols:
+    """把 panel._grid_cols 钉成固定列数（离屏未 show 的视口宽不可控）。
+
+    with 用法：退出时还原绑定方法，绝不泄漏到别的用例。
+    """
+
+    def __init__(self, panel, cols):
+        self._panel = panel
+        self._cols = int(cols)
+        self._orig = None
+
+    def __enter__(self):
+        self._orig = self._panel._grid_cols
+        self._panel._grid_cols = lambda: self._cols
+        return self
+
+    def __exit__(self, *exc):
+        self._panel._grid_cols = self._orig
+        return False
+
+
+def _list_entries(panel):
+    """渲染序列的轻量读出：[("asset", id) | ("pile", head) | ("fill", None)]。"""
+    from PyQt6.QtCore import Qt as _Qt
+    out = []
+    for i in range(panel._asset_list.count()):
+        it = panel._asset_list.item(i)
+        marker = it.data(_Qt.ItemDataRole.UserRole + 2)
+        if marker is not None:
+            out.append((marker[0], marker[1]))
+        else:
+            out.append(("asset", it.data(_Qt.ItemDataRole.UserRole + 1)))
+    return out
+
+
+def _mixed_env(tmp_path):
+    """单张 + 2 张堆 + 单张 + 3 张堆（时间交错，间隔 > 900s 断堆）。
+
+    期望形态（cols=4）：s1 占 1 列 → 堆A 前 3 个 filler 对齐行首、
+    堆尾 2 个 pile_spacer 铺满整行 → s2 → 堆B 前 3 个 filler、
+    堆尾 1 个 pile_spacer。
+    """
+    _app()
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "mix.png"))
+    specs = [(1, _t(0)),                       # 单张 s1
+             (2, _t(1200)), (3, _t(1210)),     # 堆A
+             (4, _t(2400)),                    # 单张 s2
+             (5, _t(3600)), (6, _t(3610)), (7, _t(3620))]   # 堆B
+    mgr._assets = [AssetInfo(i, "m%d.png" % i, img, True, 10, ts)
+                   for i, ts in specs]
+    mgr._next_id = 8
+    panel = _make_panel(mgr, _NoopConfig({"asset_group_enabled": True}))
+    return mgr, panel
+
+
+def test_group_layout_aligns_pile_head_to_row_start(tmp_path):
+    """★ 行首对齐（方案 A v3，filler-only）：堆首前 filler 补到 col 0，
+    堆标头成为段标题；单张自然流动占列；**不再有堆尾 pile_spacer**
+    （v3 移除容器气泡后它已无用）。
+
+    反向验证：去掉 filler 逻辑（堆从行中间起铺）→ 序列形态与堆首
+    位置断言双红。
+    """
+    mgr, panel = _mixed_env(tmp_path)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    entries = _list_entries(panel)
+    # 真实素材一个不少、顺序保持时间序
+    assert [p for k, p in entries if k == "asset"] == [1, 2, 3, 4, 5, 6, 7]
+    # 序列形态（cols=4）：s1, F×3, A1, A2, s2, F×1, B1, B2, B3
+    # —— s2 自然流到堆 A 之后同行的 col 3，堆 B 前只差 1 格 filler
+    assert [k for k, _ in entries] == [
+        "asset", "fill", "fill", "fill",
+        "asset", "asset", "asset", "fill",
+        "asset", "asset", "asset"], entries
+    # 两个堆首都落在第 0 列（位置 4、8；位置 % 4 == 0）
+    pos = {p: idx for idx, (k, p) in enumerate(entries) if k == "asset"}
+    assert pos[2] % 4 == 0 and pos[5] % 4 == 0, pos
+    # v3 钉子：序列里不允许再有 pile 标记（容器铺满整行的产物已删）
+    assert all(k != "pile" for k, _ in entries), entries
+
+
+def test_spacers_carry_markers_and_are_not_interactable(tmp_path):
+    """② 占位格标记（v3 filler-only）：filler 带 ("fill", None)、不再有
+    ("pile", head_id)；NoItemFlags（不可选不可聚焦）、无 tooltip、
+    UserRole 无 asset、不进 _items_by_id。"""
+    mgr, panel = _mixed_env(tmp_path)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    from PyQt6.QtCore import Qt as _Qt
+    seen = []
+    for i in range(panel._asset_list.count()):
+        it = panel._asset_list.item(i)
+        marker = it.data(_Qt.ItemDataRole.UserRole + 2)
+        if marker is None:
+            continue
+        seen.append(marker)
+        assert it.flags() == _Qt.ItemFlag.NoItemFlags, \
+            "占位格必须 NoItemFlags（不可选不可聚焦）"
+        assert it.toolTip() == "", "占位格不设 tooltip"
+        assert it.data(_Qt.ItemDataRole.UserRole) is None, \
+            "占位格不携带 Asset 对象"
+    assert seen and all(m == ("fill", None) for m in seen), \
+        "v3 只剩 filler 占位（pile 标记已随容器移除）: %r" % (seen,)
+    assert set(panel._items_by_id) == {1, 2, 3, 4, 5, 6, 7}, \
+        "占位格不进 _items_by_id"
+
+
+def test_pile_semantics_count_real_assets_only(tmp_path):
+    """③ 堆语义纯净：_pile_of / _pile_size / 堆内序号 / _merge_targets
+    全部只数真实素材，spacer 不入任何一张表（分母/文案不错报）。"""
+    mgr, panel = _mixed_env(tmp_path)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    d = panel._thumb_delegate
+    assert panel._pile_of == {2: 2, 3: 2, 5: 5, 6: 5, 7: 5}, panel._pile_of
+    assert panel._pile_size == {1: 1, 2: 2, 4: 1, 5: 3}, panel._pile_size
+    assert d._member_ordinals == {3: "2 / 2", 6: "2 / 3", 7: "3 / 3"}
+    # 并入目标文案 = 真实堆成员数（2 张堆 → "2 张"，不因 spacer 变大）
+    targets = panel._merge_targets(1)
+    assert [h for h, _ in targets] == [2, 5], targets
+    assert [t for _, t in targets] == ["2 张 · 09:20", "3 张 · 10:00"], \
+        targets
+    assert d._header_texts[2]["count"] == 2
+    assert d._header_texts[5]["count"] == 3
+
+
+class _FakeMetrics:
+    """等宽假 QFontMetrics：每字符 10px（可调），elide 退化为省略号。"""
+
+    def __init__(self, cw=10):
+        self.cw = cw
+
+    def horizontalAdvance(self, s):
+        return len(s) * self.cw
+
+    def elidedText(self, s, mode, width):
+        if self.horizontalAdvance(s) <= width:
+            return s
+        return "…"
+
+
+def test_header_elide_priority_date_yields_first():
+    """④ 标头 elide 优先级（纯函数）：日期最先让位（干脆不画）→
+    张数/时间永不省略 → 自定义堆名中省；默认名保底「N 张」。
+
+    反向验证：把「先省日期」改回「先省时间」（日期恒画、先压 seg2）
+    → 时间被省略成省略号的断言当场红 —— 即用户截图「2 张 · …」缺陷。
+    """
+    from src.assets_panel import plan_header_segments as plan
+    fm = _FakeMetrics()
+    dfm = _FakeMetrics(8)                     # 日期字号更小 → 每字符 8px
+    # 宽敞：日期照画，全文完整
+    dd, s1, s2 = plan("", 2, "22:52", "10-02", 200, fm, fm, dfm)
+    assert (dd, s1, s2) == (True, "2 张", " · 22:52")
+    # ★ 回归钉：全文 + 间距 + 日期放不下 → 日期先消失，时间保完整
+    #   （"2 张 · 22:52" 宽 110；110 + 8 + 40 = 158 > 130 → 弃日期）
+    dd, s1, s2 = plan("", 2, "22:52", "10-02", 130, fm, fm, dfm)
+    assert dd is False, "空间不足时日期必须先让位（不画）"
+    assert s1 == "2 张" and s2 == " · 22:52", (s1, s2)
+    # 自定义名 + 窄：名字让位（中省），「7 张 · 19:50」保完整
+    dd, s1, s2 = plan("很长的自定义堆名字", 7, "19:50", "10-04", 180,
+                      fm, fm, dfm)
+    assert dd is False
+    assert s1 != "很长的自定义堆名字" and "…" in s1, s1
+    assert s2 == " · 7 张 · 19:50", "张数与时间永不省略"
+    # 默认名 + 极窄（45px，连「 · 22:52」都放不下）：整体中省但保底「N 张」
+    dd, s1, s2 = plan("", 2, "22:52", "", 45, fm, fm, dfm)
+    assert s1 == "2 张", "默认名保底「N 张」永不省略"
+    assert s2 != " · 22:52", "极窄时时间才降级"
+
+
+def test_viewport_resize_rebuilds_grouped_layout_debounced(tmp_path):
+    """⑤ resize 联动：列数变化 → 防抖 150ms 调度分组态重建（不立即重灌）；
+    列数没变 / 平铺态 → 不调度。"""
+    mgr, panel = _mixed_env(tmp_path)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    panel.set_grouping(False)
+    panel._on_viewport_cols_changed()         # 平铺：直接忽略
+    assert not (panel._cols_debounce and panel._cols_debounce.isActive())
+    panel.set_grouping(True)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    before = panel._asset_list.count()
+    panel._on_viewport_cols_changed()         # 列数没变：不动
+    assert not (panel._cols_debounce and panel._cols_debounce.isActive())
+    assert panel._asset_list.count() == before
+    with _FixedCols(panel, 3):
+        panel._on_viewport_cols_changed()     # 列数变化：仅调度（防抖）
+    assert panel._cols_debounce is not None and panel._cols_debounce.isActive()
+    assert panel._asset_list.count() == before, \
+        "防抖窗口内不许立即重建（保留旧 spacer，最多短暂错位）"
+
+
+def test_interaction_guards_skip_spacers(tmp_path):
+    """⑥ 交互防护：右键 / 双击占位格 → 直接忽略（不打开、不走菜单路径）。"""
+    from PyQt6.QtCore import QPoint, Qt as _Qt
+    mgr, panel = _mixed_env(tmp_path)
+    with _FixedCols(panel, 4):
+        panel.refresh()
+    spacer_item = None
+    for i in range(panel._asset_list.count()):
+        it = panel._asset_list.item(i)
+        if it.data(_Qt.ItemDataRole.UserRole + 2) is not None:
+            spacer_item = it
+            break
+    assert spacer_item is not None, "混合数据 + cols=4 必然有占位格"
+    opened = []
+    panel._open = lambda aid: opened.append(aid) or True
+    # 双击 spacer → 忽略；双击真实素材 → 照常打开
+    panel._on_double_click(spacer_item)
+    assert opened == []
+    panel._on_double_click(panel._asset_list.item(0))
+    assert opened == [1]
+    # 右键 spacer：防护直接 return（若失守，下一步就会摸到
+    # _host.container/QMenu 而炸 → 测试红；真实素材的菜单路径由
+    # test_asset_thumbs.py 的 QMenu 替身用例覆盖，此处不模态 exec）
+    panel._asset_list.itemAt = lambda pos: spacer_item
+    panel._on_context_menu(QPoint(0, 0))      # 不抛异常 = 防护生效
+
+
+# ====================================================================
+# 11. 滚轮像素级丝滑（2026-10-06 手感返工；两态统一生效）
+# ====================================================================
+def _many_assets_env(tmp_path, n=40):
+    """n 条素材（确保滚动条有量程）+ 面板。"""
+    _app()
+    from src.temp_asset_manager import TempAssetManager, AssetInfo
+    mgr = TempAssetManager(str(tmp_path))
+    img = _make_image(str(tmp_path / "x.png"))
+    mgr._assets = [AssetInfo(i + 1, "s%02d.png" % i, img, True, 10,
+                             _t(i * 1200))
+                   for i in range(n)]
+    mgr._next_id = n + 1
+    panel = _make_panel(mgr)
+    return mgr, panel
+
+
+def _wheel_event(dy, pixel=False, mods=None):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    return QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10),
+        QPoint(0, 40) if pixel else QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        mods or Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase, False)
+
+
+def test_wheel_scrolls_fixed_pixels_per_tick(tmp_path):
+    """★ 滚轮手感（离屏实测校准的钉子）：
+
+    改前 ScrollPerItem 每刻度实滚 147px = 1 整行（CELL_H=148）；
+    改后视口拦截每刻度恒 _WHEEL_STEP_PX=36px（≈1/4 行，一格 ≈4 刻度）。
+    ★ 实测还发现：仅 ScrollPerPixel + 调小 singleStep 不够——QListView
+    会在 updateGeometries 把 singleStep 覆盖回行高、每刻度 =
+    singleStep × wheelScrollLines(3) = 444px（比改前还粗），故必须
+    视口拦截。反向验证：删掉 eventFilter 的 Wheel 分支 → 本用例红。
+    """
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtWidgets import QAbstractItemView
+    mgr, panel = _many_assets_env(tmp_path)
+    lst = panel._asset_list
+    assert lst.verticalScrollMode() == \
+        QAbstractItemView.ScrollMode.ScrollPerPixel, \
+        "滚动模式必须 ScrollPerPixel（PerItem 每刻度滚一整行）"
+    assert panel._WHEEL_STEP_PX == 36
+    sb = lst.verticalScrollBar()
+    # 未 show 的面板无布局量程（maximum=0），拦截语义单测直接给定程
+    sb.setRange(0, 5000)
+    vp = lst.viewport()
+    sb.setValue(500)
+    # 向下滚一格刻度（angleDelta -120）→ value +36（内容上移）
+    ev = _wheel_event(-120)
+    assert panel.eventFilter(vp, ev) is True, "滚轮事件应被视口拦截消化"
+    assert sb.value() == 500 + 36, sb.value()
+    # 向上滚 → -36 回到原位
+    assert panel.eventFilter(vp, _wheel_event(120)) is True
+    assert sb.value() == 500, sb.value()
+    # Ctrl/Alt/Shift 修饰：不拦（保留 Qt 缩放/翻页/水平语义）
+    for mods in (Qt.KeyboardModifier.ControlModifier,
+                 Qt.KeyboardModifier.AltModifier,
+                 Qt.KeyboardModifier.ShiftModifier):
+        sb.setValue(500)
+        ev = _wheel_event(-120, mods=mods)
+        assert panel.eventFilter(vp, ev) is False
+        assert sb.value() == 500, "修饰键滚轮不拦"
+    # 触摸板（pixelDelta 非空）：不拦，保留系统原生平滑滚动
+    sb.setValue(500)
+    assert panel.eventFilter(vp, _wheel_event(-120, pixel=True)) is False
+    assert sb.value() == 500
+    # 纯水平滚轮：不拦
+    from PyQt6.QtCore import QPointF as _QPF
+    from PyQt6.QtGui import QWheelEvent
+    ev_h = QWheelEvent(_QPF(10, 10), _QPF(10, 10), QPoint(0, 0),
+                       QPoint(-120, 0), Qt.MouseButton.NoButton,
+                       Qt.KeyboardModifier.NoModifier,
+                       Qt.ScrollPhase.NoScrollPhase, False)
+    assert panel.eventFilter(vp, ev_h) is False
+
+
+def test_scroll_single_step_synced_with_cell_height(tmp_path):
+    """_sync_scroll_step：singleStep ≈ CELL_H/4（下限 24）；分组态垫高
+    后随 CELL_H 变大（键盘/拖动微调步长；滚轮走视口拦截不经此）。"""
+    mgr, panel = _many_assets_env(tmp_path)
+    d = panel._thumb_delegate
+    sb = panel._asset_list.verticalScrollBar()
+    assert sb.singleStep() == max(24, d.CELL_H // 4)
+    panel.set_grouping(True)
+    assert d.CELL_H == d.THUMB_H + 64 + d.HEADER_H
+    assert sb.singleStep() == max(24, d.CELL_H // 4), \
+        "分组态垫高后步长须随 CELL_H 重新校准"

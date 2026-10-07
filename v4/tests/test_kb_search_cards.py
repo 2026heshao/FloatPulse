@@ -654,7 +654,7 @@ class TestSearchPageCards:
         page._ctx = types.SimpleNamespace(
             plugin_id="kb-search", data=page._ctx.data,
             parent_window=lambda: None,
-            show_toast=lambda msg, ms=0: setattr(page, "_last_toast", msg),
+            show_toast=lambda msg, ms=0, **kwargs: setattr(page, "_last_toast", msg),
             logger=types.SimpleNamespace(warning=lambda *a, **k: None,
                                          info=lambda *a, **k: None))
         page._on_anchor(_qurl(f"{plug.RESULT_SCHEME}:0"))

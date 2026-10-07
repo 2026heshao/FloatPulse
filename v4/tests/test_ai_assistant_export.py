@@ -26,6 +26,11 @@ PLUGIN_PATH = os.path.join(os.path.dirname(BASE), "plugins",
                            "ai-assistant", "plugin.py")
 _MOD_NAME = "fp_test_ai_assistant_export_plugin"
 
+# 页面存活桩（2026-10-07）：teardown 已停净动画/定时器，但**不能**让 GC 在
+# 会话中段析构页面 C++ 树（实测两次全量同点位原生崩溃；整页同步 delete
+# 也 fail-fast）—— 持引用到进程退出，随 QApplication 一并回收。
+_KEEP_ALIVE = []
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -87,7 +92,27 @@ def page(qapp, plug):
     from fp_test_ai_assistant_export_plugin import AiChatPage
     w = AiChatPage(_make_ctx())
     w.show()
-    return w
+    yield w
+    # 确定性清场（2026-10-07 全量二分定位）：页面此前靠 GC 兜底回收，其上
+    # 运行中的按压 QVariantAnimation（按钮反馈 U 批起按钮自带）在 C++ 析构
+    # 时绕过 QUnifiedTimer 正常注销 → 动画定时器簿记失配（认为在跑、实际
+    # 已停）→ 同会话后续所有 QAbstractAnimation 冻结（currentTime 恒 0；
+    # asset_thumbs 淡入 / help_nav / v5 滑块 / v9 cp / v2 滚动条 / v7 日历 /
+    # v10 Stepper / splash / opacity 十余例全量确定性失败的共同根因）。
+    # 拆除时显式 stop 全部动画即可保住簿记一致（整页同步 delete 实测会在
+    # 复杂子树上 fail-fast，故不强制删对象，泄漏面仅为测试内存）。
+    from PyQt6.QtCore import QAbstractAnimation, QEvent, QTimer
+    from PyQt6.QtWidgets import QApplication
+    for anim in w.findChildren(QAbstractAnimation):
+        anim.stop()
+    for dots in w.findChildren(QTimer):
+        dots.stop()
+    w.close()
+    # rebuild 等 deleteLater 的旧子控件也清干净（pending 删除悬到会话末
+    # 会在 GC 兜底析构时打乱 QUnifiedTimer 簿记 —— 实测冻结动画驱动）
+    QApplication.sendPostedEvents(w, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+    _KEEP_ALIVE.append(w)
 
 
 # ---------------- A2：session_to_markdown / safe_export_name ----------------

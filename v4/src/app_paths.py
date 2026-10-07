@@ -255,6 +255,19 @@ def get_screen_geometry() -> QRect:
     return QRect(0, 0, 1920, 1080)
 
 
+def get_full_screen_geometry() -> QRect:
+    """获取主屏完整几何（含任务栏遮挡部分）。无屏幕环境同款回退。
+
+    轻提示距屏底缘的定位以整屏为基准（2026-10-06 设置项 R3）：任务栏
+    高度 = 整屏底缘 − 工作区底缘（任务栏不在底缘 / 自动隐藏时为 0），
+    见 toast.ToastCenter.relayout 的 max(任务栏高 + 8, 设定值) 守卫。
+    """
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        return screen.geometry()
+    return QRect(0, 0, 1920, 1080)
+
+
 # ====================================================================
 # 启动时数据完整性检查（2026-10-05 T05 自 knowledge_ball 裁剪迁移）
 # ====================================================================

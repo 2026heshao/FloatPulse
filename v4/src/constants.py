@@ -45,10 +45,12 @@ FRAGMENT_PREVIEW_LEN = 60
 PARAGRAPH_PREVIEW_LEN = 80
 NOTE_PREVIEW_LEN = 80
 
-# ---- 日程任务：勾选动画（体感优化 A2）----
-# 勾选动画基准时长（毫秒）；实际时长 = motion.duration(本值, anim_speed)，
+# ---- 日程任务：勾选动画（体感优化 A2；V3 四段式错峰 2026-10-07）----
+# 勾选动画**总长**（毫秒）；实际时长 = motion.duration(本值, anim_speed)，
 # 缩放口径统一在 src/motion.py（UI 强化方案 A1）。
-CHECK_ANIM_MS = 150
+# V3 起总长覆盖四段错峰时间轴（见 task_delegate 的 CHECK_* 轴常量）：
+# 勾选圈 pop 0→220 + 对勾描画 60→210 + 删除线扫过 80→230 + 文字沉降 0→120。
+CHECK_ANIM_MS = 230
 # 勾选框回弹峰值缩放：圆框按 1.0 → 1.15 → 1.0 做一次「回弹」。
 CHECK_BOUNCE_SCALE = 1.15
 
@@ -81,6 +83,22 @@ FS_LG = 20           # 大标题
 def mini_btn_size(icon_px: int) -> int:
     """小卡片图标边长 → 按钮边长（唯一换算点，别处不要另写公式）。"""
     return max(MINI_ICON_MIN, min(MINI_ICON_MAX, int(icon_px))) + MINI_BTN_PAD
+
+# ---- 命令面板触发键候选（2026-10-06 设置页「命令面板」卡）----
+# "/" 面板的触发键三选一候选：config.command_palette_trigger 只收这几个值
+# （白名单同源引用，见 config._CONFIG_VALUE_WHITELISTS）；Ctrl+K 是站内
+# 搜索的键，刻意不在候选里（与命令面板分工的硬边界）。
+TRIGGER_KEYS = ("/", ";", "`")
+
+# ---- 轻提示设置项（2026-10-06 设置页「轻提示」卡）----
+# config.toast_position / toast_duration 的枚举白名单与基准时长表：
+# 三处同源引用（config._CONFIG_VALUE_WHITELISTS、src/toast.py 的时长
+# 策略、settings_panel 的分段控件候选），改一处即全链路同步。
+TOAST_POSITIONS = ("center", "corner")   # 中下方居中 / 屏幕右下角
+TOAST_DURATIONS = ("brief", "standard", "relaxed")   # 短 / 标准 / 长
+# 档位 → 纯文本/成功/信息类基准驻留毫秒（错误类 ×1.875、带动作钮
+# ×1.5625 的倍率不暴露给用户，见 src/toast.KINDS 的时长策略注释）
+TOAST_BASE_MS = {"brief": 2000, "standard": 3200, "relaxed": 5000}
 
 # ---- 文件名非法字符净化 ----
 # Windows 不允许出现在文件名中的字符（含保留设备名前缀风险由调用方规避）。

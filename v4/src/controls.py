@@ -26,26 +26,31 @@
 ====================================================================
 """
 
+import math
+
 from PyQt6.QtCore import (
-    QEasingCurve, QEvent, QPointF, QPoint, QRectF, Qt, QTimer,
-    QVariantAnimation, pyqtSignal, pyqtProperty,
+    QAbstractAnimation, QEasingCurve, QEvent, QObject, QPointF, QRectF, Qt,
+    QTimer, QCoreApplication, QVariantAnimation, pyqtSignal, pyqtProperty,
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QPainter, QDoubleValidator, QIntValidator,
-    QPen,
+    QColor, QFont, QPainter, QDoubleValidator, QIntValidator,
+    QKeySequence, QMouseEvent, QPen, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QStyle, QStyleOptionButton, QVBoxLayout, QWidget,
+    QAbstractButton, QAbstractItemView, QCheckBox, QGraphicsOpacityEffect,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QStyle,
+    QStyleOptionButton, QVBoxLayout, QWidget,
 )
 from PyQt6.QtCore import QPropertyAnimation
 
-from src.app_paths import get_screen_geometry
-from src.constants import RADIUS_CTL, RADIUS_CHIP, RADIUS_PANEL
-from src.glass import _to_color   # QSS 风格颜色字符串（含 rgba）→ QColor
+from src.constants import (RADIUS_CTL, RADIUS_CHIP, RADIUS_PANEL,
+                           CHECK_ANIM_MS, CHECK_BOUNCE_SCALE)
+from src.qcolor import qcolor as _qc
 from src.theme import DEFAULT_THEME, get_colors
+from src.toast import ToastCenter
 from src import icon_render
 from src import motion
+from src import row_hover
 
 
 # ====================================================================
@@ -109,7 +114,50 @@ _SMOOTH_OVERLAYS = {
     # S4：侧栏导航行。端点对照 navBtn:hover/:pressed 被删的 a08/a18；
     # 拖拽态（[dragging="true"] 的 a18 底）仍归 QSS（静态状态，无过渡需求）。
     "navBtn":           (("primary", 20), ("primary", 46)),
+    # ---- 交互状态批（2026-10-08，清单 B1/C1）----
+    # pluginSegBtn / pluginErrorToggle 此前是裸 QPushButton（按下零反馈），
+    # 本批收编为 SmoothButton；pluginMoreBtn 本就是 IconButton，但缺登记
+    # ——掉进 None 键兜底（primary_hover 实底）会把 QSS 的 surface_2 hover
+    # 盖成绿色块，本批一并收口。收编口径：**:hover 背景变化仍归 QSS**
+    # （hover 端点 = None，避免与既有 QSS hover 底色两套机制打架——本批
+    # 只补「按下」这一缺失反馈，hover 视觉回归 QSS 语义，零回归风险）；
+    # press 端点逐一对照各按钮的语义色系：
+    #   · pluginSegBtn / pluginMoreBtn：中性面系（checked 态即 surface_3）
+    #   · pluginErrorToggle：danger 系淡染（「有问题在这」语系）
+    #   · navGroupHeader / helpTocItem：primary 淡染（对照 hover 的 a08）
+    "pluginSegBtn":     (None, ("surface_3", 255)),
+    "pluginMoreBtn":    (None, ("surface_3", 255)),
+    "pluginErrorToggle": (None, ("danger", 46)),
+    "navGroupHeader":   (None, ("primary", 31)),
+    "helpTocItem":      (None, ("primary", 31)),
+    # ---- 登记完整性护栏（U5，2026-10-07）----
+    # 护栏（tests/test_smooth_overlay_registry.py）把 theme.py 四份 QSS 里
+    # 出现的每一条 `QPushButton#name:hover` 与本表对账，缺登记即红灯 ——
+    # 因此「有意走未命名兜底」的按钮也必须**显式**登记（值与兜底一致，
+    # 行为零变化），让每一次兜底都是拍板过的，而不是漏配的。
+    "primaryBtn":       (("primary_hover", 255), ("primary_pressed", 255)),
+    # AI 助手「回到最新」浮钮（theme.py QSS 的 hover 端点是 $surface_2，
+    # 站点现无实例化点 —— QSS 与本表先对齐，防未来创建时踩 G7）
+    "backToLatestBtn":  (("surface_2", 255), None),
     None:               (("primary_hover", 255), ("primary_pressed", 255)),
+}
+
+# objectName → (checked 端点 spec)：选中态底色过渡（U3，2026-10-07）。
+# 端点逐一对照 theme.py 里已删除的 QSS `:checked` 背景（契约同
+# _SMOOTH_OVERLAYS：改 QSS 的 :checked 底色必须同步这里，反之亦然）。
+# 未收录 / None = 选中底色仍归 QSS `:checked`（一帧瞬变，维持现状）。
+_SMOOTH_CHECKED = {
+    # 分段筛选钮（插件中心「全部/已启用/已停用」）：checked 端点 =
+    # $surface_3 实底；hover 仍是 QSS 的 $surface_2（轻收编口径），
+    # 选中+悬停时 overlay 盖在 QSS hover 底上正好是「淡出回 hover」。
+    "pluginSegBtn": ("surface_3", 255),
+    # 模式切换胶囊（设置页 AI 后端 云端/本地、插件页同款）：checked 端点 =
+    # $primary 实底（对照 theme.py 已删除的 :checked 背景，主窗+卡片模板
+    # 两处同步删）。基态 hover/press 端点见 _SMOOTH_OVERLAYS（46/77% 淡染）。
+    "modeBtn": ("primary", 255),
+    # 模式切换胶囊（设置页 AI 后端 云端/本地、插件页同款）：checked 端点 =
+    # $primary 实底（对照 theme.py 已删除的 :checked 背景，主窗+卡片模板
+    # 两处同步删）。基态 hover/press 端点见 _SMOOTH_OVERLAYS（46/77% 淡染）。
 }
 
 # overlay 圆角（对照 theme.py 各选择器的 border-radius）；未收录的走全局
@@ -124,6 +172,10 @@ _OVERLAY_RADIUS = {
     "fragEditBtn": RADIUS_CTL,
     "navBtn": RADIUS_PANEL, "secondaryBtn": RADIUS_CTL,
     "textBtn": RADIUS_CTL,
+    # 交互状态批（2026-10-08，清单 C1）：圆角逐一对照 theme.py 各自的
+    # border-radius（chip=4 / panel=8 / ctl=6），overlay 不露出直角。
+    "pluginSegBtn": RADIUS_CHIP, "pluginMoreBtn": RADIUS_CHIP,
+    "navGroupHeader": RADIUS_PANEL, "helpTocItem": RADIUS_CHIP,
 }
 _DEFAULT_RADIUS = RADIUS_CTL
 
@@ -167,9 +219,20 @@ class SmoothButton(QPushButton):
         super().__init__(*args, **kwargs)
         self._hp = 0.0
         self._pp = 0.0
+        self._dp = 0.0            # 禁用淡出进度（U2）：1 = 完全禁用外观
+        self._cp = 0.0            # 选中底色进度（U3）：1 = 完全选中端点色
         self._hover_anim = None
         self._press_anim = None
+        self._dp_anim = None
+        self._checked_anim = None
         self._child_free = None   # None = 未测定（子控件可能晚于构造加入）
+        # ---- U1（2026-10-07）：press/release 改挂信号 ----
+        # QAbstractButton.pressed / released 在鼠标左键、键盘 Space/Enter、
+        # 触屏（Qt 合成鼠标事件）三条路径上统一发射 —— press 动画从
+        # mousePressEvent 挪到这里，键盘激活第一次获得按下反馈。
+        self.pressed.connect(self._on_pressed)
+        self.released.connect(self._on_released)
+        self.toggled.connect(self._on_checked_glide)
 
     # ---- 动画属性（QPropertyAnimation 写入端）----
     def _get_hp(self):
@@ -186,16 +249,37 @@ class SmoothButton(QPushButton):
         self._pp = max(0.0, min(1.0, float(value)))
         self.update()
 
+    def _get_dp(self):
+        return self._dp
+
+    def _set_dp(self, value):
+        self._dp = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _get_cp(self):
+        return self._cp
+
+    def _set_cp(self, value):
+        self._cp = max(0.0, min(1.0, float(value)))
+        self.update()
+
     hp = pyqtProperty(float, _get_hp, _set_hp)
     pp = pyqtProperty(float, _get_pp, _set_pp)
+    dp = pyqtProperty(float, _get_dp, _set_dp)
+    cp = pyqtProperty(float, _get_cp, _set_cp)
 
     # ---------------- 状态驱动 ----------------
-    def _glide(self, prop, attr, anim_attr, target):
-        """把 attr 插值到 target（0/1）。可打断：从当前值重定向，不排队。"""
+    def _glide(self, prop, attr, anim_attr, target, kind="fast"):
+        """把 attr 插值到 target（0/1）。可打断：从当前值重定向，不排队。
+
+        ``kind`` 取 motion.MOTION 的时长 token 名：进入类反馈用
+        ``fast``（120ms），松手回弹/禁用收回用 ``press_out``（150ms，
+        比进入略长 —— 回弹更从容）。
+        """
         current = getattr(self, attr)
         if abs(target - current) <= _PROGRESS_EPS:
             return
-        ms = motion.eased_ms("fast", self._speed)
+        ms = motion.eased_ms(kind, self._speed)
         if ms <= 0:
             # reduce_motion 总闸 / 档位归零：直接落终态（语义是瞬显，不是缩短）
             setattr(self, attr, float(target))
@@ -220,15 +304,25 @@ class SmoothButton(QPushButton):
         self._glide(b"hp", "_hp", "_hover_anim", 0.0)
         super().leaveEvent(event)
 
-    def mousePressEvent(self, event):
-        super().mousePressEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton and self.isDown():
-            self._glide(b"pp", "_pp", "_press_anim", 1.0)
+    # ---- U1：press / release 信号驱动（鼠标/键盘/触屏统一）----
+    def _on_pressed(self):
+        """按下反馈入口：QAbstractButton.pressed 信号槽。
 
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
+        三条触发路径都在这里汇合 —— 鼠标左键按下、键盘 Space/Enter
+        （keyPressEvent → setDown(true) → pressed）、触屏/笔（Qt 合成
+        鼠标事件）。此前挂在 mousePressEvent，键盘激活零反馈（G1/G2）。
+        """
+        self._glide(b"pp", "_pp", "_press_anim", 1.0)
+
+    def _on_released(self):
+        """松手回弹入口：QAbstractButton.released 信号槽。
+
+        时长用 ``press_out``（150ms）而不是进入的 ``fast`` —— 回弹比
+        按下更从容（规格 §6 token 表）。吞掉 release 的手势路径（导航
+        拖拽落定只 setDown(False) 不发 released）不走这里，仍由
+        :meth:`cancel_press_feedback` 显式收回。"""
         if self._pp > _PROGRESS_EPS:
-            self._glide(b"pp", "_pp", "_press_anim", 0.0)
+            self._glide(b"pp", "_pp", "_press_anim", 0.0, kind="press_out")
 
     def cancel_press_feedback(self):
         """显式收回按下反馈（pp 回 0）。
@@ -237,14 +331,85 @@ class SmoothButton(QPushButton):
         而不调用 super().mouseReleaseEvent，QPropertyAnimation 不会被通知，
         pp 会卡在 1（按钮永久下沉 + 叠色）。"""
         if self._pp > _PROGRESS_EPS:
-            self._glide(b"pp", "_pp", "_press_anim", 0.0)
+            self._glide(b"pp", "_pp", "_press_anim", 0.0, kind="press_out")
+
+    # ---- U2：禁用淡出 ----
+    def changeEvent(self, event):
+        """EnabledChange 时对禁用外观做 120ms 插值（G3「灰了一跳」）。
+
+        三条语义：
+        - 正常路径：``dp`` 在 0↔1 间走 ``fast`` 插值；同时若正在禁用，
+          press/hover 叠色一并按 ``press_out`` 收回（状态优先级
+          **disabled > pressed > hover**，禁用不残留交互反馈）；
+        - 批量刷路径：调用方用 blockSignals 包裹 setEnabled（设置页统一
+          刷新 / Stepper 批量同步）→ 直接落终态，不播动画（与
+          reduce_motion 同语义：瞬显，不是缩短）；
+        - reduce_motion 开启：_glide 内部 ms=0 自动瞬显。
+        """
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.EnabledChange:
+            return
+        if self.signalsBlocked():
+            self.snap_disabled_feedback()
+            return
+        self._glide(b"dp", "_dp", "_dp_anim",
+                    0.0 if self.isEnabled() else 1.0)
+        if not self.isEnabled() and (self._pp > _PROGRESS_EPS
+                                     or self._hp > _PROGRESS_EPS):
+            self._glide(b"pp", "_pp", "_press_anim", 0.0, kind="press_out")
+            self._glide(b"hp", "_hp", "_hover_anim", 0.0)
+
+    def snap_disabled_feedback(self):
+        """禁用反馈直接落终态（批量刷语义，同 reduce_motion：瞬显）。
+
+        按 isEnabled() 立即收敛 ``dp``，press/hover 叠色与进行中的
+        动画一并杀掉 —— 禁用覆盖一切交互态。Stepper 批量同步
+        （宿主 blockSignals 后 setValue → _sync_buttons）显式调用。"""
+        for anim in (self._hover_anim, self._press_anim, self._dp_anim):
+            if anim is not None:
+                anim.stop()
+        self._hp = 0.0
+        self._pp = 0.0
+        self._dp = 0.0 if self.isEnabled() else 1.0
+        self.update()
+
+    # ---- U3：选中底色过渡 ----
+    def _on_checked_glide(self, _checked=False):
+        """toggled 信号槽：登记了 _SMOOTH_CHECKED 端点的按钮做 cp 插值。"""
+        if self.objectName() not in _SMOOTH_CHECKED:
+            return
+        self._glide(b"cp", "_cp", "_checked_anim",
+                    1.0 if self.isChecked() else 0.0)
+
+    def _checked_progress(self):
+        """cp 的有效值：动画进行中取 _cp，静止时直接按 isChecked() 落值。
+
+        后一半是 blockSignals 批量 setChecked 的兜底 —— toggled 被吞、
+        cp 属性停在旧值，但选中态以 isChecked() 为准直接渲染（与
+        ToggleSwitch「无动画时按 isChecked 渲染」同一口径）。"""
+        anim = self._checked_anim
+        if anim is not None and \
+                anim.state() == QAbstractAnimation.State.Running:
+            return self._cp
+        return 1.0 if self.isChecked() else 0.0
 
     # ---------------- 绘制 ----------------
     def paintEvent(self, event):
+        if _PROGRESS_EPS < self._dp < 1.0 - _PROGRESS_EPS:
+            # U2 禁用淡出中间帧：两份 QSS 外观交叉淡染（见 _paint_disable_fade）
+            self._paint_disable_fade(event)
+            return
         hover_spec, press_spec = self._overlay_specs()
+        checked_spec = _SMOOTH_CHECKED.get(self.objectName())
         spec, progress = None, 0.0
         if self._pp > _PROGRESS_EPS:
+            # 状态优先级：pressed 最上（规格 §3）
             spec, progress = press_spec, self._pp
+        elif checked_spec is not None:
+            # U3：选中底色叠加层，介于 press 与 hover 之间
+            cp = self._checked_progress()
+            if cp > _PROGRESS_EPS:
+                spec, progress = checked_spec, cp
         elif self._hp > _PROGRESS_EPS:
             spec, progress = hover_spec, self._hp
         if spec is None:
@@ -262,6 +427,42 @@ class SmoothButton(QPushButton):
             painter = QPainter(self)
         self._paint_overlay(painter, spec, progress)
         painter.end()
+
+    def _paint_disable_fade(self, event):
+        """U2 禁用淡出中间帧：可用外观（1-dp）与禁用外观（dp）交叉淡染。
+
+        QSS 的 ``:disabled`` 是一帧跳变且不可插值，中间帧把两份 QSS 外观
+        （CE_PushButton 全套：背景/文字/图标，State_Enabled 旗标分别置位
+        —— 图标随之取 Normal / Disabled 两张位图）按透明度叠画。dp=0/1
+        两端走原生路径逐像素一致，交叉淡染只存在于 120ms 过渡内。按下
+        位移/叠色不参与：disabled 覆盖一切交互态，pp/hp 已在 changeEvent
+        一并收回。
+        """
+        painter = QPainter(self)
+        dp = self._dp
+        painter.save()
+        painter.setOpacity(1.0 - dp)
+        self._draw_qss_layer(painter, enabled=True)
+        painter.restore()
+        painter.save()
+        painter.setOpacity(dp)
+        self._draw_qss_layer(painter, enabled=False)
+        painter.restore()
+        painter.end()
+
+    def _draw_qss_layer(self, painter, enabled: bool):
+        """画一份 QSS 按钮外观（CE_PushButton），State_Enabled 按参置位。
+
+        与 _paint_native_transformed 的区别：painter 由调用方持有并已设好
+        透明度（交叉淡染要叠两层），且不画叠色、不做位移。"""
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        if enabled:
+            opt.state |= QStyle.StateFlag.State_Enabled
+        else:
+            opt.state &= ~QStyle.StateFlag.State_Enabled
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton,
+                                 opt, painter, self)
 
     def _paint_native_transformed(self):
         """按 ``pp`` 进度下沉 + 微缩后画原生 QSS 外观，返回未 end() 的 painter。
@@ -344,10 +545,497 @@ class SmoothButton(QPushButton):
         return None
 
 
+class SmoothInput(QLineEdit):
+    """输入框 hover/focus 边框插值 + 焦点外圈（交互视觉清单 V1，2026-10-07）。
+
+    现状：QSS 引擎没有 transition，``QLineEdit:hover`` → ``$primary_a30``、
+    ``:focus`` → ``$focus_ring`` 都是 1px 边框一帧跳变，且焦点只有一根
+    1px 边框、锚定感弱。本类在原生 QSS 外观之上叠加**绘制级**边框层：
+
+    - hover：边框 ``$panel_edge → $primary_a30`` 120ms OutCubic 插值；
+    - focus：边框插到 ``$focus_ring``（100ms，motion ``focus_ring`` 档）
+      + 内侧 3px 主色 12% 光圈淡入（画在 border 内侧，**不扩占位** ——
+      与 ToggleSwitch 内缩焦点环同一口径；稿的 box-shadow 向外扩在
+      Qt 里必然侵入布局，明确不做）；
+    - 失焦/离开反向过渡，可打断重定向（同 SmoothButton 的
+      stop → start 从当前值出发）；reduce_motion / 档位归零瞬显。
+
+    QSS 侧约定（theme.py）：`QLineEdit[smoothFrame="true"]` 把本类实例的
+    基态边框置 1px transparent 纯占位（border-box 几何与 1px 实边框一致，
+    sizeHint 零变化），边框颜色全权由本类每帧绘制 —— rest 画
+    ``$panel_edge``、hover 端点 ``$primary_a30``、focus 端点
+    ``$focus_ring``，与被删旧 QSS 行为同源同位；原生 QLineEdit
+    （HotkeyCaptureEdit / 便签输入框等未替换站点）的 ``:hover`` /
+    ``:focus`` 边框规则原样保留、不受影响。背景/文字/内边距/selection
+    色仍归 QSS；换主题不需要通知（端点色在 paint 时按当前主题解析，
+    父链探测与 SmoothButton 同款）。禁用态照常画常态边框（QSS
+    ``:disabled`` 只管文字色）。
+
+    接入面（V1）：全站走通用边框样式的 QLineEdit（搜索框 / 表单框 /
+    taskInput 等）替换为本类；例外三处不换——Stepper 的 stepValue
+    （无边框下划线式样）、HotkeyCaptureEdit（自绘捕捉控件）、便签窗
+    输入框（自绘纸面表面，不在通用 QSS 管辖内）。
+    """
+
+    _speed = 1.0
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（controls.set_ui_speed 统一调用）。"""
+        cls._speed = motion.sanitize_speed(speed)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hp = 0.0    # hover 进度：1 = 完全悬停端点（$primary_a30）
+        self._fp = 0.0    # focus 进度：1 = 完全焦点态（$focus_ring + 光圈）
+        self._hover_anim = None
+        self._focus_anim = None
+        self._host = None
+        # QSS 契约（theme.py `QLineEdit[smoothFrame="true"]`）：基态边框
+        # 置 1px transparent 纯占位（border-box 几何不变），边框颜色全权
+        # 由本类绘制层每帧画出 —— rest 画 $panel_edge，端点与旧 QSS 同源。
+        self.setProperty("smoothFrame", "true")
+
+    def set_host(self, host):
+        """主题探测宿主（与 IconButton._host 同语义；一般无需调用）。"""
+        self._host = host
+
+    # ---------------- 动画属性 ----------------
+    def _get_hp(self):
+        return self._hp
+
+    def _set_hp(self, value):
+        self._hp = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def _get_fp(self):
+        return self._fp
+
+    def _set_fp(self, value):
+        self._fp = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    hp = pyqtProperty(float, _get_hp, _set_hp)
+    fp = pyqtProperty(float, _get_fp, _set_fp)
+
+    def _glide(self, prop, attr, anim_attr, target, kind="fast"):
+        """进度插值到 target（0/1），可打断重定向；reduce_motion 瞬显。"""
+        current = getattr(self, attr)
+        if abs(target - current) <= _PROGRESS_EPS:
+            return
+        ms = motion.eased_ms(kind, self._speed)
+        if ms <= 0:
+            setattr(self, attr, float(target))
+            self.update()
+            return
+        anim = getattr(self, anim_attr)
+        if anim is None:
+            anim = QPropertyAnimation(self, prop, self)
+            anim.setEasingCurve(getattr(QEasingCurve.Type, motion.EASE["out"]))
+            setattr(self, anim_attr, anim)
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(float(target))
+        anim.setDuration(ms)
+        anim.start()
+
+    # ---------------- 状态驱动 ----------------
+    def enterEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 0.0)
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event):
+        self._glide(b"fp", "_fp", "_focus_anim", 1.0, kind="focus_ring")
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._glide(b"fp", "_fp", "_focus_anim", 0.0, kind="focus_ring")
+        super().focusOutEvent(event)
+
+    # ---------------- 绘制 ----------------
+    def _detect_theme(self):
+        """SmoothButton 同款父链探测（见其方法注释，此处不重复展开）。"""
+        host = self._host
+        if host is not None:
+            t = getattr(host, "current_theme", None)
+            if t in ("light", "dark"):
+                return t
+        w = self.parentWidget()
+        while w is not None:
+            t = getattr(w, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+            w = w.parentWidget()
+        return None
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        super().paintEvent(event)
+        # 边框每帧整圈重画（QSS 基态对 smoothFrame 实例是 1px 透明占位，
+        # 这里是边框颜色的唯一来源）：rest 画 $panel_edge（与旧 QSS 基态
+        # 同色同位），hover/focus 按进度插值；禁用态画常态边框（QSS
+        # :disabled 只管文字色，旧边框在禁用下本来就不变）。
+        hp, fp = self._hp, self._fp
+        colors = get_colors(self._detect_theme() or DEFAULT_THEME)
+        rest = _qc(colors.get("panel_edge", "#D3D1C7"))
+        hover = _qc(colors.get("primary_a30", "#0F6E56"))
+        focus = _qc(colors.get("focus_ring", "#0C5A47"))
+        # 边框：rest →(hp) hover →(fp) focus_ring 两段串联插值。
+        # ★alpha 与 RGB 一起插（panel_edge/primary_a30 都是半透明端点，
+        #   丢弃 alpha 会把中间帧/端点画成不透明实色，偏离 QSS 端点）。
+        def _lerp(a: QColor, b: QColor, t: float) -> QColor:
+            return QColor(
+                int(round(a.red() + (b.red() - a.red()) * t)),
+                int(round(a.green() + (b.green() - a.green()) * t)),
+                int(round(a.blue() + (b.blue() - a.blue()) * t)),
+                int(round(a.alpha() + (b.alpha() - a.alpha()) * t)),
+            )
+        border = _lerp(_lerp(rest, hover, hp), focus, fp)
+        w, h = float(self.width()), float(self.height())
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = RADIUS_CTL
+        if self.isEnabled() and fp > _PROGRESS_EPS:
+            # 焦点光圈：主色 12% × fp，3px 环画在 border 内侧（1~4px
+            # 带），不与正文文字（padding 10px 起）重叠，不扩占位。
+            ring = _qc(colors.get("primary", "#0F6E56"))
+            ring.setAlpha(int(round(255 * 0.12 * fp)))
+            painter.setPen(QPen(ring, 3.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            inset = 1.0 + 1.5   # border 1px + 环宽半幅
+            painter.drawRoundedRect(
+                QRectF(inset, inset, w - 2 * inset, h - 2 * inset),
+                radius, radius)
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(0.5, 0.5, w - 1.0, h - 1.0), radius, radius)
+        painter.end()
+
+
+class SmoothCheckBox(QCheckBox):
+    """自绘勾选框（交互视觉清单 V9，2026-10-07）：与 V3 任务勾选同一绘制语言。
+
+    现状：QSS ``::indicator`` 的 hover/checked 是一帧瞬变，且与任务委托的
+    「pop + 对勾描画」完成语言不同源。本类接管指示器绘制：
+
+    - hover：边框 ``$primary_a30 → $primary`` 120ms 插值（QSS 端点同源）；
+    - 选中：底色 ``$panel_fill → $primary`` 120ms + 指示器 pop 回弹
+      （CHECK_BOUNCE_SCALE，sin 半波，与 task_delegate 同参数）+ 对勾
+      按四段式时间轴错峰描画（起 80ms / 150ms 画完，同 V3 常量）；
+    - 取消勾选全程可逆（时间轴倒放）；blockSignals 批量 setChecked 不播
+      动画直接按 isChecked() 渲染（ToggleSwitch 同口径）；
+    - 焦点：``::indicator:focus`` 端点 $focus_ring，100ms 插值（画在
+      自绘边框上）；reduce_motion / 档位归零瞬显。
+
+    QSS 契约（theme.py，规则置于 ``::indicator:focus`` 之后按序覆盖）：
+    ``QCheckBox[smoothCheck="true"]::indicator { border: none;
+    background: transparent; }`` —— 只对本类实例关闭原生指示器外观，
+    指示器矩形（16px / r_chip 圆角）与文字色、spacing 仍由既有 QSS 提供。
+    """
+
+    _speed = 1.0
+
+    # 与 task_delegate 的 V3 时间轴同源（V9 复用同一「勾选完成」语言；
+    # 改轴必须两处同步 —— task_delegate 侧有轴长 = CHECK_ANIM_MS 的对齐断言）
+    _POP_END = 220
+    _DRAW_START = 80
+    _DRAW_END = 230
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（controls.set_ui_speed 统一调用）。"""
+        cls._speed = motion.sanitize_speed(speed)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._hp = 0.0     # hover 进度
+        self._fp = 0.0     # focus 进度
+        self._cp = 0.0     # 选中底色进度
+        self._tp = 0.0     # pop/描画时间轴进度（0..1 ↔ CHECK_ANIM_MS）
+        self._hover_anim = None
+        self._focus_anim = None
+        self._cp_anim = None
+        self._tl_anim = None
+        # QSS 契约：关闭本类实例的原生指示器外观（见类 docstring）
+        self.setProperty("smoothCheck", "true")
+        self.toggled.connect(self._on_toggled)
+
+    # ---------------- 动画属性 ----------------
+    @staticmethod
+    def _mk_prop(name):
+        attr = "_" + name
+
+        def _get(self):
+            return getattr(self, attr)
+
+        def _set(self, value):
+            setattr(self, attr, max(0.0, min(1.0, float(value))))
+            self.update()
+
+        return pyqtProperty(float, _get, _set)
+
+    hp = _mk_prop("hp")
+    fp = _mk_prop("fp")
+    cp = _mk_prop("cp")
+    tp = _mk_prop("tp")
+
+    def _glide(self, prop, attr, anim_attr, target, kind="fast"):
+        """进度插值到 target（0/1），可打断重定向；reduce_motion 瞬显。"""
+        current = getattr(self, attr)
+        if abs(target - current) <= _PROGRESS_EPS:
+            return
+        ms = motion.eased_ms(kind, self._speed)
+        if ms <= 0:
+            setattr(self, attr, float(target))
+            self.update()
+            return
+        anim = getattr(self, anim_attr)
+        if anim is None:
+            anim = QPropertyAnimation(self, prop, self)
+            anim.setEasingCurve(getattr(QEasingCurve.Type, motion.EASE["out"]))
+            setattr(self, anim_attr, anim)
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(float(target))
+        anim.setDuration(ms)
+        anim.start()
+
+    # ---------------- 状态驱动 ----------------
+    def enterEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._glide(b"hp", "_hp", "_hover_anim", 0.0)
+        super().leaveEvent(event)
+
+    def focusInEvent(self, event):
+        self._glide(b"fp", "_fp", "_focus_anim", 1.0, kind="focus_ring")
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._glide(b"fp", "_fp", "_focus_anim", 0.0, kind="focus_ring")
+        super().focusOutEvent(event)
+
+    def _on_toggled(self, _checked=False):
+        """toggled 槽：底色（cp）与时间轴（tp）随选中态正放/倒放。
+
+        2026-10-07 实机走查修复：V9 初版只驱动 tp，_cp 是死属性——选中后
+        底色永远停在 panel_fill（白），对勾用 on_primary 白笔画在白底上
+        完全不可见（软件导航「自动回到主页面」勾选框实锤）。补 cp 驱动。
+
+        blockSignals 批量路径 toggled 被吞 → _timeline_progress /
+        _checked_progress 兜底按 isChecked() 直接渲染，动画不播
+        （语义同 reduce_motion）。"""
+        self._glide(b"cp", "_cp", "_cp_anim",
+                    1.0 if self.isChecked() else 0.0)
+        self._glide(b"tp", "_tp", "_tl_anim",
+                    1.0 if self.isChecked() else 0.0,
+                    kind="press_out")
+
+    def _checked_progress(self):
+        """底色有效值：动画进行中取 _cp，静止按 isChecked() 落值。"""
+        anim = self._cp_anim
+        if anim is not None and \
+                anim.state() == QAbstractAnimation.State.Running:
+            return self._cp
+        return 1.0 if self.isChecked() else 0.0
+
+    def _timeline_progress(self):
+        """时间轴有效值：动画进行中取 _tp，静止按 isChecked() 落值。"""
+        anim = self._tl_anim
+        if anim is not None and \
+                anim.state() == QAbstractAnimation.State.Running:
+            return self._tp
+        return 1.0 if self.isChecked() else 0.0
+
+    # ---------------- 绘制 ----------------
+    def _detect_theme(self):
+        """SmoothInput 同款父链探测（见其方法注释）。"""
+        w = self.parentWidget()
+        while w is not None:
+            t = getattr(w, "_theme", None)
+            if t in ("light", "dark"):
+                return t
+            w = w.parentWidget()
+        return None
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        super().paintEvent(event)   # 文字 / spacing / QSS 色照常
+        from PyQt6.QtWidgets import QStyleOptionButton, QStyle
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        ind = self.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxIndicator, opt, self)
+        colors = get_colors(self._detect_theme() or DEFAULT_THEME)
+        rest_bg = _qc(colors.get("panel_fill", "#FFFFFF"))
+        on_bg = _qc(colors.get("primary", "#0F6E56"))
+        rest_border = _qc(colors.get("primary_a30", "#0F6E56"))
+        hover_border = _qc(colors.get("primary", "#0F6E56"))
+        focus_border = _qc(colors.get("focus_ring", "#0C5A47"))
+        symbol = _qc(colors.get("on_primary", "#FFFFFF"))
+
+        def _lerp(a: QColor, b: QColor, t: float) -> QColor:
+            return QColor(
+                int(round(a.red() + (b.red() - a.red()) * t)),
+                int(round(a.green() + (b.green() - a.green()) * t)),
+                int(round(a.blue() + (b.blue() - a.blue()) * t)),
+                int(round(a.alpha() + (b.alpha() - a.alpha()) * t)),
+            )
+
+        tp = self._timeline_progress()
+        cp_eff = self._checked_progress()
+        t_ms = tp * float(CHECK_ANIM_MS)
+        pop_p = max(0.0, min(1.0, t_ms / float(self._POP_END)))
+        draw_p = max(0.0, min(1.0,
+                              (t_ms - self._DRAW_START)
+                              / float(self._DRAW_END - self._DRAW_START)))
+        scale = 1.0 + (CHECK_BOUNCE_SCALE - 1.0) * math.sin(math.pi * pop_p)
+
+        side = min(ind.width(), ind.height()) * scale
+        box = QRectF(
+            ind.center().x() - side / 2.0, ind.center().y() - side / 2.0,
+            side, side)
+        radius = RADIUS_CHIP
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 底色：panel_fill → primary（cp 段）
+        bg = _lerp(rest_bg, on_bg, cp_eff)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(box, radius, radius)
+        # 边框：primary_a30 →(hp) primary →(fp) focus_ring；选中态描边随
+        # cp 一并收到 primary（与 QSS :checked 端点一致）
+        border = _lerp(_lerp(rest_border, hover_border, self._hp),
+                       focus_border, self._fp)
+        border = _lerp(border, on_bg, max(cp_eff, pop_p))
+        painter.setPen(QPen(border, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(box, radius, radius)
+        # 对勾描画（V3 同源两段折线）
+        if draw_p > 0.01:
+            x, y, w, h = box.x(), box.y(), box.width(), box.height()
+            p0 = QPointF(x + w * 0.26, y + h * 0.52)
+            p1 = QPointF(x + w * 0.44, y + h * 0.70)
+            p2 = QPointF(x + w * 0.76, y + h * 0.32)
+            l1 = math.hypot(p1.x() - p0.x(), p1.y() - p0.y())
+            l2 = math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+            total = l1 + l2
+            drawn = draw_p * total
+            pen = QPen(symbol, max(1.6, side * 0.13))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if drawn <= l1:
+                k = drawn / l1 if l1 > 0 else 0.0
+                painter.drawLine(p0, QPointF(p0.x() + (p1.x() - p0.x()) * k,
+                                             p0.y() + (p1.y() - p0.y()) * k))
+            else:
+                painter.drawLine(p0, p1)
+                k = min(1.0, (drawn - l1) / l2) if l2 > 0 else 1.0
+                painter.drawLine(p1, QPointF(p1.x() + (p2.x() - p1.x()) * k,
+                                             p1.y() + (p2.y() - p1.y()) * k))
+        painter.end()
+
+
+class _StepperSlideOverlay(QWidget):
+    """Stepper 数值滑动的瞬态覆盖层（V10，2026-10-07）。
+
+    盖在数值框上方，把「旧值滑出 + 新值滑入」两个文本画在同一帧时间轴
+    上：+ → 内容上移（旧值向上滑出淡出、新值自下方滑入淡入）；− →
+    反向。动画期间数值框自身文本为空（父类 setValue 已 setText("")），
+    收尾恢复 —— 数据/信号在 setValue 里已同步落位，这里纯表现层。
+    WA_TransparentForMouseEvents：滑动的 120ms 里点击/聚焦照常穿透。
+    """
+
+    def __init__(self, edit, old_text, new_text, up: bool, ms: int,
+                 on_finished):
+        super().__init__(edit)
+        self._edit = edit
+        self._old_text = old_text
+        self._new_text = new_text
+        self._sign = 1.0 if up else -1.0     # +1 内容上移 / -1 下移
+        self._on_finished = on_finished
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+                          True)
+        self.setGeometry(edit.rect())
+        self.show()
+        self.raise_()
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(max(1, int(ms)))
+        self._anim.setEasingCurve(
+            getattr(QEasingCurve.Type, motion.EASE["out"]))
+        # 绑定方法连接（拿接收者上下文）：宿主析构时 Qt 自动断开。
+        # 禁 lambda —— 无接收者上下文的连接在析构竞态下会在已析构
+        # 对象上回调（本文件 PageTitle docstring 同款铁律，段错误经典成因）。
+        self._anim.valueChanged.connect(self.update)
+        self._anim.finished.connect(self._done)
+
+    def start(self):
+        self._anim.start()
+
+    def _done(self):
+        self._on_finished()
+        self.hide()
+        self.deleteLater()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        p = float(self._anim.currentValue() or 0.0)
+        if p <= 0.0:
+            return
+        colors = get_colors(_detect_widget_theme(self) or DEFAULT_THEME)
+        color = _qc(colors.get("text", "#2C2C2A"))
+        painter = QPainter(self)
+        font = QFont(self._edit.font())
+        painter.setFont(font)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        h = float(self.height())
+        shift = self._sign * p * h
+        # 旧值：向移出方向滑出 + 淡出
+        painter.setOpacity(max(0.0, 1.0 - p))
+        painter.setPen(color)
+        painter.drawText(
+            QRectF(0, -shift, self.width(), h),
+            int(Qt.AlignmentFlag.AlignCenter), self._old_text)
+        # 新值：自移入方向滑入 + 淡入
+        painter.setOpacity(p)
+        painter.drawText(
+            QRectF(0, self._sign * h - shift, self.width(), h),
+            int(Qt.AlignmentFlag.AlignCenter), self._new_text)
+        painter.setOpacity(1.0)
+        painter.end()
+
+
+def _detect_widget_theme(widget):
+    """SmoothButton._detect_theme 的模块级版本（父链爬 _theme）。"""
+    w = widget.parentWidget()
+    while w is not None:
+        t = getattr(w, "_theme", None)
+        if t in ("light", "dark"):
+            return t
+        w = w.parentWidget()
+    return None
+
+
 class Stepper(QWidget):
     """数字步进器（替代 QSpinBox / QSlider 的 ± 按钮组）"""
 
     valueChanged = pyqtSignal(int)
+
+    _speed = 1.0
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（controls.set_ui_speed 统一调用，V10）。"""
+        cls._speed = motion.sanitize_speed(speed)
 
     BTN_SIZE = 30
     EDIT_WIDTH = 58
@@ -370,6 +1058,7 @@ class Stepper(QWidget):
         self._hold_dir = 0
         self._hold_tick = 0
         self._suppress_click = False
+        self._slide_overlay = None   # V10：进行中的数值滑动覆盖层（至多一个）
 
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
@@ -462,12 +1151,22 @@ class Stepper(QWidget):
         return QIntValidator(self._min, self._max, self)
 
     def _sync_buttons(self):
-        """到边界时把对应按钮置灰，避免"点了没反应"的困惑"""
+        """到边界时把对应按钮置灰，避免"点了没反应"的困惑
+
+        U2（2026-10-07）：± 钮的置灰走 SmoothButton 的禁用淡出（120ms
+        交叉淡染）；宿主用 blockSignals 包裹 setValue 批量刷（设置页
+        统一刷新路径）时直接落终态 —— 子按钮自己的信号没被 block，
+        changeEvent 探测不到批量语义，必须在这里替它拍板。"""
         self._btn_minus.setEnabled(self._value > self._min)
         self._btn_plus.setEnabled(self._value < self._max)
+        if self.signalsBlocked():
+            self._btn_minus.snap_disabled_feedback()
+            self._btn_plus.snap_disabled_feedback()
 
     def _commit_edit(self):
-        self.setValue(self._clamp(self._parse(self._edit.text())))
+        # V10：用户键入后回车/失焦提交 —— 数值来自打字本身，不做滑动
+        self.setValue(self._clamp(self._parse(self._edit.text())),
+                      animate=False)
 
     def _on_click_step(self, direction: int):
         if self._suppress_click:
@@ -491,7 +1190,8 @@ class Stepper(QWidget):
         if not self._hold_dir:
             return
         self._hold_tick += 1
-        self.step_by(self._hold_dir)
+        # V10：长按连发路径直落终态不播滑动（规格 §2 V10 明确口径）
+        self.step_by(self._hold_dir, animate=False)
         self._repeat.start(self.HOLD_FAST_MS
                            if self._hold_tick <= self.HOLD_FAST_TICKS
                            else self.HOLD_FASTER_MS)
@@ -500,24 +1200,47 @@ class Stepper(QWidget):
     def value(self) -> int:
         return self._value
 
-    def setValue(self, value: int):
-        """设置数值；仅在真正变化时发信号（与 QSpinBox 行为一致）"""
+    def setValue(self, value: int, animate: bool = True):
+        """设置数值；仅在真正变化时发信号（与 QSpinBox 行为一致）。
+
+        V10（2026-10-07 交互视觉清单）：点击 ± / 滚轮等**单步**变更时
+        数值文本 120ms 上/下滑动（方向与 ± 一致：+ 旧值上滑出、新值自
+        下方滑入；− 反向）。直落终态的路径（语义同 reduce_motion）：
+        长按连发（_on_repeat）、用户键入提交（_commit_edit）、宿主
+        blockSignals 批量刷、已有滑动进行中（防叠影）。
+        """
         new = self._clamp(value)
         if new == self._value:
             self._edit.setText(self._fmt(self._value))
             return
+        old = self._value
         self._value = new
-        self._edit.setText(self._fmt(new))
         self._sync_buttons()
         self.valueChanged.emit(new)
+        ms = (motion.eased_ms("fast", self._speed)
+              if animate and not self.signalsBlocked() else 0)
+        if ms > 0 and self._slide_overlay is None:
+            self._edit.setText("")
+            self._slide_overlay = _StepperSlideOverlay(
+                self._edit, self._fmt(old), self._fmt(new),
+                up=(new > old), ms=ms,
+                on_finished=lambda: self._finish_slide())
+            self._slide_overlay.start()
+            return
+        self._edit.setText(self._fmt(new))
 
-    def step_by(self, direction: int):
-        self.setValue(self._value + direction * self._step)
+    def _finish_slide(self):
+        """滑动收尾：恢复显示当前值（连发/批量变更插队时以 _value 为准）。"""
+        self._slide_overlay = None
+        self._edit.setText(self._fmt(self._value))
+
+    def step_by(self, direction: int, animate: bool = True):
+        self.setValue(self._value + direction * self._step, animate=animate)
 
     def setRange(self, minimum: int, maximum: int):
         self._min, self._max = int(minimum), int(maximum)
         self._edit.setValidator(self._make_validator())
-        self.setValue(self._value)
+        self.setValue(self._value, animate=False)
         self._sync_buttons()
 
     def wheelEvent(self, event):
@@ -550,12 +1273,20 @@ class ToggleSwitch(QAbstractButton):
     MARGIN = 3
     ANIM_MS = 120
 
+    _speed = 1.0
+
+    @classmethod
+    def set_speed(cls, speed):
+        """动画档位广播入口（set_ui_speed 统一调用，与 SmoothButton 同口径）。"""
+        cls._speed = motion.sanitize_speed(speed)
+
     def __init__(self, checked: bool = False, theme: str = "", parent=None):
         super().__init__(parent)
         self.setCheckable(True)
         self.setChecked(checked)
         self._theme = theme or DEFAULT_THEME
         self._progress = 1.0 if checked else 0.0
+        self._thp = 0.0     # 未选中轨道 hover 进度（U3）：1 = 完全加深
         self.setFixedSize(self.TRACK_W, self.TRACK_H)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("点击切换")
@@ -563,6 +1294,10 @@ class ToggleSwitch(QAbstractButton):
         self._anim.setDuration(self.ANIM_MS)
         self._anim.setEasingCurve(QEasingCurve.Type.OutQuad)
         self._anim.valueChanged.connect(self._on_anim)
+        self._hover_anim = QVariantAnimation(self)
+        self._hover_anim.setEasingCurve(
+            getattr(QEasingCurve.Type, motion.EASE["out"]))
+        self._hover_anim.valueChanged.connect(self._on_track_hover)
         self.toggled.connect(self._on_toggled)
 
     # ---------------- 对外 ----------------
@@ -580,6 +1315,36 @@ class ToggleSwitch(QAbstractButton):
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
+        self.update()
+
+    # ---------------- 未选中轨道 hover 插值（U3）----------------
+    def enterEvent(self, event):
+        self._glide_track_hover(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._glide_track_hover(0.0)
+        super().leaveEvent(event)
+
+    def _glide_track_hover(self, target: float):
+        """轨道 hover 加深进度插值：可打断重定向，reduce_motion 瞬显。"""
+        current = self._thp
+        if abs(target - current) <= 0.005:
+            return
+        ms = motion.eased_ms("fast", self._speed)
+        if ms <= 0:
+            self._thp = float(target)
+            self.update()
+            return
+        anim = self._hover_anim
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(float(target))
+        anim.setDuration(ms)
+        anim.start()
+
+    def _on_track_hover(self, value):
+        self._thp = float(value)
         self.update()
 
     # ---------------- 内部 ----------------
@@ -608,8 +1373,19 @@ class ToggleSwitch(QAbstractButton):
             track = QColor(colors["primary"])
         else:
             track = QColor(colors["text_disabled"])
-            if self.underMouse():
-                track = track.darker(112)
+            if self._thp > 0.0:
+                # U3（2026-10-07）：未选中轨道 hover 加深从 darker(112)
+                # 一帧瞬变改为 120ms 插值 —— 进度由 enter/leave 驱动
+                # （_glide_track_hover），快速进出可打断、不残留。
+                deep = QColor(colors["text_disabled"]).darker(112)
+                t = max(0.0, min(1.0, self._thp))
+                track = QColor(
+                    int(round(track.red() + (deep.red() - track.red()) * t)),
+                    int(round(track.green()
+                              + (deep.green() - track.green()) * t)),
+                    int(round(track.blue()
+                              + (deep.blue() - track.blue()) * t)),
+                )
         p.setBrush(track)
         p.drawRoundedRect(QRectF(0, 0, w, h), h / 2.0, h / 2.0)
 
@@ -640,24 +1416,16 @@ class ToggleSwitch(QAbstractButton):
         p.end()
 
 
-class ScreenToast(QWidget):
-    """屏幕级顶部通知：独立顶层窗口，主窗口隐藏/最小化时依然可见。
+class ScreenToast:
+    """屏幕级轻提示 · 兼容门面（2026-10-06 重设计收口）。
 
-    背景：此前的操作反馈（碎片自动清理、截图收录素材、链接拦截警告等）
-    分别挂在主窗口（容器内子控件）与悬浮球（球上方气泡）上，宿主一隐藏
-    提示就跟着消失。统一改为屏幕顶部居中的顶层浮窗 —— 位置与任何窗口
-    的可见性无关。
-
-    - 全程单例：新提示直接替换旧提示，不堆叠；
-    - 鼠标完全穿透、不抢焦点（WA_TransparentForMouseEvents +
-      WA_ShowWithoutActivating）、不进任务栏（Tool）；
-    - 配色走 get_colors 跟随主题，底色比窗口内玻璃更实（alpha 232，
-      要压住任意壁纸保证可读）。
+    实现整体迁往 :mod:`src.toast`（ToastCard + ToastCenter：屏幕底部
+    居中 248px 定宽气泡、语义色、图标、动作钮、底部倒计时条、最多
+    3 条堆叠 —— 设计稿 ``设计稿/轻提示气泡-高仿真-2026-10-06.html``）。
+    本类只剩类级转发：旧调用点 ``ScreenToast.show_msg(text, theme, ms)``
+    的三参形态不变（纯文本映射为 neutral 变体），``set_speed`` 继续作为
+    动效档位广播入口并把档位转达 ToastCenter。
     """
-
-    MARGIN_X, PAD_Y = 18, 11
-    TOP_GAP = 20              # 距屏幕顶部的距离
-    FLOAT_PX = 10             # 进出场位移幅度：进场自下上浮 / 出场向下沉没
 
     _speed = 1.0
 
@@ -665,120 +1433,42 @@ class ScreenToast(QWidget):
     def set_speed(cls, speed):
         """动画档位广播入口（main_window 经 controls.set_ui_speed 调用）。"""
         cls._speed = motion.sanitize_speed(speed)
-
-    _instance = None
+        ToastCenter.set_speed(speed)
 
     @classmethod
-    def show_msg(cls, text: str, theme: str = "", ms: int = 2600):
-        """显示一条屏幕顶部通知（模块级入口，单例复用）"""
-        inst = cls._instance
-        if inst is None:
-            inst = cls()
-            cls._instance = inst
-        if theme:
-            inst._theme = theme
-        inst.popup(text, max(800, int(ms)))
-        return inst
+    def show_msg(cls, text: str, theme: str = "", ms: int = 2600,
+                 kind: str = "neutral", action=None):
+        """显示一条屏幕底部轻提示（实现转发 src/toast.py）。
 
-    def __init__(self):
-        super().__init__(None)
-        self._theme = DEFAULT_THEME
-        self._text = ""
-        self._fade_target = 1.0
-        self._final_y = self.TOP_GAP
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-        # 进出场 = 透明度 + 位移两条动画并行（丝滑化清单 F6：上浮淡入 /
-        # 下沉淡出）。时长/曲线走 motion token（base / OutCubic）；
-        # reduce_motion 下 motion.eased_ms 返回 0 → popup/_fade_out 直接落终态。
-        easing = getattr(QEasingCurve.Type, motion.EASE["out"])
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._fade_anim.setEasingCurve(easing)
-        self._fade_anim.finished.connect(self._on_anim_done)
-        self._pos_anim = QPropertyAnimation(self, b"pos", self)
-        self._pos_anim.setEasingCurve(easing)
-
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)
-        self._timer.timeout.connect(self._fade_out)
-
-    # ---------------- 显示 ----------------
-    def popup(self, text: str, ms: int):
-        self._text = text
-        font = QFont(self.font())
-        font.setPointSize(10)
-        fm = QFontMetrics(font)
-        screen = get_screen_geometry()
-        max_w = max(240, int(screen.width() * 0.7))
-        w = min(max_w, fm.horizontalAdvance(text) + self.MARGIN_X * 2 + 8)
-        h = fm.height() + self.PAD_Y * 2
-        self.setFixedSize(int(w), int(h))
-        x = screen.left() + (screen.width() - int(w)) // 2
-        self._final_y = screen.top() + self.TOP_GAP
-        self.move(x, self._final_y)
-
-        self._timer.stop()
-        self._fade_anim.stop()
-        self._pos_anim.stop()
-        self._fade_target = 1.0
-        duration = max(1, motion.eased_ms("base", self._speed))
-        if motion.duration(180, self._speed) <= 0:
-            # reduce_motion：瞬显终态，不排队任何动画
-            self.setWindowOpacity(1.0)
-            self.show()
-            self.raise_()
-            self._timer.start(ms)
-            return
-        self.setWindowOpacity(0.0)
-        self.show()
-        self.raise_()
-        self._fade_anim.setDuration(duration)
-        self._fade_anim.setStartValue(0.0)
-        self._fade_anim.setEndValue(1.0)
-        self._pos_anim.setDuration(duration)
-        self._pos_anim.setStartValue(self.pos() + QPoint(0, self.FLOAT_PX))
-        self._pos_anim.setEndValue(self.pos())
-        self._fade_anim.start()
-        self._pos_anim.start()
-        self._timer.start(ms)
-
-    def _fade_out(self):
-        self._fade_anim.stop()
-        self._pos_anim.stop()
-        self._fade_target = 0.0
-        duration = max(1, motion.eased_ms("base", self._speed))
-        if motion.duration(180, self._speed) <= 0:
-            self.setWindowOpacity(0.0)
-            self.hide()
-            return
-        self._fade_anim.setDuration(duration)
-        self._fade_anim.setStartValue(self.windowOpacity())
-        self._fade_anim.setEndValue(0.0)
-        self._pos_anim.setDuration(duration)
-        self._pos_anim.setStartValue(self.pos())
-        self._pos_anim.setEndValue(self.pos() + QPoint(0, self.FLOAT_PX))
-        self._fade_anim.start()
-        self._pos_anim.start()
-
-    def _on_anim_done(self):
-        if self._fade_target <= 0.0 and self.windowOpacity() <= 0.02:
-            self.hide()
+        ``kind`` / ``action`` 是重设计新增的可选参数：语义变体
+        （success/info/warning/danger/accent/neutral/loading）与动作钮
+        ``(文字, 回调)``；旧的三参调用完全不受影响。时长下限沿用旧口径
+        800ms，0 按语义表默认驻留（仅显式传 ms<=0 的新代码会走到）。
+        """
+        return ToastCenter.push(
+            kind=kind, title=str(text),
+            ms=max(800, int(ms)) if ms and int(ms) > 0 else 0,
+            action=action,
+            theme=theme if theme in ("light", "dark") else "")
 
 
 def set_ui_speed(speed):
     """设置页 anim_speed 档位广播的**模块级单一入口**：一次调用同步
-    controls 内所有走 motion 缩放的动效控件（现有 SmoothButton /
-    ScreenToast，后续 S4 若新增同样在此登记）。main_window 启动与
-    anim_speed_changed 时调用，替代逐类 set_speed。"""
+    controls 内所有走 motion 缩放的动效控件（SmoothButton 与
+    ToggleSwitch 的滑动/轨道 hover、ScreenToast —— 后者把档位转达
+    src/toast.ToastCenter，新气泡的进出场/错峰随之缩放），以及
+    src/row_hover 的列表行 hover 插值（U4，delegate 行级 hp tween）。
+    main_window 启动与 anim_speed_changed 时调用，替代逐类 set_speed。"""
     SmoothButton.set_speed(speed)
+    ToggleSwitch.set_speed(speed)
+    SmoothInput.set_speed(speed)
+    SmoothCheckBox.set_speed(speed)
+    Stepper.set_speed(speed)
     ScreenToast.set_speed(speed)
+    row_hover.RowHoverController.set_speed(speed)
+    # V2：滚动条状态机过渡时长随档位缩放（src/smooth_scrollbar）
+    from src.smooth_scrollbar import SmoothScrollBar as _SSB
+    _SSB.set_speed(speed)
 
 
 # 滚轮步长（px）：Qt 默认按字体行高步进，列表滚动一格一格"卡顿"；
@@ -791,28 +1481,96 @@ def tune_list_scrolling(view):
 
     只调 QAbstractItemView 的滚动属性，不碰内容与选择行为；QSS 的
     滚动条样式不受影响。素材网格已有按单元格高度的定制步长（assets_panel），
-    不走本入口。"""
+    不走本入口。
+    （2026-10-08 清单 F2：函数体里曾嵌着一段引用 self._theme/self._text
+    的 chip 类残留 paintEvent —— 无人调用、也无法被调用（普通函数不是
+    方法），属误导维护者的死代码，已删除。）
+    """
     view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     view.verticalScrollBar().setSingleStep(SMOOTH_SCROLL_STEP_PX)
 
-    def paintEvent(self, event):
-        colors = get_colors(self._theme)
-        # glass_fill 是 QSS rgba 字符串，QColor 不认 —— 必须经 _to_color 解析
-        fill = _to_color(colors["glass_fill"])
-        fill.setAlpha(232)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        # primary_a30 是 QSS rgba 字符串，QColor 不认（无效色 → 画成黑环）
-        p.setPen(QPen(_to_color(colors["primary_a30"]), 1))
-        p.setBrush(fill)
-        p.drawRoundedRect(r, r.height() / 2.0, r.height() / 2.0)
-        p.setPen(QColor(colors["text"]))
-        f = QFont(self.font())
-        f.setPointSize(10)
-        p.setFont(f)
-        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
-        p.end()
+
+# ====================================================================
+# 页内搜索快捷键（清单 A4，2026-10-08）
+# ====================================================================
+def attach_page_search_shortcut(page, line_edit):
+    """Ctrl+F：页级聚焦搜索框（4 个带搜索框的面板统一入口）。
+
+    - 笔记页 2026-10-07 批次 N3 的写法抽成公共 helper：插件中心、
+      知识库、碎片工作台与笔记页共用一份实现；
+    - 作用域用 ``WidgetWithChildrenShortcut`` 限定在面板页内——焦点在
+      页内才触发，**不占全局命名空间**（主窗 Ctrl+W/H/T/K、F1、
+      Ctrl+1~8、命令面板触发键与 Ctrl+K 均不受影响；全局热键默认表
+      亦无 Ctrl+F，笔记页接入时已排查过）；
+    - 聚焦后全选既有词，便于直接覆盖输入。
+    返回创建的 QShortcut（一般忽略；调用方要追加行为时可再 connect）。
+    """
+    shortcut = QShortcut(QKeySequence("Ctrl+F"), page)
+    shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+    shortcut.activated.connect(line_edit.setFocus)
+    shortcut.activated.connect(line_edit.selectAll)
+    return shortcut
+
+
+class _FadeInOnceController(QObject):
+    """fade_in_once 的动画控制器（10-07 硬崩家族铁律的兑现形态）。
+
+    以目标 widget 为父 → widget 析构时控制器同灭，valueChanged/finished
+    连接的接收者就是控制器自身（绑定方法），Qt 自动断开 —— 杜绝
+    「无接收者闭包在析构竞态下于半死 effect/widget 上回调」的
+    access violation（PageTitle / Stepper 滑层同款铁律）。
+    """
+
+    def __init__(self, widget, ms: int):
+        super().__init__(widget)
+        self._widget = widget
+        self._effect = QGraphicsOpacityEffect(widget)
+        self._effect.setOpacity(0.0)
+        widget.setGraphicsEffect(self._effect)
+        self._anim = QVariantAnimation(self)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setDuration(int(ms))
+        self._anim.setEasingCurve(
+            getattr(QEasingCurve.Type, motion.EASE["out"]))
+        self._anim.valueChanged.connect(self._tick)
+        self._anim.finished.connect(self._done)
+        self._anim.start()
+
+    def stop(self):
+        self._anim.stop()
+
+    def _tick(self, value):
+        self._effect.setOpacity(max(0.0, min(1.0, float(value))))
+
+    def _done(self):
+        # 摘掉 effect（回到无覆盖层常态，避免常驻合成开销）
+        self._widget.setGraphicsEffect(None)
+        if getattr(self._widget, "_fade_in_anim", None) is self:
+            self._widget._fade_in_anim = None
+        self.deleteLater()
+
+
+def fade_in_once(widget, ms: int) -> None:
+    """一次性淡入（清单 D1，2026-10-08）：显隐终态语义不变，只补「到位过程」。
+
+    约定（与 D1 硬约束对齐）：
+    - **调用方负责先把终态落位**（setVisible(True) / setCurrentIndex）——
+      本函数只做表现层透明度插值，可见性断言/数据流零影响；
+    - ``ms <= 0``（reduce_motion 总闸 / 档位归零，``motion.duration`` 口径）
+      或目标不可见时直接跳过（瞬时切换语义）；
+    - 重复触发可打断：复用 widget 上的旧控制器，stop 后重建（不排队）；
+    - 不设模态、不 grabMouse，动画期间交互照常。
+    """
+    if ms is None or int(ms) <= 0 or not widget.isVisible():
+        return
+    # 打断旧动画：先把旧 effect 摘掉，避免两个动画写同一个透明度
+    old = getattr(widget, "_fade_in_anim", None)
+    if old is not None:
+        old.stop()
+        widget._fade_in_anim = None
+    widget.setGraphicsEffect(None)
+    widget._fade_in_anim = _FadeInOnceController(widget, int(ms))
 
 
 # ====================================================================
@@ -873,6 +1631,10 @@ class IconButton(SmoothButton):
     基类 SmoothButton（丝滑化清单 S2）补齐 hover/press 的背景过渡与
     按下位移 —— 端点色由 objectName 在 _SMOOTH_OVERLAYS 里解析。
 
+    命中区外扩（U6，2026-10-07）：24px 视觉图标钮的命中区向外扩
+    ``HIT_PAD``（4px，事件级矩形判定，见 eventFilter）—— 触屏标准的
+    32px 最小命中尺寸，不改布局、不改绘制、几何断言零变化。
+
     颜色三态（对应 QSS 的 color / :hover 色 / :checked 色）：
       · 常态 ``off_color``   缺省 ``text_secondary``
       · 悬停 ``hover_color`` 缺省 ``primary``（``danger=True`` 时 ``danger``）
@@ -885,6 +1647,8 @@ class IconButton(SmoothButton):
     ``callable`` 守卫）；没有信号的对话框/便签由宿主显式调
     :meth:`apply_theme`，或接受构造时取色（短命对象，可接受）。
     """
+
+    HIT_PAD = 4    # 命中区四向外扩 px（24px 钮 → 32px 命中，触屏标准）
 
     def __init__(self, icon_name, size=0, icon_size=16, object_name=None,
                  host=None, tooltip="", text="", checkable=False,
@@ -902,6 +1666,7 @@ class IconButton(SmoothButton):
         self._on_spec = on_color or "primary"
         self._theme_override = None
         self._hovered = False
+        self._filtered_parent = None    # U6：命中区外扩的过滤器宿主（旧父）
         if object_name:
             self.setObjectName(object_name)
         if size:
@@ -922,6 +1687,10 @@ class IconButton(SmoothButton):
         signal = getattr(host, "theme_changed", None)
         if callable(getattr(signal, "connect", None)):
             signal.connect(self._on_theme_changed)
+        # U6：构造时父控件已定（parent 形参在 super().__init__ 里生效），
+        # 立刻挂命中区外扩过滤器；此后 setParent 换父由 event() 的
+        # ParentChange 分支重挂。
+        self._rebind_parent_filter()
 
     # ---------------- 对外 ----------------
     @property
@@ -977,12 +1746,23 @@ class IconButton(SmoothButton):
           只叠一层浅面」的既定视觉）。
         - **淡染主色**（iconBtn / stepBtn / sideTabIconBtn 系）→ 端点
           token 色 primary，与 QSS ``:hover`` 文字色一致、与旧缺省等价。
+        - **hover 端点 None**（2026-10-08 清单 C1 起 pluginMoreBtn 等
+          「hover 视觉归 QSS」的按钮，端点登记为 None 避免与 QSS hover
+          底两套机制打架）→ 返回 None，调用方回退常态 off 色 —— 与
+          SmoothButton.paintEvent 的 ``spec is None`` 分支同口径（QSS
+          管 hover 底，图标色不跟随）。
         """
         # ★取 [0]（hover 端点）：图标色跟随的是悬停底色的归宿；[1] 是
         #   press 端点，仅因现有表项 hover/press 同族才结果碰巧一致，
         #   对未来 hover/press 异族的表项（如 textBtn 之类再扩一组）
         #   是陷阱 —— 2026-10-03 修正。
-        hover_token, hover_alpha = self._overlay_specs()[0]
+        hover_spec = self._overlay_specs()[0]
+        if hover_spec is None:
+            # 端点未登记（None = hover 不换底色）→ 图标维持 off 色。
+            # 2026-10-07 用户报障：pluginMoreBtn 是 IconButton，其登记
+            # hover 端点为 None，直接解包会在 enterEvent 崩溃。
+            return None
+        hover_token, hover_alpha = hover_spec
         if hover_alpha >= 250:
             if str(hover_token).startswith("primary"):
                 return colors["on_primary"]
@@ -991,6 +1771,65 @@ class IconButton(SmoothButton):
 
     def _on_theme_changed(self, _theme=None):
         self._refresh_icon()
+
+    # ---------------- 命中区外扩（U6，2026-10-07）----------------
+    # Qt 只把「落点在控件 rect 内」的鼠标事件投递给控件本体 —— 图标钮
+    # 视觉 24px、触屏标准要求命中 ≥32px，外扩的环带落在父控件坐标系里。
+    # 做法：在父控件上装事件过滤器，代收环带内的按下/松开并映射回按钮
+    # 本体（合成本地坐标事件）。**不改布局、不改绘制、sizeHint/geometry
+    # 零变化** —— 命中区是事件层的概念，与视觉层完全解耦。
+    def event(self, ev):
+        if ev.type() == QEvent.Type.ParentChange:
+            # 换父时重挂过滤器（旧父解绑防悬挂）
+            self._rebind_parent_filter()
+        return super().event(ev)
+
+    def _rebind_parent_filter(self):
+        """把命中区代收过滤器挂到当前父控件（无父时什么都不装）。"""
+        if self._filtered_parent is not None:
+            self._filtered_parent.removeEventFilter(self)
+            self._filtered_parent = None
+        p = self.parentWidget()
+        if p is not None:
+            p.installEventFilter(self)
+            self._filtered_parent = p
+
+    def _hit_rect(self):
+        """命中矩形：自身 rect 四向外扩 HIT_PAD px（事件级判定用）。"""
+        pad = self.HIT_PAD
+        return self.rect().adjusted(-pad, -pad, pad, pad)
+
+    def eventFilter(self, obj, event):
+        # 半析构防御：QApplication 销毁 / fixture 清理阶段，Qt 可能对
+        # 「C++ 对象仍活、Python 包装被重建」的 IconButton 派发事件 ——
+        # 新包装没有实例属性，摸 _filtered_parent 会 AttributeError（V 批
+        # 测试 teardown 阶段实锤）。拿不到状态就按「无命中区外扩」处理，
+        # 事件走原路由，行为与未装过滤器一致。
+        filtered_parent = getattr(self, "_filtered_parent", None)
+        et = event.type()
+        if (filtered_parent is not None and obj is filtered_parent
+                and self.isVisible()
+                and self.isEnabled()
+                and et in (QEvent.Type.MouseButtonPress,
+                           QEvent.Type.MouseButtonRelease,
+                           QEvent.Type.MouseButtonDblClick)):
+            local = self.mapFromParent(event.position().toPoint())
+            if self._hit_rect().contains(local):
+                # 环带内代收：把落点夹取进 rect —— QAbstractButton 的
+                # hitButton 只认 rect 内坐标，原始环带坐标会被它忽略。
+                # 若落点其实被兄弟控件截走，Qt 派发给兄弟、进不到本
+                # 过滤器，不会误吞别人的点击。
+                r = self.rect()
+                cx = min(max(float(local.x()), float(r.left())),
+                         float(r.right()))
+                cy = min(max(float(local.y()), float(r.top())),
+                         float(r.bottom()))
+                mapped = QMouseEvent(
+                    et, QPointF(cx, cy), event.globalPosition(),
+                    event.button(), event.buttons(), event.modifiers())
+                QCoreApplication.sendEvent(self, mapped)
+                return True    # 已消费，父控件不再处理
+        return super().eventFilter(obj, event)
 
     # ---------------- 悬停变色 ----------------
     # QSS 的 :hover 只能改 color:，管不到 QIcon 位图 —— 悬停时把 Off 态

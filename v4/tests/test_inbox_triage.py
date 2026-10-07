@@ -369,7 +369,7 @@ class _FakeHost(QObject):
     def refresh_page(self, _name):
         pass
 
-    def show_toast(self, _msg):
+    def show_toast(self, _msg, **kwargs):
         pass
 
 

@@ -46,7 +46,7 @@ from src import md_export  # noqa: E402
 
 PASS = 0
 FAIL = 0
-EXPORT_LABEL = "导出到 Obsidian"
+EXPORT_LABEL = "导出全部到 Obsidian"
 
 
 def check(name, ok, detail=""):
@@ -325,9 +325,9 @@ def main():
     check("C2 「更改目录」按钮存在",
           hasattr(sp, "_set_vault_choose") and
           sp._set_vault_choose.text() == "更改目录")
-    check("C3 「导出到 Obsidian」按钮存在",
+    check("C3 「导出全部到 Obsidian」按钮存在",
           hasattr(sp, "_set_export_btn") and
-          sp._set_export_btn.text() == "导出到 Obsidian")
+          sp._set_export_btn.text() == EXPORT_LABEL)
 
     # ---------------- D. 更改目录：取消 vs 选择 ----------------
     _FakeFileDialog.result = ""

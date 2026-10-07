@@ -42,13 +42,14 @@ import re
 
 from src.plugin_loader import PLUGIN_PACKAGE_EXT
 
-from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QTimer
+from PyQt6.QtCore import (Qt, QPoint, QRect, QSize, QTimer, QVariantAnimation,
+                          QPropertyAnimation, QEasingCurve)
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLayout, QLabel,
     QPushButton, QScrollArea, QFrame, QTextBrowser,
-    QSizePolicy, QApplication, QLineEdit, QMenu, QWidgetAction,
-    QComboBox,
+    QSizePolicy, QApplication, QMenu, QWidgetAction,
+    QComboBox, QGraphicsOpacityEffect,
 )
 
 # 弹窗基类：PluginStoreDialog 在模块加载期就需要它作基类，
@@ -56,10 +57,13 @@ from PyQt6.QtWidgets import (
 from src.glass_dialog import GlassDialog
 from src.glass_message_box import GlassMessageBox
 
+from src import motion
 from src import plugin_market
 from src import plugin_settings
 from src.controls import (SmoothButton, EmptyState, IconButton, PageTitle,
-                          IconLabel, Stepper, ToggleSwitch)
+                          IconLabel, Stepper, ToggleSwitch,
+                          attach_page_search_shortcut)
+from PyQt6.QtWidgets import QLineEdit  # A/B 临时
 from src.theme import DEFAULT_THEME, get_colors
 from src.plugin_net import make_async_getter, make_async_bytes_getter
 from src.update_checker import RELEASES_API_URL, check_headers
@@ -300,7 +304,7 @@ class PluginsPanel(QWidget):
         self._rescan_pending = False  # 重扫描两步走（见 _on_rescan）进行中
         # 搜索 + 状态筛选（2026-10-04 三件套之二）
         self._search_input = None
-        self._seg_buttons = {}        # "all"/"on"/"off" -> QPushButton
+        self._seg_buttons = {}        # "all"/"on"/"off" -> SmoothButton
         self._filter_hint = None
         self._card_records = []       # [(card, lp)]，过滤判据与卡片一一对应
         self._visible_cards = []      # 过滤后参与网格摆放的卡片
@@ -384,6 +388,9 @@ class PluginsPanel(QWidget):
         self._search_input.setToolTip("按插件名、插件 id 或动作名过滤下方卡片")
         self._search_input.textChanged.connect(lambda _t: self._apply_filter())
         toolbar.addWidget(self._search_input)
+        # Ctrl+F：页级聚焦搜索框（清单 A4，2026-10-08 收口——写法与
+        # 笔记页统一，页内作用域不占全局命名空间）
+        attach_page_search_shortcut(self, self._search_input)
 
         seg_tips = {
             "all": "显示全部已安装插件",
@@ -391,7 +398,10 @@ class PluginsPanel(QWidget):
             "off": "只看已停用 / 未提供动作 / 未生效的插件",
         }
         for key, label in (("all", "全部"), ("on", "已启用"), ("off", "已停用")):
-            btn = QPushButton(label)
+            # 2026-10-08（清单 C1）：裸 QPushButton → SmoothButton（按下
+            # 反馈唯一实现在 SmoothButton._set_pp；overlay 端点见 controls
+            # 的 pluginSegBtn 条目——QSS hover 底不变，按下叠 surface_3）
+            btn = SmoothButton(label)
             btn.setObjectName("pluginSegBtn")
             btn.setCheckable(True)
             btn.setAutoExclusive(True)
@@ -427,7 +437,9 @@ class PluginsPanel(QWidget):
         eb = QVBoxLayout(self._error_box)
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(8)
-        self._error_toggle = QPushButton()
+        # 2026-10-08（清单 C1）：裸 QPushButton → SmoothButton（overlay
+        # 端点见 controls 的 pluginErrorToggle 条目——按下叠 danger 淡染）
+        self._error_toggle = SmoothButton()
         self._error_toggle.setObjectName("pluginErrorToggle")
         self._error_toggle.setCheckable(True)
         self._error_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -777,30 +789,182 @@ class PluginsPanel(QWidget):
         return query in haystack
 
     def _apply_filter(self):
-        """按搜索词 + 分段重摆卡片：只改可见性与网格占位，不重建卡片。"""
+        """按搜索词 + 分段重摆卡片：只改可见性与网格占位，不重建卡片。
+
+        可见性**同步**落位（本方法的语义与既有断言契约），叠加项只是
+        表现层：新进入结果集的卡片做逐卡错峰淡入（D1，2026-10-08，
+        设计稿 plugins-center-filter-transitions 的 Qt 等价实现——
+        不动布局几何，网格重排仍即时，入场用 opacity 错峰补齐节奏感）。
+        reduce_motion / 档位归零 / 面板不可见时跳过动画（瞬时切换）。
+        """
+        prev_visible = {id(c) for c in self._visible_cards}
         self._visible_cards = []
+        newly = []
         for card, lp in self._card_records:
             visible = self._card_matches_filter(lp)
             card.setVisible(visible)
             if visible:
                 self._visible_cards.append(card)
+                if id(card) not in prev_visible:
+                    newly.append(card)
         self._regrid()
         if self._filter_hint is not None:
             # 「装了但全被滤掉」才提示；真没装走 EmptyState 空态
             self._filter_hint.setVisible(
                 bool(self._card_records) and not self._visible_cards)
+        self._stagger_cards_in(newly)
+
+    # ---- D1：筛选结果逐卡错峰淡入（2026-10-08）----
+    def _anim_speed(self) -> float:
+        """动画档位（宿主 MainWindow.anim_speed）；测试替身/缺失回退 1.0。"""
+        return motion.sanitize_speed(getattr(self._host, "anim_speed", 1.0))
+
+    def _stagger_cards_in(self, cards) -> None:
+        """新出现的卡片逐卡错峰淡入：一条 QVariantAnimation 驱动全部卡片，
+        每张按索引偏移一个 stagger 步长（单动画复用 = 天然可打断重定向）。
+
+        - 不改可见性/几何（visible 已同步落位），只挂 QGraphicsOpacityEffect；
+        - 收尾摘掉全部 effect（无常驻合成开销）；
+        - reduce_motion / 面板不可见 / 空集 → 直接返回（瞬时语义）。
+        """
+        # 先清掉上一轮可能残留的 effect（快速连续触发时的打断路径——
+        # 按上一轮的真实 targets 清，不依赖可能已被 refresh 重建的记录表）
+        for card in getattr(self, "_stagger_targets", None) or []:
+            if getattr(card, "_stagger_effect_owner", False):
+                card.setGraphicsEffect(None)
+                card._stagger_effect_owner = False
+        if getattr(self, "_stagger_anim", None) is not None:
+            self._stagger_anim.stop()
+            self._stagger_anim = None
+        if not cards or not self.isVisible():
+            return
+        ms = motion.eased_ms("fast", self._anim_speed())
+        if ms <= 0 or not cards:
+            return
+        targets = list(cards)[:24]        # 封顶：超长结果集不做逐卡动效
+        self._stagger_targets = targets
+        step = max(0, int(motion.duration(motion.MOTION["stagger"],
+                                          self._anim_speed())))
+        span = ms + step * (len(targets) - 1)
+
+        effects = []
+        for card in targets:
+            effect = QGraphicsOpacityEffect(card)
+            effect.setOpacity(0.0)
+            card.setGraphicsEffect(effect)
+            card._stagger_effect_owner = True
+            effects.append(effect)
+        self._stagger_effects = effects
+        self._stagger_step = step
+        self._stagger_ms = ms
+        self._stagger_span = span
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(max(1, span))
+        anim.setEasingCurve(getattr(QEasingCurve.Type, motion.EASE["out"]))
+        # 绑定方法连接（接收者上下文）：宿主面板析构时 Qt 自动断开 ——
+        # 禁无接收者闭包（10-07 硬崩家族铁律，PageTitle/Stepper 同款）。
+        anim.valueChanged.connect(self._stagger_tick)
+        anim.finished.connect(self._stagger_done)
+        self._stagger_anim = anim
+        anim.start()
+
+    def _stagger_tick(self, value):
+        """逐卡写透明度。卡片可能在动画在途时被 refresh 重建销毁
+        （effect 随卡片 C++ 同灭）→ 逐卡半析构防御，跳过即走。"""
+        t = float(value) * self._stagger_span
+        step, ms = self._stagger_step, self._stagger_ms
+        for i, effect in enumerate(self._stagger_effects):
+            local = (t - step * i) / ms if ms > 0 else 1.0
+            try:
+                effect.setOpacity(max(0.0, min(1.0, local)))
+            except RuntimeError:
+                continue    # 半析构卡片：effect 已随宿主销毁，跳过
+
+    def _stagger_done(self):
+        # 只清本轮真实挂过 effect 的卡片（_card_records 可能在动画
+        # 在途时被 refresh 重建，按记录表清会漏掉旧卡）
+        for card in getattr(self, "_stagger_targets", None) or []:
+            if getattr(card, "_stagger_effect_owner", False):
+                try:
+                    card.setGraphicsEffect(None)
+                except RuntimeError:
+                    pass    # 半析构卡片：effect 已随宿主销毁，无需摘
+                card._stagger_effect_owner = False
+        self._stagger_effects = []
+        anim = self._stagger_anim
+        if anim is not None:
+            self._stagger_anim = None
+            anim.deleteLater()
 
     def _on_error_toggled(self, checked: bool):
-        """失败折叠条展开 / 收起（标题钮 checked ↔ 卡片容器可见）"""
+        """失败折叠条展开 / 收起（标题钮 checked ↔ 卡片容器可见）。
+
+        可见性**同步**落位（语义/断言契约不变）；展开方向补一段
+        maximumHeight 撑开动画（D1，2026-10-08）：从 0 长到 sizeHint，
+        收尾解除高度约束。收起方向保持瞬时（test_plugins_panel 要求
+        立即隐藏，且「先动画后隐藏」会让断言落空）。reduce_motion /
+        面板不可见 / 重复触发（refresh 路径 body 本就可见）→ 不动画。
+        """
         self._error_expanded = bool(checked)
         if self._error_body is not None:
+            was_visible = self._error_body.isVisibleTo(self)
             self._error_body.setVisible(self._error_expanded)
+            self._animate_error_body_expand(was_visible)
         if self._error_toggle is not None and self._error_box is not None \
                 and self._error_box.isVisibleTo(self):
             n = self._error_layout.count()
             self._error_toggle.setText(
                 f"加载失败的插件（{n} 个）"
                 f"——{'点击收起' if checked else '点击展开'}原因与修复建议")
+
+    _WIDGET_MAX_H = 16777215   # Qt QWidget 尺寸上限（QWIDGETSIZE_MAX）
+
+    def _animate_error_body_expand(self, was_visible: bool) -> None:
+        """展开方向的 maximumHeight 撑开动画（收起不动画，见上）。
+
+        复用同一条 QPropertyAnimation（重复触发可打断重定向）；动画期间
+        不设模态、不抢鼠标；reduce_motion / 面板不可见 / 本就可见
+        （refresh 重入路径）→ 直接解除约束落终态。
+        """
+        body = self._error_body
+        if body is None:
+            return
+        if getattr(self, "_error_expand_anim", None) is not None:
+            self._error_expand_anim.stop()
+            self._error_expand_anim = None
+        body.setMaximumHeight(self._WIDGET_MAX_H)   # 先解除旧约束
+        if not self._error_expanded or was_visible or not self.isVisible():
+            return
+        ms = motion.eased_ms("fast", self._anim_speed())
+        target = body.sizeHint().height()
+        if ms <= 0 or target <= 0:
+            return
+
+        anim = QPropertyAnimation(body, b"maximumHeight", self)
+        anim.setStartValue(0)
+        anim.setEndValue(int(target))
+        anim.setDuration(ms)
+        anim.setEasingCurve(getattr(QEasingCurve.Type, motion.EASE["out"]))
+        # 绑定方法连接（接收者上下文，禁无接收者闭包 —— 10-07 铁律）
+        anim.finished.connect(self._on_error_expand_done)
+        self._error_expand_anim = anim
+        anim.start()
+
+    def _on_error_expand_done(self):
+        body = self._error_body
+        if body is None:
+            return
+        try:
+            body.setMaximumHeight(self._WIDGET_MAX_H)
+        except RuntimeError:
+            return    # 半析构容器：约束随宿主销毁，无需解除
+        anim = self._error_expand_anim
+        if anim is not None:
+            self._error_expand_anim = None
+            anim.deleteLater()
 
     @staticmethod
     def _has_store_pkgs(store) -> bool:

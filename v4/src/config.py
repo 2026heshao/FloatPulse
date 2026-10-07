@@ -66,7 +66,8 @@
                           迁移，且必须与 json_store.STORE_VERSIONS["config"]
                           同步）；当前 v3 = 新增 toast_duration_ms 键（全新
                           键无旧值可改，迁移按 fragments 0→1 的 setdefault
-                          先例补默认，存量用户值一律不动）
+                          先例补默认，存量用户值一律不动；2026-10-06 该键
+                          随轻提示设置项重设计退役，迁移保留仅作版本史）
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
                           下载、失败静默、不上传任何数据」立场见 update_checker）
   - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
@@ -79,9 +80,38 @@
                           步进器溢出，见 theme.UI_SCALE_VALUES 注释）
   - window_opacity:       主窗口不透明度百分比（50-100，默认 100；低于 100
                           时窗口整体半透明，见 main_window._apply_window_opacity）
-  - toast_duration_ms:    屏幕轻提示（ScreenToast）展示时长毫秒（1000-6000，
-                          默认 2800；main_window.show_toast 未显式传 ms 时
-                          读取；悬浮球 1500ms 短提示与托盘气泡不受影响）
+  - 轻提示设置（2026-10-06 设置页「轻提示」卡，7 键取代 toast_duration_ms）：
+    toast_enabled:          轻提示总开关（false 时所有 toast 请求静默丢弃，
+                            不显示、不排队、不发声；重新开启不补发积压）
+    toast_position:         气泡位置（"center" 中下方居中 / "corner" 右下角
+                            margin 24px；白名单 = constants.TOAST_POSITIONS）
+    toast_bottom_offset:    气泡底缘距屏幕底缘像素（24-120 每档 8，默认 56；
+                            小于任务栏高度时自动抬到 max(任务栏高+8, 设定值)，
+                            见 src/toast.ToastCenter.relayout）
+    toast_duration:         基准停留时长档位（"brief" 2s / "standard" 3.2s /
+                            "relaxed" 5s；白名单 = constants.TOAST_DURATIONS；
+                            错误类与带动作钮按固定倍率自动延长，倍率不暴露）
+    toast_max_visible:      同屏最多气泡数（1-5，默认 3；溢出最早的收拢为
+                            「+N」胶囊，腾出空间后依序恢复）
+    toast_animation:        入场/出场补间开关（false 直接置位/移除；hover
+                            暂停与倒计时条不受影响，刻意不给关闭入口）
+    toast_sound:            警告/错误类气泡提示音（默认关：伴随型工具出声
+                            需用户主动要；success/info 静默）
+  - command_palette_enabled: 全局命令面板总开关（"/" 或自选触发键弹出；
+                          关闭后触发键不弹面板、直达键全部注销）
+  - command_palette_trigger: 命令面板触发键（"/" / ";" / "`" 三选一，
+                          白名单 = constants.TRIGGER_KEYS，非法回落 "/"）
+  - command_palette_global_hotkey: 命令面板全局唤醒键（须含修饰键的组合键，
+                          默认 "Alt+/"；任意应用界面按下即呼出命令面板，
+                          解决「多应用同开时主窗失焦、触发键失效」痛点；
+                          空串 = 未启用。自由形态组合键无有限合法集，不进
+                          白名单；注册层经 global_hotkey.parse_hotkey 校验，
+                          失败仅 warning + toast，不中断直达键注册）
+  - command_hotkeys:      命令直达键映射（cid → 组合键串，如 "Ctrl+Alt+1"；
+                          形态校验见 command_palette.sanitize_hotkeys_map）
+  - custom_actions:       命令面板自定义动作列表（[{id, type: url/folder/text,
+                          title, value, hotkey}]，清洗见
+                          command_palette.sanitize_custom_actions，上限 20 条）
 ====================================================================
 """
 
@@ -91,6 +121,7 @@ import json
 from src.constants import (
     DEFAULT_THEME, backup_corrupt_file,
     MINI_ICON_MIN, MINI_ICON_MAX, MINI_ICON_DEFAULT,
+    TRIGGER_KEYS, TOAST_POSITIONS, TOAST_DURATIONS,
 )
 from src.theme import THEME_VALUES
 from src import accent
@@ -151,12 +182,38 @@ DEFAULT_CONFIG = {
     "first_run_done":       False,        # 已完成三步欢迎向导（onboarding.should_show 判定）
     "ui_scale":             100,          # 界面缩放百分比（85-130，只缩放全局字号）
     "window_opacity":       100,          # 主窗口不透明度百分比（50-100，100=不透明）
-    # ===== 屏幕轻提示时长（2026-10-05 B4）=====
-    # ScreenToast 展示毫秒数：main_window.show_toast 未显式传 ms 时读这里。
-    # 下限 1000 保短提示来得及读，上限 6000 防提示条长期压住屏幕顶部；
-    # 悬浮球 1500ms 短提示（knowledge_ball._show_toast）与托盘气泡
-    # （tray / card_window 的 showMessage）各有独立时长，不读本键。
-    "toast_duration_ms":    2800,
+    # ===== 屏幕轻提示设置（2026-10-06 设置页「轻提示」卡，7 键）=====
+    # 取代 2026-10-05 B4 的 toast_duration_ms 单键（档位化 + 补齐位置 /
+    # 堆叠 / 动效 / 声音）。全部默认值 = 轻提示重设计稿定案值（零配置即
+    # 终稿）；枚举白名单与基准时长表见 constants.TOAST_*（三处同源）。
+    # 纯新增键，schema_version 不升（缺键由这里的默认值兜底）；退役的
+    # toast_duration_ms 留在存量 json 里无害——_load 只合并认识的键，
+    # 下次 save() 自然脱落。
+    "toast_enabled":        True,        # 总开关（false = 请求静默丢弃）
+    "toast_position":       "center",    # center 中下方居中 / corner 右下角
+    "toast_bottom_offset":  56,          # 距屏幕底缘 px（24-120 每档 8）
+    "toast_duration":       "standard",  # 短 2s / 标准 3.2s / 长 5s
+    "toast_max_visible":    3,           # 同屏上限（1-5），溢出收拢「+N」
+    "toast_animation":      True,        # 入场/出场补间（false 直接置位）
+    "toast_sound":          False,       # 警告/错误提示音（默认静默）
+    # ===== 全局命令面板设置（2026-10-06 设置页「命令面板」卡）=====
+    # 开关关闭时：触发键不弹面板（show_toast 提示去设置开启）、直达键全部注销；
+    # 触发键三选一（白名单 = constants.TRIGGER_KEYS，非法值加载时回落 "/"）；
+    # command_hotkeys 是 cid → 组合键串的映射（dict），读侧一律过
+    # command_palette.sanitize_hotkeys_map 形态校验，垃圾键值静默丢弃；
+    # custom_actions 是自定义动作列表（url / folder / text 三类，上限 20 条，
+    # 读侧过 sanitize_custom_actions 清洗 —— id 重排 / 非法条目整条丢弃）。
+    "command_palette_enabled": True,
+    "command_palette_trigger": "/",
+    # 全局唤醒键（2026-10-06）：任意应用界面按下即呼出命令面板——触发键
+    # 是应用内 QShortcut，主窗失焦即失效；本键走 RegisterHotKey 全局热键
+    # 补这个盲区。须含修饰键（默认 "Alt+/" 开箱即用），空串 = 未启用。
+    # 自由形态组合键：不进白名单（无有限合法集），is_valid_combo 的
+    # 字母/数字末段口径也不适用（"/" 经 VkKeyScanW 可映射）——注册层
+    # parse_hotkey / 设置页 _is_valid_wake_combo 校验，失败 warning + toast。
+    "command_palette_global_hotkey": "Alt+/",
+    "command_hotkeys":      {},           # cid → 组合键串（如 "Ctrl+Alt+1"）
+    "custom_actions":       [],           # 自定义动作（清洗后落盘）
     # ===== 强调色 / 壁纸（2026-10-03 主题扩展）=====
     "accent":               accent.DEFAULT_ACCENT,  # 强调色 id（accent.ACCENT_IDS）
     "accent_custom":        "",           # 自定义强调色 #RRGGBB（accent=custom 时生效）
@@ -253,7 +310,18 @@ _CONFIG_TYPES = {
     "first_run_done":       bool,
     "ui_scale":             int,
     "window_opacity":       int,
-    "toast_duration_ms":    int,
+    "toast_enabled":        bool,
+    "toast_position":       str,
+    "toast_bottom_offset":  int,
+    "toast_duration":       str,
+    "toast_max_visible":    int,
+    "toast_animation":      bool,
+    "toast_sound":          bool,
+    "command_palette_enabled": bool,
+    "command_palette_trigger": str,
+    "command_palette_global_hotkey": str,
+    "command_hotkeys":      dict,
+    "custom_actions":       list,
     "accent":               str,
     "accent_custom":        str,
     "wallpaper":            str,
@@ -348,10 +416,12 @@ _CONFIG_RANGES = {
     # 主窗口不透明度：与设置页「窗口透明度」Stepper 范围 50-100（每档 5%）一致；
     # 下限 50 保证文字仍可读（Qt windowOpacity 为 0 时窗口不可点击）
     "window_opacity":       (50, 100),
-    # 屏幕轻提示时长（毫秒）：与设置页「提示条时长」Stepper 范围 1000-6000
-    # （每档 100ms）一致；下限 1000 保短提示来得及读，上限 6000 防提示条
-    # 长期压住屏幕顶部
-    "toast_duration_ms":    (1000, 6000),
+    # 轻提示（2026-10-06 设置页「轻提示」卡）：底缘距离与设置页 Stepper
+    # 范围 24-120（每档 8px）一致；同屏上限与 Stepper 1-5 一致。
+    # toast_enabled / toast_animation / toast_sound 三个 bool 不进 RANGES；
+    # toast_position / toast_duration 走下面 _CONFIG_VALUE_WHITELISTS。
+    "toast_bottom_offset":  (24, 120),
+    "toast_max_visible":    (1, 5),
     # 强调色 / 壁纸（2026-10-03 主题扩展）：范围与 wallpaper.py 的常量同源，
     # 避免 EOS Delta 的两侧步长漂移
     "wallpaper_opacity":    (0, 100),
@@ -375,6 +445,13 @@ _CONFIG_VALUE_WHITELISTS = {
     "wallpaper_mode": wallpaper.MODES,
     # 凭证哨兵处置：deny/mask/allow 三选一（与 secret_guard.GUARD_MODES 同源）
     "clipboard_guard_mode": secret_guard.GUARD_MODES,
+    # 命令面板触发键："/" / ";" / "`" 三选一（与 constants.TRIGGER_KEYS 同源；
+    # Ctrl+K 归站内搜索，刻意不在候选 —— test_command_palette 钉死）
+    "command_palette_trigger": TRIGGER_KEYS,
+    # 轻提示位置与时长档位（与 constants.TOAST_POSITIONS / TOAST_DURATIONS
+    # 同源；settings_panel 分段控件候选同引一份，2026-10-06）
+    "toast_position":       TOAST_POSITIONS,
+    "toast_duration":       TOAST_DURATIONS,
 }
 
 

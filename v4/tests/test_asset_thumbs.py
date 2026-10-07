@@ -439,18 +439,26 @@ def test_hover_paint_is_visible_against_normal(env):
     index = panel._asset_list.model().index(0, 0)
     assert index.data(Qt.ItemDataRole.UserRole) is not None
 
-    def render(state):
+    def render(hp):
+        """按 U4 口径渲染：hover 视觉由行级 hp 进度驱动（不再吃
+        State_MouseOver 一帧瞬变），直写控制器进度等价于该时刻帧。"""
         img = QImage(d.CELL_W, d.CELL_H, QImage.Format.Format_ARGB32)
         img.fill(Qt.GlobalColor.white)
         p = QPainter(img)
         opt = QStyleOptionViewItem()
         opt.rect = QRect(0, 0, d.CELL_W, d.CELL_H)
-        opt.state = state
+        opt.state = QStyle.StateFlag.State_Enabled
+        d._hover._hp[index.row()] = float(hp)
         d.paint(p, opt, index)
         p.end()
+        d._hover._hp.pop(index.row(), None)
         return img
 
-    base = QStyle.StateFlag.State_Enabled
-    normal = render(base)
-    hover = render(base | QStyle.StateFlag.State_MouseOver)
-    assert normal != hover, "hover 与常态渲染完全一致 = 悬停没有反馈"
+    # U4（2026-10-07）：瞬变改插值 —— rest/中间帧/端点三帧两两不同，
+    # 比旧「normal != hover」更严（中间帧没画出来会撞车）。
+    normal = render(0.0)
+    mid = render(0.5)
+    hover = render(1.0)
+    assert normal != hover, "hover 端点与常态渲染完全一致 = 悬停没有反馈"
+    assert normal != mid, "hp=0.5 中间帧与常态一致 —— 插值没有落到外观"
+    assert mid != hover, "hp=0.5 中间帧与端点一致 —— 插值没有落到外观"

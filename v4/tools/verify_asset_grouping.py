@@ -101,10 +101,27 @@ class Host:
         from types import SimpleNamespace
         self.data_changed = SimpleNamespace(emit=lambda *a: None)
 
+    @property
+    def config(self):
+        # ★ 面板经 getattr(host, "config", None) 读配置（阈值/开关）——
+        # 必须是 property；只挂 _config 属性会让 gap 恒回退默认 900，
+        # D 段「阈值可调」静默失真（docs 验证坑：替身属性一律 @property）。
+        return self._config
+
 
 def list_ids(panel):
-    return [panel._asset_list.item(i).data(Qt.ItemDataRole.UserRole + 1)
-            for i in range(panel._asset_list.count())]
+    """真实素材 id 序列（滤掉分组态的 spacer 占位格）。
+
+    方案 A v2（2026-10-06）起分组序列含行首对齐占位格：UserRole+1 为
+    None、UserRole+2 带 ("pile", head_id)/("fill", None) 标记——与本轮
+    test_assets_grouping.py 的 _list_ids 同口径，只数真实素材。
+    """
+    out = []
+    for i in range(panel._asset_list.count()):
+        aid = panel._asset_list.item(i).data(Qt.ItemDataRole.UserRole + 1)
+        if aid is not None:
+            out.append(aid)
+    return out
 
 
 def digest(path):
@@ -126,6 +143,7 @@ def grab_cell(panel, index):
     opt.rect = QRect(0, 0, d.CELL_W, d.CELL_H)
     opt.state = QStyle.StateFlag.State_Enabled
     opt.font = panel._asset_list.font()
+    opt.widget = panel._asset_list   # 方案 A 起容器段需经 widget 取视口列数
     d.paint(p, opt, model_index)
     p.end()
     return img
@@ -174,11 +192,13 @@ def main():
     check(len(grouped) == 7, "B 分组模式仍 7 条 (实际 %d)" % len(grouped))
 
     # C. 真聚类：5 同刻 → 1 堆；2 晚一小时 → 1 堆；共 2 堆
+    #    （方案 A 起标头为结构化 dict {"count","time","name","date"}）
     headers = panel._thumb_delegate._header_texts
     check(len(headers) == 2, "C 7 张聚成 2 堆 (实际 %d)" % len(headers))
-    labels = list(headers.values())
-    check(any(lab == "5 张 · 09:00" for lab in labels),
-          "C 同刻连拍堆名为 '5 张 · 09:00' (实际 %s)" % labels)
+    check(headers.get(1) == {"count": 5, "time": "09:00", "name": "",
+                             "date": "10-03"},
+          "C 连拍堆标头结构 = {count:5, time:'09:00', name:'', date:'10-03'}"
+          " (实际 %r)" % (headers.get(1),))
     # E. 分组模式真出像素：首格（带堆标题）渲染与平铺不同
     cell_grouped = grab_cell(panel, 0)
     panel.set_grouping(False)
@@ -280,16 +300,18 @@ def main():
     check(d2._header_texts == {},
           "H2 单张堆不画标题条 (实际 %r)" % (d2._header_texts,))
     check(d2._member_ordinals == {}, "H2 单张堆无堆内序号")
-    check(panel2._asset_list.count() == 3, "H2 单张堆仍逐张铺出（不丢图）")
+    check(len(list_ids(panel2)) == 3, "H2 单张堆仍逐张铺出（不丢图，滤 spacer 后）")
     check(d2.CELL_H == d2.THUMB_H + 64 + d2.HEADER_H,
           "H2 有单张堆时整批仍统一垫高（否则同排缩略图错位）")
 
-    # H3. 堆内非首格挂 "#2" 序号，堆首保留真实文件名
+    # H3. 堆内非首格挂 "2 / 5" 序号（方案 A：分子=位次，分母=堆大小），
+    #     堆首保留真实文件名
     cfg.set("asset_group_gap_seconds", 900)
     panel.refresh()
     ords = panel._thumb_delegate._member_ordinals
-    check(sorted(ords.values()) == ["#2", "#2", "#3", "#4", "#5"],
-          "H3 两组各自从 #2 起编号（5 张 → #2..#5，2 张 → #2）(实际 %r)"
+    check(sorted(ords.values()) == ["2 / 2", "2 / 5", "3 / 5", "4 / 5",
+                                    "5 / 5"],
+          "H3 两组各自从 2/N 起编号（5 张 → 2/5..5/5，2 张 → 2/2）(实际 %r)"
           % (sorted(ords.values()),))
     check(not (set(panel._thumb_delegate._header_texts) & set(ords)),
           "H3 堆首格不挂序号（保留真实文件名）")
@@ -316,8 +338,9 @@ def main():
     pump(app, 30)
     head_id = panel._pile_heads[0]
     panel._apply_pile_rename(head_id, "登录页排障现场")
-    check(panel._thumb_delegate._header_texts.get(head_id) == "登录页排障现场",
-          "I1 堆标题换自定义名 (实际 %r)"
+    check((panel._thumb_delegate._header_texts.get(head_id) or {})
+          .get("name") == "登录页排障现场",
+          "I1 堆标题换自定义名（结构化 name 字段）(实际 %r)"
           % (panel._thumb_delegate._header_texts.get(head_id),))
     data = _json.loads(open(groups_path, encoding="utf-8").read())
     check(data["asset_groups"]["names"] == {str(head_id): "登录页排障现场"},
@@ -345,15 +368,16 @@ def main():
     panel._detach_asset(head_id, detach=True)
     new_head = panel._pile_heads[0]
     check(new_head != head_id
-          and panel._thumb_delegate._header_texts.get(new_head)
-          not in (None, "登录页排障现场"),
+          and (panel._thumb_delegate._header_texts.get(new_head) or {})
+          .get("name") == "",
           "I4 堆首移出后新堆首用默认名（旧堆名不串堆）(实际 %r)"
           % (panel._thumb_delegate._header_texts.get(new_head),))
     panel._detach_asset(head_id, detach=False)
     # 收尾：清掉测试标注，别把「现场」留进后续截图
     panel._apply_pile_rename(head_id, "")
-    check(panel._thumb_delegate._header_texts.get(head_id) == "5 张 · 09:00",
-          "I5 清空堆名 = 恢复默认名")
+    check((panel._thumb_delegate._header_texts.get(head_id) or {})
+          == {"count": 5, "time": "09:00", "name": "", "date": "10-03"},
+          "I5 清空堆名 = 恢复默认名（count/time 照填）")
 
     # ---- J. 并入任意堆（merged 旁路标注；2026-10-05）----
     # 此刻两堆：堆首 1（连拍 5 张，09:00–09:01）+ 堆首 6（晚片 2 张，10:00）
@@ -373,10 +397,14 @@ def main():
     # J2. 并入既有堆：渲染归目标堆尾、堆首不变、标题计数更新
     panel._merge_asset(2, 6)
     check(panel._pile_of.get(2) == 6, "J2 并入后归属目标堆（堆首 6）")
-    check(panel._thumb_delegate._header_texts.get(6) == "3 张 · 10:00",
+    check((panel._thumb_delegate._header_texts.get(6) or {})
+          .get("count") == 3
+          and (panel._thumb_delegate._header_texts.get(6) or {})
+          .get("time") == "10:00",
           "J2 目标堆标题计数更新 (实际 %r)"
           % (panel._thumb_delegate._header_texts.get(6),))
-    check(panel._thumb_delegate._header_texts.get(1) == "4 张 · 09:00",
+    check((panel._thumb_delegate._header_texts.get(1) or {})
+          .get("count") == 4,
           "J2 原堆标题计数更新 (实际 %r)"
           % (panel._thumb_delegate._header_texts.get(1),))
     check(2 in panel._thumb_delegate._member_ordinals, "J2 并入者挂堆内序号")
@@ -396,14 +424,18 @@ def main():
     panel._merge_asset(5, None)
     check(panel._pile_of.get(5) == 5 and 5 in panel._pile_heads,
           "J4 新建堆：素材自锚成堆（锚点 5）")
-    check(panel._thumb_delegate._header_texts.get(5) == "1 张 · 09:01",
+    check((panel._thumb_delegate._header_texts.get(5) or {})
+          .get("count") == 1
+          and (panel._thumb_delegate._header_texts.get(5) or {})
+          .get("time") == "09:01",
           "J4 新建堆单成员也挂标题 (实际 %r)"
           % (panel._thumb_delegate._header_texts.get(5),))
     panel._merge_asset(1, 5)
     ids_new = list_ids(panel)
     check(panel._pile_of.get(1) == 5 and ids_new.index(5) < ids_new.index(1),
           "J4 二次并入不抢锚点首格（时间更早也排后）")
-    check(panel._thumb_delegate._header_texts.get(5) == "2 张 · 09:01",
+    check((panel._thumb_delegate._header_texts.get(5) or {})
+          .get("count") == 2,
           "J4 新建堆计数更新 (实际 %r)"
           % (panel._thumb_delegate._header_texts.get(5),))
 
@@ -415,7 +447,8 @@ def main():
           % (data["asset_groups"].get("merged"),))
     panel._detach_asset(1, detach=False)
     check(panel._pile_of.get(1) == 1, "J5 取消移出回天然聚类（堆首 1）")
-    check(panel._thumb_delegate._header_texts.get(6) == "3 张 · 10:00",
+    check((panel._thumb_delegate._header_texts.get(6) or {})
+          .get("count") == 3,
           "J5 J2 的并入者不受影响（堆首 6 仍 3 张）")
     check((digest(json_path) if os.path.exists(json_path) else None)
           == d_before_annotation,

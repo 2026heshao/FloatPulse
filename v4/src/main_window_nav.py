@@ -47,6 +47,7 @@ from src.nav_layout import (
     reorder_within_group,
 )
 from src.glass import NavIndicator, NavGroupHeader
+from src import smooth_scrollbar
 from src.controls import SmoothButton
 
 # 侧栏导航图标的渲染尺寸（逻辑像素；与 13px 字号的视觉重量对齐）
@@ -272,6 +273,9 @@ class NavChromeMixin:
         self._nav_content = QWidget()
         self._nav_content.setObjectName("navScrollContent")
         self._nav_scroll.setWidget(self._nav_content)
+        # V2（2026-10-07 交互视觉清单）：滚动条状态机——闲置 6px 半透明 →
+        # 悬停/滚动中 8px 加深 → 静止 600ms 回落（替换 navScroll 专属 QSS）
+        smooth_scrollbar.install_on(self._nav_scroll)
         v.addWidget(self._nav_scroll, 1)
         # 滚动后选中条要跟着走（否则停在旧位置指向别的条目）
         self._nav_scroll.verticalScrollBar().valueChanged.connect(
@@ -536,6 +540,11 @@ class NavChromeMixin:
         3. OutQuint→OutCubic + 时长收紧 280/210/18→220/170/12：39px 行高
            下 OutQuint ~105ms 就走完 97%，余下 175ms 只挪 1px，观感是
            "急起—长尾漂移"；OutCubic 220ms 的静止尾巴 <1 帧。
+        4. ★ 2026-10-06 逐拍同步内容部件高度（_sync_nav_content_height 挂
+           valueChanged）：溢出态下 widgetResizable 跟随滞后一拍，逐帧
+           maximumHeight 增长会把布局在旧部件高度上过约束一拍，亏空被挤
+           到上方条目 → 被点击组头逐帧上下弹跳（用户报「导航栏自动加长
+           时分组震荡」）。每拍写入后立刻校高，亏空窗口归零。
         """
         items = self._nav_group_item_widgets(group)
         hd = self._nav_group_headers.get(group)
@@ -551,10 +560,12 @@ class NavChromeMixin:
         # 只停本组在飞动画且不落终态（重定向；别组的动画照飞）
         self._stop_nav_group_anims_keep_pose(group)
         if duration <= 0:
-            # 动画档位关闭：直接到终态（保持"0 动画"设置下的零延迟手感）
+            # 动画档位关闭：直接到终态（保持"0 动画"设置下的零延迟手感）。
+            # 终态写入后同拍校高：无动画路径同样存在"慢一拍"窗口
             for w in items:
                 w.setMaximumHeight(16777215 if expand else 0)
                 w.setVisible(expand)
+            self._sync_nav_content_height()
             return
         parallel = QParallelAnimationGroup(self)
         parallel.setProperty("_nav_group", group)
@@ -576,6 +587,13 @@ class NavChromeMixin:
             prop.setEasingCurve(QEasingCurve.Type.OutCubic)
             prop.setStartValue(start_v)
             prop.setEndValue(row_h if expand else 0)
+            # ★ 逐拍同步（防震荡，机制见 _sync_nav_content_height 文档）：
+            #   实测 valueChanged 触发时属性**已经写入**（0 不匹配），此刻
+            #   取 sizeHint 是含本拍的最新值 —— 在布局激活前把内容部件校
+            #   到位，"部件高度慢一拍"的过约束窗口就不存在了。折叠同挂：
+            #   收起方向的富余虽然只造成"滚动条晚一拍"这种轻微失真，一并
+            #   校掉更干净。
+            prop.valueChanged.connect(self._sync_nav_content_height)
             delay = stagger * i
             if delay > 0:
                 seq = QSequentialAnimationGroup(self)
@@ -603,6 +621,9 @@ class NavChromeMixin:
             else:
                 w.setVisible(False)
                 w.setMaximumHeight(16777215)
+        # 解除约束后 sizeHint 理论上不变（行高==sizeHint），但为防测量
+        # 偏差留下"慢一拍"窗口，这里同拍再校一次（幂等，无变化即空转）
+        self._sync_nav_content_height()
         self._nav_group_anims = [a for a in self._nav_group_anims
                                  if a is not self.sender()]
         self._sync_nav_selection()
@@ -673,6 +694,16 @@ class NavChromeMixin:
         对位、拖拽槽位冻结），等不得。规则与 QScrollArea 一致：内容高度
         = max(布局 sizeHint，视口高度)——内容矮于视口时被拉伸铺满，超出
         时出滚动条。宽度不动（视口宽度由滚动区自己同步，横向不滚）。
+
+        ★ 2026-10-06 起它还是分组展开/折叠动画的**逐拍同步器**：每拍
+        maximumHeight 写入后由 valueChanged 直接调用本方法（见
+        _animate_nav_group），把"部件高度比 sizeHint 慢一拍"的窗口压到
+        零 —— 没有这个同步，溢出态下每拍增长都会让布局在旧部件高度上
+        过约束一拍，亏空被 qGeomCalc 挤到上方条目上再弹回，被点击组头
+        就会逐帧上下弹跳（用户报「导航栏自动加长时分组震荡」的根因）。
+        注意不能用"起播前一次 resize 预长"代替：widgetResizable 会在
+        Resize 事件里**同步**把部件钳回 max(sizeHint, 视口)，预长当场被
+        吞掉（离屏探针实锤），只有跟在属性写入之后的同拍校高才站得住。
         """
         sa = getattr(self, "_nav_scroll", None)
         content = getattr(self, "_nav_content", None)

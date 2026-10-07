@@ -48,6 +48,16 @@ MOTION = {
     "enter_rise": 320,      # 主窗入场 16px 上浮（原字面量收口）
     "ball_delay": 160,      # 主窗 show → 悬浮球浮现延迟
     "ball_pop": 260,        # 悬浮球 OutBack 弹性浮现
+
+    # ---- 轻提示气泡（2026-10-06 重设计，src/toast.py）----
+    "toast_in": 280,        # 入场：上浮 12px + 淡入（OutCubic 减速）
+    "toast_out": 160,       # 出场：下沉 8px + 淡出（InCubic 加速，无回弹）
+    "toast_stagger": 60,    # 批量入场的错峰步长（避免同帧齐跳）
+    "toast_move": 280,      # 存活气泡平移补间（堆叠补位 / 设置项 R9 位置变更）
+
+    # ---- 按钮交互反馈系统化升级（2026-10-07 规格文档 §6，controls.py）----
+    "press_out": 150,       # 松手回弹（比 fast 略长 —— 回弹比进入更从容）
+    "focus_ring": 100,      # 焦点环淡入淡出（与 fast/base 档位解耦的独立节奏）
 }
 
 # ---- 缓动名（Qt ``QEasingCurve.Type`` 的成员名）----

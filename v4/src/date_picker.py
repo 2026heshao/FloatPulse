@@ -44,13 +44,16 @@ QSS 外框、日期值语义、``dateChanged`` 信号），只把弹层换成自
 ====================================================================
 """
 
-from PyQt6.QtCore import QDate, QEvent, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QDate, QEvent, QRect, QRectF, QSize,
+    Qt, QVariantAnimation, pyqtSignal,
+)
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QDateEdit, QToolButton, QWidget,
 )
 
-from src import icon_render
+from src import icon_render, motion
 from src.constants import DEFAULT_THEME, FS_SM, FS_XS, RADIUS_CTL, RADIUS_PANEL
 from src.date_grid import (
     COLS, DAYS_IN_GRID, MONTH_LABELS, ROWS, WEEKDAY_LABELS,
@@ -139,6 +142,8 @@ class CalendarPopup(QWidget):
         self._selected = None            # (y, m, d) 或 None
         self._today = None               # (y, m, d) 或 None
         self._hover = ("none",)          # 与 hit_test 同构
+        self._hover_prog = {}            # V7：hit 键 → hover 淡染进度 0..1
+        self._hover_anims = {}           # hit 键 → QVariantAnimation（懒建）
         self._cells = ()
         self._anchor = None              # 打开本弹层的输入框（外点判定豁免它）
 
@@ -165,6 +170,7 @@ class CalendarPopup(QWidget):
 
     def _sync_cells(self):
         self._cells = month_cells(self._year, self._month)
+        self._cleanup_hover_anims()   # V7：格子索引重排，淡染进度即清
 
     def set_theme(self, theme_name: str):
         """换主题：只换色板并重绘（不重建窗口 → 不闪、不丢焦点）。"""
@@ -329,15 +335,78 @@ class CalendarPopup(QWidget):
     def mouseMoveEvent(self, event):
         hit = self.hit_test(event.pos())
         if hit != self._hover:
+            old = self._hover
             self._hover = hit
+            self._glide_cell_hover(old, 0.0)
+            self._glide_cell_hover(hit, 1.0)
             self.update()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         if self._hover != ("none",):
+            old = self._hover
             self._hover = ("none",)
+            self._glide_cell_hover(old, 0.0)
             self.update()
         super().leaveEvent(event)
+
+    # ---- V7（2026-10-07 交互视觉清单）：格子 hover 淡染 120ms 插值 ----
+    # 现状是 cal_hover_bg 一帧直画；改为每格独立 hover 进度（hit 键为
+    # 索引），旧格回落、新格抬升并行。仅 day/month 格子参与淡染；导航钮
+    # 与页脚保持瞬时（范围外，维持原状）。rest（进度 0）不画底 → 与改动
+    # 前 rest 渲染逐字节一致；端点（进度 1）= cal_hover_bg 全值 → 端点
+    # 不漂移。reduce_motion / 档位归零经 motion 直接瞬显。
+    _HOVER_CELL_TAGS = ("day", "month")
+
+    def _glide_cell_hover(self, hit, target: float):
+        """把 hit 格子的 hover 进度插值到 target；非格子命中忽略。
+
+        每键一条独立 QVariantAnimation（懒建、可打断重定向），键经闭包
+        绑定写进 _hover_prog；reduce_motion（ms=0）直接落位。
+        """
+        if hit[0] not in self._HOVER_CELL_TAGS:
+            return
+        key = hit
+        current = self._hover_prog.get(key, 0.0)
+        if abs(target - current) <= 0.004:
+            return
+        ms = motion.eased_ms("fast", 1.0)
+        if ms <= 0:
+            anim = self._hover_anims.get(key)
+            if anim is not None:
+                anim.stop()
+            if target <= 0.0:
+                self._hover_prog.pop(key, None)
+            else:
+                self._hover_prog[key] = float(target)
+            self.update()
+            return
+        anim = self._hover_anims.get(key)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(
+                lambda v, k=key: self._set_cell_hover(k, float(v)))
+            self._hover_anims[key] = anim
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(float(target))
+        anim.setDuration(ms)
+        anim.start()
+
+    def _set_cell_hover(self, key, value: float):
+        value = max(0.0, min(1.0, value))
+        if value <= 0.004 and self._hover != key:
+            self._hover_prog.pop(key, None)   # 回落干净即出表（不残留）
+        else:
+            self._hover_prog[key] = value
+        self.update()
+
+    def _cleanup_hover_anims(self):
+        """换月 / 换视图 / 关闭重开时清空进度与动画（格子索引会重排）。"""
+        for anim in self._hover_anims.values():
+            anim.stop()
+        self._hover_anims.clear()
+        self._hover_prog.clear()
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -366,6 +435,7 @@ class CalendarPopup(QWidget):
         elif tag == "title":
             self._mode = "month" if self._mode == "day" else "day"
             self._hover = ("none",)
+            self._cleanup_hover_anims()   # V7：视图切换，进度即清
             self.update()
         elif tag == "year_prev":
             self._year -= 1
@@ -483,15 +553,20 @@ class CalendarPopup(QWidget):
         key = (year, month, day)
         selected = self._selected == key
         is_today = self._today == key
-        hovered = self._hover == ("day", index)
+        hover_prog = (self._hover_prog.get(("day", index), 0.0)
+                      if in_month else 0.0)
 
         if selected:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._c("cal_accent"))
             painter.drawRoundedRect(QRectF(block), BLOCK_R, BLOCK_R)
-        elif hovered and in_month:
+        elif hover_prog > 0.004:
+            # V7：hover 淡染按进度画 cal_hover_bg（rest=0 不画，端点=1 全值）
+            hover_bg = self._c("cal_hover_bg")
+            hover_bg.setAlphaF(max(0.0, min(1.0, hover_prog))
+                               * hover_bg.alphaF())
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._c("cal_hover_bg"))
+            painter.setBrush(hover_bg)
             painter.drawRoundedRect(QRectF(block), BLOCK_R, BLOCK_R)
         if is_today and not selected:
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -519,14 +594,18 @@ class CalendarPopup(QWidget):
             block = QRect(rect.x() + 8, rect.y() + (MONTH_H - BLOCK_H) // 2,
                           MONTH_W - 16, BLOCK_H)
             selected = (i + 1) == self._month
-            hovered = self._hover == ("month", i + 1)
+            hover_prog = self._hover_prog.get(("month", i + 1), 0.0)
             if selected:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(self._c("cal_accent"))
                 painter.drawRoundedRect(QRectF(block), BLOCK_R, BLOCK_R)
-            elif hovered:
+            elif hover_prog > 0.004:
+                # V7：同 day 格，hover 按进度淡染
+                hover_bg = self._c("cal_hover_bg")
+                hover_bg.setAlphaF(max(0.0, min(1.0, hover_prog))
+                                   * hover_bg.alphaF())
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(self._c("cal_hover_bg"))
+                painter.setBrush(hover_bg)
                 painter.drawRoundedRect(QRectF(block), BLOCK_R, BLOCK_R)
             painter.setFont(self._font(FS_SM))
             painter.setPen(self._c("cal_on_accent") if selected

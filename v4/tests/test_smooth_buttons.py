@@ -37,14 +37,15 @@ if BASE not in sys.path:
     sys.path.insert(0, BASE)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPointF, QEvent, QAbstractAnimation, Qt
-from PyQt6.QtGui import QColor, QEnterEvent
+from PyQt6.QtCore import QPointF, QEvent, QAbstractAnimation, QPoint, Qt
+from PyQt6.QtGui import QColor, QEnterEvent, QKeyEvent
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QLabel
 
 from src import motion
 from src.controls import (
-    IconButton, ScreenToast, SmoothButton, _OVERLAY_RADIUS, _SMOOTH_OVERLAYS,
+    IconButton, ScreenToast, SmoothButton, Stepper, ToggleSwitch,
+    _OVERLAY_RADIUS, _SMOOTH_CHECKED, _SMOOTH_OVERLAYS,
 )
 from src.theme import get_card_window_qss, get_main_window_qss
 
@@ -100,8 +101,11 @@ def test_no_button_rule_uses_margin_displacement(qss_name, qss):
 def test_named_hover_rules_have_no_background_color_left():
     """S2 收编的命名按钮 :hover/:pressed 不得残留 background-color，
     否则 QSS 跳变 + overlay 插值两套机制打架（悬停会叠色过头）。"""
-    # 列表行/分组头样式里只有 navBtn 已收编（navGroupHeader 因
-    # glass.py↔controls.py 导入环暂缓；appLaunchBtn 是 QToolButton）
+    # 列表行/分组头样式里只有 navBtn 是完整收编（hover 背景过渡也归
+    # overlay）；navGroupHeader / helpTocItem / 插件三钮（pluginSegBtn /
+    # pluginErrorToggle / pluginMoreBtn）按 2026-10-08 清单 C1 的轻收编
+    # 口径：**hover 背景仍归 QSS、只收编按下反馈**（overlay 端点
+    # (None, press)），故不在本清单；appLaunchBtn 是 QToolButton
     kept_no_bg = [
         "QPushButton#secondaryBtn:hover", "QPushButton#dangerBtn:hover",
         "QPushButton#iconBtn:hover",
@@ -347,52 +351,41 @@ def test_icon_button_danger_variant_uses_danger_overlay():
 
 
 # ====================================================================
-# D. ScreenToast 进出场（清单 F6）
+# D. ScreenToast 兼容门面（2026-10-06：实现整体迁往 src/toast.py 的
+#    ToastCard + ToastCenter —— 底部居中语义气泡，进出场契约由
+#    tests/test_toast.py 承接；此处只钉「旧入口转发语义不变」）
 # ====================================================================
-@pytest.fixture()
-def toast(restore_motion):
+def test_screen_toast_show_msg_delegates_to_toast_center(restore_motion):
+    """旧入口 show_msg(text, theme, ms) → ToastCenter.push(neutral)。"""
+    from src import toast as toast_mod
     _app()
-    inst = ScreenToast.show_msg("测试")
-    inst._timer.stop()          # 单例跨测试共用：先掐掉上一次的定时器
-    yield inst
-    inst._timer.stop()
-    inst.hide()
+    calls = []
+    orig = toast_mod.ToastCenter.push
+
+    def _spy(cls, **kw):
+        calls.append(kw)
+
+    toast_mod.ToastCenter.push = classmethod(_spy)
+    try:
+        ScreenToast.show_msg("钉图已复制", "light", 2600)
+        ScreenToast.show_msg("已复制路径", "dark", 800)
+    finally:
+        toast_mod.ToastCenter.push = orig
+    assert len(calls) == 2
+    assert calls[0]["kind"] == "neutral"
+    assert calls[0]["title"] == "钉图已复制"
+    assert calls[0]["theme"] == "light"
+    assert calls[0]["ms"] == 2600
+    assert calls[1]["ms"] == 800
 
 
-def test_toast_popup_floats_up_and_fades_in(toast):
-    """进场 = 上浮 + 淡入并行，时长/曲线走 motion base 档（F6）。"""
-    from PyQt6.QtCore import QAbstractAnimation
-    assert toast._fade_anim.duration() == motion.eased_ms("base")
-    assert toast._pos_anim.duration() == motion.eased_ms("base")
-    assert toast._pos_anim.state() == QAbstractAnimation.State.Running
-    assert toast._pos_anim.endValue().y() == toast._final_y
-    assert toast._pos_anim.startValue().y() == toast._final_y + toast.FLOAT_PX
-    toast._fade_anim.setCurrentTime(toast._fade_anim.duration())
-    toast._pos_anim.setCurrentTime(toast._pos_anim.duration())
-    assert toast.windowOpacity() == 1.0
-    assert toast.pos().y() == toast._final_y
-
-
-def test_toast_fade_out_sinks_down(toast):
-    """出场 = 下沉 + 淡出；动画结束后隐藏（单例复用的收尾契约）。"""
-    toast._fade_anim.setCurrentTime(toast._fade_anim.duration())
-    toast._pos_anim.setCurrentTime(toast._pos_anim.duration())
-    toast._fade_out()
-    assert toast._fade_anim.endValue() == 0.0
-    assert toast._pos_anim.endValue().y() == toast._final_y + toast.FLOAT_PX
-    toast._fade_anim.setCurrentTime(toast._fade_anim.duration())
-    assert toast.windowOpacity() == 0.0
-    assert not toast.isVisible(), "淡出完成必须隐藏，等待下一次单例复用"
-
-
-def test_toast_reduce_motion_snaps(toast):
-    """reduce_motion：进出场直接落终态，不创建运行中的动画。"""
-    motion.set_reduce_motion(True)
-    toast.popup("测试", 8000)
-    assert toast.windowOpacity() == 1.0
-    assert toast.pos().y() == toast._final_y
-    toast._fade_out()
-    assert not toast.isVisible()
+def test_screen_toast_set_speed_broadcasts_to_center(restore_motion):
+    """动效档位广播：ScreenToast.set_speed 必须转达 ToastCenter。"""
+    from src import toast as toast_mod
+    _app()
+    ScreenToast.set_speed(1.5)
+    assert ScreenToast._speed == pytest.approx(1.5)
+    assert toast_mod.ToastCenter.speed() == pytest.approx(1.5)
 
 
 # ====================================================================
@@ -484,6 +477,30 @@ def test_auto_hover_color_washed_endpoint_keeps_primary():
         solid_surface.deleteLater()
 
 
+def test_auto_hover_color_none_endpoint_keeps_off_and_no_crash():
+    """hover 端点登记为 None 的 IconButton（2026-10-08 清单 C1 的
+    pluginMoreBtn）悬停不得崩溃 —— 2026-10-07 用户报障：_auto_hover_color
+    直接解包 ``_overlay_specs()[0]``，None 端点在 enterEvent 抛
+    TypeError。契约：None 端点 → 返回 None（调用方回退 off 色），且
+    enter/leave 全链路可走。"""
+    _app()
+    # 与站点同参：插件卡右上角「⋯」钮（plugins_panel.py IconButton("more")）
+    b = IconButton("more", size=20, icon_size=14,
+                   object_name="pluginMoreBtn")
+    try:
+        assert b._overlay_specs()[0] is None, (
+            "pluginMoreBtn 的 hover 端点应登记为 None（hover 视觉归 QSS）")
+        assert b._auto_hover_color({}) is None
+        # 全链路冒烟：enterEvent → _refresh_icon → _auto_hover_color，
+        # 修复前此处抛 TypeError
+        b._hovered = True
+        b._refresh_icon()
+        b._hovered = False
+        b._refresh_icon()
+    finally:
+        b.deleteLater()
+
+
 def _count_content_px(img, endpoint, inset=4, tol=60):
     """数与端点色距离 > tol 的内容像素（跳过圆角边缘的 inset 带）。"""
     diff = 0
@@ -556,3 +573,364 @@ def test_solid_hover_text_contrast_contract(theme):
             "%s 主题：on_primary 对 %s（%s）对比度 %.2f < 4.5 —— 实底钮"
             "文字不可读" % (theme, token, colors[token], ratio)
         )
+
+
+# ====================================================================
+# G. 按钮交互反馈系统化升级（2026-10-07 规格文档，批次 U1/U2/U3/U6）
+# ====================================================================
+# U1 press/release 改挂 QAbstractButton.pressed / released 信号 ——
+#    鼠标左键、键盘 Space/Enter、触屏（Qt 合成鼠标事件）三路统一；
+#    松手回弹改用 press_out token（150ms，比 fast 略长）。
+# U2 禁用淡出 —— EnabledChange 时 dp 0↔1 插值（120ms 交叉淡染），
+#    blockSignals 批量刷直接落终态（语义同 reduce_motion）。
+# U3 选中态过渡 —— 分段钮 checked 底色 cp 插值；ToggleSwitch 未选中
+#    轨道 hover 从 darker(112) 瞬变改插值。
+# U6 命中区外扩 —— IconButton 命中区四向外扩 4px（事件级判定），
+#    布局/绘制/几何零变化。
+
+def _images_differ(img_a, img_b, tol=10, min_diff_px=5):
+    """抽样比对两张图像是否不同（像素级护栏的公共判定）。"""
+    if img_a.size() != img_b.size():
+        return True
+    diff = 0
+    for yy in range(0, img_a.height(), 2):
+        for xx in range(0, img_a.width(), 2):
+            ca, cb = img_a.pixelColor(xx, yy), img_b.pixelColor(xx, yy)
+            if ((ca.red() - cb.red()) ** 2 + (ca.green() - cb.green()) ** 2
+                    + (ca.blue() - cb.blue()) ** 2) > tol * tol:
+                diff += 1
+                if diff >= min_diff_px:
+                    return True
+    return False
+
+
+# ---------------- U1：键盘 / 触屏 press 统一 ----------------
+def test_keyboard_space_press_drives_press_progress(btn, restore_motion):
+    """G1 红线：键盘 Space 激活必须出现按下反馈（press 信号统一接入）。"""
+    from PyQt6.QtWidgets import QApplication
+    _app()
+    press = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space,
+                      Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(btn, press)
+    assert btn._press_anim is not None, "键盘按下应启动 press 动画"
+    assert btn._press_anim.endValue() == 1.0
+    btn._press_anim.setCurrentTime(btn._press_anim.duration())
+    assert btn.pp == 1.0
+    release = QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Space,
+                        Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(btn, release)
+    assert btn._press_anim.endValue() == 0.0, "键盘松开应回弹"
+
+
+def test_release_rebound_uses_press_out_token(btn, restore_motion):
+    """松手回弹时长 = press_out（150ms，规格 §6），不再复用 fast。"""
+    QTest.mousePress(btn, Qt.MouseButton.LeftButton)
+    btn._press_anim.setCurrentTime(btn._press_anim.duration())
+    QTest.mouseRelease(btn, Qt.MouseButton.LeftButton)
+    assert btn._press_anim.duration() == motion.eased_ms("press_out")
+    assert motion.MOTION["press_out"] > motion.MOTION["fast"]
+
+
+def test_hover_still_uses_fast_token(btn, restore_motion):
+    """进入反馈仍走 fast（120ms）—— press_out 只服务回弹方向。"""
+    btn.enterEvent(_enter_event())
+    assert btn._hover_anim.duration() == motion.eased_ms("fast")
+
+
+# ---------------- U2：禁用淡出 ----------------
+def test_disable_fade_glides_and_redirects(btn, restore_motion):
+    """setEnabled(False) → dp 0→1 插值；复用同一条动画可重定向回 0。"""
+    btn.setEnabled(False)
+    assert btn._dp_anim is not None, "禁用应启动淡出动画"
+    assert btn._dp_anim.endValue() == 1.0
+    btn._dp_anim.setCurrentTime(btn._dp_anim.duration())
+    assert btn.dp == 1.0
+    btn.setEnabled(True)
+    assert btn._dp_anim.endValue() == 0.0, "恢复可用必须重定向回可用外观"
+    btn._dp_anim.setCurrentTime(btn._dp_anim.duration())
+    assert btn.dp == 0.0
+
+
+def test_disable_while_pressed_fades_feedback_out(btn, restore_motion):
+    """状态优先级 disabled > pressed：禁用时 press 反馈一并收回。"""
+    QTest.mousePress(btn, Qt.MouseButton.LeftButton)
+    btn._press_anim.setCurrentTime(btn._press_anim.duration())
+    assert btn.pp == 1.0
+    btn.setEnabled(False)
+    assert btn._press_anim.endValue() == 0.0, "禁用必须收回按下反馈"
+    btn._press_anim.setCurrentTime(btn._press_anim.duration())
+    assert btn.pp == 0.0
+
+
+def test_reduce_motion_disables_fade_snaps(btn, restore_motion):
+    """reduce_motion 开启：禁用淡出瞬显落终态，不建动画对象。"""
+    motion.set_reduce_motion(True)
+    btn.setEnabled(False)
+    assert btn.dp == 1.0
+    assert btn._dp_anim is None
+
+
+def test_block_signals_batch_disable_snaps_without_animation(btn,
+                                                             restore_motion):
+    """批量刷语义：blockSignals 包裹的 setEnabled 直接落终态（规格 U2）。"""
+    btn.blockSignals(True)
+    btn.setEnabled(False)
+    btn.blockSignals(False)
+    assert btn.dp == 1.0, "批量刷应直接落禁用终态"
+    assert btn._dp_anim is None, "批量刷不应创建淡出动画"
+
+
+def test_stepper_boundary_batch_refresh_snaps(restore_motion):
+    """Stepper 批量同步：宿主 block 包裹 setValue → 子按钮禁用淡出直接
+    落终态（子按钮自身信号没被 block，changeEvent 探测不到批量语义，
+    必须由 _sync_buttons 显式拍板）。"""
+    _app()
+    s = Stepper(0, 10, 0)
+    minus = s._btn_minus
+    assert not minus.isEnabled(), "边界初值下 − 钮应置灰"
+    s.blockSignals(True)
+    s.setValue(6)
+    s.blockSignals(False)
+    assert minus.isEnabled()
+    assert minus.dp == 0.0, "批量刷恢复可用应直接落终态"
+    # 构造期边界置灰会合法地创建过一次 dp 动画对象；批量刷的语义是
+    # 「不播动画」—— 断言不存在运行中的淡出，而不是对象不存在。
+    assert (minus._dp_anim is None
+            or minus._dp_anim.state() != QAbstractAnimation.State.Running), (
+        "批量刷不应在子按钮上播淡出动画")
+    s.deleteLater()
+
+
+def test_stepper_boundary_gray_pixels_differ(restore_motion):
+    """边界置灰像素对比（规格 U2 护栏）：同一 − 钮，禁用端点与可用端点
+    的抓帧必须不同（图标 text_disabled ↔ text_secondary）。"""
+    _app()
+    s = Stepper(0, 10, 0)
+    minus = s._btn_minus
+    if minus._dp_anim is not None:
+        minus._dp_anim.setCurrentTime(minus._dp_anim.duration())
+    img_off = minus.grab().toImage()
+    s.setValue(5)
+    if minus._dp_anim is not None:
+        minus._dp_anim.setCurrentTime(minus._dp_anim.duration())
+    img_on = minus.grab().toImage()
+    assert _images_differ(img_off, img_on), (
+        "Stepper 边界置灰前后 − 钮像素无差异 —— 禁用淡出没有落到外观"
+    )
+    s.deleteLater()
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_disable_fade_cross_fade_pixels(theme):
+    """禁用淡出中间帧 = 可用/禁用两份 QSS 外观交叉淡染：dp=0 / 0.5 / 1
+    三帧两两不同（少了哪一层都会在某组比较里撞车）。"""
+    _app()
+    b = SmoothButton("下一张")
+    b.setObjectName("nextBtn")
+    b.setStyleSheet(get_main_window_qss(theme))
+    b.resize(120, 34)
+    try:
+        img_on = b.grab().toImage()
+        b.setEnabled(False)
+        anim = b._dp_anim
+        assert anim is not None
+        anim.setCurrentTime(max(1, anim.duration() // 2))
+        img_mid = b.grab().toImage()
+        anim.setCurrentTime(anim.duration())
+        img_off = b.grab().toImage()
+        assert _images_differ(img_on, img_off), "禁用端点像素无差异"
+        assert _images_differ(img_on, img_mid), (
+            "%s：淡出中间帧与可用端点相同 —— 交叉淡染的禁用层没画" % theme)
+        assert _images_differ(img_mid, img_off), (
+            "%s：淡出中间帧与禁用端点相同 —— 交叉淡染的可用层没画" % theme)
+    finally:
+        b.deleteLater()
+
+
+# ---------------- U3：选中态过渡（分段钮）----------------
+def _seg_button():
+    _app()
+    b = SmoothButton("全部")
+    b.setObjectName("pluginSegBtn")
+    b.setCheckable(True)
+    return b
+
+
+def test_segmented_checked_tint_glides(restore_motion):
+    """分段钮选中底色：点击选中 → cp 0→1 插值；再点取消 → 重定向回 0。"""
+    b = _seg_button()
+    try:
+        QTest.mouseClick(b, Qt.MouseButton.LeftButton)
+        assert b.isChecked()
+        assert b._checked_anim is not None, "选中应启动底色过渡"
+        assert b._checked_anim.endValue() == 1.0
+        b._checked_anim.setCurrentTime(b._checked_anim.duration())
+        assert b.cp == 1.0
+        QTest.mouseClick(b, Qt.MouseButton.LeftButton)
+        assert not b.isChecked()
+        assert b._checked_anim.endValue() == 0.0, "取消选中必须回弹"
+    finally:
+        b.deleteLater()
+
+
+def test_segmented_checked_batch_set_checked_snaps(restore_motion):
+    """blockSignals 批量 setChecked：toggled 被吞 → 无动画，paint 按
+    isChecked 直接落终态（与 ToggleSwitch 同一口径）。"""
+    b = _seg_button()
+    try:
+        b.blockSignals(True)
+        b.setChecked(True)
+        b.blockSignals(False)
+        assert b._checked_anim is None, "批量选中不应创建过渡动画"
+        assert b._checked_progress() == 1.0
+    finally:
+        b.deleteLater()
+
+
+def test_checked_endpoint_registered():
+    """checked 端点契约钉死（U3）：pluginSegBtn = $surface_3、
+    modeBtn = $primary 实底（2026-10-07 收编）。"""
+    assert _SMOOTH_CHECKED == {
+        "pluginSegBtn": ("surface_3", 255),
+        "modeBtn": ("primary", 255),
+    }
+
+
+def test_checked_qss_background_removed():
+    """theme.py 的 #pluginSegBtn:checked / #modeBtn:checked 不得再有
+    background-color —— 选中底色过渡归 overlay，QSS 留底 = 两套机制
+    打架（S2 同款红线）。"""
+    bodies = _rule_bodies()
+    for sel in ("QPushButton#pluginSegBtn:checked",
+                "QPushButton#modeBtn:checked"):
+        assert sel in bodies, "%s 规则不见了（误删？）" % sel
+        assert "background-color" not in bodies[sel]
+
+
+# ---------------- U3：ToggleSwitch 轨道 hover 插值 ----------------
+def test_toggle_track_hover_interpolates(restore_motion):
+    """未选中轨道 hover 加深：enter → 插值到 1，leave → 重定向回 0。"""
+    _app()
+    sw = ToggleSwitch(checked=False)
+    try:
+        sw.enterEvent(_enter_event())
+        assert sw._hover_anim.state() == QAbstractAnimation.State.Running
+        assert sw._hover_anim.endValue() == 1.0
+        sw._hover_anim.setCurrentTime(sw._hover_anim.duration())
+        assert sw._thp == 1.0
+        sw.leaveEvent(QEvent(QEvent.Type.Leave))
+        assert sw._hover_anim.endValue() == 0.0, "离开必须重定向回常态轨道"
+    finally:
+        sw.deleteLater()
+
+
+def test_toggle_track_hover_pixel_fade():
+    """hover 加深是渐变：进度 0 / 1 两端抓帧必须不同（darker(112) 的
+    插值替代，不是干脆删掉加深）。"""
+    _app()
+    sw = ToggleSwitch(checked=False, theme="light")
+    try:
+        sw._thp = 0.0
+        sw.update()
+        img_rest = sw.grab().toImage()
+        sw._thp = 1.0
+        sw.update()
+        img_hover = sw.grab().toImage()
+        assert _images_differ(img_rest, img_hover), (
+            "未选中轨道 hover 进度 0/1 像素无差异 —— hover 加深失效")
+    finally:
+        sw.deleteLater()
+
+
+def test_toggle_track_hover_snaps_under_reduce_motion(restore_motion):
+    """reduce_motion 总闸：轨道 hover 加深瞬显，不建动画。"""
+    motion.set_reduce_motion(True)
+    _app()
+    sw = ToggleSwitch(checked=False)
+    try:
+        sw.enterEvent(_enter_event())
+        assert sw._thp == 1.0, "减弱动效下 hover 应瞬时到位"
+        assert sw._hover_anim.state() != QAbstractAnimation.State.Running
+    finally:
+        sw.deleteLater()
+
+
+# ---------------- U6：命中区外扩 ----------------
+def test_icon_button_hit_pad_geometry_unchanged():
+    """U6 红线：外扩只存在于事件层 —— sizeHint/geometry 零变化，
+    _hit_rect 恰好比 rect 四向外扩 HIT_PAD=4px。"""
+    _app()
+    b = IconButton("close", size=24, object_name="iconBtn")
+    try:
+        assert b.size().width() == 24 and b.size().height() == 24
+        assert b.rect().width() == 24 and b.rect().height() == 24
+        assert not b.rect().contains(QPoint(-3, 12)), "采样点应在 rect 外"
+        assert b._hit_rect().contains(QPoint(-3, 12)), (
+            "rect 外 3px 的点必须落在事件级命中区内")
+        assert IconButton.HIT_PAD == 4
+    finally:
+        b.deleteLater()
+
+
+def test_icon_button_click_3px_outside_rect_reaches():
+    """边界外 3px 的点击必须可达（触屏 32px 标准的最低验收线），
+    且外扩带之外的点击保持不可达（不吞邻居）。"""
+    from PyQt6.QtWidgets import QWidget
+    _app()
+    host = QWidget()
+    host.resize(96, 72)
+    clicked = []
+    b = IconButton("close", size=24, parent=host)
+    b.move(28, 18)      # rect x∈[28,52) y∈[18,42)，外扩带 x∈[24,56)
+    b.clicked.connect(lambda: clicked.append(True))
+    host.show()
+    _app().processEvents()
+    try:
+        # 外扩带内、rect 外 3px：x=25（rect 左缘 28 - 3）
+        QTest.mouseClick(host, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, QPoint(25, 30))
+        assert clicked, "命中区外扩后，rect 外 3px 的点击必须触发按钮"
+        # 外扩带之外（x=20 < 24）：不得误触
+        clicked.clear()
+        QTest.mouseClick(host, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, QPoint(20, 30))
+        assert not clicked, "外扩带之外的点击不应触发按钮"
+    finally:
+        b.deleteLater()
+        host.deleteLater()
+
+
+def test_icon_button_inside_click_still_reaches():
+    """rect 内的正常点击路径不受外扩过滤器影响（回归钉）。"""
+    from PyQt6.QtWidgets import QWidget
+    _app()
+    host = QWidget()
+    host.resize(96, 72)
+    clicked = []
+    b = IconButton("close", size=24, parent=host)
+    b.move(28, 18)
+    b.clicked.connect(lambda: clicked.append(True))
+    host.show()
+    _app().processEvents()
+    try:
+        QTest.mouseClick(b, Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier)
+        assert clicked, "rect 内点击必须照常触发"
+    finally:
+        b.deleteLater()
+        host.deleteLater()
+
+
+def test_icon_button_no_parent_hit_filter_is_safe():
+    """无父控件的图标钮（顶层创建后 reparent）不炸：过滤器可安全重挂。"""
+    _app()
+    b = IconButton("close", size=24)
+    try:
+        assert b._filtered_parent is None
+        from PyQt6.QtWidgets import QWidget
+        host = QWidget()
+        b.setParent(host)
+        assert b._filtered_parent is host, "reparent 后过滤器必须重挂到新父"
+        host.deleteLater()
+    finally:
+        b.deleteLater()

@@ -97,7 +97,7 @@ class _Ctx:
         self.toasts = []
         self._win = None
 
-    def show_toast(self, text, ms=2800):
+    def show_toast(self, text, ms=2800, **kwargs):
         self.toasts.append((text, ms))
         return True
 

@@ -1010,7 +1010,8 @@ def _feed(pg, text):
     """模拟「模型回复到达」：走真实 _on_reply（含 parse_reply/parse_actions）"""
     pg._on_reply({"ok": True, "status": 200,
                   "body": json.dumps(
-                      {"choices": [{"message": {"content": text}}]})})
+                      {"choices": [{"message": {"content": text}}]})},
+                 pg._req_id)   # 当代代数（2026-10-06 中断令牌守卫配套）
     pump(30)
 
 

@@ -53,6 +53,16 @@ REQUIRED_MAIN = {
     "QComboBox:focus",
     "QPlainTextEdit:focus",
     "QTextEdit:focus",
+    # 交互状态批（2026-10-08，清单 B1/A1）：透明/浅底按钮逐枚登记
+    # $focus_ring（此前落到通用兜底 $on_primary = 浅色主题的白 → 隐形）；
+    # navGroupHeader 同批改 StrongFocus（A1）
+    "QPushButton#pluginSegBtn:focus",
+    "QPushButton#pluginErrorToggle:focus",
+    "QPushButton#pluginMoreBtn:focus",
+    "QPushButton#navGroupHeader:focus",
+    # 交互状态批第二批（2026-10-08，清单 A2/B2）：自绘行 + 选择器命名收口
+    "QFrame#navRow:focus",
+    "QPushButton#pluginsPickBtn:focus",
 }
 REQUIRED_CARD = {
     "QPushButton#sideTabIconBtn:focus",
@@ -68,12 +78,15 @@ REQUIRED_CARD = {
     "QTextEdit#noteEdit:focus",
     "QDateEdit#taskDate:focus",
     "QListWidget#taskList:focus",
+    # 交互状态批第二批（2026-10-08，清单 E4/B2）：小卡片素材格三态收口
+    "QWidget#assetItem:focus",
 }
 
-# 显式 NoFocus 的控件：不该有焦点态死规则（controls.Stepper 的 ± 钮、
-# glass.NavGroupHeader）——有的话说明有人误加了规则
-NO_FOCUS_DEAD_RULES = ("QPushButton#stepBtn:focus",
-                       "QPushButton#navGroupHeader:focus")
+# 显式 NoFocus 的控件：不该有焦点态死规则（controls.Stepper 的 ± 钮）——
+# 有的话说明有人误加了规则。
+# （2026-10-08 清单 A1：navGroupHeader 已改 StrongFocus 并登记
+#  :focus 规则，从本清单移入 REQUIRED_MAIN 覆盖清单。）
+NO_FOCUS_DEAD_RULES = ("QPushButton#stepBtn:focus",)
 
 
 # ====================================================================

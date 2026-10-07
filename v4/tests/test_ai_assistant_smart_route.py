@@ -79,6 +79,7 @@ def _fake_page(plug, ctx, text=""):
     page = SimpleNamespace()
     page._ctx = ctx
     page._busy = False
+    page._req_id = 0          # 在途请求代数（中断令牌守卫配套；真 _dispatch 会自增）
     page._cfg = {"max_data_chars": 6000, "custom_rules": []}
     page._history = []
     page._temperature = 0.4

@@ -9,7 +9,7 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QListWidget, QListWidgetItem, QMenu, QTextEdit,
+    QListWidget, QListWidgetItem, QMenu, QTextEdit,
     QSplitter, QDialog,
     QAbstractItemView, QStyledItemDelegate,
 )
@@ -31,7 +31,8 @@ from src.note_manager import Note
 from src.time_format import format_relative_time
 from src.theme import DEFAULT_THEME, get_colors
 from src.icon_render import icon as render_icon
-from src.controls import tune_list_scrolling, EmptyState, IconButton, PageTitle
+from src.controls import (tune_list_scrolling, EmptyState, IconButton,
+                          PageTitle, attach_page_search_shortcut, SmoothInput)
 
 # 手动命名标题的长度上限（与重命名对话框一致）
 _TITLE_MAX_LEN = 50
@@ -133,10 +134,18 @@ class NotesPanel(QWidget):
         v.addLayout(toolbar)
 
         # ---- 搜索框 ----
-        self._note_search = QLineEdit()
+        self._note_search = SmoothInput()
         self._note_search.setPlaceholderText("搜索标题或内容...")
         self._note_search.textChanged.connect(self.refresh)
         v.addWidget(self._note_search)
+
+        # Ctrl+F：页级聚焦搜索框。2026-10-07 批次 N3 的页内写法已于
+        # 2026-10-08（清单 A4）抽成公共 helper（controls.attach_page_
+        # search_shortcut），插件中心 / 知识库 / 碎片工作台与本页共用
+        # 一份实现：WidgetWithChildrenShortcut 限定页内作用域，不占全局
+        # 命名空间（接入时的排查结论：main_window 全局键为 Ctrl+W/H/T/K、
+        # F1、Ctrl+1~8 与触发键（默认 "/"），全局热键默认表亦无 Ctrl+F）。
+        attach_page_search_shortcut(self, self._note_search)
 
         # ---- 左右分栏：列表 + 编辑区 ----
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -198,6 +207,40 @@ class NotesPanel(QWidget):
         finally:
             self._refreshing = False
 
+    # ---- 状态栏统一入口（批次 N4 / N5）----
+    def _set_status_text(self, text: str, unsaved: bool = False) -> None:
+        """状态栏文本唯一写入点。
+
+        - ``unsaved=True``（"● 未保存" 两态）→ 用主题 warning 语义色内联
+          着色（色值取当刻 ``get_colors``，light/dark 各自跟随）；
+        - 正常态清回空样式（还原 QSS hintLabel 灰字，不残留上次的色）。
+        """
+        if unsaved:
+            colors = get_colors(
+                getattr(self._host, "current_theme", None) or DEFAULT_THEME)
+            self._note_status_label.setStyleSheet(f"color: {colors['warning']};")
+        else:
+            self._note_status_label.setStyleSheet("")
+        self._note_status_label.setText(text)
+
+    def _status_word_suffix(self) -> str:
+        """字数后缀（N5）：取编辑区明文字符数；空内容省略（不显示"0 字"）。"""
+        count = len(self._note_edit.toPlainText())
+        return f" · {count} 字" if count else ""
+
+    def _focus_search(self) -> None:
+        """Ctrl+F：聚焦页内搜索框并全选既有词（便于直接覆盖输入）。"""
+        self._note_search.setFocus()
+        self._note_search.selectAll()
+
+    def focus_new_note(self) -> None:
+        """「新建笔记」公开委托（命令面板 action.new_note 落点）。
+
+        复用 :meth:`_on_new` 的既有交互（清空编辑区 + 聚焦，输入后自动
+        保存落盘），零新交互模式。
+        """
+        self._on_new()
+
     def _refresh_impl(self):
         current_id = self._current_note_id
         keyword = self._note_search.text().strip().lower()
@@ -244,9 +287,10 @@ class NotesPanel(QWidget):
         if current_id is not None:
             filtered_out = bool(keyword) and not current_in_list
             if filtered_out and self._note_save_timer.isActive():
-                self._note_status_label.setText("● 未保存 · 当前笔记不在搜索结果中")
+                self._set_status_text(
+                    "● 未保存 · 当前笔记不在搜索结果中", unsaved=True)
             elif filtered_out:
-                self._note_status_label.setText("当前笔记不在搜索结果中")
+                self._set_status_text("当前笔记不在搜索结果中")
             elif not self._note_save_timer.isActive():
                 self._set_status_editing()
 
@@ -274,11 +318,13 @@ class NotesPanel(QWidget):
         self._note_empty_label.raise_()
 
     def _set_status_editing(self) -> bool:
-        """状态栏显示当前笔记的最近修改时间（相对时间）"""
+        """状态栏显示当前笔记的最近修改时间（相对时间）+ 字数"""
         note = self._note_manager.get_note(self._current_note_id)
         if note is None:
             return False
-        self._note_status_label.setText(f"编辑中：{_format_relative_time(note.update_time)}")
+        self._set_status_text(
+            f"编辑中：{_format_relative_time(note.update_time)}"
+            f"{self._status_word_suffix()}")
         return True
 
     def _on_item_title_edited(self, item):
@@ -304,7 +350,7 @@ class NotesPanel(QWidget):
             return
         if not changed:
             return
-        self._note_status_label.setText("已重命名")
+        self._set_status_text("已重命名")
         QTimer.singleShot(0, self._after_title_change)
 
     def _after_title_change(self):
@@ -333,7 +379,9 @@ class NotesPanel(QWidget):
         self._current_note_id = note_id
         self._note_edit.setPlainText(note.content)
         self._loading_note = False
-        self._note_status_label.setText(f"编辑中：{_format_relative_time(note.update_time)}")
+        self._set_status_text(
+            f"编辑中：{_format_relative_time(note.update_time)}"
+            f"{self._status_word_suffix()}")
 
     def _on_text_changed(self):
         """文本变化 → 启动防抖定时器"""
@@ -342,7 +390,8 @@ class NotesPanel(QWidget):
         if self._current_note_id is None and not self._note_edit.toPlainText().strip():
             return
         self._note_save_timer.start()
-        self._note_status_label.setText("● 未保存")
+        self._set_status_text(f"● 未保存{self._status_word_suffix()}",
+                              unsaved=True)
 
     def _on_save(self):
         """自动保存当前笔记"""
@@ -351,7 +400,7 @@ class NotesPanel(QWidget):
             if content.strip():
                 self._current_note_id = self._note_manager.add_note(content)
                 self.refresh()
-                self._note_status_label.setText("已保存")
+                self._set_status_text("已保存")
                 self._host.data_changed.emit("note")
         else:
             content = self._note_edit.toPlainText()
@@ -360,7 +409,7 @@ class NotesPanel(QWidget):
                     self._current_note_id = self._note_manager.add_note(content)
                     self.refresh()
             else:
-                self._note_status_label.setText("已保存")
+                self._set_status_text("已保存")
                 self._host.data_changed.emit("note")
 
     def _on_new(self):
@@ -373,7 +422,7 @@ class NotesPanel(QWidget):
         self._note_edit.clear()
         self._loading_note = False
         self._note_edit.setFocus()
-        self._note_status_label.setText("新建笔记，输入内容自动保存")
+        self._set_status_text("新建笔记，输入内容自动保存")
 
     def _on_delete(self):
         """删除当前笔记（临时笔记不可删除，需给出明确反馈）"""
@@ -404,7 +453,7 @@ class NotesPanel(QWidget):
             self._note_edit.clear()
             self._loading_note = False
             self.refresh()
-            self._note_status_label.setText("已删除")
+            self._set_status_text("已删除")
             self._host.data_changed.emit("note")
 
     def _on_context_menu(self, pos):
@@ -433,13 +482,13 @@ class NotesPanel(QWidget):
                        or DEFAULT_THEME)["danger"]))
         menu.addSeparator()
         act_sticky = menu.addAction("钉到桌面")
-        act_export = menu.addAction("导出到 Obsidian")
+        act_export = menu.addAction("导出全部到 Obsidian")
         action = menu.exec(self._note_list.mapToGlobal(pos))
         if action == act_rename:
             self._rename_dialog(note_id)
         elif act_title_auto is not None and action == act_title_auto:
             if self._note_manager.set_title_auto(note_id, not target.title_auto):
-                self._note_status_label.setText(
+                self._set_status_text(
                     "已设为跟随内容" if target.title_auto else "已锁定标题"
                 )
                 self.refresh()
@@ -468,7 +517,7 @@ class NotesPanel(QWidget):
                     self._note_edit.clear()
                     self._loading_note = False
                 self.refresh()
-                self._note_status_label.setText("已删除")
+                self._set_status_text("已删除")
                 self._host.data_changed.emit("note")
         elif action == act_sticky:
             self._pin_sticky(note_id)
@@ -485,7 +534,8 @@ class NotesPanel(QWidget):
         ok, reason = manager.open(note_id)
         if not ok and reason == "limit":
             self._host.show_toast(
-                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些")
+                f"便签最多同时钉 {manager.MAX_STICKIES} 个，请先关闭一些",
+                kind="warning")
 
     def _rename_dialog(self, note_id: int):
         """编辑笔记标题对话框"""
@@ -505,7 +555,7 @@ class NotesPanel(QWidget):
         hint.setObjectName("hintLabel")
         v.addWidget(hint)
 
-        title_edit = QLineEdit(note.title or "")
+        title_edit = SmoothInput(note.title or "")
         title_edit.setMaxLength(_TITLE_MAX_LEN)
         title_edit.returnPressed.connect(dialog.accept)
         v.addWidget(title_edit)

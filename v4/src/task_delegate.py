@@ -24,11 +24,11 @@ item 数据约定（由任务页 refresh 时写入）：
                                         （overdue → 组标题整行 danger 红）
   - ``UserRole + 5``（ROLE_DONE）     : 是否已完成（bool，用于无动画时兜底）
 
-勾选动画四要素（全部按进度 p 绘制）：
-  1. 对勾 ``QPainterPath`` 按 p 逐段描绘
-  2. 方形圆角框缩放 1.0 → CHECK_BOUNCE_SCALE → 1.0 的回弹
-  3. 标题删除线按 p 从左划出
-  4. 整行文字 / 状态色按 p 插值到次级灰（text_placeholder）
+勾选动画四要素（全部按子进度绘制；V3 起四段错峰，见 CHECK_* 轴常量）：
+  1. 对勾 ``QPainterPath`` 按描画子进度逐段描绘
+  2. 方形圆角框缩放 1.0 → CHECK_BOUNCE_SCALE → 1.0 的回弹（pop 段）
+  3. 标题删除线按扫过子进度从左划出（与对勾错峰 80ms）
+  4. 整行文字 / 状态色按沉降子进度插值到次级灰（text_placeholder）
 
 动画进度以 **task_id 为键** 存于本 delegate（``self._progress``），
 故 refresh() 重建 item 后动画不丢；进度由任务页的面板级
@@ -43,12 +43,13 @@ from PyQt6.QtCore import (
     Qt, QSize, QRect, QRectF, QPointF, QEvent, pyqtSignal,
 )
 from PyQt6.QtGui import QColor, QPen, QFont, QFontMetrics
-from PyQt6.QtWidgets import QStyledItemDelegate, QStyle
+from PyQt6.QtWidgets import QListWidget, QStyledItemDelegate, QStyle
 
-from src.constants import CHECK_BOUNCE_SCALE
+from src.constants import CHECK_ANIM_MS, CHECK_BOUNCE_SCALE
 from src.task_manager import (
     STATE_NONE, STATE_OVERDUE, STATE_TODAY, KIND_HEADER,
 )
+from src import row_hover
 
 
 # ---- item 角色（相对 Qt.UserRole 偏移；与任务页保持一致）----
@@ -58,17 +59,42 @@ ROLE_REL = Qt.ItemDataRole.UserRole + 3
 ROLE_STATE = Qt.ItemDataRole.UserRole + 4
 ROLE_DONE = Qt.ItemDataRole.UserRole + 5
 
-# ---- 行/组标题尺寸（2026-10-02 任务页高仿真稿：行高 32、行距 0 18px、
-#      15px 方形圆角勾选框、整行平面背景无圆角）----
+# ---- 行/组标题尺寸（原 2026-10-02 高仿真稿：行高 32、行距 18px、
+#      15px 方形圆角勾选框、整行平面背景无圆角。2026-10-06 紧凑改版：
+#      行左右内边距 18 → 8 压水平留白（勾选框与输入栏左缘近乎对齐，
+#      hover/选中背景本就是整行全宽色块，视觉更整），其余尺寸不动；
+#      小卡片任务页（card_window_pages）共用本委托，同步收紧）----
 ROW_HEIGHT = 32
 HEADER_HEIGHT = 26
 CHECK_SIZE = 15            # 勾选框边长（方形圆角，不再是圆形）
 CHECK_RADIUS = 3           # 勾选框圆角（稿：border-radius 3px）
-LEFT_MARGIN = 18           # 行左内边距（稿：padding 0 18px）
-RIGHT_MARGIN = 18          # 行右内边距
+LEFT_MARGIN = 8            # 行左内边距（紧凑改版：18 → 8）
+RIGHT_MARGIN = 8           # 行右内边距
 CHECK_TEXT_GAP = 10        # 勾选框与标题间距（稿：gap 10px）
 REL_GAP = 10               # 标题与相对时间最小间距
 CAPTION_DROP = 6           # 组标题整体下沉量（稿：上 10px / 下 4px 的非对称留白）
+
+# ---- V3 四段式错峰时间轴（毫秒，2026-10-07 交互视觉清单 §3）----
+# 面板仍用**单个** QVariantAnimation 驱动全局进度 p（0→1，总长
+# CHECK_ANIM_MS=230，行级进度缓存基建零改动），委托在绘制侧把 p 按
+# 时间轴切成四段子进度：「完成」从一个同步瞬态变成有编排的过程 ——
+#   勾选圈 pop（220ms 回弹）→ 对勾描画（150ms，错峰 60ms 起）→
+#   删除线左→右扫（150ms，错峰 80ms 起）→ 整行文字沉降次级色（120ms）。
+# 取消勾选（p 1→0）天然逆放；p=0/1 两端所有子进度同为 0/1，rest 与
+# 终态渲染逐字节不变。轴值总长必须与 constants.CHECK_ANIM_MS 对齐。
+CHECK_POP_END = 220        # 勾选圈 pop 段终点
+CHECK_DRAW_START = 60      # 对勾描画起点（与 pop 错峰）
+CHECK_DRAW_END = 210       # 对勾描画终点
+CHECK_STRIKE_START = 80    # 删除线起点（与对勾错峰 80ms）
+CHECK_STRIKE_END = 230     # 删除线终点（= 总长 CHECK_ANIM_MS）
+CHECK_SETTLE_END = 120     # 文字沉降段终点
+
+
+def _stage(t: float, start: float, end: float) -> float:
+    """全局时间 t（ms）→ [start, end] 段的子进度（0..1，越界夹取）。"""
+    if end <= start:
+        return 1.0 if t >= end else 0.0
+    return max(0.0, min(1.0, (t - start) / (end - start)))
 
 
 def _to_qcolor(value, fallback: str = "#000000") -> QColor:
@@ -116,6 +142,11 @@ class TaskItemDelegate(QStyledItemDelegate):
         self._colors = dict(colors) if colors else {}
         # 勾选动画进度：task_id -> float(0..1)（跨 refresh 存活）
         self._progress = {}
+        # U4（2026-10-07 规格 G5）：行级 hover 进度缓存 —— hover 底色从
+        # State_MouseOver 一帧瞬变改为 120ms OutCubic 插值（单 QTimer
+        # 驱动、滚动/拖拽清零）。组标题行不参与（旧口径：header 无底色）。
+        self._hover = row_hover.RowHoverController(
+            hoverable=lambda idx: idx.data(KIND_ROLE) != KIND_HEADER)
 
     # ---------------- 对外 ----------------
     def set_colors(self, colors: dict):
@@ -288,18 +319,31 @@ class TaskItemDelegate(QStyledItemDelegate):
         title = str(index.data(ROLE_TITLE) or "")
         rel = str(index.data(ROLE_REL) or "")
         p = self._resolve_progress(task_id, done)
+        # V3：全局进度 → 四段错峰子进度（轴长 = CHECK_ANIM_MS，见常量注释）
+        t = p * CHECK_ANIM_MS
+        pop_p = _stage(t, 0.0, CHECK_POP_END)
+        draw_p = _stage(t, CHECK_DRAW_START, CHECK_DRAW_END)
+        strike_p = _stage(t, CHECK_STRIKE_START, CHECK_STRIKE_END)
+        settle_p = _stage(t, 0.0, CHECK_SETTLE_END)
 
         c = self._colors
         done_color = _to_qcolor(c.get("text_placeholder", "#6E6D67"))
         normal_color, rel_base = self._row_colors(state)
 
         # ---- 行背景：选中 / 悬浮（稿：整行平面色块，方角不缩进）----
+        # U4（2026-10-07 规格 G5）：hover 底色由 State_MouseOver 一帧瞬变
+        # 改为行级 hp 进度插值（120ms OutCubic，motion fast 档）。端点
+        # 不变：hp=1 时仍是不透明 surface_2 整行色块；hp<=ε 走原 rest
+        # 分支 —— 非 hover 态渲染与旧版逐字节一致。selected > hover。
         if option.state & QStyle.StateFlag.State_Selected:
             bg = _to_qcolor(c.get("accent_soft", "#E1F5EE"))
-        elif option.state & QStyle.StateFlag.State_MouseOver:
-            bg = _to_qcolor(c.get("surface_2", "#F5F4F0"))
         else:
-            bg = None
+            hp = row_hover.hover_amount(self._hover, option, index)
+            if hp > row_hover.ALPHA_EPS:
+                bg = _to_qcolor(c.get("surface_2", "#F5F4F0"))
+                bg.setAlpha(int(round(255.0 * hp)))
+            else:
+                bg = None
         if bg is not None:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(bg)
@@ -312,10 +356,10 @@ class TaskItemDelegate(QStyledItemDelegate):
 
         # ---- 勾选框（方形圆角框 + 回弹 + 对勾）----
         cb_rect = self._checkbox_rect(rect)
-        self._paint_checkbox(painter, cb_rect, p)
+        self._paint_checkbox(painter, cb_rect, pop_p, draw_p)
 
-        # ---- 文字颜色：normal → done 按 p 插值 ----
-        text_color = _lerp_color(normal_color, done_color, p)
+        # ---- 文字颜色：normal → done 按沉降段子进度插值 ----
+        text_color = _lerp_color(normal_color, done_color, settle_p)
 
         # 字体
         font = QFont(painter.font())
@@ -342,9 +386,9 @@ class TaskItemDelegate(QStyledItemDelegate):
             elided,
         )
 
-        # 删除线：按 p 从左划出
-        if p > 0.001:
-            line_w = base_fm.horizontalAdvance(elided) * p
+        # 删除线：按扫过子进度从左划出（与对勾错峰）
+        if strike_p > 0.001:
+            line_w = base_fm.horizontalAdvance(elided) * strike_p
             line_y = rect.center().y() + 1
             pen = QPen(text_color, 1.3)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -355,45 +399,47 @@ class TaskItemDelegate(QStyledItemDelegate):
         # 相对时间
         if rel:
             painter.setFont(rel_font)
-            painter.setPen(_lerp_color(rel_base, done_color, p))
+            painter.setPen(_lerp_color(rel_base, done_color, settle_p))
             painter.drawText(
                 QRect(rel_x, rect.top(), rel_w, rect.height()),
                 int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
                 rel,
             )
 
-    def _paint_checkbox(self, painter, cb_rect: QRect, p: float):
+    def _paint_checkbox(self, painter, cb_rect: QRect, pop_p: float,
+                        draw_p: float):
         """方形圆角勾选框（高仿真稿）：未完成 = line_2 描边空框；
         完成 = primary 实底 + on_primary 对勾（浅主题白勾 / 深主题墨绿勾，
-        与稿的 #FFFFFF / #04342C 一致）。回弹与对勾逐段描绘动画保留。"""
+        与稿的 #FFFFFF / #04342C 一致）。回弹走 pop 段子进度，对勾描画
+        走描画段子进度（V3 四段错峰）。"""
         fill_color = _to_qcolor(self._colors.get("primary", "#0F6E56"))
         idle_border = _to_qcolor(self._colors.get("line_2", "#D3D1C7"))
         symbol_color = _to_qcolor(self._colors.get("on_primary", "#FFFFFF"))
 
-        # 回弹：1.0 → CHECK_BOUNCE_SCALE → 1.0
-        scale = 1.0 + (CHECK_BOUNCE_SCALE - 1.0) * math.sin(math.pi * p)
+        # 回弹：1.0 → CHECK_BOUNCE_SCALE → 1.0（pop 段内完成）
+        scale = 1.0 + (CHECK_BOUNCE_SCALE - 1.0) * math.sin(math.pi * pop_p)
         center = cb_rect.center()
         side = cb_rect.width() * scale
         box = QRectF(center.x() - side / 2.0, center.y() - side / 2.0,
                      side, side)
 
-        # 填充随 p 淡入
-        if p > 0.001:
+        # 填充随 pop 子进度淡入
+        if pop_p > 0.001:
             fill = QColor(fill_color)
-            fill.setAlphaF(min(1.0, p))
+            fill.setAlphaF(min(1.0, pop_p))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(fill)
             painter.drawRoundedRect(box, CHECK_RADIUS, CHECK_RADIUS)
 
-        # 描边：idle(line_2) → primary 插值
-        pen = QPen(_lerp_color(idle_border, fill_color, p), 1.5)
+        # 描边：idle(line_2) → primary 插值（pop 段）
+        pen = QPen(_lerp_color(idle_border, fill_color, pop_p), 1.5)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(box, CHECK_RADIUS, CHECK_RADIUS)
 
-        # 对勾按 p 逐段描绘
-        if p > 0.01:
-            self._draw_check(painter, box, p, symbol_color)
+        # 对勾按描画子进度逐段描绘
+        if draw_p > 0.01:
+            self._draw_check(painter, box, draw_p, symbol_color)
 
     def _draw_check(self, painter, box: QRectF, p: float,
                     color: QColor | None = None):
@@ -430,3 +476,64 @@ class TaskItemDelegate(QStyledItemDelegate):
             end = QPointF(p1.x() + (p2.x() - p1.x()) * t,
                           p1.y() + (p2.y() - p1.y()) * t)
             painter.drawLine(p1, end)
+
+
+class TaskListWidget(QListWidget):
+    """任务列表容器（清单 A3，2026-10-08）：主窗任务页与小卡片任务页共用。
+
+    背景：委托的 ``editorEvent`` 只处理鼠标释放，``QListWidget`` 原生
+    只给方向键移动当前行——用户能用键盘"走到"任务上，但走到后勾选、
+    右键菜单全够不着。本容器把缺的键盘路径补齐（两处入口共用一份实现，
+    避免主窗/小卡片重复）：
+
+    - **Space / Enter（含小键盘 Enter）**：对当前行发勾选切换 —— 直接
+      沿用委托既有的 ``toggle_requested`` 信号通道，勾选动画/延时重建
+      逻辑零改动；
+    - **Shift+F10 / Menu 键**：在当前行位置弹右键菜单 —— 发射内建的
+      ``customContextMenuRequested(QPoint)``（坐标语义与鼠标右键一致，
+      viewport 坐标），两处宿主页各自已接好的菜单处理器原样复用，
+      菜单实现零重复；
+    - 方向键移动当前行走 QListWidget 原生逻辑，不在此覆盖；组标题行
+      （KIND_HEADER / 无合法 task_id）对 Space/Enter 不响应。
+    """
+
+    def keyPressEvent(self, event):  # noqa: N802 (Qt 命名)
+        key = event.key()
+        if key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if self._toggle_current_row():
+                event.accept()
+                return
+        elif key == Qt.Key.Key_Menu or (
+                key == Qt.Key.Key_F10 and
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            if self._open_menu_on_current_row():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    # ---------------- 内部 ----------------
+    def _toggle_current_row(self) -> bool:
+        """对当前行发勾选切换（经委托的 toggle_requested 通道）。"""
+        index = self.currentIndex()
+        if not index.isValid():
+            return False
+        if index.data(KIND_ROLE) == KIND_HEADER:
+            return False
+        task_id = index.data(Qt.ItemDataRole.UserRole)
+        # 仅对合法 int task_id 生效（与委托 editorEvent 的守卫一致）
+        if isinstance(task_id, bool) or not isinstance(task_id, int):
+            return False
+        delegate = self.itemDelegate()
+        if delegate is None or not hasattr(delegate, "toggle_requested"):
+            return False
+        delegate.toggle_requested.emit(int(task_id))
+        return True
+
+    def _open_menu_on_current_row(self) -> bool:
+        """在当前行中心弹右键菜单（复用宿主页已接的菜单处理器）。"""
+        index = self.currentIndex()
+        if not index.isValid():
+            return False
+        # 与 customContextMenuRequested 的坐标契约一致（viewport 坐标）
+        self.customContextMenuRequested.emit(self.visualRect(index).center())
+        return True
