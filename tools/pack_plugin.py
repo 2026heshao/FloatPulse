@@ -32,6 +32,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import zipfile
 
@@ -172,6 +173,33 @@ def _verify_package(pkg_path: str, plugin_id: str, entry: str) -> str:
     return ""
 
 
+def _source_bytes(plugin_dir: str, rel: str) -> bytes:
+    """读插件源文件的**分发字节**。
+
+    优先走 git index blob（``git cat-file blob :<path>``）——与
+    .gitattributes 规范化后的仓库内容逐字节一致，CI 全新 checkout 与
+    开发机工作树（行尾可能还是历史 CRLF）打包结果相同，marketplace
+    索引哈希才能跨环境成立（2026-10-11 实锤：工作树 CRLF vs CI LF
+    让同一提交打出两种哈希）。git 不可用 / 文件未入库 / 插件目录在
+    仓库外（测试 tmp_path）时回落工作区原始字节。
+    """
+    full = os.path.join(plugin_dir, *rel.split("/"))
+    try:
+        archive_rel = os.path.relpath(full, ROOT).replace(os.sep, "/")
+    except ValueError:                    # 跨盘（如 C: tmp vs D: 仓库）
+        with open(full, "rb") as f:
+            return f.read()
+    if archive_rel.startswith(".."):      # 仓库外目录：git 视角不存在
+        with open(full, "rb") as f:
+            return f.read()
+    out = subprocess.run(["git", "cat-file", "blob", f":{archive_rel}"],
+                         capture_output=True, cwd=ROOT)
+    if out.returncode == 0:
+        return out.stdout
+    with open(full, "rb") as f:           # 未入库的新文件
+        return f.read()
+
+
 def pack_plugin(plugin_dir: str, out_dir: str = DEFAULT_OUT_DIR,
                 force: bool = False, check_only: bool = False) -> tuple:
     """打包一个插件目录。
@@ -216,10 +244,9 @@ def pack_plugin(plugin_dir: str, out_dir: str = DEFAULT_OUT_DIR,
                 # 套一层 <插件id>/ 前缀：与内置包结构一致，
                 # 解压到 plugins/<id>/ 时天然隔离。
                 # 确定性打包：ZipInfo 替代 write()，mtime 固定——
-                # 索引 sha256 才能对上同一份源码的任何一次重打包。
-                src = os.path.join(plugin_dir, *rel.split("/"))
-                with open(src, "rb") as f:
-                    payload = f.read()
+                # 索引 sha256 才能对上同一份源码的任何一次重打包；
+                # 字节走 git index blob（行尾归一化），跨环境可复现。
+                payload = _source_bytes(plugin_dir, rel)
                 zi = zipfile.ZipInfo(f"{plugin_id}/{rel}",
                                      date_time=_ZIP_FIXED_DATE)
                 zi.compress_type = zipfile.ZIP_DEFLATED

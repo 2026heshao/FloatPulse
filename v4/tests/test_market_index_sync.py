@@ -77,6 +77,27 @@ class TestDeterministicPacking:
                               .decode("utf-8"))
         assert data["id"] == "kb-search"
 
+    def test_source_bytes_normalized(self):
+        """打包字节走 git index blob：工作树行尾（历史 CRLF）不影响产物。
+
+        2026-10-11 实锤：plugin.py 在 index 里是 LF、工作树还是 CRLF，
+        打包器若读工作区字节，同一提交在开发机与 CI 打出两种哈希，
+        索引必然脱同步。收口后 source bytes == index blob 字节。
+        """
+        import subprocess
+        rel = "plugins/kb-search/plugin.py"
+        raw = open(os.path.join(BASE, "..", rel), "rb").read()
+        blob = subprocess.run(
+            ["git", "cat-file", "blob", f":{rel}"], capture_output=True,
+            cwd=os.path.join(BASE, ".."))
+        assert blob.returncode == 0
+        packed = __import__("pack_plugin")._source_bytes(
+            os.path.join(BASE, "..", "plugins", "kb-search"), "plugin.py")
+        assert packed == blob.stdout          # 与 git 规范化内容一致
+        # 若工作树与 index 行尾不同，显式证明走的是 index 路径
+        if raw != blob.stdout:
+            assert packed != raw              # 不被工作区行尾污染
+
 
 # ====================================================================
 # 2. 索引再生与校验
