@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [v4.9.1] - 2026-10-11
+
+### Fixed
++- **打包版插件加载失败：`ModuleNotFoundError: No module named 'src.plugin_ui'`（用户报：市场装好插件后加载失败，2026-10-11）**：插件能 `from src.plugin_ui import ...` 是插件契约的一部分，但冻结（PyInstaller）包里只有**主程序静态分析可达**的模块——`src/plugin_ui.py` 只被插件 import、主程序自身从不引用（主程序走 `glass_dialog` / `controls`），于是它被排除在 PYZ 之外，插件装好一点就报导入失败。这是 2026-10-08 `uuid` / `base64` / `hmac` 那次「插件依赖不在包里」事故的**同构复发**，只是换了宿主模块。修复：`FloatPulse.spec` 的 `hiddenimports` 补 `src.plugin_ui`（同批补注释说明「插件依赖的宿主模块与标准库同规」）；新增护栏 `tests/test_plugin_bundle_host_modules.py` **3 项**——扫 `plugins/**` 全部 `from src.X import` / `import src.X`，断言每一项要么被主程序 import、要么显式列入 hiddenimports，并钉死 `src.plugin_ui`（附扫描器自检防 AST 口径漂移）。反向验证：临时摘掉 `src.plugin_ui` → 护栏当场 2 项红灯、还原即绿；打包 TOC 复核 `src.plugin_ui` 已进包。
++- **插件商店窗口误报「都已安装」（用户报：只装了 1 个却显示全都装好了，2026-10-11）**：从在线市场装完一个包后 `PluginsPanel._on_install` 会调 `PluginStoreDialog.reload()` 同步刷新卡片，而 `reload()` 清空列表时**连在线市场卡片一起删掉、只清不建**（原实现注释自认「reload() 会连在线卡一起清掉」）——刚装的那 1 个使本地 pending 归空，窗口只剩「商店里的插件包都已安装」而 5 张在线卡凭空消失，用户感知成「6 个全装好了」。修复：`reload()` 重扫本地商店后**按 `_market_items` 保序重建在线卡片**，并按已装 plugin_id 剔除刚装成的那条（与已装卡片去重口径同源，不产生幽灵卡）；空态文案改为**仅当「本地无待装 且 在线无卡」**时显示（该类误导 2026-10-08 首次发现，本次堵掉第二次复发路径）。回归：`tests/test_plugins_panel.py::TestStoreDialog` 由 7 项扩到 **11 项**（新增：装完 reload 后在线卡保留且只剔除已装项 / 多卡保序无重复 / 空态仅双空时出现 / 下载地址未解析不建幽灵卡）；反向验证：还原旧清空逻辑 → 11 项全红，还原即绿。
+
 ## [v4.9.0] - 2026-10-10
 
 ### Fixed

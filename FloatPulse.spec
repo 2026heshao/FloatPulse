@@ -85,7 +85,17 @@ a = Analysis(
     # ★以后新增插件用到包里没有的标准库，必须同步加到这里
     # （护栏 tests/test_plugin_bundle_stdlib.py 会比对插件 stdlib 依赖
     # 与 hiddenimports + 主程序可达集的并集）。
-    hiddenimports=["encodings.idna", "uuid", "base64", "hmac"],
+    #
+    # src.plugin_ui（2026-10-11 zip 版实机踩坑）：宿主模块同样有这个坑——
+    # src/plugin_ui.py 只被**插件**import，主程序自身从不引用它
+    # （主程序走 glass_dialog / controls），静态分析收不进 PYZ →
+    # 插件安装成功但加载报
+    # ModuleNotFoundError("No module named 'src.plugin_ui'")。
+    # ★插件依赖的**宿主模块**（src.*）与标准库同理：主程序不可达的
+    # 必须显式列出，由护栏 tests/test_plugin_bundle_host_modules.py
+    # 逐项比对插件依赖面与「主程序可达 ∪ hiddenimports」。
+    hiddenimports=["encodings.idna", "uuid", "base64", "hmac",
+                   "src.plugin_ui"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

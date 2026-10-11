@@ -2072,6 +2072,10 @@ class PluginStoreDialog(GlassDialog):
         # 清空旧卡片（按标记逆序删，空态 label 与末尾 stretch 保留）。
         # 先 hide 再 deleteLater：deleteLater 要等事件循环才真正删除，
         # 不 hide 的话旧卡片会残影叠加在新卡片上（离屏截图实测）。
+        # 在线市场卡片一并清掉，随后按 _market_items 重建（见下方
+        # 「在线卡片保序重建」）——装完一个包就调 reload()，若只清不建，
+        # 用户会看到「商店里的插件包都已安装」而在线列表凭空消失
+        # （2026-10-11 用户实测：只装 1 个却像全都装好了）。
         for i in reversed(range(self._list_layout.count())):
             item = self._list_layout.itemAt(i)
             w = item.widget() if item is not None else None
@@ -2094,6 +2098,19 @@ class PluginStoreDialog(GlassDialog):
         pending = [e for e in entries if not getattr(e, "installed", False)]
         n_installed = len(entries) - len(pending)
 
+        # ---- 在线卡片保序重建（2026-10-11）----
+        # _market_items 是「上次检查在线市场得到的待装条目」，_market_assets
+        # 是已解析的下载地址。装完包 reload() 时两者都还在，重建卡片让在线
+        # 列表不因一次安装而消失；刚装成功的那个条目按 plugin_id 过滤掉
+        # （本地 scan_store 已把它标 installed，与已装卡片去重口径一致）。
+        installed_ids = {getattr(e, "plugin_id", "") for e in entries
+                         if getattr(e, "installed", False)}
+        online_items = [it for it in getattr(self, "_market_items", [])
+                        if it.get("file") in getattr(self, "_market_assets", {})
+                        and it.get("id") not in installed_ids]
+        for it in reversed(online_items):
+            self._list_layout.insertWidget(1, self._make_online_card(it))
+
         if n_installed:
             self._installed_hint.setText(
                 f"另有 {n_installed} 个插件包已安装——"
@@ -2106,8 +2123,11 @@ class PluginStoreDialog(GlassDialog):
         else:
             self._installed_hint.setVisible(False)
 
-        self._empty_label.setVisible(not pending)
-        if not pending:
+        # 空态只在「本地无待装 **且** 在线无卡片」时出现——否则会产生
+        # 「都已安装」压在在线卡片上方的误导（2026-10-08 首次发现，
+        # 2026-10-11 二次复发于「装完 reload 丢在线卡」路径）。
+        self._empty_label.setVisible(not pending and not online_items)
+        if not pending and not online_items:
             self._empty_label.setText(
                 "商店目录里还没有可安装的插件包\n\n"
                 "把 .fpplug 插件包（或含 manifest.json 的文件夹）\n"

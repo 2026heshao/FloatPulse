@@ -698,6 +698,103 @@ class TestStoreDialog:
         finally:
             dlg.deleteLater()
 
+    # ---- 在线卡片在 reload 后不丢（2026-10-11 用户实测回归）----
+    @staticmethod
+    def _online_cards(dlg):
+        out = []
+        for i in range(dlg._list_layout.count()):
+            w = dlg._list_layout.itemAt(i).widget()
+            if w is not None and getattr(w, "_is_online_card", False):
+                out.append(w)
+        return out
+
+    def _seed_online(self, dlg, ids=("remote-a", "remote-b")):
+        """把在线市场状态灌进弹窗（模拟「检查在线市场」已跑完）"""
+        dlg._market_items = [{
+            "id": i, "name": f"远程{i}", "version": "2.0",
+            "description": "d", "capabilities": [], "hotkeys": [],
+            "size": 2048, "file": f"{i}.fpplug", "sha256": "",
+        } for i in ids]
+        dlg._market_assets = {f"{i}.fpplug": 100 + n
+                              for n, i in enumerate(ids)}
+        dlg._on_release_loaded({"ok": True, "body": ""})
+
+    def test_online_cards_survive_install_reload(self, qapp, tmp_path):
+        """★ 用户实测根因：装完一个包 reload() 把在线卡片全清掉，
+        窗口只剩「商店里的插件包都已安装」，看起来像 6 个全装好了。
+        修复后：reload 重建在线卡片，只把**刚装成的那个**从在线列表剔除。"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "remote-a", installed=False)]
+        loader = _StoreFakeLoader([], entries)
+        panel = PluginsPanel(_FakeHost(loader=loader))
+        dlg = PluginStoreDialog(panel)
+        panel._store_dialog = dlg
+        try:
+            self._seed_online(dlg, ids=("remote-a", "remote-b"))
+            assert len(self._online_cards(dlg)) == 2
+            # 装 remote-a → 触发 _on_install → reload
+            panel._on_install("remote-a", "远程remote-a")
+            online = self._online_cards(dlg)
+            # remote-a 已被剔除（本地已装），remote-b 仍在 → 不能误报「都已安装」
+            assert len(online) == 1
+            assert online[0]._market_item["id"] == "remote-b"
+            # 空态文案整体不得出现（在线还有可装项）
+            assert not dlg._empty_label.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
+    def test_online_cards_keep_order_and_no_duplicate(self, qapp, tmp_path):
+        """多张在线卡 reload 后**保序**重建，且不与本地卡重复"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        # 本地有一个未装包（remote-b 同名文件也进商店），在线两张
+        entries = [_make_store_entry(tmp_path, "remote-a", installed=False)]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            self._seed_online(dlg, ids=("remote-a", "remote-b", "remote-c"))
+            dlg.reload()
+            order = [w._market_item["id"] for w in self._online_cards(dlg)]
+            assert order == ["remote-a", "remote-b", "remote-c"]
+            # 空态不显示（在线有卡）
+            assert not dlg._empty_label.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
+    def test_empty_hint_only_when_no_local_and_no_online(self, qapp, tmp_path):
+        """空态「都已安装」只在本地无待装 **且** 在线无卡时出现"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "demo-b", installed=True)]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            # 纯本地全装完 → 空态出现（既有行为不变）
+            assert dlg._empty_label.isVisibleTo(dlg)
+            assert "都已安装" in dlg._empty_label.text()
+            # 有在线卡 → 空态撤下
+            self._seed_online(dlg)
+            assert not dlg._empty_label.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
+    def test_reload_clears_stale_online_when_assets_missing(self, qapp,
+                                                            tmp_path):
+        """在线条目但下载地址未解析（_market_assets 空）→ 不建卡（防幽灵卡）"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], [])))
+        dlg = PluginStoreDialog(panel)
+        try:
+            dlg._market_items = [{
+                "id": "ghost", "name": "幽灵", "version": "1.0",
+                "description": "d", "capabilities": [], "hotkeys": [],
+                "size": 10, "file": "ghost.fpplug", "sha256": "",
+            }]
+            dlg._market_assets = {}
+            dlg.reload()
+            assert self._online_cards(dlg) == []
+            assert dlg._empty_label.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
 
 # ====================================================================
 # 双列网格（2026-09-29）：行优先摆放 + 窄视口回落单列
