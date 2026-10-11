@@ -91,11 +91,37 @@ def _migrate_config_2_to_3(data: dict) -> dict:
     return data
 
 
+# config v3 → v4 的迁移参数：凭证哨兵默认开关（2026-10-08 稳定性轮 P0）。
+# ★ 不能 import config 取值：config 反向依赖本模块，取值会成环。
+#   故此处写常量，并由 tests/test_clipboard_guard_v4.py 用
+#   「迁移后取值 == DEFAULT_CONFIG['clipboard_guard_enabled']」把两者钉死，
+#   防止日后改默认却忘改迁移（护栏必须能红灯）。
+_CONFIG_V3_OLD_GUARD_ENABLED = False
+_CONFIG_V3_NEW_GUARD_ENABLED = True
+
+
+def _migrate_config_3_to_4(data: dict) -> dict:
+    """config v3 → v4：凭证哨兵默认开启（2026-10-08）。
+
+    ★ 只改写**恰好等于旧默认 False** 的持久值 → True。注意旧版取值只有
+    False/True 两档，False 既是旧默认也可能是用户显式关闭——迁移按
+    「等于旧默认即改写」口径执行（与 v1→v2 同款）；被改写的用户在
+    设置页「剪贴板与碎片」一键关回即可。
+    新增的 clipboard_guard_expiry_hours / clipboard_guard_exclude_patterns
+    是全新键，无旧值可改，缺失由 DEFAULT_CONFIG 兜底，不做 setdefault。
+    幂等纯函数：重跑不变。
+    """
+    if data.get("clipboard_guard_enabled") == _CONFIG_V3_OLD_GUARD_ENABLED:
+        data["clipboard_guard_enabled"] = _CONFIG_V3_NEW_GUARD_ENABLED
+    return data
+
+
 # 各数据 store 的当前 schema 版本（键 = 各文件顶层记录数组键名，config 除外）。
 # 结构变更时把对应项 +1，并在 MIGRATIONS 注册逐级迁移函数。
 STORE_VERSIONS = {
-    "config":    3,     # config.json（schema_version 字段；v3 = 新增
-                        # toast_duration_ms 键；v2 = 分组阈值默认 120→900）
+    "config":    4,     # config.json（schema_version 字段；v4 = 凭证哨兵
+                        # 默认开启；v3 = 新增 toast_duration_ms 键；
+                        # v2 = 分组阈值默认 120→900）
     "fragments": 1,     # fragments.json
     "notes":     1,     # notes.json
     "tasks":     1,     # schedule.json
@@ -110,7 +136,8 @@ STORE_VERSIONS = {
 # 版本号照常推进、数据原样跳过（适用于新增字段且读取端已有兜底的场景）。
 MIGRATIONS = {
     "config":    {1: _migrate_config_1_to_2,
-                  2: _migrate_config_2_to_3},
+                  2: _migrate_config_2_to_3,
+                  3: _migrate_config_3_to_4},
     "fragments": {0: _migrate_fragments_0_to_1},
     "notes":     {},
     "tasks":     {},

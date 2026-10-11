@@ -68,6 +68,10 @@
                           键无旧值可改，迁移按 fragments 0→1 的 setdefault
                           先例补默认，存量用户值一律不动；2026-10-06 该键
                           随轻提示设置项重设计退役，迁移保留仅作版本史）
+                          当前 v4 = 凭证哨兵默认开启（clipboard_guard_
+                          enabled False→True，只改写等于旧默认的值）+
+                          新增 clipboard_guard_expiry_hours /
+                          clipboard_guard_exclude_patterns 两键
   - auto_check_updates:   启动后每天最多静默检查一次新版本（2.3；「不自动
                           下载、失败静默、不上传任何数据」立场见 update_checker）
   - last_update_check:    最近一次更新检查日期 "YYYY-MM-DD"（空 = 从未检查）
@@ -244,11 +248,24 @@ DEFAULT_CONFIG = {
     "hide_on_fullscreen":   True,         # 全屏应用前台时自动隐藏悬浮球
     "fragment_preview_visible": True,     # 碎片工作台右侧预览面板是否显示
     "clipboard_capture_images": True,     # 剪贴板图片自动存入临时素材池
-    # 凭证哨兵（clipboard-guard）：文本落盘前过一层正则 + 熵检测，
-    # 命中即按 clipboard_guard_mode 处置。**默认关闭**（与既有行为等价，
-    # 上线后手工打开，出问题一键关回去）。
-    "clipboard_guard_enabled": False,      # 凭证哨兵总开关（默认关）
+    # ===== 凭证哨兵（clipboard-guard）=====
+    # 文本落盘前过一层正则 + 熵检测（secret_guard），命中即按
+    # clipboard_guard_mode 处置。**2026-10-08 起默认开启**（默认 mask=
+    # 遮蔽占位落盘；老配置里仍是旧默认 False 的由 config v3→v4 迁移
+    # 改写为 True，用户显式设过的其它值不动——旧版只有 False/True 两值，
+    # False 既是旧默认也是显式关闭，迁移口径=「等于旧默认即改写」，
+    # 关闭过的用户在设置页一键关回）。
+    # 原文随行：mask 落盘时原文经 DPAPI 加密（secret_vault）存进碎片
+    # secret_enc 字段，本机同账户可「揭示原文」，换机/换账户不可解。
+    "clipboard_guard_enabled": True,       # 凭证哨兵总开关（默认开）
     "clipboard_guard_mode":  "mask",       # 命中处置：deny / mask / allow
+    # 敏感内容自动过期（小时）：命中哨兵的碎片（带随行密文）落盘超过
+    # 该时长即整条自动清除；0 = 不过期。范围与设置页 Stepper 一致。
+    "clipboard_guard_expiry_hours": 72,
+    # 排除规则：用户自定义正则列表——剪贴板文本命中任一规则即跳过哨兵
+    # 检测（放行收录）。非法正则在 sanitize_guard_patterns 处被静默丢弃，
+    # 上限 20 条（与 custom_actions 上限同口径）。
+    "clipboard_guard_exclude_patterns": [],
     "nav_order":            [],           # 左栏功能页显示顺序（空 = 从未自定义，用默认顺序）
     # 左栏当前**已展开**的分组集合（多组可同时展开；空列表 = 全部折叠）
     # 取值见 src/nav_layout.NAV_GROUPS；收敛逻辑在 sanitize_expanded_groups
@@ -274,7 +291,7 @@ DEFAULT_CONFIG = {
     #   落的版本号，若它落后于 STORE_VERSIONS，文件每次加载都会重跑迁移 ——
     #   用户把 asset_group_gap_seconds 显式设回 120 后，会被迁移再次改回 900，
     #   静默覆盖用户意图。由 test_assets_grouping 的 pin 用例钉死两边一致。
-    "schema_version":       3,
+    "schema_version":       4,
 }
 
 # 配置项类型映射（用于校验）
@@ -353,6 +370,8 @@ _CONFIG_TYPES = {
     "clipboard_capture_images": bool,
     "clipboard_guard_enabled": bool,
     "clipboard_guard_mode": str,
+    "clipboard_guard_expiry_hours": int,
+    "clipboard_guard_exclude_patterns": list,
     "nav_order":            list,
     "nav_expanded_groups":  list,
     "ai_backend_mode":      str,
@@ -427,6 +446,8 @@ _CONFIG_RANGES = {
     "wallpaper_opacity":    (0, 100),
     "wallpaper_blur":       (0, wallpaper.MAX_BLUR),
     "wallpaper_veil":       (0, 100),
+    # 凭证哨兵自动过期：0（不过期）~ 8760（一年）；与设置页 Stepper 同源
+    "clipboard_guard_expiry_hours": (0, 8760),
     # AI 总配置本地服务端口：合法 TCP 端口段（设置页输入框同范围）
     "ai_local_port":        (1024, 65535),
     # 本地模型上下文长度：llama-server -c 硬边界（越界由 ai_server.sanitize_ctx_size

@@ -630,6 +630,31 @@ class TestStoreDialog:
         finally:
             dlg.deleteLater()
 
+    def test_dialog_online_cards_hide_empty_hint(self, qapp, tmp_path):
+        """在线市场出卡片后必须撤掉本地空态提示（2026-10-08 用户实测：
+        本地包都装完时「都已安装」文案压在在线卡片上方，误导用户）。
+        原实现 `if not self._market_items` 是死分支，条件颠倒。"""
+        from src.plugins_panel import PluginStoreDialog, PluginsPanel
+        entries = [_make_store_entry(tmp_path, "demo-b", installed=True)]
+        panel = PluginsPanel(_FakeHost(loader=_StoreFakeLoader([], entries)))
+        dlg = PluginStoreDialog(panel)
+        try:
+            assert dlg._empty_label.isVisibleTo(dlg)     # 本地空态先在
+            dlg._market_items = [{
+                "id": "remote-x", "name": "远程插件", "version": "2.0",
+                "description": "d", "capabilities": [], "hotkeys": [],
+                "size": 2048, "file": "remote-x.fpplug", "sha256": "",
+            }]
+            dlg._market_assets = {"remote-x.fpplug": 123}
+            dlg._on_release_loaded({"ok": True, "body": ""})
+            online = [w for i in range(dlg._list_layout.count())
+                      for w in [dlg._list_layout.itemAt(i).widget()]
+                      if w is not None and getattr(w, "_is_online_card", False)]
+            assert len(online) == 1
+            assert not dlg._empty_label.isVisibleTo(dlg)
+        finally:
+            dlg.deleteLater()
+
     def test_dialog_bad_package_shows_error(self, qapp, tmp_path):
         from PyQt6.QtWidgets import QLabel, QPushButton
         from src.plugins_panel import PluginStoreDialog, PluginsPanel

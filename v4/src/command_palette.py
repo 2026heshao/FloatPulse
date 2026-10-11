@@ -39,7 +39,7 @@
 from dataclasses import dataclass
 from string import Template
 
-from PyQt6.QtCore import QEvent, QPoint, QRectF, QSize, Qt
+from PyQt6.QtCore import QEvent, QPoint, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout,
@@ -83,6 +83,25 @@ _CUSTOM_ACTION_ICONS = {"url": "nav", "folder": "folder", "text": "clipboard"}
 # 直达键组合键形态校验的修饰键白名单（大小写不敏感；不含 Ctrl+K 这种
 # 应用内快捷键 —— 直达键必须是全局热键，至少带一个修饰键）
 _COMBO_MODIFIERS = frozenset({"ctrl", "alt", "shift", "win", "meta"})
+
+# 应用内置快捷键（不可改键的窗口级固定键）——**单一真相源**。
+# 2026-10-10（用户报「自定义动作快捷键无法识别」）：用户把自定义动作绑到
+# Ctrl+T，而 Ctrl+T 是「切换主题」内置键 —— 直达键是**全局热键**，注册后
+# 会系统级吞掉该组合（浏览器 Ctrl+T 新建标签也会被抢），且与内置键互相顶替。
+# 旧的冲突查重只比「命令直达键 / 自定义动作 / 截图热键 / 唤醒键」四源，
+# **漏了内置键**，于是撞车组合能一路存进配置。此表供设置页查重消费
+# （main_window._init_shortcuts 的实际绑定与 settings_panel「内置快捷键」
+# 说明行同源，改绑内置键时三处一起改）。
+# 值 = 展示名；键 = 归一化后的组合键串（小写、无空格）。
+BUILTIN_HOTKEYS = {
+    "ctrl+w": "隐藏主窗口",
+    "ctrl+h": "隐藏主窗口",
+    "ctrl+t": "切换主题",
+    "ctrl+k": "站内搜索",
+    "f1": "使用说明",
+}
+# Ctrl+1~8 切左栏第 N 页（编号区间展开，避免手写 8 条）
+BUILTIN_NAV_HOTKEY_LABEL = "切换功能页"
 
 
 @dataclass(frozen=True)
@@ -334,6 +353,25 @@ def normalize_trigger(raw):
     return raw if raw in TRIGGER_KEYS else "/"
 
 
+def builtin_hotkey_holder(combo) -> str:
+    """组合键是否撞上应用内置快捷键；撞了返回其展示名，否则空串。
+
+    与设置页查重同口径（归一化：小写 + 去空格）；``Ctrl+1~8`` 段一并覆盖
+    —— 内置键是窗口级固定键，直达键是全局热键，同键会互相顶替且系统级
+    吞键，必须在绑定时就拒绝（此前查重漏了内置表，撞车组合能存进配置）。
+    """
+    norm = str(combo or "").strip().lower().replace(" ", "")
+    if not norm:
+        return ""
+    if norm in BUILTIN_HOTKEYS:
+        return BUILTIN_HOTKEYS[norm]
+    if norm.startswith("ctrl+") and len(norm) == len("ctrl+1"):
+        tail = norm[len("ctrl+"):]
+        if tail.isdigit() and 1 <= int(tail) <= 8:
+            return BUILTIN_NAV_HOTKEY_LABEL
+    return ""
+
+
 # ---------------- 模糊匹配（纯函数，可单测） ----------------
 def _is_subsequence(needle: str, haystack: str) -> bool:
     """``needle`` 的字符是否按序出现在 ``haystack`` 中（不要求连续）。"""
@@ -527,7 +565,11 @@ class CommandPalette(QDialog):
     玻璃壳复用 GlassPanel，配色/QSS 跟随宿主当前主题。
     """
 
-    SHADOW_MARGIN = 14
+    # 阴影收口（2026-10-09 用户报「面板外侧有一圈透明框」）：旧值
+    # SHADOW_MARGIN=14 + 6 层阴影把灰环画得太宽太重，视觉上像一圈
+    # 脏边框。收口为 6px 边距 + 4 层递减阴影（GlassDialog 卡片同量级），
+    # 体感从「大灰框」变「贴合的柔影」；窗口随之收紧，弹出不占多余面积。
+    SHADOW_MARGIN = 6
     RADIUS = 12
     WIDTH = 560
     HEIGHT = 420
@@ -539,9 +581,25 @@ class CommandPalette(QDialog):
         self._entries = []
         self.setWindowFlags(
             Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint)
+            | Qt.WindowType.WindowStaysOnTopHint
+            # NoDropShadowWindowHint（2026-10-10 用户报「周围还有一圈白色
+            # 透明框」）：无边框顶层窗在 Win11 下 DWM 会补画系统阴影/白边，
+            # 自绘的柔影之外再叠一层系统框就是那圈白环。与 toast /
+            # task_reminder_popup / date_picker 同款收口手法。
+            | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(self.WIDTH, self.HEIGHT)
+
+        # 焦点保险定时器（2026-10-10）：**必须是挂在本窗上的成员 QTimer**，
+        # 不能用 QTimer.singleShot(ms, self._ensure_focus) —— 后者把已绑定
+        # 方法与静态定时器绑在一起，面板在 120ms 内被 close/deleteLater 后
+        # 回调仍会触发已析构的 C++ 对象，实测在测试组合跑时引发 access
+        # violation 进程崩溃（改前不崩、改后必崩，A/B 对照定位）。
+        # 成员定时器随宿主销毁自动清场，无悬空回调。
+        self._focus_timer = QTimer(self)
+        self._focus_timer.setSingleShot(True)
+        self._focus_timer.setInterval(120)
+        self._focus_timer.timeout.connect(self._ensure_focus)
 
         # ---- 玻璃壳 + 阴影边距（体例照 GlassDialog）----
         self._container = GlassPanel(self, radius=self.RADIUS)
@@ -735,6 +793,20 @@ class CommandPalette(QDialog):
         return self._execute_item(item) if item is not None else False
 
     # ---------------- 打开 / 关闭 ----------------
+    def closeEvent(self, event):
+        """关闭即撤下焦点保险定时器（2026-10-10 崩溃修复）。
+
+        面板关闭后不再需要抢焦点；更关键的是：定时器若在关闭后仍 pending，
+        宿主随后 deleteLater 销毁 C++ 对象，回调会打在已析构对象上 ——
+        实测在测试组合跑（open_at 后紧接 teardown 销毁）必崩
+        ``access violation``。这里显式 stop，与成员定时器的随宿主清场
+        形成双保险（stop 覆盖「关窗但未销毁」窗口期）。
+        """
+        timer = getattr(self, "_focus_timer", None)
+        if timer is not None:
+            timer.stop()
+        super().closeEvent(event)
+
     def open_at(self):
         """刷新注册表（自定义动作/直达键现算）→ 清空查询 → 定位弹出。"""
         self.reload_registry()
@@ -755,6 +827,25 @@ class CommandPalette(QDialog):
         self.raise_()
         self.activateWindow()
         self._input.setFocus(Qt.FocusReason.PopupFocusReason)
+        # 全局唤醒键焦点保险（2026-10-09 用户报「优先级不够高」）：
+        # Windows 前台锁（前台应用霸占焦点时 SetForegroundWindow 被系统
+        # 拒绝）下 Popup 的 activateWindow 可能静默失败 —— 面板画出来了
+        # 却收不到键盘输入，用户感知等同「唤不醒」。show 后事件循环再跑
+        # 一拍时回查焦点归属，丢了就 raise_ + activateWindow 补一次
+        # （绕过锁需要的前台切换一般在此刻已被系统放行）；仍失败保持
+        # 现状不无限重试 —— 打字进不去总比面板抽风闪烁好。
+        # 用成员定时器（见 __init__）：面板提前关闭/销毁时自动随宿主清场。
+        self._focus_timer.start()
+
+    def _ensure_focus(self):
+        """弹出后焦点兜底：面板仍可见但焦点不在搜索框 → 抢回前台+焦点。"""
+        if not self.isVisible():
+            return
+        if self._input.hasFocus():
+            return
+        self.raise_()
+        self.activateWindow()
+        self._input.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # ---------------- 阴影 ----------------
     def paintEvent(self, event):
@@ -764,8 +855,10 @@ class CommandPalette(QDialog):
         m = self.SHADOW_MARGIN
         base = QRectF(self.rect()).adjusted(m, m, -m, -m)
         theme = getattr(self._host, "current_theme", None) or DEFAULT_THEME
-        alpha = 96 if theme == "dark" else 48
+        # 阴影收口（2026-10-09）：层数 6→4、max_alpha 减半（96/48 → 48/24），
+        # 与 6px 边距配套 —— 外圈不再出现可感知的灰色环带
+        alpha = 48 if theme == "dark" else 24
         draw_soft_shadow(painter, base, self.RADIUS,
-                         layers=6, max_alpha=alpha, offset_y=5.0)
+                         layers=4, max_alpha=alpha, offset_y=4.0)
         painter.end()
         super().paintEvent(event)

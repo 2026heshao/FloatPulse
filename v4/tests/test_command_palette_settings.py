@@ -258,10 +258,14 @@ class TestConfigTrio:
         assert "command_palette_global_hotkey" not in _CONFIG_VALUE_WHITELISTS
 
     def test_schema_versions_untouched(self):
-        """不动 STORE_VERSIONS / schema_version（只加新键默认值的回归钉子）"""
+        """不动 STORE_VERSIONS / schema_version（只加新键默认值的回归钉子）
+
+        2026-10-08 稳定性轮 P0：凭证哨兵默认开启走 config v3→v4 迁移
+        （哨兵批次本身动版本，本卡只加键的批次不再动版本），如实升 4。
+        """
         from src.json_store import STORE_VERSIONS
-        assert DEFAULT_CONFIG["schema_version"] == 3
-        assert STORE_VERSIONS["config"] == 3
+        assert DEFAULT_CONFIG["schema_version"] == 4
+        assert STORE_VERSIONS["config"] == 4
 
 
 # ====================================================================
@@ -469,3 +473,29 @@ class TestGlobalWakeHotkey:
             assert grid._find_conflict("", "alt+/") == "全局唤醒键"
         finally:
             grid.deleteLater()
+
+    # ---- 内置快捷键冲突源（2026-10-10 用户报自定义动作快捷键失效）----
+    def test_builtin_shortcut_conflict_rejected(self, qapp):
+        """用户把自定义动作绑到 Ctrl+T（内置「切换主题」）能存进配置，
+        而直达键是全局热键 → 按不出反应且互相顶替。查重必须拦住。"""
+        host = _StubHost({"command_hotkeys": {}})
+        grid = CommandKeysGrid(host)
+        try:
+            holder = grid._find_conflict("", "ctrl+t")
+            assert holder is not None and "切换主题" in holder
+            # 自由组合不受影响
+            assert grid._find_conflict("", "ctrl+alt+t") is None
+        finally:
+            grid.deleteLater()
+
+    def test_custom_action_builtin_conflict(self, qapp):
+        """自定义动作表单同样拦内置快捷键（Ctrl+T / F1 / Ctrl+1）"""
+        host = _StubHost({})
+        panel = CustomActionsPanel(host)
+        try:
+            for combo in ("Ctrl+T", "F1", "Ctrl+3"):
+                holder = panel._hotkey_conflict([], combo)
+                assert holder is not None and "内置快捷键" in holder, combo
+            assert panel._hotkey_conflict([], "Ctrl+Alt+T") is None
+        finally:
+            panel.deleteLater()

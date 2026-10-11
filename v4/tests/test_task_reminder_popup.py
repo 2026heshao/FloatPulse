@@ -14,9 +14,11 @@ toast），样式不可控、观感差。现换自绘顶层卡片 ``task_reminde
   C. 行为：「打开任务页」与点卡片空白处发 open_requested 并收起；
      「知道了」/ 关闭钮 / 倒计时到点收起发 dismissed；悬停暂停倒计时
      （记剩余量）；单例复用不堆叠；右下角贴边定位；
-  D. 回退钉子：knowledge_ball._check_task_reminders 不得再调原生气泡
-     （AST 扫 show_message），且必须走 task_reminder_popup.show_reminder；
-     主窗 QSS 必须带 #taskReminderCard 骨架规则。
+  D. 回退钉子：task_reminder_wiring._check_task_reminders 不得再调
+     原生气泡（AST 扫 show_message），且必须走
+     task_reminder_popup.show_reminder；主窗 QSS 必须带
+     #taskReminderCard 骨架规则。（2026-10-08 拆分轮：编排自
+     knowledge_ball.py 迁 src/task_reminder_wiring.py，钉子随迁。）
 ====================================================================
 """
 
@@ -299,8 +301,11 @@ def test_main_qss_has_reminder_card_skeleton():
 
 
 def test_knowledge_ball_no_longer_uses_native_balloon():
-    """回退钉子：任务提醒不得再走原生托盘气泡（AST 扫描，防倒退）。"""
-    src_path = os.path.join(BASE, "knowledge_ball.py")
+    """回退钉子：任务提醒不得再走原生托盘气泡（AST 扫描，防倒退）。
+
+    2026-10-08 拆分轮：_check_task_reminders 迁 src/task_reminder_wiring.py。
+    """
+    src_path = os.path.join(BASE, "src", "task_reminder_wiring.py")
     with open(src_path, encoding="utf-8") as f:
         tree = ast.parse(f.read())
     fn = None

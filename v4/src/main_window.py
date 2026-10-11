@@ -36,6 +36,7 @@
 """
 
 import os
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -145,6 +146,9 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
     TITLE_BAR_HEIGHT = 48
     SHADOW_MARGIN = 18           # 阴影留白边距
     WINDOW_RADIUS = 14           # 窗口圆角（与设计稿一致）
+    # 页面后台预热「慢页」阈值（毫秒）：预热是同步构建，超过此值即留痕
+    # （2026-10-10 用户报开窗后卡顿，用于定位哪一页占用事件循环）
+    SLOW_PAGE_WARM_MS = 120.0
     # 默认尺寸按屏幕可用工作区钳制时预留的四周留白（小屏兜底，防开出屏幕外）
     SCREEN_SAFE_MARGIN = 40
     # 窗口几何落盘防抖间隔（毫秒）：连续拖动/缩放期间只写一次盘
@@ -562,19 +566,60 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self._palette_shortcut.activated.connect(self._open_command_palette)
         self._reapply_command_hotkeys()
 
-    def _reapply_command_hotkeys(self):
-        """命令直达键 + 全局唤醒键重注册：注销全部 → 读 config 过滤 → 逐条注册。
+    # 全局唤醒键注册失败的重试退避（2026-10-09 用户报「唤醒键时灵时不灵」）：
+    # RegisterHotKey 失败的典型场景是**别的程序先占了键**（或上一次会话的
+    # 热键还没释放干净），而占用者往往随后会自己退出/释放 —— 此刻起 3s /
+    # 10s / 30s 三次退避重试能救回绝大多数「开机后怎么按都没反应」的会话；
+    # 三次全败保持原告警口径不再骚扰（toast 只弹首次）。设置页改键触发
+    # 本方法重入时，旧重试链随 unregister_all + 链号作废一并失效。
+    _WAKE_RETRY_DELAYS_MS = (3000, 10000, 30000)
 
-        总开关关闭时保持注销态直接返回（直达键与全局唤醒键随面板开关联动）。
-        注册失败只告警 + toast，不中断后续键。
+    def _reapply_command_hotkeys(self):
+        """命令直达键 + 自定义动作直达键 + 全局唤醒键重注册。
+
+        注销全部 → 读 config 过滤 → 逐条注册；总开关关闭时保持注销态直接
+        返回（三类键随面板开关联动）。注册失败只告警 + toast，不中断后续键。
+
+        ★2026-10-10（用户报「自定义动作的快捷键无法识别使用」）：此前只遍历
+        ``config.command_hotkeys``（cid → 组合键），**漏了
+        ``config.custom_actions[].hotkey``** —— 设置页允许给自定义动作绑直达键
+        且冲突查重齐备，注册侧却从没读过，于是键绑了也按不出任何反应，只能
+        进面板搜索。现按 custom_actions 清洗结果一并注册（cid 口径
+        ``custom.<id>``，与注册表 ``custom_action_entries`` 同源），执行仍走
+        统一的 ``_execute_command_by_cid`` → ``execute_custom_action``。
         """
         self._command_hotkey_mgr.unregister_all()
+        # 递增链号：作废在途的唤醒键重试链（旧链回调发现自己的号过期即退出，
+        # 不再往新配置上重注册旧键 —— 与 open_at 的 reload 现算同口径）
+        self._wake_retry_seq = getattr(self, "_wake_retry_seq", 0) + 1
+        # 配置已变 → 直达键查表缓存必须失效（否则新增/改名自定义动作后
+        # 按 cid 查到的仍是旧注册表，键位指向已删条目）
+        self._cmd_registry = None
         if not self._config.get("command_palette_enabled", True):
             return
         from src import command_palette
         combos = command_palette.sanitize_hotkeys_map(
             self._config.get("command_hotkeys", {}) or {})
+        # 自定义动作直达键并入同一注册循环（cid = custom.<id>）
+        for action in command_palette.sanitize_custom_actions(
+                self._config.get("custom_actions", []) or []):
+            if action.get("hotkey"):
+                combos[f"custom.{action['id']}"] = action["hotkey"]
         for cid, combo in combos.items():
+            # 内置快捷键冲突 → 跳过注册（2026-10-10）：直达键是**全局热键**，
+            # 真注册上去会系统级吞掉该组合（Ctrl+T 会让浏览器"新建标签"失效），
+            # 且与本应用内置键互相顶替（表现正是用户报的「绑了没反应」）。
+            # 设置页查重已拦新增，这里兜住**存量配置**（改版前存下的撞车键）。
+            holder = command_palette.builtin_hotkey_holder(combo)
+            if holder:
+                self._log_warn(
+                    f"[命令面板] 直达键 {combo}（{cid}）与内置快捷键"
+                    f"「{holder}」冲突，已跳过注册")
+                self.show_toast(
+                    f"直达键 {combo} 与内置快捷键「{holder}」冲突，已跳过；"
+                    f"请在 设置 → 全局工具 → 命令面板 中改绑",
+                    kind="warning")
+                continue
             ok = self._command_hotkey_mgr.register(
                 combo, lambda c=cid: self._execute_command_by_cid(c))
             if not ok:
@@ -586,17 +631,60 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         # 即呼出命令面板——触发键是 QShortcut 只在应用聚焦时有效，本键走
         # RegisterHotKey 补盲区。空串 = 未启用；与直达键 / 自定义动作 /
         # 截图热键的互斥查重在设置侧已拦（command_palette_settings），注册
-        # 侧不做第二套查重，仍失败（如被其他程序占用）沿用既有告警口径。
+        # 侧不做第二套查重，仍失败（如被其他程序占用）走退避重试链。
         wake = str(self._config.get("command_palette_global_hotkey", "")
                    or "").strip()
         if not wake:
             return
-        if not self._command_hotkey_mgr.register(
-                wake, self._open_command_palette):
-            self._log_warn(f"[命令面板] 全局唤醒键注册失败：{wake}")
+        self._register_wake_hotkey(wake)
+
+    def _register_wake_hotkey(self, wake: str,
+                              attempt: int = 0, seq: int = None):
+        """注册全局唤醒键；失败按退避表重试（toast 只在首次失败弹）。
+
+        ``seq`` 为重试链号（None = 现取当前值开新链）：设置页改键 /
+        开关联动会走 _reapply_command_hotkeys 重入并递增链号，旧链的
+        延迟回调发现号不匹配即静默退出，不会把旧键注册到新会话上。
+        成功注册（含重试救回）写 INFO 日志 —— 此前成功路径零留痕，
+        「键到底注册上没有」只能靠猜，排障时对不上日志。
+        """
+        if seq is None:
+            seq = self._wake_retry_seq
+        ok = self._command_hotkey_mgr.register(wake, self._open_command_palette)
+        if ok:
+            if attempt:
+                self._log_info(
+                    f"[命令面板] 全局唤醒键重试成功（第 {attempt} 次）：{wake}")
+            else:
+                self._log_info(f"[命令面板] 全局唤醒键已注册：{wake}")
+            return
+        if attempt >= len(self._WAKE_RETRY_DELAYS_MS):
+            self._log_warn(
+                f"[命令面板] 全局唤醒键注册失败（已重试 {attempt} 次）：{wake}")
+            return
+        delay = self._WAKE_RETRY_DELAYS_MS[attempt]
+        self._log_warn(
+            f"[命令面板] 全局唤醒键注册失败（{delay // 1000}s 后第 "
+            f"{attempt + 1} 次重试）：{wake}")
+        if attempt == 0:
             self.show_toast(
-                f"全局唤醒键 {wake} 注册失败（可能被其他程序占用）",
+                f"全局唤醒键 {wake} 注册失败，将自动重试（可能被其他程序占用）",
                 kind="warning")
+        chain = seq
+        QTimer.singleShot(delay, lambda: self._wake_retry_fire(
+            wake, attempt + 1, chain))
+
+    def _wake_retry_fire(self, wake: str, attempt: int, chain: int):
+        """退避重试的延迟落点：链号过期（配置已变）或开关已关 → 放弃。"""
+        if chain != self._wake_retry_seq:
+            return
+        if not self._config.get("command_palette_enabled", True):
+            return
+        current = str(self._config.get("command_palette_global_hotkey", "")
+                      or "").strip()
+        if current != wake:
+            return
+        self._register_wake_hotkey(wake, attempt=attempt, seq=chain)
 
     def _execute_command_by_cid(self, cid: str):
         """直达键触发：按 cid 在（惰性缓存的）注册表里查命令并执行。
@@ -690,6 +778,15 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         try:
             from src.logger import get_logger
             get_logger().warning(msg)
+        except Exception:                             # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _log_info(msg: str):
+        """INFO 级留痕（同 _log_warn 的懒 import 口径；唤醒键注册成功等）"""
+        try:
+            from src.logger import get_logger
+            get_logger().info(msg)
         except Exception:                             # noqa: BLE001
             pass
 
@@ -973,6 +1070,27 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         self._play_entrance_animation()
         # 启动丝滑化：构造期只建首页，show 后逐页后台构建（一次性）
         self._start_lazy_warmup()
+        # 前台强夺（2026-10-10 用户报「主窗打开后卡住几秒点不动」）：
+        # 实机三次取证显示主窗自身响应始终 ≤73ms（事件循环毫不忙），
+        # 但窗口出来后前台仍是别的进程 —— Windows 前台锁下
+        # activateWindow() 被静默拒绝，用户看得见却点不动（键盘也进不去），
+        # 直到手点一次标题栏。这里延后一拍（窗口已映射，Qt 自身的激活
+        # 尝试先跑完）再强夺前台，失败也不影响显示。
+        QTimer.singleShot(0, self._force_foreground_now)
+
+    def _force_foreground_now(self):
+        """把主窗真正推到前台（前台锁下 activateWindow 会静默失败）。
+
+        只读校验 + 三步递进都收在 win_focus.force_foreground；这里只负责
+        在正确的时机调用（show 后一拍）并保证不可见/已销毁时不做无效调用。
+        """
+        if not self.isVisible():
+            return
+        try:
+            from src.win_focus import force_foreground
+            force_foreground(int(self.winId()))
+        except Exception as exc:            # noqa: BLE001 - 抢焦点失败不该影响显示
+            self._log_warn(f"[主窗口] 前台强夺失败：{exc!r}")
 
     def _init_nav_indicator_position(self):
         """布局完成后把指示条对齐到当前选中项（不带动画，避免从 0 滑下来）"""
@@ -1516,6 +1634,10 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
             self._lazy_warm_timer = None
             return
         idx = self._lazy_pending.pop(0)
+        # 慢页留痕（2026-10-10 用户报「打开主窗后卡几秒」）：预热是同步重活，
+        # 单页构建直接占用事件循环 —— 只在超过阈值时记一行，平时零输出，
+        # 供定位「到底哪一页把开窗后的交互卡住」。
+        t0 = time.perf_counter()
         try:
             self._ensure_page_built(idx)
         except Exception as e:        # noqa: BLE001 - 单页预热失败不崩进程
@@ -1523,6 +1645,13 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
             # 失败留痕即可，页面首次真正切到时还会再走一次构建
             from src.logger import get_logger
             get_logger().warning(f"第 {idx} 页后台预热失败（切页时将重试）: {e}")
+            return
+        cost_ms = (time.perf_counter() - t0) * 1000
+        if cost_ms >= self.SLOW_PAGE_WARM_MS:
+            from src.logger import get_logger
+            get_logger().warning(
+                f"[主窗口] 预热第 {idx} 页耗时 {cost_ms:.0f}ms"
+                f"（超过 {self.SLOW_PAGE_WARM_MS:.0f}ms 阈值，期间事件循环被占用）")
 
     @property
     def _page_fragments(self):
@@ -1785,7 +1914,17 @@ class MainWindow(NavChromeMixin, PluginPagesMixin, QWidget):
         """公开入口：切换到指定页面并刷新对应面板（托盘气泡点击等外部调用）。
 
         与 show_plugins_page 同族；索引含义见 _refresh_page 的页面表。
+
+        ★2026-10-10（用户报「主窗口关闭时命令面板的操作/跳转无效」）：
+        补齐 show/raise/activateWindow 三连 —— 此前只切栈，主窗处于
+        关闭（收进托盘/隐藏）态时，页面切了但窗口根本没露脸，用户
+        感知就是「点了没反应」。show_settings_page / show_plugins_page /
+        show_plugin_page 三者本就带三连，此处是唯一漏网的同类入口，
+        现与它们同构（隐藏态先显形再切页，可见态重复 show 是无害幂等）。
         """
+        self.show()
+        self.raise_()
+        self.activateWindow()
         self._switch_page(index)
 
     def refresh_apps_page(self):

@@ -17,8 +17,9 @@
      progress_tween 插值；阶段打点快于动画链长时未完链立即结算
      再开新链（跳格但不乱、不丢档，真实节奏「第 6 档长驻」可视）
   4. 满格苏醒（只播一次）：球 scale 1→1.12→1 弹跳 + 光晕扩散；
-     完成后触发 after_wake 回调，main() 据此 show 主窗（三段接力：
-     苏醒 → 主窗入场 → splash_hold 后闪屏才淡出）
+     ★2026-10-08 启动提速：苏醒**开始**即触发 after_wake 回调（并行
+     收尾——弹跳/光晕照播，main() 据此 show 主窗，不再等光晕走完）；
+     末档 set_stage 跳过光点飞行直接补满（真实工作已完成的仪式段）
   5. 文案交叉淡变（fast 档）、计数与环同步、版本号右下角
   6. 全部时长经 motion.duration(ms, anim_speed) 缩放；reduce_motion
      下零动画（球静止中位、跳格充能、文案硬切、finish 直接 close）
@@ -222,9 +223,15 @@ class LaunchSplash(QWidget):
             self.update()
             return
         self._target = target
-        tip = self._ring_tip_pos(self._frac)
-        self._spark = {"t0": self._clock_ms(),
-                       "x": tip.x(), "y": tip.y()}
+        if target >= 1.0:
+            # 2026-10-08 启动提速：末档时真实启动工作已全部完成，光点飞行
+            # 纯属仪式——跳过 180ms 在途段，从当前档直接补满（补满插值保留）
+            self._spark = None
+            self._start_tween()
+        else:
+            tip = self._ring_tip_pos(self._frac)
+            self._spark = {"t0": self._clock_ms(),
+                           "x": tip.x(), "y": tip.y()}
         self.update()
 
     def after_wake(self, cb):
@@ -280,13 +287,25 @@ class LaunchSplash(QWidget):
                        "from": self._frac, "to": self._target}
 
     def _start_wake(self):
-        """满格苏醒（只播一次）：弹跳 + 光晕；完成即放行交接回调"""
+        """满格苏醒（只播一次）：弹跳 + 光晕。
+
+        2026-10-08 启动提速：交接回调改为**苏醒开始即放行**（并行收尾）
+        ——弹跳/光晕照播到完（帧驱动自然收束），主窗 show 不再等 320ms
+        光晕走完；闪屏卡片随后经 splash_hold + splash_out 淡出，正好盖住
+        苏醒尾巴。reduce_motion 仍零动画立即完成（_mark_awake 同步口径）。
+        """
         self._target = max(self._target, 1.0)
         self._frac = 1.0
         self._woke = True
         self._wake_t0 = self._clock_ms() if self._ms("wake_halo") > 0 else None
         if self._wake_t0 is None:
             self._mark_awake()
+            return
+        # 并行放行：动画照播，焦点交接立即开始（0ms 单跳异步触发）
+        self._wake_done = True
+        cbs, self._wake_cbs = self._wake_cbs, []
+        for cb in cbs:
+            QTimer.singleShot(0, cb)
 
     def _mark_awake(self):
         """苏醒完成：放行焦点交接回调（幂等；先标记再异步触发）"""

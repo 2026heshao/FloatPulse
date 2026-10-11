@@ -213,3 +213,47 @@ def sanitize_mode(value, default: str = DEFAULT_MODE) -> str:
     if isinstance(value, str) and value in GUARD_MODES:
         return value
     return default
+
+
+# ====================================================================
+# 用户自定义排除规则（2026-10-08 稳定性轮 P0）
+# ====================================================================
+# 剪贴板文本命中任一用户正则 → 跳过哨兵检测（放行收录）。本函数只做
+# 配置清洗（形态校验 + 编译预检），匹配逻辑在 clipboard_monitor。
+EXCLUDE_PATTERNS_MAX = 20
+
+
+def sanitize_guard_patterns(value, limit: int = EXCLUDE_PATTERNS_MAX):
+    """把任意配置值收敛为合法排除正则列表。
+
+    - 非列表 → 空列表；条目非 str / 空串 / 编译失败 → 静默丢弃
+      （用户手改 config.json 塞垃圾值不致崩掉收录链路）
+    - 去重（保序）；超 limit 截断
+    :return: ``(合法正则串列表, 预编译对象列表)`` —— 串列表供回写/展示，
+             编译对象供匹配（同一来源只编译一次）。
+    """
+    if not isinstance(value, (list, tuple)):
+        return [], []
+    seen = []
+    compiled = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        try:
+            cre = re.compile(item)
+        except re.error:
+            continue
+        if item in seen:
+            continue
+        seen.append(item)
+        compiled.append(cre)
+        if len(seen) >= limit:
+            break
+    return seen, compiled
+
+
+def matches_exclusion(text: str, compiled) -> bool:
+    """文本是否命中任一（预编译）排除规则。空文本 / 无规则 → False。"""
+    if not text or not compiled:
+        return False
+    return any(cre.search(text) is not None for cre in compiled)

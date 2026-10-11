@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QLineEdit, QListWidget, QListWidgetItem, QMenu,
     QFrame, QTextEdit, QSplitter, QStackedWidget,
     QStyledItemDelegate, QStyle, QStyleOptionViewItem, QApplication,
-    QRadioButton, QButtonGroup,
+    QRadioButton, QButtonGroup, QDialog, QPushButton,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, QRect, QRectF
 from PyQt6.QtGui import QColor, QFontMetrics, QBrush, QPainterPath
@@ -37,7 +37,9 @@ from src.fragment_classifier import (
     CATEGORY_LABELS, CATEGORY_ORDER, CATEGORY_TOKENS,
 )
 from src import secret_guard
+from src import secret_vault
 from src import row_hover
+from src.logger import get_logger
 from src.fragment_edit_dialog import FragmentEditDialog
 from src.glass_dialog import GlassDialog, flash_button, make_separator
 from src.glass_message_box import GlassMessageBox
@@ -1284,6 +1286,11 @@ class FragmentsPanel(QWidget):
         act_detail = menu.addAction("查看详情")
         act_edit = menu.addAction("编辑内容")
         act_copy = menu.addAction("复制内容")
+        # 凭证揭示入口（2026-10-08 稳定性轮 P0）：带随行密文的遮蔽条目，
+        # DPAPI 解密后弹窗回看原文；解密失败（换机/换账户）提示不可解
+        act_reveal = None
+        if frag is not None and frag.secret_enc:
+            act_reveal = menu.addAction("揭示原文（已加密保存）")
         menu.addSeparator()
         act_to_note = menu.addAction("存为笔记")
         act_to_kb = menu.addAction("加入知识库")
@@ -1304,6 +1311,8 @@ class FragmentsPanel(QWidget):
         action = menu.exec(self._frag_list.mapToGlobal(pos))
         if action == act_pin:
             self._apply_pin_toggle(fid)
+        elif action == act_reveal:
+            self._reveal_secret(fid)
         elif action == act_detail:
             self._show_detail(fid)
         elif action == act_edit:
@@ -1351,6 +1360,49 @@ class FragmentsPanel(QWidget):
         """复制单条碎片内容到剪贴板"""
         self._clipboard_monitor.put_text(frag.content)
         self._host.show_toast("已复制碎片内容", kind="success")
+
+    def _reveal_secret(self, fragment_id):
+        """揭示被遮蔽凭证的原文（2026-10-08 稳定性轮 P0）。
+
+        DPAPI 解密随行密文后弹窗回看；「复制原文」经 put_text（自带
+        suppress，复制动作本身不会被剪贴板监听再收录一遍）。
+        解密失败（换机 / 换账户 / 数据坏）→ 提示不可解，不弹空窗。
+        """
+        frag = self._fragment_manager.get_fragment(fragment_id)
+        if frag is None or not frag.secret_enc:
+            return
+        original = secret_vault.unprotect(frag.secret_enc)
+        if original is None:
+            self._host.show_toast(
+                "无法解密：密文绑定原电脑与账户，换机或换账户后不可回看",
+                kind="error")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("揭示原文")
+        dlg.setModal(True)
+        dlg.setFixedWidth(420)
+        lay = QVBoxLayout(dlg)
+        hint = QLabel("以下原文仅本机本账户可解密显示；关闭后自动隐藏。")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(original)
+        lay.addWidget(text, 1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_copy = QPushButton("复制原文")
+        btn_close = QPushButton("关闭")
+        btn_copy.clicked.connect(lambda: self._clipboard_monitor.put_text(original))
+        btn_copy.clicked.connect(
+            lambda: self._host.show_toast("已复制原文", kind="success"))
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_close)
+        lay.addLayout(btn_row)
+        get_logger().info(
+            f"[剪贴板] 凭证原文揭示：fragment_id={fragment_id}（弹窗回看）")
+        dlg.exec()
 
     def _edit_fragment(self, fragment_id):
         """编辑碎片内容（保存后刷新列表与预览，保留浏览位置）"""

@@ -22,6 +22,12 @@
  10. hit_count 计数字段（2026-10-03 第 6 卡 inbox-triage）：累计该碎片
      被搜索命中的次数，支撑「从未被搜索命中」的清仓判定条件；旧数据读时
      默认 0（零迁移）。仅由 note_search_hit() 记账，不参与其它逻辑
+ 11. secret_enc 随行密文字段（2026-10-08 稳定性轮 P0）：剪贴板凭证哨兵
+     按 mask 处置落盘时，原文经 DPAPI 加密（src/secret_vault）存进本
+     字段，供「揭示原文」回看；旧数据缺省空串 = 无随行原文（零迁移）。
+     原文明文绝不落 fragments.json——密文换机 / 换账户不可解（DPAPI
+     语义）。敏感内容自动过期（purge_expired_guarded）只清带本字段的
+     碎片，普通碎片不受影响
 
 碎片类型常量：
   - TYPE_CLIPBOARD_TEXT    : 剪贴板文本（Ctrl+C 复制的文本）
@@ -38,6 +44,9 @@ from src.json_store import load_records, save_records
 from src.fragment_classifier import (
     classify, VALID_CATEGORIES,
 )
+
+# 随行密文字段的时间解析格式（与 add_fragment 的 created_at 同源）
+_CREATED_AT_FMT = "%Y-%m-%d %H:%M"
 
 
 # ====================================================================
@@ -152,7 +161,7 @@ class Fragment:
     """
 
     def __init__(self, fragment_id, ftype, content, source, created_at,
-                 category=None, pinned=False, hit_count=0):
+                 category=None, pinned=False, hit_count=0, secret_enc=""):
         self.fragment_id = fragment_id          # 唯一主键，自增不复用
         self.type = ftype                       # 碎片类型（见 TYPE_*）
         self.content = content                   # 碎片内容
@@ -170,6 +179,8 @@ class Fragment:
             self.hit_count = int(hit_count or 0)
         except (TypeError, ValueError):
             self.hit_count = 0
+        # 凭证原文随行密文（DPAPI base64；空串 = 无随行原文）
+        self.secret_enc = str(secret_enc or "")
 
     def to_dict(self):
         """序列化为字典"""
@@ -182,6 +193,7 @@ class Fragment:
             "category": self.category,
             "pinned": self.pinned,
             "hit_count": self.hit_count,
+            "secret_enc": self.secret_enc,
         }
 
     @classmethod
@@ -202,6 +214,7 @@ class Fragment:
             category=d.get("category"),
             pinned=bool(d.get("pinned", False)),
             hit_count=d.get("hit_count", 0),
+            secret_enc=str(d.get("secret_enc", "") or ""),
         )
 
     def preview(self, max_len: int = 50) -> str:
@@ -341,6 +354,10 @@ class FragmentManager:
                 # 内容变了，内容语义类别跟着重算（自动分类的约定）
                 frag.category = classify(text)
                 changed = True
+                # 随行密文是「原文 = content 被遮蔽」的凭据：用户手改内容
+                # 后密文与内容脱钩，揭示会展示旧原文造成误解 → 直接清除
+                if frag.secret_enc:
+                    frag.secret_enc = ""
         if source is not None and str(source) != frag.source:
             frag.source = str(source)
             changed = True
@@ -522,6 +539,69 @@ class FragmentManager:
         if touched:
             self.mark_dirty()
         return touched
+
+    # ---------------- 凭证原文随行 / 敏感内容过期（2026-10-08） ----------------
+    def attach_secret(self, fragment_id: int, blob: str) -> bool:
+        """给碎片挂随行密文（DPAPI base64，来自 secret_vault.protect）。
+
+        空串拒绝（空串语义 = 无随行原文，不能用它「清除」——清除走
+        clear_secret）。碎片不存在返回 False。
+        """
+        if not blob or not isinstance(blob, str):
+            return False
+        frag = self.get_fragment(fragment_id)
+        if frag is None:
+            return False
+        frag.secret_enc = blob
+        self.mark_dirty()
+        return True
+
+    def clear_secret(self, fragment_id: int) -> bool:
+        """清除随行密文（回溯改判为「记录原文」后原文已明文在池，密文冗余）"""
+        frag = self.get_fragment(fragment_id)
+        if frag is None or not frag.secret_enc:
+            return False
+        frag.secret_enc = ""
+        self.mark_dirty()
+        return True
+
+    def get_secret_blob(self, fragment_id: int) -> str:
+        """取随行密文（无则空串）"""
+        frag = self.get_fragment(fragment_id)
+        return frag.secret_enc if frag is not None else ""
+
+    def guarded_fragments(self) -> list:
+        """全部带随行密文的碎片（按内存序，供过期清理与统计）"""
+        return [f for f in self._fragments if f.secret_enc]
+
+    def purge_expired_guarded(self, hours: int, now=None) -> list:
+        """敏感内容自动过期：删除「带随行密文且创建时间早于 hours 小时前」
+        的碎片，返回被删 fragment_id 列表（供日志留痕）。
+
+        - ``hours <= 0`` → 不过期（返回空表，不写盘）
+        - created_at 解析失败的碎片**不删**（脏数据宁多留不强删）
+        - 普通碎片（无随行密文）一律不受影响
+        """
+        if not hours or int(hours) <= 0:
+            return []
+        now = now or datetime.now()
+        cutoff = now.timestamp() - int(hours) * 3600
+        expired_ids = []
+        for f in self._fragments:
+            if not f.secret_enc:
+                continue
+            try:
+                ts = datetime.strptime(f.created_at, _CREATED_AT_FMT).timestamp()
+            except (ValueError, TypeError):
+                continue
+            if ts < cutoff:
+                expired_ids.append(f.fragment_id)
+        if not expired_ids:
+            return []
+        self._fragments = [f for f in self._fragments
+                           if f.fragment_id not in set(expired_ids)]
+        self.mark_dirty()
+        return expired_ids
 
     # ---------------- 容量管理 ----------------
     def count(self) -> int:

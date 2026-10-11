@@ -148,11 +148,13 @@ class TestStartupChainWiring:
         assert 'motion.MOTION["enter_rise"]' in src
 
     def test_relay_wired_in_entrypoint(self):
-        src = (V4_ROOT / "knowledge_ball.py").read_text(encoding="utf-8")
-        assert "after_wake" in src                 # 苏醒 → show 主窗
-        assert 'motion.MOTION["splash_hold"]' in src
-        assert 'motion.MOTION["ball_delay"]' in src
-        assert "play_startup_pop" in src           # 悬浮球压轴浮现
+        """启动链路动效 token 消费点（2026-10-08 拆分轮迁 src/startup_relay.py）"""
+        relay = (V4_ROOT / "src" / "startup_relay.py").read_text(
+            encoding="utf-8")
+        assert "after_wake" in relay              # 苏醒 → show 主窗
+        assert 'motion.MOTION["splash_hold"]' in relay
+        assert 'motion.MOTION["ball_delay"]' in relay
+        assert "play_startup_pop" in relay        # 悬浮球压轴浮现
 
 
 # ====================================================================

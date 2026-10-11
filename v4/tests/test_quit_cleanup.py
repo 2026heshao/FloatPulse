@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""退出显式收尾回归（1.4）—— knowledge_ball._shutdown_once。
+"""退出显式收尾回归（1.4）—— wiring.shutdown_once。
+
+2026-10-08 拆分轮：幂等引擎自 knowledge_ball.py 迁入 src/wiring.py
+（QuitCoordinator 自持默认，宿主不再注入），本文件回归面同步改钉。
 
 钉死的行为：
   A 幂等：连调多次只有第一次实际执行（_safe_quit 与 aboutToQuit 都会
@@ -16,7 +19,7 @@ import sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
 
-import knowledge_ball                      # noqa: E402
+from src import wiring                    # noqa: E402
 
 
 # ---------------- 测试替身 ----------------
@@ -58,7 +61,7 @@ def _build_wiring(calls, state):
     clipboard_monitor = _FakeClipboardMonitor(calls)
 
     def _shutdown_resources():
-        knowledge_ball._shutdown_once(state, [
+        wiring.shutdown_once(state, [
             ("截图热键注销", lambda: shot_hotkey_mgr.unregister_all()),
             ("插件热键注销", lambda: plugin_hotkey_mgr.unregister_all()),
             ("AI 本地服务停止", lambda: ai_server.stop()),
@@ -74,7 +77,7 @@ def test_shutdown_once_idempotent():
     state = {"done": False}
     quit_resources = _build_wiring(calls, state)
     assert quit_resources() is None          # 收尾函数无返回值（副作用式）
-    assert knowledge_ball._shutdown_once(state, []) is False  # 第二次幂等跳过
+    assert wiring.shutdown_once(state, []) is False  # 第二次幂等跳过
     assert calls == {"shot": 1, "plugin": 1,
                      "ai_stop": 1, "clip_stop": 1}
 
@@ -99,7 +102,7 @@ def test_shutdown_once_swallows_step_errors():
         ("会炸的一步", lambda: 1 / 0),
         ("正常步骤", lambda: calls.append("ok")),
     ]
-    assert knowledge_ball._shutdown_once(state, steps) is True
+    assert wiring.shutdown_once(state, steps) is True
     assert calls == ["ok"]
 
 
@@ -112,7 +115,7 @@ def test_shutdown_once_tolerates_unbound_components():
         ("未创建的组件", lambda: hotkey_mgr.unregister_all()),  # noqa: F821
         ("已就绪的组件", lambda: calls.append("ok")),
     ]
-    assert knowledge_ball._shutdown_once(state, steps) is True
+    assert wiring.shutdown_once(state, steps) is True
     assert calls == ["ok"]
 
 
@@ -120,11 +123,19 @@ def test_shutdown_once_new_state_rearms():
     """换新的 state 标记重新生效（各次运行/各处调用互不串扰）"""
     calls = []
     first_state = {"done": False}
-    assert knowledge_ball._shutdown_once(
+    assert wiring.shutdown_once(
         first_state, [("A", lambda: calls.append("A"))]) is True
-    assert knowledge_ball._shutdown_once(
+    assert wiring.shutdown_once(
         first_state, [("A", lambda: calls.append("A"))]) is False
     second_state = {"done": False}
-    assert knowledge_ball._shutdown_once(
+    assert wiring.shutdown_once(
         second_state, [("A", lambda: calls.append("A"))]) is True
     assert calls == ["A", "A"]
+
+
+def test_quit_coordinator_defaults_to_builtin_engine():
+    """QuitCoordinator 不再要求宿主注入 shutdown_once（内置默认引擎）"""
+    coord = wiring.QuitCoordinator(
+        ball=object(), main_window=object(), card_window=object(),
+        sticky_manager=object(), config_manager=object())
+    assert coord._shutdown_once is wiring.shutdown_once

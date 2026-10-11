@@ -66,7 +66,7 @@ from src.single_instance import SingleInstance
 from src.card_window import CardWindow, card_modes
 from src.app_paths import find_icon_file, get_base_dir, get_screen_geometry
 import startup_checks  # 启动数据完整性入口壳（C1 下沉，弹窗留入口层）
-from src.task_manager import TaskManager, bucket_unfinished
+from src.task_manager import TaskManager
 from src.note_manager import NoteManager
 from src.fragment_manager import FragmentManager
 from src.clipboard_monitor import ClipboardMonitor
@@ -86,7 +86,8 @@ from src.controls import ScreenToast
 from src import icon_render
 from src import motion
 from src.icons import strip_leading_emoji, has_icon as icon_exists
-from src import task_reminder_popup
+from src.task_reminder_wiring import wire_task_reminders
+from src.startup_relay import wire_startup_relay
 from src.constants import DEFAULT_THEME
 from src.pomodoro import (
     PomodoroTimer, PHASE_FOCUS, PHASE_BREAK,
@@ -2218,31 +2219,6 @@ class FloatingBall(QWidget):
 # ====================================================================
 # 说明：薄包装与启动数据检查已迁 src/app_paths；启动完整性弹窗壳现居 startup_checks（C1）。
 
-def _shutdown_once(state, steps) -> bool:
-    """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
-
-    _safe_quit（托盘退出）与 aboutToQuit（事件循环结束）都会触发收尾，
-    二者收口到这里，靠 state["done"] 保证连调多次只有第一次生效。
-
-    state : {"done": bool} 收尾状态标记（首次调用置 True）
-    steps : [(描述, 可调用)]；可调用抛任何异常（含组件尚未创建的
-            NameError——启动早期异常退出时收尾仍可能被触发）都只写日志
-    返回  True=本次实际执行；False=已收尾过，幂等跳过
-    """
-    if state.get("done"):
-        return False
-    state["done"] = True
-    from src.logger import get_logger
-    log = get_logger()
-    for desc, fn in steps:
-        try:
-            fn()
-        except Exception as exc:                  # noqa: BLE001
-            log.warning(f"[退出] {desc}失败：{exc}")
-    log.info("[退出] 资源收尾完成（热键注销 / AI 本地服务 / 剪贴板监听）")
-    return True
-
-
 def main():
     app = QApplication(sys.argv)
     # 禁用"最后一个窗口关闭时自动退出"——悬浮球/主窗口可能同时隐藏，
@@ -2490,11 +2466,11 @@ def main():
     # ---- 退出显式收尾（1.4）：热键注销 / AI 本地服务 / 剪贴板监听 ----
     # T05 D2 外迁：退出/托盘/收尾编排收进 wiring.QuitCoordinator。各组件在
     # 下方集成段才创建（register_resources 晚注入引用槽），首次调用必然
-    # 发生在事件循环期；幂等引擎 _shutdown_once 原位保留（模块级函数）。
+    # 发生在事件循环期；幂等引擎 shutdown_once 2026-10-08 随迁 wiring
+    # （QuitCoordinator 内置默认，宿主不再注入）。
     quit_coordinator = QuitCoordinator(
         ball=ball, main_window=main_window, card_window=ball.card_window,
         sticky_manager=sticky_manager, config_manager=config_manager,
-        shutdown_once=_shutdown_once,
     )
 
     # ---- 托盘右键菜单（F1；D1-lite：构建在 src/tray.py）----
@@ -2508,74 +2484,11 @@ def main():
     )
 
     # ---- 任务到期提醒（启动时 + 每日 9:00 自绘提醒卡片）----
-    def _msecs_until_next(hour: int) -> int:
-        """距下一个指定整点的毫秒数（用于每日定时）"""
-        from datetime import datetime, timedelta
-        now = datetime.now()
-        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        return int((target - now).total_seconds() * 1000)
-
-    def _check_task_reminders():
-        """扫描未完成任务并弹自绘提醒卡片（三桶口径）。
-
-        ★2026-09-30 修：此前只提醒「今日到期 / 已逾期」两项，导致
-        **无截止日的未完成任务永远不会被提醒**（用户反馈"未完成任务不提示"，
-        实测其 5 条未完成任务 deadline 全为空串 → 命中 STATE_NONE → 静默）。
-
-        ★2026-10-02 换呈现层：原生托盘气泡（系统 toast，样式不可控）→
-        自绘弹窗 task_reminder_popup（用户点名重设计）；触发时机、
-        task_reminder_enabled 开关与三桶口径全部不变，分桶仍由纯函数
-        bucket_unfinished 固化；球体徽标（refresh_badge）★2026-10-07
-        改为「全部未完成任务数」，与提醒三桶口径脱钩。
-
-        三桶（顺序即弹窗内展示顺序）：
-          · 已逾期   —— STATE_OVERDUE
-          · 今日到期 —— STATE_TODAY
-          · 未安排日期 —— STATE_NONE 且未完成（无日期 / 日期写坏）
-
-        任务状态仍统一走 task_state（脏日期解析失败 → 无日期，不标红、
-        不进逾期桶）。
-        """
-        ball.refresh_badge()   # 顺带刷新球体徽标（未完成数变了即同步）
-        if not config_manager.get("task_reminder_enabled", True):
-            return
-        from datetime import datetime
-        today = datetime.now().strftime("%Y-%m-%d")
-        overdue, due, undated = bucket_unfinished(
-            task_manager.get_all_tasks(), today)
-        total = len(overdue) + len(due) + len(undated)
-        if not total:
-            return
-        task_reminder_popup.show_reminder(
-            overdue=[t.title for t in overdue],
-            due=[t.title for t in due],
-            undated=[t.title for t in undated],
-            theme=resolve_theme_name(
-                config_manager.get("theme", DEFAULT_THEME)),
-        )
-        get_logger().info(
-            f"任务提醒已弹出：逾期 {len(overdue)}，今日到期 {len(due)}，"
-            f"未安排日期 {len(undated)}")
-
-    def _schedule_daily_reminder():
-        """每日 9:00 检查一次（自循环重排）"""
-        _check_task_reminders()
-        QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)
-
-    # 提醒卡片「打开任务页」/ 点卡片空白处 → 显示主窗口并切到任务页
-    # （与原托盘气泡 messageClicked 同语义；卡片点击经 open_requested 回连）
-    def _open_task_page_from_reminder():
-        main_window.show()
-        main_window.raise_()
-        main_window.activateWindow()
-        main_window.show_page(1)
-
-    task_reminder_popup.popup_instance().open_requested.connect(
-        _open_task_page_from_reminder)
-    QTimer.singleShot(4000, _check_task_reminders)          # 启动 4 秒后首次检查
-    QTimer.singleShot(_msecs_until_next(9), _schedule_daily_reminder)  # 之后每天 9:00
+    # 2026-10-08 拆分外迁 → src/task_reminder_wiring.py（宿主依赖全参数
+    # 注入；三桶口径 / 12s 自动收起 / 跳转定位锚点随迁，行为零变化）
+    wire_task_reminders(
+        config_manager=config_manager, task_manager=task_manager,
+        ball=ball, main_window=main_window)
 
     # ---- 2.3 启动后延迟静默检查更新（默认开，每天至多一次）----
     # 立场不变：不自动下载、失败静默、不携带任何本机数据。延迟 15 秒
@@ -2717,13 +2630,31 @@ def main():
         shot_hotkey_mgr, plugin_hotkey_mgr, screenshot_pin, clipboard_monitor)
 
     # ---- 插件装配编排（T05 D2 外迁）→ wiring.PluginWiring ----
+    # 2026-10-08 启动提速：apply_plugins（load_all 实测 ~780ms）此前同步
+    # 卡在主窗 show 之前；现改为**主窗显示后 800ms 延迟执行**——入场动画
+    # （闪屏淡出 + 悬浮球压轴）播完、首帧可交互后再加载插件，总启动
+    # 进入 <1.5s 档。代价：左栏插件按钮 / 插件页晚 ~0.8s 出现（用户已
+    # 拍板接受）。热键注册随 apply_plugins 一并延后；plugins_changed
+    # 信号路径（插件中心开关/重扫描）不受影响，仍即时重载。
     plugin_wiring = PluginWiring(
         loader=plugin_loader, registry=plugin_registry, ctx=plugin_ctx,
         hotkey_mgr=plugin_hotkey_mgr, config_manager=config_manager,
         main_window=main_window, ball=ball,
     )
     plugin_wiring.wire()
-    plugin_wiring.apply_plugins()
+
+    def _deferred_plugin_load():
+        """主窗显示后延迟执行一次插件加载（幂等：防闪屏兜底链路重入）"""
+        if _deferred_plugin_load.done:
+            return
+        _deferred_plugin_load.done = True
+        t0 = time.monotonic()
+        plugin_wiring.apply_plugins()
+        get_logger().info(
+            f"[启动] 插件延迟加载完成 "
+            f"{(time.monotonic() - t0) * 1000:.0f}ms（主窗已可交互）")
+
+    _deferred_plugin_load.done = False
 
     # 1. 小卡片退出请求 / 悬浮球右键退出 → 安全退出程序
     ball.card_window.request_quit.connect(quit_coordinator.safe_quit)
@@ -2747,34 +2678,15 @@ def main():
     _heartbeat = HeartbeatWatch()   # 实例持有 QTimer 引用防 GC
 
     # ---- 三段接力启动编排（2026-10-03 方案 D）----
-    # ① 第 11 档打点：闪屏充能满格并苏醒（弹跳 + 光晕）；
-    # ② 苏醒完成 → 主窗 show（入场 fade/rise，焦点交接）；
-    # ③ show 后 splash_hold(120ms) 闪屏才淡出（splash_out）、
-    #    ball_delay(160ms) 悬浮球 OutBack 压轴浮现（球心不动 0.7→1.0）。
-    # 焦点先交接后离场；reduce_motion 下三段全瞬显（时长归零口径）。
+    # 2026-10-08 拆分外迁 → src/startup_relay.py：①第 11 档打点（本函数
+    # _mark）②苏醒完成 → 主窗 show ③splash_hold 后闪屏淡出 + 球压轴 +
+    # 插件延迟加载；5s 兜底强显。reduce_motion 下全瞬显。
     _mark("显示主窗口")
-    _relay_shown = {"flag": False}
-
-    def _reveal_main_window():
-        """满格苏醒完成 → show 主窗 → 编排闪屏淡出与悬浮球压轴（幂等）"""
-        if _relay_shown["flag"]:
-            return
-        _relay_shown["flag"] = True
-        main_window.show()
-        get_logger().info("主窗口已显示，进入事件循环")
-        now = time.monotonic()
-        logger.info(f"[启动] 全部完成 总计 {now - _boot['t0']:.2f}s")
-        QTimer.singleShot(
-            motion.duration(motion.MOTION["splash_hold"], _boot_speed),
-            splash.finish)
-        if config_manager.get("ball_visible", True):
-            QTimer.singleShot(
-                motion.duration(motion.MOTION["ball_delay"], _boot_speed),
-                ball.play_startup_pop)
-
-    splash.after_wake(_reveal_main_window)
-    # 兜底：闪屏链路万一卡死（异常/平台差异），5s 强制显示主窗
-    QTimer.singleShot(5000, _reveal_main_window)
+    wire_startup_relay(
+        splash=splash, main_window=main_window, ball=ball,
+        config_manager=config_manager, boot_speed=_boot_speed,
+        boot=_boot, logger=logger,
+        deferred_plugin_load=_deferred_plugin_load)
 
     # ---- 3.4 首启引导：首次使用时弹出三步欢迎向导（设置页「🚀 启动与
     # 系统 → 🔄 重看引导」可重看，同一 dialog）----

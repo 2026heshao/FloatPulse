@@ -5,10 +5,12 @@
   1. 几何：320×184 固定尺寸、圆角 14
   2. set_stage(text, i, total)：文案 / 计数 / 充能目标三同步；
      空文案不覆盖；档位夹取（越界回 0/total）
-  3. 充能链（因果动画）：光点在途不充能，链播完 frac 收敛到 index/total
+  3. 充能链（因果动画）：光点在途不充能，链播完 frac 收敛到 index/total；
+     末档（满格）跳过光点飞行直达补满（2026-10-08 启动提速）
   4. 快机节奏：未完链立即结算再开新链（跳格但不丢档）
-  5. 满格苏醒只播一次；after_wake 在苏醒完成后触发（三段接力焦点
-     交接点）；苏醒后才注册的回调下一跳立即触发
+  5. 满格苏醒只播一次；★2026-10-08 启动提速：after_wake 在苏醒**开始**
+     时即放行（并行收尾——弹跳/光晕照播，主窗 show 不再等光晕走完）；
+     苏醒后才注册的回调下一跳立即触发
   6. finish：淡出关闭 + 幂等；补发未触发的交接回调（主窗必显兜底）
   7. reduce_motion：跳格充能零动画、交接立即放行、finish 直接 close
   8. 接线回归：knowledge_ball.py 三段接力编排 + 阶段总数与 _mark
@@ -121,11 +123,39 @@ class TestChargeChain:
         assert s._counter == 9
         s.finish()
 
+    def test_final_stage_skips_spark_fly(self, qapp):
+        """末档提速（2026-10-08）：满格档跳过光点飞行，直达补满插值"""
+        s = LaunchSplash()
+        s.start()
+        s.set_stage("加载插件…", 10, 11)
+        _wait_chain()
+        s.set_stage("显示主窗口…", 11, 11)
+        assert s._spark is None and s._tween is not None   # 无在途光点
+        _wait_chain()
+        assert abs(s._frac - 1.0) < 1e-6
+        s.finish()
+
 
 # ====================================================================
 # 4. 满格苏醒 + 三段接力交接
 # ====================================================================
 class TestWake:
+    def test_wake_releases_at_start_not_after_halo(self, qapp):
+        """并行收尾（2026-10-08 启动提速）：苏醒开始即放行交接回调，
+        弹跳/光晕仍照播到完（_wake_t0 保持由帧驱动收束）"""
+        s = LaunchSplash()
+        s.start()
+        fired = []
+        s.after_wake(lambda: fired.append(1))
+        s._start_wake()                      # 直接触发满格（模拟末档到达）
+        QApplication.processEvents()         # 0ms 单跳落地
+        assert fired == [1]                  # 不再等 wake_halo 走完
+        assert s._wake_t0 is not None        # 苏醒动画仍在播
+        QTest.qWait(motion.MOTION["wake_halo"] + 120)
+        assert s._wake_t0 is None            # 帧驱动收束
+        assert s._wake_done
+        s.finish()
+
     def test_wake_once_and_after_wake_fires(self, qapp):
         s = LaunchSplash()
         s.start()
@@ -222,12 +252,19 @@ class TestPaint:
 
 
 # ====================================================================
-# 8. 接线回归：knowledge_ball.py 三段接力（源码钉死）
+# 8. 接线回归：三段接力（源码钉死；2026-10-08 拆分轮接力段迁
+#    src/startup_relay.py，钉子随迁；_mark 档位仍钉 knowledge_ball）
 # ====================================================================
 class TestRelayWiring:
     @pytest.fixture(scope="class")
     def src(self):
         with open(os.path.join(BASE, "knowledge_ball.py"),
+                  encoding="utf-8") as f:
+            return f.read()
+
+    @pytest.fixture(scope="class")
+    def relay_src(self):
+        with open(os.path.join(BASE, "src", "startup_relay.py"),
                   encoding="utf-8") as f:
             return f.read()
 
@@ -238,15 +275,16 @@ class TestRelayWiring:
         assert m, "_BOOT_STAGE_TOTAL 常量缺失"
         assert len(marks) == int(m.group(1)) == 11
 
-    def test_relay_order_and_tokens(self, src):
+    def test_relay_order_and_tokens(self, src, relay_src):
         assert 'splash.set_stage(f"{stage}…", _boot["n"], _BOOT_STAGE_TOTAL)' \
             in src
-        assert "after_wake(_reveal_main_window)" in src
+        # 三段接力本体（startup_relay.py）：苏醒回调 → show → hold 淡出
+        assert "after_wake(_reveal_main_window)" in relay_src
         # 旧直接 show 序列已移除：show 只发生在苏醒回调 / 兜底里
         assert "main_window.show()\n    _mark(" not in src
-        assert src.index('_mark("显示主窗口")') \
-            < src.index("def _reveal_main_window")
-        assert "QTimer.singleShot(5000, _reveal_main_window)" in src
-        assert 'motion.MOTION["splash_hold"]' in src
-        assert 'motion.MOTION["ball_delay"]' in src
-        assert "play_startup_pop" in src
+        assert relay_src.index("def _reveal_main_window") \
+            < relay_src.index("splash.after_wake(_reveal_main_window)")
+        assert "QTimer.singleShot(5000, _reveal_main_window)" in relay_src
+        assert 'motion.MOTION["splash_hold"]' in relay_src
+        assert 'motion.MOTION["ball_delay"]' in relay_src
+        assert "play_startup_pop" in relay_src

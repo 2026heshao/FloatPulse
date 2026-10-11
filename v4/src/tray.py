@@ -27,6 +27,7 @@ show_message() 发托盘气泡——本类只做托盘本体，不持有业务�
 ====================================================================
 """
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
@@ -54,6 +55,12 @@ class TrayController:
         self._icon_widget.setVisible(True)
         self._main_window = None
         self._config = None
+        # 气泡「点击直达」动作（2026-10-10）：messageClicked 是托盘图标级
+        # 全局信号——番茄钟/任务提醒/更新气泡共用同一图标发出，动作必须
+        # 一次性（点击即消费）且带 TTL（气泡自动消失后动作随之失效），
+        # 防止陈旧路由把后续无关气泡的点击也带去旧目的地。
+        self._message_action = None
+        self._message_action_timer = None
 
     # ---------------- 装配（依赖就绪后调用，两段式，对应原实现顺序）----------------
     def attach(self, main_window, config):
@@ -140,16 +147,65 @@ class TrayController:
                 get_logger().info("托盘点击 → 显示主窗口")
 
     def _on_message_clicked(self):
-        """点击提醒气泡 → 显示主窗口并切到任务页"""
-        self._main_window.show()
-        self._main_window.raise_()
-        self._main_window.activateWindow()
-        self._main_window.show_page(1)
+        """点击提醒气泡：有注册动作 → 只执行动作（一次性消费）；否则回落
+        既有默认路径（显示主窗口并切到任务页）。
+
+        动作抛异常只留痕不外抛（托盘槽内异常会打断 Qt 事件派发），
+        动作此时已消费，后续点击自然回落默认路径。
+        """
+        action, self._message_action = self._message_action, None
+        self._stop_message_action_timer()
+        if action is None:
+            self._main_window.show()
+            self._main_window.raise_()
+            self._main_window.activateWindow()
+            self._main_window.show_page(1)
+            return
+        try:
+            action()
+        except Exception:                     # noqa: BLE001 - 托盘槽不外抛
+            get_logger().warning("[托盘] 气泡点击动作执行失败", exc_info=True)
+
+    # ---------------- 气泡点击动作注入口（2026-10-10） ----------------
+    def set_message_action(self, action, ttl_ms: int = 60000) -> None:
+        """注册（或清除）下一次气泡点击的直达动作。
+
+        action        : 无参可调用；None = 清除已注册动作
+        ttl_ms        : 动作有效期毫秒（默认 60s）——气泡消失后动作不应
+                        仍然存活把无关点击带去旧目的地；到点自动失效。
+        重复注册 latest wins；一次性：点击即消费。
+        """
+        self._message_action = action
+        self._stop_message_action_timer()
+        if action is not None and ttl_ms and ttl_ms > 0:
+            timer = QTimer(self._icon_widget)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda: setattr(self, "_message_action", None))
+            timer.start(int(ttl_ms))
+            self._message_action_timer = timer
+
+    def _stop_message_action_timer(self) -> None:
+        timer = self._message_action_timer
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+            self._message_action_timer = None
 
     # ---------------- 气泡提示 ----------------
     def show_message(self, title, body,
-                     icon=QSystemTrayIcon.MessageIcon.Information, ms=6000):
-        """托盘气泡统一出口（任务提醒 / 版本更新 / 番茄钟完成等经此发出）"""
+                     icon=QSystemTrayIcon.MessageIcon.Information, ms=6000,
+                     action=None, action_ttl_ms: int = 60000):
+        """托盘气泡统一出口（任务提醒 / 版本更新 / 番茄钟完成等经此发出）。
+
+        action 传入时一站式注册本次气泡的「点击直达」动作；未传时**清除**
+        已注册动作——messageClicked 不区分来源气泡，带旧动作放行会把
+        无关气泡（番茄钟等）的点击串台到旧目的地。
+        """
+        if action is not None:
+            self.set_message_action(action, action_ttl_ms)
+        else:
+            self.set_message_action(None)
         self._icon_widget.showMessage(title, body, icon, ms)
 
     def notify_hidden_to_tray(self):

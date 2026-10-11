@@ -2224,11 +2224,16 @@ class PluginStoreDialog(GlassDialog):
         # 出卡片：插在本地卡片**之前**（紧跟空态 label），末尾 stretch 前的
         # 位置由本地卡片继续占用——reload() 会连在线卡一起清掉，语义简单
         insert_at = 1      # [empty_label, 在线卡..., 本地卡..., stretch]
+        inserted = 0
         for it in reversed(self._market_items):
             if it["file"] in self._market_assets:
                 self._list_layout.insertWidget(
                     insert_at, self._make_online_card(it))
-        if not self._market_items:
+                inserted += 1
+        # 出了在线卡就撤掉本地空态提示：本地包可能确实都装完了，但
+        # 「都已安装」文案压在在线卡片上方属于误导（2026-10-08 用户实测；
+        # 原实现写成 `if not self._market_items` 是死分支，条件颠倒）
+        if inserted:
             self._empty_label.setVisible(False)
 
     def _make_cap_badge(self, cap: str):

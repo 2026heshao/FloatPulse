@@ -50,6 +50,7 @@ from src import accent
 from src import wallpaper
 from src import motion
 from src import icon_render
+from src import secret_guard
 from src.update_checker import (RELEASES_API_URL, RELEASES_PAGE_URL,
                                 CHECK_TIMEOUT_S, check_headers, extract_tag,
                                 is_newer)
@@ -671,7 +672,59 @@ class SettingsPanel(QWidget):
         self._set_clipboard_images = self._toggle("clipboard_capture_images", True)
         self._set_clipboard_images.toggled.connect(self._on_clipboard_images_changed)
         add_row(gv, "剪贴板自动捕获图片", "无文本时图片自动进素材池；图文混排仍按文本收集",
-                self._set_clipboard_images, last=True)
+                self._set_clipboard_images)
+
+        # ===== 凭证哨兵（2026-10-08 稳定性轮 P0）=====
+        # 总开关：token / API key / 私钥等明文复制 → 遮蔽占位落盘，
+        # 原文 DPAPI 加密随行（碎片右键「揭示原文」回看）
+        self._set_guard_enabled = self._toggle("clipboard_guard_enabled", True)
+        self._set_guard_enabled.toggled.connect(self._on_guard_enabled_changed)
+        add_row(gv, "凭证哨兵", "自动识别 token / API Key / 私钥并遮蔽落盘，右键碎片可揭示原文",
+                self._set_guard_enabled)
+
+        # 命中处置分段（deny/mask/allow，白名单与 config 同源）
+        self._guard_mode_seg = QWidget()
+        seg_h = QHBoxLayout(self._guard_mode_seg)
+        seg_h.setContentsMargins(0, 0, 0, 0)
+        seg_h.setSpacing(0)
+        self._guard_mode_group = QButtonGroup(self._guard_mode_seg)
+        self._guard_mode_group.setExclusive(True)
+        self._guard_mode_btns = {}
+        cur_mode = str(self._config.get("clipboard_guard_mode", "mask"))
+        for key in secret_guard.GUARD_MODES:
+            label = {"mask": "遮蔽", "deny": "拦截", "allow": "放行"}[key]
+            btn = SmoothButton(label)
+            btn.setObjectName("secondaryBtn")
+            btn.setCheckable(True)
+            btn.setChecked(key == cur_mode)
+            btn.clicked.connect(
+                lambda _chk=False, k=key: self._on_guard_mode_changed(k))
+            self._guard_mode_group.addButton(btn)
+            self._guard_mode_btns[key] = btn
+            seg_h.addWidget(btn)
+        add_row(gv, "命中处置",
+                "遮蔽=存占位（原文加密随行） / 拦截=不收录 / 放行=记录原文",
+                self._guard_mode_seg)
+
+        # 敏感内容自动过期（Stepper 0-8760 小时；数值类禁 QSlider 铁律）
+        self._set_guard_expiry = Stepper(
+            0, 8760, int(self._config.get("clipboard_guard_expiry_hours", 72)),
+            suffix="小时", step=12)
+        self._set_guard_expiry.valueChanged.connect(self._on_guard_expiry_changed)
+        add_row(gv, "敏感内容自动过期",
+                "命中哨兵的碎片超过该时长自动删除；0 表示不过期",
+                self._set_guard_expiry)
+
+        # 排除规则（用户自定义正则，逗号分隔；非法正则保存时提示并丢弃）
+        self._set_guard_exclude = SmoothInput()
+        pats = self._config.get("clipboard_guard_exclude_patterns", []) or []
+        self._set_guard_exclude.setText(", ".join(str(p) for p in pats))
+        self._set_guard_exclude.setPlaceholderText("如：(?i)example[._]com, 测试密钥")
+        self._set_guard_exclude.setMinimumWidth(190)
+        self._set_guard_exclude.editingFinished.connect(self._on_guard_exclude_changed)
+        add_row(gv, "哨兵排除规则",
+                "命中这些正则的文本不做凭证检测（逗号分隔，即时生效）",
+                self._set_guard_exclude, last=True)
 
         # ================= 4. 临时素材 =================
         cv = self._new_category_page("assets")
@@ -1837,6 +1890,21 @@ class SettingsPanel(QWidget):
         if hasattr(self, '_set_clipboard_filter'):
             apps = self._config.get("clipboard_filter_apps", []) or []
             self._set_clipboard_filter.setText(", ".join(str(a) for a in apps))
+        if hasattr(self, '_set_guard_enabled'):
+            # 凭证哨兵组（2026-10-08）：批量刷新前屏蔽信号防误写盘
+            self._set_guard_enabled.blockSignals(True)
+            self._set_guard_enabled.setChecked(
+                bool(self._config.get("clipboard_guard_enabled", True)))
+            self._set_guard_enabled.blockSignals(False)
+            cur_mode = str(self._config.get("clipboard_guard_mode", "mask"))
+            for key, btn in self._guard_mode_btns.items():
+                btn.setChecked(key == cur_mode)
+            self._set_guard_expiry.blockSignals(True)
+            self._set_guard_expiry.setValue(
+                int(self._config.get("clipboard_guard_expiry_hours", 72)))
+            self._set_guard_expiry.blockSignals(False)
+            pats = self._config.get("clipboard_guard_exclude_patterns", []) or []
+            self._set_guard_exclude.setText(", ".join(str(p) for p in pats))
         if hasattr(self, '_set_card_size'):
             self._set_card_size.blockSignals(True)
             self._set_card_size.setValue(int(self._config.get("app_card_size", 96)))
@@ -2078,6 +2146,49 @@ class SettingsPanel(QWidget):
         if enabled != self._config.get("clipboard_capture_images", True):
             self._config.set("clipboard_capture_images", enabled)
             self._config.save()
+
+    def _on_guard_enabled_changed(self, checked: bool):
+        """凭证哨兵总开关：即时持久化（监听器每次捕获时实时读配置）"""
+        enabled = bool(checked)
+        if enabled != self._config.get("clipboard_guard_enabled", True):
+            self._config.set("clipboard_guard_enabled", enabled)
+            self._config.save()
+
+    def _on_guard_mode_changed(self, key: str):
+        """凭证哨兵命中处置（deny/mask/allow）：持久化 + 同步分段选中态"""
+        if key != str(self._config.get("clipboard_guard_mode", "mask")):
+            self._config.set("clipboard_guard_mode", key)
+            self._config.save()
+        for k, btn in self._guard_mode_btns.items():
+            btn.setChecked(k == key)
+
+    def _on_guard_expiry_changed(self, value):
+        """敏感内容自动过期（小时）：即时持久化（巡检定时器每小时读一次）"""
+        try:
+            hours = int(value)
+        except (TypeError, ValueError):
+            return
+        if hours != self._config.get("clipboard_guard_expiry_hours", 72):
+            self._config.set("clipboard_guard_expiry_hours", hours)
+            self._config.save()
+
+    def _on_guard_exclude_changed(self):
+        """哨兵排除规则：焦点离开或回车时清洗校验并持久化。
+
+        解析规则同剪贴板过滤（中英文逗号/分号分隔）；非法正则直接丢弃，
+        与用户输入不一致时回填清洗结果让用户看到实际生效的规则。
+        """
+        raw = self._set_guard_exclude.text()
+        parts = [p.strip()
+                 for p in raw.replace("，", ",").replace("；", ";")
+                 .replace(";", ",").split(",")]
+        valid, _compiled = secret_guard.sanitize_guard_patterns(parts)
+        if valid != (self._config.get("clipboard_guard_exclude_patterns", []) or []):
+            self._config.set("clipboard_guard_exclude_patterns", valid)
+            self._config.save()
+        shown = ", ".join(valid)
+        if self._set_guard_exclude.text() != shown:
+            self._set_guard_exclude.setText(shown)
 
     def _on_close_to_tray_changed(self, checked: bool):
         """关闭到托盘开关：即时持久化（closeEvent 每次实时读配置，无需广播）"""

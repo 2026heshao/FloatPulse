@@ -417,6 +417,99 @@ class TestPaletteBehavior:
                      if e.cid == "action.export")
         assert entry.title == "导出全部到 Obsidian"
 
+
+# ====================================================================
+# 4b. 阴影收口 + 焦点保险（2026-10-09 用户报三项之二：外圈透明框 /
+#     唤醒优先级——面板画出来却收不到键盘输入等同唤不醒）
+# ====================================================================
+class TestShadowAndFocus:
+    def test_shadow_margin_tight(self):
+        """阴影边距收口 6px（旧值 14 画出的宽灰环被用户当成「一圈透明框」）"""
+        assert cp.CommandPalette.SHADOW_MARGIN == 6
+
+    def test_shadow_paint_uses_reduced_layers(self):
+        """paintEvent 阴影参数钉死：4 层 / alpha 减半 / offset 4 —— 防回潮"""
+        src = _read(PALETTE_PATH)
+        assert "layers=4" in src
+        assert "alpha = 48 if theme == \"dark\" else 24" in src
+        assert "offset_y=4.0" in src
+        # 旧参数不得残留
+        assert "layers=6" not in src
+        assert "alpha = 96 if theme == \"dark\" else 48" not in src
+
+    def test_open_at_schedules_focus_guard(self, palette):
+        """open_at 挂焦点保险（_ensure_focus），接线钉死。
+
+        ★必须走**成员 QTimer**（父=本窗）：早期用 QTimer.singleShot(ms,
+        绑定方法) 时，面板提前 close/deleteLater 后回调仍打已析构的 C++
+        对象 —— 测试组合跑必崩 access violation（A/B 对照定位）。
+        """
+        palette.open_at()
+        assert palette.isVisible()
+        assert palette._focus_timer.isActive()            # 已排程
+        assert palette._focus_timer.parent() is palette   # 随宿主清场
+        src = _read(PALETTE_PATH)
+        assert "self._focus_timer.start()" in src
+        assert "QTimer.singleShot(120, self._ensure_focus)" not in src, \
+            "静态 singleShot 会在面板提前销毁后触发悬空回调（进程崩溃）"
+
+    def test_close_stops_focus_guard(self, palette):
+        """关闭即停表（崩溃修复的第二道闸）：面板 close 后定时器不得
+        仍 pending —— 否则宿主 deleteLater 后回调打在已析构对象上。"""
+        palette.open_at()
+        assert palette._focus_timer.isActive()
+        palette.close()
+        assert not palette._focus_timer.isActive()
+        assert "def closeEvent" in _read(PALETTE_PATH)
+
+    def test_ensure_focus_recovers_lost_focus(self, palette):
+        """焦点丢失兜底：焦点在面板内其它可聚焦控件（列表）上时，
+        _ensure_focus 把焦点抢回输入框。用窗口内转移做探针 —— 离屏
+        环境里跨顶层窗口的 activateWindow 不生效（活动窗口归 probe），
+        跨窗口场景由实机验证承接。"""
+        palette.open_at()
+        palette._list.setFocus()
+        assert not palette._input.hasFocus()
+        palette._ensure_focus()
+        assert palette._input.hasFocus()
+
+    def test_ensure_focus_keeps_focus_when_held(self, palette):
+        """焦点本就在输入框时 no-op（不闪不重绘）"""
+        palette.open_at()
+        palette._input.setFocus()
+        palette._ensure_focus()          # 不应抛异常也不应关闭面板
+        assert palette.isVisible()
+
+    def test_ensure_focus_ignores_closed_palette(self, palette):
+        """面板已关闭 → 兜底直接返回（不复活已关窗口）"""
+        palette.open_at()
+        palette.close()
+        palette._ensure_focus()
+        assert not palette.isVisible()
+
+    def test_main_window_wake_retry_wiring(self):
+        """main_window 唤醒键退避重试 AST 钉子：_register_wake_hotkey /
+        _wake_retry_fire / _log_info 方法在位；退避表 3 档；成功路径
+        _log_info 留痕（此前成功零日志，排障对不上）"""
+        src = _read(MAIN_WINDOW_PATH)
+        tree = ast.parse(src)
+        main_cls = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef)
+                        and n.name == "MainWindow")
+        names = {n.name for n in main_cls.body
+                 if isinstance(n, ast.FunctionDef)}
+        assert {"_register_wake_hotkey", "_wake_retry_fire",
+                "_log_info"} <= names
+        dumped = next(n for n in main_cls.body
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_register_wake_hotkey")
+        dump = ast.dump(dumped)
+        assert "_WAKE_RETRY_DELAYS_MS" in dump
+        assert "_log_info" in dump
+        assert "_open_command_palette" in dump      # 回调仍是打开面板
+        # 退避表形态：3 档、递增、毫秒
+        assert "_WAKE_RETRY_DELAYS_MS = (3000, 10000, 30000)" in src
+
     def test_execute_help_hotkeys(self, palette, stub_host):
         palette.open_at()
         palette._input.setText("快捷键说明")
@@ -496,14 +589,23 @@ class TestBoundaries:
                 "_reapply_command_hotkeys", "execute_custom_action",
                 "unregister_command_hotkeys"} <= names
         # 全局唤醒键（2026-10-06）：注册逻辑钉在 _reapply_command_hotkeys
-        # 内（真读 command_palette_global_hotkey，空串跳过）且回调连到
-        # _open_command_palette——快捷键存在但连错槽的哑弹在这里红灯
+        # 调用的 _register_wake_hotkey 内（真读 command_palette_global_
+        # hotkey，空串跳过）且回调连到 _open_command_palette——快捷键存在
+        # 但连错槽的哑弹在这里红灯；2026-10-09 起失败走退避重试链
+        # （_WAKE_RETRY_DELAYS_MS + _wake_retry_fire），一并钉住
         reapply = next(n for n in main_cls.body
                        if isinstance(n, ast.FunctionDef)
                        and n.name == "_reapply_command_hotkeys")
         dumped_reapply = ast.dump(reapply)
         assert "command_palette_global_hotkey" in dumped_reapply
-        assert "_open_command_palette" in dumped_reapply
+        assert "_register_wake_hotkey" in dumped_reapply
+        assert "_wake_retry_seq" in dumped_reapply       # 重试链号防串台
+        reg = next(n for n in main_cls.body
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_register_wake_hotkey")
+        dumped_reg = ast.dump(reg)
+        assert "_open_command_palette" in dumped_reg
+        assert "_WAKE_RETRY_DELAYS_MS" in dumped_reg
         # command_palette_changed 信号存在（类体 pyqtSignal 声明）且已 connect
         assert "command_palette_changed" in src
         assert "self.command_palette_changed.connect(" in src
@@ -527,6 +629,151 @@ class TestBoundaries:
         assert "[[/]]" in html
         assert "命令面板" in html
         assert "Ctrl+K" in html       # 分工说明同段在位
+
+
+# ====================================================================
+# 5b. 2026-10-10 三项用户报障的钉死（主窗关闭态跳转 / 面板白框 / 前台强夺）
+# ====================================================================
+class TestPrompt20261010Fixes:
+    def test_show_page_shows_window(self):
+        """用户报①：主窗关闭态下命令面板跳页无效 —— show_page 必须
+        与 show_settings_page / show_plugins_page 同构，带显示三连。
+
+        此前只调 _switch_page：窗口收进托盘时页面切了但窗口不露脸，
+        用户感知「点了没反应」。
+        """
+        src = _read(MAIN_WINDOW_PATH)
+        tree = ast.parse(src)
+        main_cls = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef)
+                        and n.name == "MainWindow")
+        fn = next(n for n in main_cls.body
+                  if isinstance(n, ast.FunctionDef) and n.name == "show_page")
+        dump = ast.dump(fn)
+        for call in ("show", "raise_", "activateWindow", "_switch_page"):
+            assert call in dump, f"show_page 缺 {call}（主窗关闭态跳转会无效）"
+
+    def test_all_page_entrypoints_show_window(self):
+        """同类入口一致性：settings / plugins / plugin:key 三者本就带
+        显示三连，show_page 补齐后四个入口同构（防半迁移）"""
+        mw = _read(MAIN_WINDOW_PATH)
+        mixin = _read(os.path.join(V4, "src", "main_window_plugin_pages.py"))
+        for name, src in (("show_settings_page", mw),
+                          ("show_plugins_page", mw),
+                          ("show_plugin_page", mixin)):
+            idx = src.index(f"def {name}")
+            body = src[idx:idx + 700]
+            assert "self.show()" in body, f"{name} 缺 show()"
+            assert "activateWindow" in body, f"{name} 缺 activateWindow"
+
+    def test_palette_has_no_drop_shadow_hint(self):
+        """用户报②：面板周围还有一圈白色透明框 —— 无边框顶层窗在 Win11
+        下 DWM 会补画系统阴影/白边。必须与 toast / task_reminder_popup /
+        date_picker 同款加 NoDropShadowWindowHint。"""
+        src = _read(PALETTE_PATH)
+        assert "NoDropShadowWindowHint" in src
+        # 与项目内既有三处手法同源
+        for peer in ("toast.py", "task_reminder_popup.py", "date_picker.py"):
+            assert "NoDropShadowWindowHint" in _read(
+                os.path.join(V4, "src", peer))
+
+    def test_main_window_has_foreground_force(self):
+        """用户报③：主窗打开后点不动 —— 实机取证是前台没抢到（自身
+        响应 ≤73ms）。showEvent 必须挂 _force_foreground_now。"""
+        src = _read(MAIN_WINDOW_PATH)
+        tree = ast.parse(src)
+        main_cls = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef)
+                        and n.name == "MainWindow")
+        names = {n.name for n in main_cls.body
+                 if isinstance(n, ast.FunctionDef)}
+        assert "_force_foreground_now" in names
+        show_ev = next(n for n in main_cls.body
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "showEvent")
+        assert "_force_foreground_now" in ast.dump(show_ev)
+        assert "win_focus" in src
+
+    def test_win_focus_module_contract(self):
+        """前台强夺模块契约：三段递进齐备 + 非 Windows 安全降级 +
+        AttachThreadInput 必须成对分离（防输入队列长期串接）。"""
+        from src import win_focus
+        assert callable(win_focus.force_foreground)
+        # 非 Windows / 非法入参一律 False，不抛异常
+        assert win_focus.force_foreground(0) is False
+        assert win_focus.force_foreground(None) is False
+        assert win_focus.force_foreground("not-a-hwnd") is False
+        src = _read(os.path.join(V4, "src", "win_focus.py"))
+        assert "SetForegroundWindow" in src
+        assert "AttachThreadInput" in src
+        assert "keybd_event" in src                  # 兜底解前台锁
+        assert src.count("AttachThreadInput(") >= 2  # attach + detach 成对
+
+
+# ====================================================================
+# 5c. 自定义动作直达键（2026-10-10 用户报「快捷键无法识别使用」）
+# ====================================================================
+class TestCustomActionHotkeys:
+    def test_reapply_registers_custom_action_hotkeys(self):
+        """用户报根因：_reapply_command_hotkeys 此前只读 command_hotkeys，
+        漏了 custom_actions[].hotkey —— 键绑了也按不出反应，只能进面板搜。
+        注册循环必须并入自定义动作（cid = custom.<id>）。"""
+        src = _read(MAIN_WINDOW_PATH)
+        tree = ast.parse(src)
+        main_cls = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef)
+                        and n.name == "MainWindow")
+        fn = next(n for n in main_cls.body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_reapply_command_hotkeys")
+        dump = ast.dump(fn)
+        assert "sanitize_custom_actions" in dump, \
+            "注册循环未读 custom_actions —— 自定义动作直达键永远不会生效"
+        assert "custom_actions" in dump
+        assert "custom." in dump            # cid 口径 custom.<id>
+        assert "builtin_hotkey_holder" in dump   # 内置键冲突兜底
+
+    def test_registry_cache_invalidated_on_reapply(self):
+        """缓存失效：_cmd_registry 此前只构建不失效，改/删自定义动作后
+        按 cid 查到的是旧表。重注册时必须置 None。"""
+        src = _read(MAIN_WINDOW_PATH)
+        tree = ast.parse(src)
+        main_cls = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.ClassDef)
+                        and n.name == "MainWindow")
+        fn = next(n for n in main_cls.body
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "_reapply_command_hotkeys")
+        assert "_cmd_registry" in ast.dump(fn)
+
+    def test_builtin_hotkey_holder_detects_builtins(self):
+        """内置键冲突源（单一真相源 BUILTIN_HOTKEYS）：
+        Ctrl+T（切主题）/ Ctrl+K / Ctrl+W / F1 / Ctrl+1~8 都必须被认出，
+        用户报的正是把自定义动作绑到了 Ctrl+T。"""
+        from src import command_palette as _cp
+        assert _cp.builtin_hotkey_holder("Ctrl+T") == "切换主题"
+        assert _cp.builtin_hotkey_holder("ctrl+t") == "切换主题"   # 大小写无关
+        assert _cp.builtin_hotkey_holder(" Ctrl + T ") == "切换主题"  # 空格容错
+        assert _cp.builtin_hotkey_holder("Ctrl+K") == "站内搜索"
+        assert _cp.builtin_hotkey_holder("Ctrl+W") == "隐藏主窗口"
+        assert _cp.builtin_hotkey_holder("F1") == "使用说明"
+        assert _cp.builtin_hotkey_holder("Ctrl+1") == "切换功能页"
+        assert _cp.builtin_hotkey_holder("Ctrl+8") == "切换功能页"
+        # 不误杀：带 Alt 的自由组合 / 区间外的编号
+        assert _cp.builtin_hotkey_holder("Ctrl+Alt+T") == ""
+        assert _cp.builtin_hotkey_holder("Ctrl+9") == ""
+        assert _cp.builtin_hotkey_holder("Ctrl+Alt+/") == ""
+        assert _cp.builtin_hotkey_holder("") == ""
+        assert _cp.builtin_hotkey_holder(None) == ""
+
+    def test_builtin_table_matches_main_window_bindings(self):
+        """单一真相源契约：BUILTIN_HOTKEYS 声明的键必须在 main_window
+        真的绑着（防表漂移成假护栏）；Ctrl+T 必在表内（用户撞的那个）。"""
+        src = _read(MAIN_WINDOW_PATH)
+        for combo in ("Ctrl+W", "Ctrl+H", "Ctrl+T", "Ctrl+K", "F1"):
+            assert f'QKeySequence("{combo}")' in src, f"{combo} 未在主窗绑定"
+        from src import command_palette as _cp
+        assert _cp.BUILTIN_HOTKEYS["ctrl+t"] == "切换主题"
 
     def test_help_sections_still_parse(self):
         """加行后 17 章切片必须仍然成立（test_help_nav 的等价自查：

@@ -308,10 +308,15 @@ class CommandKeysGrid(QWidget):
     def _find_conflict(self, cid: str, norm: str, include_wake: bool = True):
         """该组合键是否已被占用：返回占用方展示名，无冲突返回 None。
 
-        冲突口径：其他命令的直达键 / 自定义动作的直达键 / 截图钉屏热键 /
-        全局唤醒键（2026-10-06）。``include_wake=False`` 供全局唤醒键自身
-        的捕获处理复用（自己与自己不构成冲突，见 settings_panel
-        _on_cmd_wake_changed）。
+        冲突口径（2026-10-10 起补第 5 源）：其他命令的直达键 / 自定义动作的
+        直达键 / 截图钉屏热键 / 全局唤醒键 / **应用内置快捷键**。
+        ``include_wake=False`` 供全局唤醒键自身的捕获处理复用（自己与自己
+        不构成冲突，见 settings_panel _on_cmd_wake_changed）。
+
+        ★内置键此前不在表内：用户把自定义动作绑到 Ctrl+T（切换主题）能存进
+        配置，而直达键是全局热键 —— 按下会被系统级吞掉且与内置键互相顶替，
+        表现就是「键绑了没反应」。现统一拒绝（单一真相源
+        ``cp.BUILTIN_HOTKEYS``）。
         """
         titles = self._titles()
         for other_cid, other in self._current_map().items():
@@ -329,6 +334,9 @@ class CommandKeysGrid(QWidget):
                 "command_palette_global_hotkey", "") or "")
             if wake and _norm_combo(wake) == norm:
                 return "全局唤醒键"
+        builtin = cp.builtin_hotkey_holder(norm)
+        if builtin:
+            return f"内置快捷键（{builtin}）"
         return None
 
     def _toast(self, text: str):
@@ -607,7 +615,7 @@ class CustomActionsPanel(QWidget):
 
     def _hotkey_conflict(self, actions, combo: str):
         """表单直达键与既有绑定冲突（其他动作 / 命令直达键 / 截图热键 /
-        全局唤醒键）。"""
+        全局唤醒键 / **应用内置快捷键**）。"""
         norm = _norm_combo(combo)
         for a in actions:
             if a["id"] != self._editing_id and a["hotkey"] \
@@ -625,6 +633,10 @@ class CustomActionsPanel(QWidget):
             "command_palette_global_hotkey", "") or "")
         if wake and _norm_combo(wake) == norm:
             return "全局唤醒键"
+        # 内置快捷键（2026-10-10）：Ctrl+T 这类窗口级固定键不能当全局直达键
+        builtin = cp.builtin_hotkey_holder(norm)
+        if builtin:
+            return f"内置快捷键（{builtin}）"
         return None
 
     def _find_sibling_grid(self):

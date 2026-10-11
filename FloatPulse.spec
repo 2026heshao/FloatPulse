@@ -71,11 +71,28 @@ a = Analysis(
     pathex=[_SRC],
     binaries=[],
     datas=[(_ICON, ".")],
-    hiddenimports=[],
+    # encodings.idna：socket.getaddrinfo 对域名做 IDNA 规范化时经 codecs
+    # 动态查找，静态分析收不进 PYZ → 打包产物首次联网即 LookupError
+    # "unknown encoding: idna"（2026-10-07 用户 zip 版实机踩坑）。
+    # 它 import 的 stringprep 会被 PyInstaller 顺链自动带上。
+    #
+    # uuid/base64/hmac（2026-10-08 zip 版实机踩坑）：主程序自身从不
+    # import 这几个标准库 → 静态分析不收 → 插件入口顶层
+    # `import uuid`（ai-assistant / ai-text-workshop / recurring-tasks）
+    # 或 `import base64/hmac`（vault）在冻结环境直接 ModuleNotFoundError，
+    # 插件中心显示「加载失败: 导入失败」。插件 require 白名单允许
+    # "PyQt6 + Python 标准库"，但冻结包里只有主程序可达的模块——
+    # ★以后新增插件用到包里没有的标准库，必须同步加到这里
+    # （护栏 tests/test_plugin_bundle_stdlib.py 会比对插件 stdlib 依赖
+    # 与 hiddenimports + 主程序可达集的并集）。
+    hiddenimports=["encodings.idna", "uuid", "base64", "hmac"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["unicodedata"],
+    # unicodedata 原为体积优化排除（~1MB），但 encodings.idna → stringprep
+    # → unicodedata 是 top-level 硬依赖（IDNA nameprep 必经），排除会让
+    # 上一行的 hiddenimports 白补——2026-10-07 随 idna 修复一并放开。
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

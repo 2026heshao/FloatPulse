@@ -22,7 +22,7 @@
 import ctypes
 from ctypes import wintypes
 
-from PyQt6.QtCore import QAbstractNativeEventFilter
+from PyQt6.QtCore import QAbstractNativeEventFilter, QTimer
 
 from src.logger import get_logger
 
@@ -159,18 +159,40 @@ class GlobalHotkeyManager(QAbstractNativeEventFilter):
 
     # ---------------- 原生事件过滤 ----------------
     def nativeEventFilter(self, eventType, message):
-        """拦截 WM_HOTKEY：wParam 即注册时返回的 id"""
+        """拦截 WM_HOTKEY：wParam 即注册时返回的 id。
+
+        ★2026-10-10（用户报「用命令面板快捷键打开主窗页面卡 1-2 秒」）：
+        回调**必须异步派发**，不能在本函数里同步执行 —— 这里跑的是
+        Windows 原生消息分发栈（Qt 的 nativeEventFilter），而命令面板
+        热键的回调链里有 ``show / raise_ / activateWindow``，甚至
+        ``win_focus.force_foreground``（内部会 **注入 ALT 键 + 抢前台**）。
+        在原生消息处理过程中注入输入/切换前台，系统需要把新产生的按键
+        消息再派发回来，而当前正阻塞在消息过滤器内 —— 形成**自旋等待**，
+        主线程被卡住约 1-2 秒（实机心跳日志反复出现 ~1000ms 阻塞；而
+        同样的调用在普通 Python 代码里测只有 0-3ms，故此前四种探针都
+        测不出来）。
+
+        改为 ``QTimer.singleShot(0, ...)`` 排队：回调在**本轮原生消息
+        处理结束、控制权回到 Qt 事件循环之后**才执行，重入链路被切断。
+        排队只增加一次事件循环周转（亚毫秒级），不影响热键响应的即时感。
+        """
         if _IS_WINDOWS and eventType == b"windows_generic_MSG":
             try:
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == WM_HOTKEY:
                     entry = self._hotkeys.get(int(msg.wParam))
                     if entry is not None:
-                        try:
-                            entry[0]()
-                        except Exception as e:   # noqa: BLE001 - 回调 bug 不阻断事件流
-                            # 回调异常必须留痕，否则表现为「热键按了没反应」无从排查
-                            get_logger().warning(f"热键回调异常: {e}")
+                        callback = entry[0]
+                        # 排队到事件循环（不在此栈内执行）—— 见方法注释
+                        QTimer.singleShot(0, lambda cb=callback: _safe_call(cb))
             except Exception:
                 pass  # 消息解析失败不阻断事件流
         return False, 0
+
+
+def _safe_call(callback):
+    """延迟执行热键回调：异常留痕（否则表现为「热键按了没反应」无从排查）"""
+    try:
+        callback()
+    except Exception as e:               # noqa: BLE001 - 回调 bug 不阻断事件流
+        get_logger().warning(f"热键回调异常: {e}")

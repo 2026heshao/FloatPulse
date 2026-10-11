@@ -25,7 +25,7 @@ from datetime import date as _date
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QMenu, QDialog,
-    QFormLayout, QDateEdit, QProgressBar,
+    QFormLayout, QDateEdit, QProgressBar, QAbstractItemView,
 )
 from PyQt6.QtCore import Qt, QDate, QTimer, QVariantAnimation, QEasingCurve
 
@@ -400,6 +400,27 @@ class TasksPanel(QWidget):
         「添加」按钮路径，不新造交互模式。
         """
         self._task_title_input.setFocus()
+
+    def focus_task_by_title(self, title: str) -> bool:
+        """定位并选中指定标题的任务行（任务提醒跳转落点，2026-10-08）。
+
+        - 按行描述符 ``ROLE_TITLE`` 精确匹配第一条（逾期组排在最前，
+          提醒跳转目标即首条逾期任务）；找到 → 选中 + scrollToItem
+          （CommandPalette 快捷跳转同款手法），返回 True
+        - 找不到（任务已删 / 改名 / 列表未建）→ False，调用方静默
+        """
+        if not title:
+            return False
+        for i in range(self._task_list.count()):
+            item = self._task_list.item(i)
+            if item.data(KIND_ROLE) != KIND_ROW:
+                continue
+            if item.data(ROLE_TITLE) == title:
+                self._task_list.setCurrentItem(item)
+                self._task_list.scrollToItem(
+                    item, QAbstractItemView.ScrollHint.PositionAtTop)
+                return True
+        return False
 
     # ==================================================================
     # 添加 / 编辑 / 右键 / 批量

@@ -27,10 +27,14 @@ main() 组装序（§4）：构造 → 注入 → 装配。本模块从宿主装
      main() 局部变量换成构造注入的引用槽。
 """
 
+import sys
+import threading
 import time
+import traceback
 from typing import Any, Callable, Dict
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 
 from src.ai_server import AI_SERVER
@@ -104,11 +108,38 @@ class FullscreenCoordinator:
 # ======================================================================
 # 退出收尾 + 托盘回调（1.4 / F1）
 # ======================================================================
+def shutdown_once(state, steps) -> bool:
+    """退出收尾统一入口（1.4）：幂等执行收尾步骤，单步失败只告警不阻断。
+
+    _safe_quit（托盘退出）与 aboutToQuit（事件循环结束）都会触发收尾，
+    二者收口到这里，靠 state["done"] 保证连调多次只有第一次生效。
+    2026-10-08 拆分轮自 knowledge_ball.py 迁入（QuitCoordinator 自持，
+    宿主不再注入；__init__ 的 shutdown_once 参数保留供测试替身）。
+
+    state : {"done": bool} 收尾状态标记（首次调用置 True）
+    steps : [(描述, 可调用)]；可调用抛任何异常（含组件尚未创建的
+            NameError——启动早期异常退出时收尾仍可能被触发）都只写日志
+    返回  True=本次实际执行；False=已收尾过，幂等跳过
+    """
+    if state.get("done"):
+        return False
+    state["done"] = True
+    log = get_logger()
+    for desc, fn in steps:
+        try:
+            fn()
+        except Exception as exc:                  # noqa: BLE001
+            log.warning(f"[退出] {desc}失败：{exc}")
+    log.info("[退出] 资源收尾完成（热键注销 / AI 本地服务 / 剪贴板监听）")
+    return True
+
+
 class QuitCoordinator:
     """退出与托盘编排：安全退出、显隐切换、aboutToQuit 诊断日志。
 
-    幂等引擎 ``shutdown_once`` 由宿主注入（模块级函数钉死在
-    knowledge_ball.py，test_quit_cleanup 回归面），本类只持有收尾状态标记
+    幂等引擎 ``shutdown_once`` 2026-10-08 随本类迁入同模块（宿主不再
+    注入；test_quit_cleanup 回归面同步改钉 wiring.shutdown_once），本类
+    只持有收尾状态标记
     ``_shutdown_state`` 与**晚绑定引用槽**——截图/插件热键管理器、截图钉屏、
     剪贴板监听在 main() 集成段才创建，经 register_resources 统一注入；
     首次收尾调用必然发生在事件循环期（与原闭包晚绑定语义一致）。
@@ -116,7 +147,7 @@ class QuitCoordinator:
 
     def __init__(self, *, ball: Any, main_window: Any, card_window: Any,
                  sticky_manager: Any, config_manager: Any,
-                 shutdown_once: Callable):
+                 shutdown_once: Callable = shutdown_once):
         self._ball = ball
         self._main_window = main_window
         self._card_window = card_window
@@ -249,11 +280,18 @@ class QuitCoordinator:
 # UI 心跳看门狗
 # ======================================================================
 class HeartbeatWatch:
-    """UI 心跳看门狗：事件循环阻塞 >800ms 时记录（诊断卡顿/未响应）。
+    """UI 心跳看门狗：事件循环阻塞 >800ms 时记录**调用栈现场**。
 
     QTimer 在主线程事件循环里调度；循环被长任务阻塞时下一跳会迟到，
     相邻两跳的间隔 = 实际阻塞时长。平时零输出，只在真卡顿时留痕。
-    实例持有 QTimer 引用防 GC（原 main() 局部 _hb_timer 语义）。
+
+    ★2026-10-10（用户报「命令面板快捷键跳页卡 1-2 秒」）升级：此前只记
+    「阻塞了多久」，抓不到**阻塞在哪一行** —— 本次排查为此临时写过独立
+    线程 dump 脚本（tools/run_with_stall_dump.py）才看到现场，于是把该
+    能力内建进产品：独立守护线程用 ``sys._current_frames()`` 取主线程栈，
+    卡顿发生时把栈一并写进 app.log。下次再卡，日志直接指出代码位置。
+
+    独立线程只读主线程 frame 对象（不注入、不暂停主线程），开销可忽略。
     """
 
     def __init__(self, threshold_ms: int = 800, interval_ms: int = 250):
@@ -263,6 +301,11 @@ class HeartbeatWatch:
         self._timer.setInterval(interval_ms)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        # 主线程标识与栈采样：守护线程在主线程无心跳超过阈值时抓现场
+        self._main_tid = threading.get_ident()
+        self._stop = threading.Event()
+        self._watch = threading.Thread(target=self._watch_stall, daemon=True)
+        self._watch.start()
 
     def _tick(self) -> None:
         now = time.monotonic()
@@ -271,6 +314,23 @@ class HeartbeatWatch:
         if gap > self._threshold_ms:
             get_logger().warning(
                 f"[UI心跳] 事件循环阻塞 {gap:.0f}ms（本条在阻塞结束后补记）")
+
+    def _watch_stall(self) -> None:
+        """独立线程：主线程心跳停摆 ≥ 阈值 → 抓其调用栈写日志。"""
+        while not self._stop.wait(0.1):
+            try:
+                idle_ms = (time.monotonic() - self._last) * 1000
+                if idle_ms < self._threshold_ms:
+                    continue
+                frame = sys._current_frames().get(self._main_tid)
+                stack = ("".join(traceback.format_stack(frame))
+                         if frame is not None else "(主线程栈不可得)")
+                get_logger().warning(
+                    f"[UI心跳] 主线程卡住 {idle_ms:.0f}ms，现场调用栈：\n{stack}")
+                # 同一次卡顿只抓一次（等它结束再继续观察）
+                self._stop.wait(1.0)
+            except Exception:                 # noqa: BLE001 - 诊断线程绝不拖垮主流程
+                self._stop.wait(1.0)
 
 
 # ======================================================================
@@ -429,6 +489,9 @@ def schedule_silent_update_check(config_manager: Any, tray: Any) -> None:
     立场不变：不自动下载、失败静默、不携带任何本机数据。延迟 15 秒
     错开启动高峰；频率判定走 update_checker 的纯逻辑（should_check_now
     / mark_checked），托盘只在真的发现新版本时打扰一次。
+    2026-10-10 升级：气泡文案自说明「点击直达下载页」，点击气泡经
+    QDesktopServices.openUrl 直开 GitHub Release 页（无网络请求、无
+    凭证、复用系统浏览器）；托盘侧动作一次性 + TTL，不会被后续气泡串台。
     """
     def _silent_update_check():
         from src import update_checker
@@ -448,10 +511,17 @@ def schedule_silent_update_check(config_manager: Any, tray: Any) -> None:
                 return                  # 无新版：不动 latest_known_version
             config_manager.set("latest_known_version", tag)
             config_manager.save()
+
+            def _open_release_page():
+                QDesktopServices.openUrl(QUrl(update_checker.RELEASES_PAGE_URL))
+                get_logger().info(
+                    "[更新] 气泡点击直达 Release 页")
+
             tray.show_message(
                 f"发现新版本 {tag}",
-                f"当前 v{APP_VERSION}——到 设置 → 关于 查看更新内容",
-                QSystemTrayIcon.MessageIcon.Information, 8000)
+                f"当前 v{APP_VERSION}——点击本气泡直达下载页",
+                QSystemTrayIcon.MessageIcon.Information, 12000,
+                action=_open_release_page)
             get_logger().info(
                 f"[更新] 静默检查发现新版本 {tag}（当前 v{APP_VERSION}）")
 

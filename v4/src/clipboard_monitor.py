@@ -39,7 +39,7 @@ import ctypes
 from ctypes import wintypes
 from datetime import datetime
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import QApplication
 
@@ -47,6 +47,7 @@ from src.fragment_manager import (
     FragmentManager,
 )
 from src import secret_guard
+from src import secret_vault
 from src.logger import get_logger
 
 # 剪贴板图片 MIME → 落盘扩展名（md.hasImage() 为假时的兜底路径）
@@ -175,6 +176,8 @@ class ClipboardMonitor(QObject):
         self._last_image_hash = ""
         # 监听是否已启动
         self._started = False
+        # 敏感内容过期巡检定时器（start() 里创建）
+        self._expiry_timer = None
         # 凭证哨兵：本轮待用户回溯改判的命中队列（内存，不落盘）
         # 每项 = {"fragment_id", "mode", "rule", "preview", "content"}
         # content 保留原文，仅在内存里——用户选「仅本次记录原文」才写盘。
@@ -190,9 +193,20 @@ class ClipboardMonitor(QObject):
         if self._clipboard is not None:
             self._clipboard.dataChanged.connect(self._on_data_changed)
             self._started = True
+            get_logger().info("[剪贴板] 监听已启动（凭证哨兵%s）"
+                              % ("开" if self._guard_config()[0] else "关"))
+            # 敏感内容自动过期：启动扫一次 + 每小时巡检
+            self.sweep_expired_guarded()
+            self._expiry_timer = QTimer(self)
+            self._expiry_timer.setInterval(3600 * 1000)
+            self._expiry_timer.timeout.connect(self.sweep_expired_guarded)
+            self._expiry_timer.start()
 
     def stop(self):
         """停止监听（断开 dataChanged 信号）"""
+        if self._expiry_timer is not None:
+            self._expiry_timer.stop()
+            self._expiry_timer = None
         if not self._started:
             return
         if self._clipboard is not None:
@@ -201,6 +215,29 @@ class ClipboardMonitor(QObject):
             except (TypeError, RuntimeError):
                 pass
         self._started = False
+
+    def sweep_expired_guarded(self):
+        """敏感内容自动过期（clipboard_guard_expiry_hours；0 = 不过期）。
+
+        启动时 + 每小时巡检一次；删除带随行密文且超龄的碎片并留痕。
+        """
+        if self._config is None:
+            return
+        try:
+            hours = int(self._config.get("clipboard_guard_expiry_hours", 72))
+        except (TypeError, ValueError):
+            return
+        if hours <= 0:
+            return
+        try:
+            expired = self._fm.purge_expired_guarded(hours)
+        except Exception as e:        # noqa: BLE001
+            get_logger().warning(f"敏感内容过期清理失败: {e}")
+            return
+        if expired:
+            get_logger().info(
+                "[剪贴板] 敏感内容自动过期：删除 %s 条（阈值 %s 小时），id=%s"
+                % (len(expired), hours, expired))
 
     def set_enabled(self, enabled: bool):
         """启用/禁用捕获（不切断信号连接，仅不处理）"""
@@ -265,6 +302,8 @@ class ClipboardMonitor(QObject):
 
         # 去重：与上次相同则跳过
         if text == self._last_text:
+            get_logger().info(
+                f"[剪贴板] 去重跳过（与上一次内容相同，长度 {len(text)}）")
             return
         self._last_text = text
 
@@ -307,6 +346,9 @@ class ClipboardMonitor(QObject):
             # 被拦了、内容是什么」，否则等同于静默删除（功能故障）。
             self._audit["denied"] += 1
             self._enqueue_guard(guard_info)
+            get_logger().info(
+                "[剪贴板] 凭证命中已拦截（deny）：规则=%s，命中数=%s，原文未落盘"
+                % (guard_info.get("rule"), guard_info.get("count")))
             return
         try:
             fid = self._fm.add_clipboard_text(content, source="剪贴板")
@@ -314,6 +356,20 @@ class ClipboardMonitor(QObject):
             if is_guarded:
                 guard_info["fragment_id"] = fid
                 self._enqueue_guard(guard_info)
+                # mask 处置：原文 DPAPI 加密随行落盘（揭示入口用）。
+                # allow 处置原文已明文在池，无需密文。
+                # 加密失败降级为「只落占位、不存原文」（揭示不可用但不影响收录）。
+                if guard_info.get("mode") == secret_guard.MODE_MASK:
+                    try:
+                        self._fm.attach_secret(
+                            fid, secret_vault.protect(guard_info["content"]))
+                    except Exception as e:    # noqa: BLE001
+                        get_logger().warning(
+                            f"凭证原文随行加密失败（揭示不可用）: {e}")
+            get_logger().info(
+                "[剪贴板] 收录文本碎片 id=%s 长度=%s%s"
+                % (fid, len(content),
+                   "（凭证遮蔽落盘，原文已加密随行）" if is_guarded else ""))
             self.fragment_added.emit(fid)
         except Exception as e:        # noqa: BLE001 - 捕获失败不中断监听，但留痕
             get_logger().warning(f"剪贴板文本碎片写入失败: {e}")
@@ -323,10 +379,19 @@ class ClipboardMonitor(QObject):
         """读取哨兵配置：(enabled, mode)。未注入配置 → (False, default)。"""
         if self._config is None:
             return False, secret_guard.DEFAULT_MODE
-        enabled = bool(self._config.get("clipboard_guard_enabled", False))
+        enabled = bool(self._config.get("clipboard_guard_enabled", True))
         mode = secret_guard.sanitize_mode(
             self._config.get("clipboard_guard_mode", secret_guard.DEFAULT_MODE))
         return enabled, mode
+
+    def _exclusion_compiled(self):
+        """用户排除规则的预编译缓存（配置变更后由 set_enabled 路径失效；
+        简单起见按配置键值元组缓存——低频调用，直接读配置亦可接受）"""
+        if self._config is None:
+            return []
+        patterns = self._config.get("clipboard_guard_exclude_patterns", [])
+        _, compiled = secret_guard.sanitize_guard_patterns(patterns)
+        return compiled
 
     def _guard_text(self, content: str):
         """对文本做凭证检测并按处置返回。
@@ -343,6 +408,12 @@ class ClipboardMonitor(QObject):
         # 「本次记住」优先于持久配置（仅本进程有效，不写盘）
         if self._guard_session_mode is not None:
             mode = self._guard_session_mode
+        # 用户排除规则：命中任一自定义正则 → 放行（不进哨兵）。留痕不落原文。
+        if secret_guard.matches_exclusion(content, self._exclusion_compiled()):
+            get_logger().info(
+                "[剪贴板] 凭证哨兵排除规则放行（长度 %s 的文本命中自定义正则）"
+                % len(content))
+            return content, False, None
         hits = secret_guard.detect(content)
         if not hits:
             return content, False, None
@@ -399,6 +470,9 @@ class ClipboardMonitor(QObject):
                 original = info.get("content", "")
                 if fid:
                     self._fm.update_fragment(fid, original)
+                    # 原文已明文在池 → 随行密文冗余，清掉（update_fragment
+                    # 内容变化时也会自动清，此处兜底 fid 无变化的情况）
+                    self._fm.clear_secret(fid)
                 else:
                     # 当初被整条丢弃（deny）→ 这次补写回池
                     fid = self._fm.add_clipboard_text(original, source="剪贴板")
@@ -412,6 +486,9 @@ class ClipboardMonitor(QObject):
         except Exception as e:        # noqa: BLE001
             get_logger().warning(f"凭证回溯改判失败: {e}")
             return False
+        get_logger().info(
+            "[剪贴板] 凭证回溯改判：fragment_id=%s → %s"
+            % (fid, mode))
         del self._guard_queue[index]
         return True
 
@@ -426,6 +503,7 @@ class ClipboardMonitor(QObject):
             self._trim_if_needed()
             self.fragment_added.emit(fid)
             self.path_detected.emit(path)
+            get_logger().info(f"[剪贴板] 收录路径碎片 id={fid} path={path}")
         except Exception as e:        # noqa: BLE001 - 捕获失败不中断监听，但留痕
             get_logger().warning(f"剪贴板路径碎片写入失败: {e}")
 
@@ -489,6 +567,8 @@ class ClipboardMonitor(QObject):
                 return False
             if digest:
                 self._last_image_hash = digest
+            get_logger().info(
+                f"[剪贴板] 收录图片素材 id={asset_id}（{size} 字节）")
             self.image_captured.emit(int(asset_id))
             return True
         except Exception:
@@ -541,6 +621,7 @@ class ClipboardMonitor(QObject):
             return
         if removed > 0:
             # 让 UI 能提示"数据为什么少了"（此前是静默删除）
+            get_logger().info(f"[剪贴板] 容量上限裁剪：淘汰最早 {removed} 条碎片")
             self.fragments_trimmed.emit(int(removed))
 
     @staticmethod
