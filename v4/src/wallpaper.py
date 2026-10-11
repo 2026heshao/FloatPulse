@@ -178,7 +178,9 @@ def import_image(src_path, base_dir=None) -> tuple:
         return ("", "不是有效的图片文件")
 
     try:
-        digest = hashlib.sha1()
+        # SHA1 在这里只做壁纸文件的去重指纹（文件名前缀），非安全用途；
+        # 显式声明 usedforsecurity=False 既是事实也是 bandit B324 的官方豁免口径
+        digest = hashlib.sha1(usedforsecurity=False)
         with open(src_path, "rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)

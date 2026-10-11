@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# PYTHONUTF8=1：Windows runner 默认 cp1252，含中文注释的 requirements.txt
+# 会让 pip-audit 的解析器 UnicodeDecodeError（2026-10-11 CI 实锤）
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   pytest:
     runs-on: windows-latest

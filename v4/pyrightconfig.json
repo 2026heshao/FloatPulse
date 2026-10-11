@@ -23,6 +23,13 @@
   // reportOptionalIterable 1
   // reportOptionalCall 1
   // reportOptionalOperand 1
+  //
+  // ---- 存量豁免（基线 2026-10-11，pyright 1.1.414，共 37 errors）----
+  // 新版 pyright 把旧规则拆出两个新名（旧豁免名盖不住）：10-08/10-10
+  // 批次代码存量暴露 reportAttributeAccessIssue 34（QCoreApplication.
+  // styleHints / Mixin.data_changed / delegate 替身属性赋值等，PyQt6
+  // stub 在替身/动态属性模式下普遍）+ reportCallIssue 3（重载匹配）。
+  // 按基线策略先豁免，后续按模块收敛后摘除转真阻断。
   "reportMissingImports": "none",
   "reportOptionalMemberAccess": "none",
   "reportArgumentType": "none",
@@ -33,5 +40,7 @@
   "reportAssignmentType": "none",
   "reportOptionalIterable": "none",
   "reportOptionalCall": "none",
-  "reportOptionalOperand": "none"
+  "reportOptionalOperand": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportCallIssue": "none"
 }

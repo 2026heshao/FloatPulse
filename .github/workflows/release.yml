@@ -48,6 +48,12 @@ jobs:
           done
           ls -l plugin_store/
 
+      # ②.5 市场索引再生（2026-10-11 根因修复）：index.json 手钉哈希随
+      #     插件演进必然脱同步 → 在线市场下载全被「sha256 不符」丢弃。
+      #     CI 现场从源码再生索引，保证「索引哈希 == 附件哈希」恒成立。
+      - name: 再生市场索引（哈希/版本/体积自动同步）
+        run: python tools/sync_market_index.py
+
       # ② 安装包进 CI（成熟化 2.1）：CI 镜像不预装 Inno Setup，本机那些
       #    探测路径在这里统统不存在，用 choco 一条命令装上（Windows 官方
       #    包管理器，runner 出厂自带 choco，无需额外引导）

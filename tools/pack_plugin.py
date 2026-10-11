@@ -51,6 +51,14 @@ from src.plugin_loader import (                    # noqa: E402
 # 默认输出目录：<仓库根>/plugin_store（与运行时的商店目录一致）
 DEFAULT_OUT_DIR = os.path.join(ROOT, "plugin_store")
 
+# 确定性打包（2026-10-10）：zip 成员默认携带文件 mtime 且 deflate 压缩档
+# 随实现浮动——同一份源码两次打出来的字节流不同，marketplace/index.json
+# 里钉的 sha256 就没法维持。收口成「同源码 ⇒ 同字节」：
+#   - 全部成员时间戳固定（1980-01-01 00:00:00，zip 格式支持的最小值）
+#   - 压缩档位固定（ZIP_DEFLATED, compresslevel=9）
+# 排序本就按路径稳定（collect_files 已排序），mtime 归零后打包可复现。
+_ZIP_FIXED_DATE = (1980, 1, 1, 0, 0, 0)
+
 # 打包时排除的目录名 / 文件名 / 后缀
 SKIP_DIRS = frozenset({"__pycache__", ".git", ".idea", ".vscode",
                        ".pytest_cache", ".mypy_cache"})
@@ -202,12 +210,21 @@ def pack_plugin(plugin_dir: str, out_dir: str = DEFAULT_OUT_DIR,
                 f"  加 --force 覆盖，或先把旧包移走", info)
 
     try:
-        with zipfile.ZipFile(pkg_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(pkg_path, "w", zipfile.ZIP_DEFLATED,
+                             compresslevel=9) as zf:
             for rel in files:
                 # 套一层 <插件id>/ 前缀：与内置包结构一致，
-                # 解压到 plugins/<id>/ 时天然隔离
-                zf.write(os.path.join(plugin_dir, *rel.split("/")),
-                         arcname=f"{plugin_id}/{rel}")
+                # 解压到 plugins/<id>/ 时天然隔离。
+                # 确定性打包：ZipInfo 替代 write()，mtime 固定——
+                # 索引 sha256 才能对上同一份源码的任何一次重打包。
+                src = os.path.join(plugin_dir, *rel.split("/"))
+                with open(src, "rb") as f:
+                    payload = f.read()
+                zi = zipfile.ZipInfo(f"{plugin_id}/{rel}",
+                                     date_time=_ZIP_FIXED_DATE)
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.external_attr = 0o600 << 16
+                zf.writestr(zi, payload)
     except OSError as exc:
         return False, f"写包失败：{pkg_path}（{exc}）", info
 
@@ -250,9 +267,11 @@ def main(argv=None) -> int:
     ok, message, info = pack_plugin(args.plugin_dir, args.out,
                                     force=args.force,
                                     check_only=args.check_only)
-    print(message)
+    # Windows 控制台默认 GBK，manifest 文案可能含 emoji——放不下时降级
+    # 替换而不是崩在 print（UTF-8 环境不受影响）
+    print(message.encode("gbk", "replace").decode("gbk", "replace"))
     if ok and not args.check_only:
-        print("  下一步：启动 FloatPulse → 插件中心 → 🏪 插件商店 → 安装")
+        print("  下一步：启动 FloatPulse → 插件中心 → 插件商店 → 安装")
     return 0 if ok else 1
 
 
