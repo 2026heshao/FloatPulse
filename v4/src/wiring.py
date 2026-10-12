@@ -788,15 +788,11 @@ def wire_text_context_menu() -> Any:
 
     只读 / 密码回显控件的差异化约束见 ``src/text_context_menu.py`` 模块头。
     返回过滤器实例（wiring 持引用防 GC —— 应用级过滤器被回收即静默失效）。
-    幂等：重复调用只装配一次，也不重复记日志。
+    幂等与「日志只记一次」都在 ``install_text_context_menu`` 内部完成
+    （状态留在拥有单例的那个模块里，不往函数对象上挂属性）。
     """
     from src.text_context_menu import install_text_context_menu
-    already = bool(getattr(install_text_context_menu, "_done", False))
-    filt = install_text_context_menu()
-    if not already:
-        install_text_context_menu._done = True
-        get_logger().info("[右键菜单] 文本控件中文右键菜单已装配（应用级过滤器）")
-    return filt
+    return install_text_context_menu()
 
 
 def maybe_show_onboarding(config_manager: Any, main_window: Any) -> None:

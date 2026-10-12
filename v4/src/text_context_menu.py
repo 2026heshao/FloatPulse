@@ -373,15 +373,33 @@ class TextContextMenuFilter(QObject):
 # 模块级单例引用：应用级过滤器**必须留引用**，否则被 GC 后静默失效
 # （与本仓 HeartbeatWatch「实例持 QTimer 引用防 GC」同款纪律）。
 _INSTANCE = None
+# 装配日志只记一次的标志（模块级真实状态）。
+# ⚠ 不要改成往函数对象上挂属性（``install_text_context_menu._done = True``）：
+#   pyright 会报 `Cannot assign to attribute "_done" for class "FunctionType"`
+#   并卡死 CI 的 pyright 闸门（2026-10-12 实测踩过），且那本就是把状态挂在
+#   函数对象上的坏味道 —— 状态应与单例同处一个模块。
+_LOGGED = False
 
 
 def install_text_context_menu() -> TextContextMenuFilter:
-    """装配入口（幂等）：返回并持有唯一过滤器实例。"""
-    global _INSTANCE
+    """装配入口（幂等）：返回并持有唯一过滤器实例。
+
+    幂等且**日志只记一次**（重复调用不刷屏）；首次装配时留一条 INFO，
+    便于排障时确认过滤器确实装上了。
+    """
+    global _INSTANCE, _LOGGED
     if _INSTANCE is None:
         _INSTANCE = TextContextMenuFilter()
     if not _INSTANCE.installed:
         _INSTANCE.install()
+    if not _LOGGED:
+        _LOGGED = True
+        try:
+            from src.logger import get_logger
+            get_logger().info(
+                "[右键菜单] 文本控件中文右键菜单已装配（应用级过滤器）")
+        except Exception:                          # noqa: BLE001 - 日志失败不影响装配
+            pass
     return _INSTANCE
 
 
