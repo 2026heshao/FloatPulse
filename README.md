@@ -1,6 +1,12 @@
 # FloatPulse · 生活悬浮球
 
-![Tests](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml/badge.svg)
+**中文** | [English](README.en.md)
+
+[![Tests](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml/badge.svg)](https://github.com/2026heshao/FloatPulse/actions/workflows/tests.yml)
+
+[![Release](https://img.shields.io/github/v/release/2026heshao/FloatPulse?color=teal)](https://github.com/2026heshao/FloatPulse/releases/latest)
+
+[![Downloads](https://img.shields.io/github/downloads/2026heshao/FloatPulse/total?color=teal)](https://github.com/2026heshao/FloatPulse/releases)
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-teal.svg)
 
@@ -11,7 +17,11 @@
 ![Qt](https://img.shields.io/badge/UI-PyQt6%206.7%2B-41cd52)
 
 **一款 Windows 桌面常驻悬浮球工具：剪贴板自动留存 → 素材临时中转 → 截图钉屏对照，手边的零碎一个球接住。**  
-原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核；下载包 31 MB（解压后 75 MB），启动约 1 秒。
+原生 PyQt6 控件 + QSS 实现，无 Electron、无浏览器内核；下载包约 32 MB（解压后约 75 MB），启动约 1 秒。
+
+> 关键词：剪贴板历史 · 悬浮球 / 桌面挂件 · 截图钉图 · 碎片收集 · 临时素材中转 · 便签与任务 · 本地优先 · PyQt6 桌面应用 · Windows 效率工具
+
+[一次说清「不适合谁」](#-与同类工具的区别) · [下载最新版](https://github.com/2026heshao/FloatPulse/releases/latest) · [插件按需安装](#-插件按需下载安装)
 
 | 主窗口（浅色 · 开箱即用） | 主窗口（深色 · 换强调色 + 壁纸） |
 | ------- | ------- |
@@ -208,7 +218,7 @@ python tools/build_release.py                      # 产出 宣传页/FloatPulse
 - **发布前三源一致性自检**：打包前先跑 `tools/check_release_consistency.py`，核对 `APP_VERSION` ↔ `CHANGELOG.md` 版本标题 ↔ Release tag 三者对齐，任一不符直接终止发布（本地也能手动跑）
 - **产物附 `SHA256SUMS.txt`**：`build_release.py` 收尾生成校验清单（覆盖 zip / setup.exe / 插件附件），下载后在 `宣传页/` 目录 `sha256sum -c SHA256SUMS.txt` 一键核验完整性
 
-体积口径：**下载包 31.6 MB**（v4.8.0 zip，2026-10-02 实测）／**解压后 73.5 MB**（同上，`FloatPulse.spec` 内有构成分析）。
+体积口径：**下载包约 32 MB**（v4.9.1 zip，2026-10-11 实测 32.3 MB；安装包 24.3 MB）／**解压后约 75 MB**（`FloatPulse.spec` 内有构成分析）。
 
 ---
 
@@ -273,14 +283,13 @@ Issue / PR 均欢迎，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## English
 
-
-**FloatPulse** is a Windows floating-ball utility built with native PyQt6 — a lightweight, Electron-free landing spot for everything you copy, drag or capture, always one hover away.
+**FloatPulse** is an always-on-top floating ball for Windows that catches the little things you copy, drag or screenshot, so they stay one hover away instead of getting lost in chat history. Built with native PyQt6 — no Electron, no bundled browser engine.
 
 - **Floating ball**: drag, edge-snap, hover to pop a quick card; drop files to capture; drop `.exe/.lnk` to create launchers
 - **Clipboard capture (the main path)**: text and paths you copy are kept automatically, de-duplicated and timestamped; plus drag-and-drop pickup
 - **Screenshot pin** (`Ctrl+Alt+S`): select any screen region and pin it as an always-on-top reference window
-- **Main window**: ten pages in a four-group collapsible sidebar (multiple groups can stay open), fragments workbench, tasks with deadline grouping, notes, docx-based knowledge base, asset manager, URL & app launcher
-- **Plugins, opt-in**: the app ships **without any plugins** — download the `.fpplug` you want from Release Assets, drop it into `plugin_store\`, and install it from the plugin center (AI assistant, in-app full-text search, recurring tasks, weekly report)
+- **Main window**: ten pages in a four-group collapsible sidebar, fragments workbench, tasks with deadline grouping, notes, docx-based knowledge base, asset staging, URL & app launcher
+- **Plugins, opt-in**: the app ships **without any plugins** — download the `.fpplug` you want from Release Assets, drop it into `plugin_store\`, and install it from the plugin centre
 - **Engineering**: layered architecture, atomic JSON writes, single-instance guard, dual theme with contrast tests, pytest suite
 
 ```bash
@@ -288,6 +297,6 @@ pip install -r requirements.txt
 cd v4 && python knowledge_ball.py
 ```
 
-Windows 10/11, Python 3.10+. Licensed under MIT. Chinese UI only (i18n welcome).
+Windows 10/11, Python 3.10+. Licensed under MIT. **Chinese UI only** (i18n is on the roadmap).
 
-**Not for**: global file search (use Everything / Flow Launcher), cross-device sync, or replacing your notes app — it is a staging area, not a second brain.
+📖 **[Full English documentation →](README.en.md)** · **[Not for](README.en.md#why-another-launcher--clipboard-tool)**: global file search, cross-device sync, or replacing your notes app — it is a staging area, not a second brain.

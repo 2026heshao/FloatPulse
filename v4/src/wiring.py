@@ -355,6 +355,8 @@ class PluginWiring:
         self._config = config_manager
         self._main_window = main_window
         self._ball = ball
+        # 预留的插件页槽位（2026-10-12 防首屏后跳）：[(plugin_id, title), ...]
+        self._reserved_specs = []
 
     def apply_hotkeys(self) -> None:
         """按当前注册表绑定插件热键；核心热键优先级最高，冲突的插件让位。
@@ -381,6 +383,42 @@ class PluginWiring:
                 f"[插件] 热键注册失败（可能被占用）：{act.hotkey}（{act.id}）",
             ))
         reapply_hotkey_bindings(self._hotkey_mgr, bindings)
+
+    def reserve_pages_before_show(self) -> int:
+        """主窗 `show` **之前**预留插件页导航槽位（2026-10-12 导航栏闪跳修复）。
+
+        根因（逐帧实测）：`load_all`（实测 ~94ms）被推迟到主窗显示后 ~960ms
+        才跑（2026-10-08 启动提速的代价），于是侧栏在露脸时没有插件按钮，
+        约 1s 后一次性长出 N 行 → 整列下移 190px + 滚动条弹出 —— 即用户报的
+        「导航栏闪跳一下」。预扫只看 manifest（实测 ~1.6ms，不 import 插件
+        模块），因此可以安全放在 show 前：侧栏首帧即终态，之后注册只走幂等
+        分支换 widget（零重排）。
+
+        被停用的插件不预留（与 `_register_plugin_pages` 的跳过口径一致，
+        否则停用的插件也会占一个槽位）。
+        """
+        if not self._config.get("plugins_enabled", True):
+            return 0
+        disabled = {p for p in (
+            self._config.get("plugins_disabled", None) or [])
+            if isinstance(p, str) and p}
+        try:
+            specs = self._loader.scan_page_specs()
+        except Exception as exc:            # noqa: BLE001 - 预留失败不该挡住启动
+            get_logger().warning(f"[插件] 导航槽位预扫失败，跳过预留：{exc!r}")
+            return 0
+        specs = [(pid, title) for pid, title in specs if pid not in disabled]
+        if not specs:
+            return 0
+        reserve = getattr(self._main_window, "reserve_plugin_pages", None)
+        if not callable(reserve):
+            return 0
+        n = reserve(specs)
+        self._reserved_specs = list(specs)      # 收尾回收比对用
+        if n:
+            get_logger().info(
+                f"[插件] 导航槽位已预留 {n} 个（show 前，防首屏后跳）")
+        return n
 
     def apply_plugins(self, _enabled=None) -> None:
         """插件总闸：开 → 加载/登记；关 → 摘动作 + 摘页面（模块仍驻留）"""
@@ -442,6 +480,36 @@ class PluginWiring:
                 get_logger().warning(
                     f"[插件] 页面注入失败，跳过：{lp.plugin_id}（{exc!r}）",
                     exc_info=True)
+        self._drop_stale_reserved_pages(disabled)
+
+    def _drop_stale_reserved_pages(self, disabled) -> None:
+        """回收「预留了槽位但真页没来」的幽灵页（2026-10-12）。
+
+        `reserve_pages_before_show` 是按 manifest 预判的；若某插件随后在
+        `load_all` 里因依赖白名单 / 入口缺失 / 导入异常失败，或 `create_page`
+        返回空，它的占位按钮会留在侧栏，点开是空白页。这里在页面注册收尾
+        统一比对：**已写入 page_key 的**即真页到位，其余预留槽位一律撤掉。
+        停用的插件也不该留槽位（disabled 集合内同样撤）。
+        """
+        drop = getattr(self._main_window, "drop_reserved_page", None)
+        if not callable(drop):
+            return
+        live = set()
+        for lp in self._loader.loaded_plugins():
+            key = getattr(lp, "page_key", None)
+            if key:
+                live.add(key)
+        for plugin_id, _title in self._reserved_specs:
+            key = f"plugin:{plugin_id}"
+            if key in live and plugin_id not in disabled:
+                continue
+            try:
+                if drop(plugin_id):
+                    get_logger().info(
+                        f"[插件] 回收未装成的预留槽位：{key}")
+            except Exception:              # noqa: BLE001 - 回收失败不阻断装配
+                get_logger().warning(
+                    f"[插件] 预留槽位回收失败：{key}", exc_info=True)
 
     def _unregister_all_plugin_pages(self) -> None:
         """总闸关闭 → 把全部插件页从主窗口摘掉（2026-09-27）。
@@ -707,6 +775,28 @@ def wire_scheme_follow(main_window: Any, config_manager: Any) -> None:
     if _scheme_hints is not None and hasattr(_scheme_hints,
                                              "colorSchemeChanged"):
         _scheme_hints.colorSchemeChanged.connect(_on_system_scheme_changed)
+
+
+def wire_text_context_menu() -> Any:
+    """装配文本控件中文右键菜单（2026-10-12 用户报障）。
+
+    Qt 给文本控件生成的 ``createStandardContextMenu()`` 是英文、不套应用
+    主题、且空控件下几乎全灰（用户报"没有实质作用"）。接管方式是一条
+    **应用级事件过滤器**：装在 QApplication 上，一次性覆盖主窗、卡片窗、
+    便签、各对话框与后续加载的插件页 —— 全仓 55 处文本控件无需逐一接线，
+    插件页（不可预知何时创建）也自动命中。
+
+    只读 / 密码回显控件的差异化约束见 ``src/text_context_menu.py`` 模块头。
+    返回过滤器实例（wiring 持引用防 GC —— 应用级过滤器被回收即静默失效）。
+    幂等：重复调用只装配一次，也不重复记日志。
+    """
+    from src.text_context_menu import install_text_context_menu
+    already = bool(getattr(install_text_context_menu, "_done", False))
+    filt = install_text_context_menu()
+    if not already:
+        install_text_context_menu._done = True
+        get_logger().info("[右键菜单] 文本控件中文右键菜单已装配（应用级过滤器）")
+    return filt
 
 
 def maybe_show_onboarding(config_manager: Any, main_window: Any) -> None:

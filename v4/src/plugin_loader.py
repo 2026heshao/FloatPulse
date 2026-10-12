@@ -983,6 +983,44 @@ class PluginLoader:
                 dirs.append(path)
         return dirs
 
+    def scan_page_specs(self) -> list:
+        """只读 manifest，返回声明了 page 的插件 ``[(plugin_id, title), ...]``。
+
+        ★ 2026-10-12 导航栏闪跳修复（用户报「主窗口刚加载完成时导航栏会
+        闪跳一下」的取证结论）：`load_all`（实测 ~94ms，含 import 插件
+        模块）被刻意推迟到主窗显示后 ~960ms 才跑（2026-10-08 启动提速），
+        于是侧栏在主窗露脸时**还没有插件按钮**，约 1s 后一次性长出 5 行
+        → 整列下移 190px + 滚动条弹出 —— 逐帧实测的跳变源。本方法提供
+        **纯 manifest 预扫**（实测 ~1.6ms，不 import 插件模块），供宿主在
+        `show` 前预留导航槽位，使侧栏首帧即终态，之后真页只做 widget 替换
+        （register_plugin_page 幂等分支，零重排）。
+
+        口径与 `_load_one` 的前半段一致：只有 `validate_manifest` 通过的
+        manifest 才参与（非法 / 版本不匹配的插件本来也加载不了，不该预留）。
+        `requires` 白名单与入口存在性**刻意不在此校验**：它们要读入口文件，
+        留给真正的 `load_all`；被 `load_all` 判失败的插件，其预留槽位由
+        宿主回收注销（见 `wiring.PluginWiring._drop_stale_reserved_pages`）。
+
+        顺序与 `_candidate_dirs` 同源（目录名排序），保证**预留顺序 ==
+        真实注册顺序**，物理索引一致。
+        """
+        out = []
+        for dirpath in self._candidate_dirs():
+            manifest_path = os.path.join(dirpath, MANIFEST_NAME)
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue        # 读不了/坏 JSON：load_all 会归类为失败插件
+            manifest, _err = validate_manifest(data)
+            if manifest is None:
+                continue
+            page = manifest.get("page")
+            if not page:
+                continue
+            out.append((manifest["id"], page["title"]))
+        return out
+
     # ---------------- 单个插件 ----------------
     def _load_one(self, dirpath: str):
         folder = os.path.basename(dirpath)

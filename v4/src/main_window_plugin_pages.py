@@ -160,6 +160,70 @@ class PluginPagesMixin:
             self._apply_nav_order(list(self._nav_order), save=True)
         return True
 
+    def reserve_plugin_pages(self, specs) -> int:
+        """预建插件页导航按钮（**占位页**），使侧栏首帧即终态。
+
+        ★ 2026-10-12 导航栏闪跳修复。根因（逐帧实测）：插件页装配被推迟到
+        主窗显示 ~960ms 后才跑，于是侧栏露脸时没有插件按钮，随后一次性长出
+        N 行 → 整列下移 190px + 滚动条弹出，用户看到「导航栏闪跳一下」。
+        本方法在 `show` **之前**按纯 manifest 预扫结果（`scan_page_specs`，
+        实测 ~1.6ms）把按钮与占位页先建好，侧栏首帧即最终高度；之后
+        `register_plugin_page` 走**幂等分支**（已存在同 key 按钮），只替换
+        widget 与文案，**不重排、不落定动画、不写盘**。
+
+        与逐个 `register_plugin_page` 的关键差别：
+          · 整批只做 **1 次** `_apply_nav_order`（逐次调用是 N 次重排 +
+            N 次落定动画 + N 次 config 落盘，实测 5 个插件 = 5/5/5）；
+          · `save=False` —— 预留是**临时占位**，不该把 nav_order 写盘
+            （真实顺序仍由随后的注册流程落盘）。
+
+        ``specs`` = ``[(plugin_id, title), ...]``（顺序即真实注册顺序）。
+        返回新建的槽位数。已存在同 key 按钮的条目跳过（重入安全）。
+        """
+        added = 0
+        order = list(self._nav_order)
+        for plugin_id, title in specs or ():
+            key = f"plugin:{plugin_id}"
+            if key in self._nav_btns:
+                continue                    # 已注册（重入）→ 不重复建
+            # 与 register_plugin_page 同源剥 emoji：预留若用原始标题，真页注册
+            # 时文案再变一次（"🤖 AI 助手" → "AI 助手"），按钮宽度会抖一下 ——
+            # 那正是本修复要消除的观感。
+            title = strip_leading_emoji(title)
+            index = self._stack.count()
+            self.NAV_PAGE_TITLES[key] = title
+            self.NAV_PAGE_INDEX[key] = index
+            # 占位页：真页由随后的 register_plugin_page 幂等分支就地替换，
+            # 物理索引不变（与 unregister_plugin_page 的占位策略同源）
+            self._stack.addWidget(QWidget())
+            btn = self._make_nav_button(title, index, nav_key=key,
+                                        icon_name=plugin_page_icon(key))
+            self._nav_btns[key] = btn
+            if key not in order:
+                order.append(key)
+            added += 1
+        if added:
+            # 一次性重排 + **不落盘**（占位顺序不入 config）
+            self._apply_nav_order(order, save=False)
+        return added
+
+    def drop_reserved_page(self, plugin_id: str) -> bool:
+        """回收一个**尚未装入真页**的预留槽位（插件最终加载失败时用）。
+
+        `reserve_plugin_pages` 是按 manifest 预判的；若该插件随后在
+        `load_all` 里因依赖白名单 / 入口缺失 / 导入异常而失败，它的占位
+        按钮与空页必须撤掉，否则侧栏留一个点开是空白的幽灵页。
+        已装入真页的（`_stack.widget(idx)` 非本次占位）不动 —— 那种情况由
+        插件中心的正常停用路径处理。
+        返回是否真的回收了。
+        """
+        key = f"plugin:{plugin_id}"
+        idx = self.NAV_PAGE_INDEX.get(key)
+        btn = self._nav_btns.get(key)
+        if idx is None or btn is None:
+            return False
+        return bool(self.unregister_plugin_page(key))
+
     def rebuild_plugin_page(self, plugin_id: str) -> bool:
         """重新注册指定插件的页面（插件中心重新启用某插件时调用）。
 

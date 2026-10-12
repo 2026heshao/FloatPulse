@@ -2430,6 +2430,7 @@ def main():
         FullscreenCoordinator, QuitCoordinator, HeartbeatWatch, PluginWiring,
         schedule_silent_update_check, wire_pomodoro_notifications,
         wire_cross_window_signals, wire_scheme_follow, maybe_show_onboarding,
+        wire_text_context_menu,
     )
     # 全屏检测编排（B8）：连线 + 按配置启停 + 番茄钟对齐 → FullscreenCoordinator
     fullscreen_coordinator = FullscreenCoordinator(
@@ -2642,6 +2643,10 @@ def main():
         main_window=main_window, ball=ball,
     )
     plugin_wiring.wire()
+    # ★ 2026-10-12 导航栏闪跳修复：主窗 show 之前按 manifest 预扫预留插件页
+    #   槽位（纯读 JSON，实测 ~1.6ms，不 import 插件模块）。此后 ~960ms 的
+    #   延迟加载只走幂等分支替换 widget，侧栏首帧即终态、不再整列下移。
+    plugin_wiring.reserve_pages_before_show()
 
     def _deferred_plugin_load():
         """主窗显示后延迟执行一次插件加载（幂等：防闪屏兜底链路重入）"""
@@ -2667,6 +2672,9 @@ def main():
         ball, main_window, config_manager, docx_manager,
         temp_asset_manager, clipboard_monitor, sticky_manager)
     wire_scheme_follow(main_window, config_manager)
+    # 文本控件中文右键菜单（2026-10-12 用户报障）：应用级过滤器，一次装配
+    # 覆盖主窗/卡片/便签/对话框与后续加载的插件页（Qt 自带英文标准菜单接管）
+    _text_ctx_filter = wire_text_context_menu()
     # 8.8 主窗口全屏让位开关变更 → 启停全屏检测
     main_window.hide_on_fullscreen_changed.connect(
         lambda _enabled: fullscreen_coordinator.apply())
