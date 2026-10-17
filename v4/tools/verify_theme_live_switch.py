@@ -125,6 +125,17 @@ class FakeHost(QObject):
         return self._theme
 
     @property
+    def config(self):
+        """D3 只读契约：面板经 ``self._host.config`` 读配置。
+
+        ★ 必须是 @property —— 只挂 ``_config`` 属性会让
+        ``FragmentsPanel`` 构造期直接 AttributeError
+        （2026-10-16 CI 实锤：fragments_panel.py:786 读 host.config）。
+        同 verify_asset_grouping.Host.config 的写法与教训。
+        """
+        return self._config
+
+    @property
     def _container(self):
         return None
 

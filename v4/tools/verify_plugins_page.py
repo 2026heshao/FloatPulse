@@ -74,6 +74,12 @@ def main():
         shutil.copy2(os.path.join(data, "config.json"), test_cfg)
     config = ConfigManager(test_cfg)
     config.set("theme", "light")
+    # ★ 显式钉住展开集合（2026-10-16 CI 红根因）：侧栏分组重构后
+    #   plugins 属 system 组，NAV_DEFAULT_EXPANDED 只展开 workbench ——
+    #   若沿用本机 config.json（往往四组全展开）脚本绿，CI 全新数据目录
+    #   下 A4「按钮可见」必红。这里不依赖环境配置，断言才有确定性。
+    config.set("nav_expanded_groups",
+               ["workbench", "tools", "plugin_pages", "system"])
 
     tm = TaskManager(os.path.join(data, "schedule.json"))
     nm = NoteManager(os.path.join(data, "notes.json"))
@@ -181,7 +187,12 @@ def main():
     print(f"[DONE] {len(_checkpoints) - len(failed)}/{len(_checkpoints)} 通过")
     if failed:
         print(f"[FAIL] 未通过: {failed}")
-        sys.exit(1)
+    sys.stdout.flush()
+    # ★ 必须 os._exit：失败路径走 sys.exit(1) 时，解释器销毁阶段 Qt 对象
+    #   析构顺序不定，Windows 离屏下会以 0xC0000005（rc=3221225477）崩溃，
+    #   把真实退出码盖掉 —— CI 上就会把「一个断言失败」报成「进程崩溃」。
+    #   同 verify_theme_live_switch.py / verify_asset_grouping.py 的既有写法。
+    os._exit(0 if not failed else 1)
 
 
 if __name__ == "__main__":
